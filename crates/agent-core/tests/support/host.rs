@@ -370,6 +370,7 @@ impl Writer {
                     };
                     let mut record = original.clone();
                     record.content = Arc::new(item);
+                    row.version = cached.sequence;
                     row.content = Content::Full(Arc::new(records::Record::Item(record)));
                     let transfer = serde_json::from_value(value["result"]["transfer"].clone())?;
                     value["result"] = json!(records::Hydrated {

@@ -19,7 +19,7 @@ expect "Saved from Mac" after 保存
 press 保存
 expect_absent 処理中… 10000
 press ツールを追加
-press 差分
+press 変更
 expect "Saved from Mac" after ツールを追加 10000
 screenshot saved-diff
 press ツールを閉じる

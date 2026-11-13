@@ -170,3 +170,5 @@ CREATE TABLE jobs (
 ) STRICT;
 CREATE INDEX jobs_due ON jobs (run_after, position) WHERE state = 'pending';
 CREATE INDEX jobs_lane ON jobs (lane, position);
+
+CREATE TABLE workspace_scripts (root TEXT PRIMARY KEY, body BLOB NOT NULL) STRICT;

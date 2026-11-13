@@ -1767,3 +1767,49 @@ fn the_first_native_turn_executes_a_pending_stop_only_once() {
             .is_empty()
     );
 }
+
+#[test]
+fn repeated_catalog_native_parent_does_not_version_an_unchanged_public_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let parent = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    storage.create(&parent, &header()).unwrap();
+    storage
+        .save_source(
+            &parent,
+            ProviderKind::Claude,
+            "native-parent",
+            None,
+            &Default::default(),
+        )
+        .unwrap();
+    let child = address("native-child");
+    let mut child_header = header();
+    child_header.details.parent = Some(address("native-parent"));
+    storage.queue_catalog(ProviderKind::Claude, 100).unwrap();
+    let first = storage.claim(100, 1).unwrap().pop().unwrap();
+    storage
+        .catalog_page(&first, &[(child.clone(), child_header.clone())], None, 100)
+        .unwrap();
+    assert_eq!(storage.header(&child).unwrap().details.parent, Some(parent));
+    let replica = decision::records::Replica::new(agent_protocol::sync::Scope::List, 1)
+        .apply(1, storage.list(None).unwrap())
+        .unwrap();
+    let key = Key::Thread(child.clone());
+    let before = replica.rows()[&key].clone();
+    let again = storage.claim(60_100, 1).unwrap().pop().unwrap();
+    storage
+        .catalog_page(
+            &again,
+            &[(
+                child,
+                child_header,
+            )],
+            None,
+            60_100,
+        )
+        .unwrap();
+    let message = storage.list(replica.cursor()).unwrap();
+    let replica = replica.apply(1, message).unwrap();
+    assert_eq!(replica.rows()[&key], before);
+}

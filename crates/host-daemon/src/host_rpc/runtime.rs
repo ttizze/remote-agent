@@ -28,6 +28,7 @@ pub(in crate::host_rpc) mod list;
 #[cfg(test)]
 pub(in crate::host_rpc) mod native_fixture;
 pub(in crate::host_rpc) mod output;
+mod preparation;
 mod recovery;
 mod resources;
 mod rpc;
@@ -40,6 +41,7 @@ pub(super) struct Runtime {
     pub owners: Arc<Owners>,
     effects: Mutex<Option<mpsc::UnboundedReceiver<Effect>>>,
     resources: Mutex<HashMap<SessionRef, Arc<resources::Source>>>,
+    preparations: Mutex<HashMap<SessionRef, Arc<preparation::Preparation>>>,
     catalog_access: HashMap<ProviderKind, tokio::sync::RwLock<()>>,
     requests: Mutex<HashMap<RequestId, resources::PendingRequest>>,
     outputs: Arc<output::Outputs>,
@@ -83,6 +85,7 @@ impl Runtime {
             owners,
             effects: Mutex::new(Some(effects)),
             resources: Default::default(),
+            preparations: Default::default(),
             catalog_access: providers
                 .into_iter()
                 .map(|provider| (provider, Default::default()))
@@ -92,6 +95,14 @@ impl Runtime {
             recovered: Default::default(),
             updating_recovery,
             update_report: Default::default(),
+        }
+    }
+
+    pub(super) fn cancel_preparations(&self) {
+        for preparation in self.preparations.lock().unwrap().values() {
+            if let Some((_, cancel)) = &*preparation.active.lock().unwrap() {
+                cancel.cancel();
+            }
         }
     }
 
@@ -259,7 +270,7 @@ impl Runtime {
             Command::Submit { .. }
                 | Command::ResumeQueue
                 | Command::SteerInput(_)
-                | Command::RetryInput(_)
+                | Command::RetryInput { .. }
                 | Command::ResolveUnknown { retry: true, .. }
                 | Command::Answer { .. }
                 | Command::Rewind(_)
@@ -271,6 +282,47 @@ impl Runtime {
             None
         };
         let admission = (|| {
+            if let Command::Interrupt { turn } = &request.command {
+                let header = service
+                    .inner
+                    .conversation
+                    .storage
+                    .header(&request.session)
+                    .map_err(storage_failure)?;
+                let state = service
+                    .inner
+                    .conversation
+                    .storage
+                    .state(&request.session)
+                    .map_err(storage_failure)?;
+                let starting = state.inputs.values().any(|input| {
+                    matches!(
+                        input.state,
+                        decision::InputState::Preparing {
+                            stage: PreparationStage::Provider,
+                            ..
+                        }
+                    ) && turn
+                        .as_ref()
+                        .is_none_or(|turn| turn.as_str() == input.id.as_str())
+                });
+                if starting
+                    && header
+                        .details
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.setup.as_ref())
+                        .is_some_and(|setup| {
+                            !setup.can_cancel
+                                && setup.phase == agent_protocol::workspace::SetupPhase::Running
+                        })
+                {
+                    return Err(Failure::new(
+                        "preparation_started",
+                        "The agent has already started",
+                    ));
+                }
+            }
             if let Command::Submit { content, .. } = &request.command {
                 let current = service
                     .inner
@@ -378,55 +430,7 @@ impl Runtime {
                 cwd,
                 provider,
             } => {
-                let result =
-                    Self::prepare(service, &target, &id, action, stage, cwd, provider).await;
-                match result {
-                    Ok((cwd, source, created)) => {
-                        Self::event(
-                            service,
-                            &target,
-                            Event::Prepared {
-                                id,
-                                action,
-                                cwd: Some(cwd.clone()),
-                                source: source.clone(),
-                            },
-                        )
-                        .await?;
-                        if let Ok(projects) = service.project_snapshot().await {
-                            runtime
-                                .owners
-                                .workspace(
-                                    &target,
-                                    cwd.clone(),
-                                    projects.project_membership(Some(&cwd)),
-                                )
-                                .await?;
-                        }
-                        let saved = runtime.storage.state(&target)?;
-                        if let Some(native) = source {
-                            Self::release_unused_source(service, &target, provider, &native)
-                                .await?;
-                        }
-                        if created && saved.thread.workspace.cwd() != Some(cwd.as_str()) {
-                            if let Err(error) = service.inner.worktrees.discard(cwd).await {
-                                tracing::warn!(target: "agent", operation="conversation.discard_worktree", %error);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        Self::event(
-                            service,
-                            &target,
-                            Event::PreparationFailed {
-                                id,
-                                action,
-                                error: execution_error(error),
-                            },
-                        )
-                        .await?;
-                    }
-                }
+                Self::prepare_effect(service, &target, id, action, stage, cwd, provider).await?;
             }
             Action::Deliver {
                 id,
@@ -540,50 +544,38 @@ impl Runtime {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 Self::event(service, &target, Event::Wake).await?;
             }
-            Action::CancelPreparation { .. } => {}
+            Action::CancelPreparation { action } => {
+                if let Some(preparation) = runtime.preparations.lock().unwrap().get(&target)
+                    && let Some((current, cancel)) = &*preparation.active.lock().unwrap()
+                    && *current == action
+                {
+                    cancel.cancel();
+                }
+                let state = runtime.storage.state(&target)?;
+                if !state
+                    .inputs
+                    .values()
+                    .any(|input| matches!(input.state, decision::InputState::Preparing { .. }))
+                    && let Some(workspace) = runtime.storage.header(&target)?.details.workspace
+                    && workspace
+                        .setup
+                        .as_ref()
+                        .is_some_and(|setup| setup.can_cancel)
+                {
+                    service
+                        .setup_update(
+                            &target,
+                            workspace.generation,
+                            super::storage::workspace::SetupChange::Finish {
+                                phase: agent_protocol::workspace::SetupPhase::Cancelled,
+                                error: None,
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+            }
         }
         Ok(())
-    }
-
-    async fn prepare(
-        service: &HostRpcService,
-        target: &SessionRef,
-        id: &ClientInputId,
-        action: Uuid,
-        stage: PreparationStage,
-        cwd: Option<String>,
-        provider: ProviderKind,
-    ) -> Result<(String, Option<String>, bool), Failure> {
-        let _workspace = service.inner.worktree_access.read().await;
-        match stage {
-            PreparationStage::Workspace => {
-                let directory = cwd
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| service.inner.projects.chat_directory());
-                tokio::fs::create_dir_all(&directory)
-                    .await
-                    .map_err(|error| Failure::new("workspace_unavailable", error))?;
-                let directory = tokio::fs::canonicalize(&directory)
-                    .await
-                    .map_err(|error| Failure::new("workspace_unavailable", error))?;
-                Ok((
-                    dunce::simplified(&directory)
-                        .to_str()
-                        .ok_or_else(|| {
-                            Failure::new("workspace_unavailable", "workspace path is not UTF-8")
-                        })?
-                        .to_owned(),
-                    None,
-                    false,
-                ))
-            }
-            PreparationStage::Worktree => {
-                let (cwd, created) = service.prepare_directory(cwd.as_deref()).await?;
-                Ok((cwd, None, created))
-            }
-            PreparationStage::Provider => {
-                Self::prepare_provider(service, target, id, action, cwd, provider).await
-            }
-        }
     }
 }

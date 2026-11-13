@@ -15,6 +15,8 @@ use std::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
+    #[cfg_attr(feature = "bindings", uniffi(default = None))]
+    pub workspace: Option<agent_protocol::workspace::WorkspaceStrategy>,
     pub text: String,
     pub attachments: Vec<Attachment>,
     #[serde(default)]
@@ -54,6 +56,7 @@ fn merge_recovered_draft(recovered: &Draft, current: &Draft) -> Draft {
 /// A restore that the Host may have committed before its reply reached us.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputRecovery {
+    pub store: uuid::Uuid,
     pub session: crate::session::SessionRef,
     pub operation: uuid::Uuid,
     pub draft: Arc<Draft>,
@@ -90,6 +93,8 @@ pub struct FileDraft {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     #[serde(skip)]
+    pub options: HashMap<String, Arc<agent_protocol::workspace::WorkspaceOptions>>,
+    #[serde(skip)]
     pub file_metadata: crate::presentation::files::FileMetadataCache,
     #[serde(skip)]
     pub file_trees: crate::presentation::files::FileTrees,
@@ -122,6 +127,7 @@ pub struct WorkspaceLocation {
     pub cwd: String,
     pub file: Option<Arc<FileContent>>,
     pub review_cwd: Option<String>,
+    pub comparison: Option<String>,
     pub review: Option<Arc<WorkspaceReview>>,
 }
 impl WorkspaceLocation {
@@ -251,6 +257,7 @@ pub struct TerminalOutput {
 )]
 pub enum TerminalTarget {
     Shell {
+        command: Option<String>,
         cwd: String,
     },
     Account {
@@ -322,6 +329,7 @@ same_by_eq!(
     String,
     ModelPreferences,
     crate::localization::UiLanguage,
+    crate::presentation::web_links::WebLinkTarget,
     follow_up::ComposerPreferences,
     agent_protocol::editors::EditorId,
     crate::session::SessionRef,
@@ -390,6 +398,8 @@ group! {
         pub model_preferences: ModelPreferences,
         #[serde(default)]
         pub ui_language: crate::localization::UiLanguage,
+        #[serde(skip)]
+        pub web_link_target: crate::presentation::web_links::WebLinkTarget,
         #[serde(default)]
         pub account: Arc<AccountState>,
         #[serde(skip)]
@@ -726,6 +736,7 @@ fn clear_workspace_location(workspace: &mut WorkspaceLocation) {
     workspace.file = None;
     workspace.review = None;
     workspace.review_cwd = None;
+    workspace.comparison = None;
 }
 
 pub fn reduce(previous: &Snapshot, pane_id: &str, event: Event) -> (Snapshot, Vec<Effect>) {
@@ -809,7 +820,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         StartTerminal, StartAccountTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ResolveFile, ResolveFileReference, ReadFile,
         ReadFileOpenCapabilities, OpenInEditor,
-        SaveFile, WriteWorkspaceFile, ReviewWorkspace, ReadWorktreeSettings,
+        SaveFile, WriteWorkspaceFile, ReviewWorkspace, ChangeWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree,
         ListAgents, AddProject, ScanProjects, ImportProjects, RetryPreparation,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
@@ -953,7 +964,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         | Intent::DiscardUnknownSubmission { ref client_user_message_id }
             if previous.operation_running(op::OperationKey::InputRecovery {input:client_user_message_id.clone()}) => {},
         Intent::RestoreUnknownSubmission { client_user_message_id } => {
-            if let Some(effect) = op::resolve_saved_input(previous, &client_user_message_id, true) {
+            if let Some(effect) = op::resolve_saved_input(&mut next, &client_user_message_id, true) {
                 return (next, vec![effect]);
             }
             if let Some(effect) = op::resolve_local_input(previous,&client_user_message_id,true) {
@@ -961,7 +972,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             }
         }
         Intent::DiscardUnknownSubmission { client_user_message_id } => {
-            if let Some(effect) = op::resolve_saved_input(previous, &client_user_message_id, false) {
+            if let Some(effect) = op::resolve_saved_input(&mut next, &client_user_message_id, false) {
                 return (next, vec![effect]);
             }
             if let Some(effect) = op::resolve_local_input(previous,&client_user_message_id,false) {
@@ -984,6 +995,15 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             }
             let effects=list_sync::project(&mut next, false);
             return (next,effects);
+        }
+        Intent::SetWorkspaceComparison { cwd, base_ref } => {
+            if cwd.is_empty() || next.selected_directory(next.panes.get(pane_id).expect("admitted pane exists")) != cwd {
+                return (next, Vec::new());
+            }
+            let pane = Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists"));
+            Arc::make_mut(&mut pane.workspace).comparison = base_ref;
+            let effects = op::review_workspace(&mut next, pane_id).into_iter().collect();
+            return (next, effects);
         }
         Intent::RefreshProject { project_id } => {
             let effects=list_sync::refresh_project(&next,&project_id);
@@ -1082,6 +1102,8 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
                 draft_key: key,
                 ..Default::default()
             });
+            let selected = next.panes.get(pane_id).unwrap().navigation.cwd.clone();
+            Arc::make_mut(&mut next.files.workspace).options.remove(&selected);
             let effects = op::review_workspace(&mut next, pane_id).into_iter().collect();
             return (next, effects);
         }
@@ -1117,6 +1139,9 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
 
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.input.drafts).insert(thread_id, Arc::new(draft));
+        }
+        Intent::SelectWorkspace { thread_id, workspace } => {
+            Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default()).workspace = workspace;
         }
         Intent::AppendTranscript { thread_id, text } => {
             if !text.is_empty() {
@@ -1271,6 +1296,7 @@ fn navigate(snapshot: &mut Snapshot, pane_id: &str, navigation: Navigation) {
         let workspace = Arc::make_mut(&mut pane.workspace);
         workspace.file = location.file;
         workspace.review_cwd = location.review_cwd;
+        workspace.comparison = location.comparison;
         workspace.review = location.review;
     } else if pane.navigation.cwd != navigation.cwd || navigation.draft_key.is_empty() {
         clear_workspace_location(Arc::make_mut(&mut pane.workspace));
@@ -1527,7 +1553,8 @@ impl Snapshot {
         for (handle, terminal) in self.terminals.iter() {
             if terminal.phase == TerminalPhase::Suspended {
                 effects.push(match &terminal.target {
-                    TerminalTarget::Shell { cwd } => Effect::execute(op::StartTerminal {
+                    TerminalTarget::Shell { cwd, command } => Effect::execute(op::StartTerminal {
+                        command: command.clone(),
                         handle: handle.clone(),
                         cwd: cwd.clone(),
                         size: terminal.size,
@@ -2326,3 +2353,7 @@ mod history_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "state/workspace_tests.rs"]
+mod workspace_tests;

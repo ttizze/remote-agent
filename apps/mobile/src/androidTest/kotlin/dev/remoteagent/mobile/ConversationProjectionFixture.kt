@@ -39,22 +39,25 @@ internal fun ThreadDetailFixture(
     ThreadDetailScreen(
         dev.remoteagent.core.Presentation.fromSnapshot(snapshot, "").conversationContext(),
         current,
-        perform,
-        { id ->
-            current?.let { before ->
-                before.toggleActivity(id, expansion)?.let { change ->
-                    expansion = change
-                    current =
-                        ConversationRows.project(
-                            before.source(),
-                            before.scope(),
-                            change,
-                            fixtureRowPolicy,
-                            before,
-                        )
+        ConversationActions(
+            perform,
+            { id ->
+                current?.let { before ->
+                    before.toggleActivity(id, expansion)?.let { change ->
+                        expansion = change
+                        current =
+                            ConversationRows.project(
+                                before.source(),
+                                before.scope(),
+                                change,
+                                fixtureRowPolicy,
+                                before,
+                            )
+                    }
                 }
-            }
-        },
+            },
+            snapshot.terminals(),
+        ),
         modifier,
         scrollToTopRequest,
         composer,

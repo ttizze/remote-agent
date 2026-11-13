@@ -683,7 +683,7 @@ mod tests {
                 PreferenceKey::Language | PreferenceKey::Contrast => {
                     self.language.lock().unwrap().clone()
                 }
-                PreferenceKey::Composer => Vec::new(),
+                PreferenceKey::Composer | PreferenceKey::WebLinks => Vec::new(),
             })
         }
         fn save(&self, key: PreferenceKey, bytes: Vec<u8>) -> Result<(), AgentError> {
@@ -696,6 +696,10 @@ mod tests {
                     serde_json::from_slice::<crate::persistence::EditorPreferences>(&bytes)
                         .unwrap();
                     *self.editor_preferences.lock().unwrap() = bytes;
+                }
+                PreferenceKey::WebLinks => {
+                    serde_json::from_slice::<crate::presentation::web_links::WebLinkTarget>(&bytes)
+                        .unwrap();
                 }
                 PreferenceKey::Composer => {
                     serde_json::from_slice::<crate::state::ComposerPreferences>(&bytes).unwrap();

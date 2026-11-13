@@ -34,6 +34,11 @@ impl Workbench {
         });
     }
 
+    pub fn run_script(self, cwd: String, command: String) {
+        self.application
+            .with(|application| application.open_script(self.scope.get_untracked(), cwd, command));
+    }
+
     /// Opens `url` in the in-app browser.
     pub fn browse(self, url: String) {
         self.open(PanelKind::Browser, None, None);
@@ -66,6 +71,14 @@ impl Workbench {
         self.application
             .with(|application| application.terminal_handle(id))
     }
+    pub fn open_setup_terminal(
+        self,
+        terminal: agent_core::presentation::conversation::SetupTerminal,
+    ) {
+        self.application.with(|application| {
+            application.open_setup_terminal(self.scope.get_untracked(), terminal)
+        });
+    }
 }
 
 pub(crate) fn title() -> String {
@@ -95,7 +108,7 @@ fn symbol(kind: PanelKind) -> &'static str {
         PanelKind::Terminal => "terminal",
         PanelKind::Files => "folder",
         PanelKind::File => "doc",
-        PanelKind::Diff => "arrow.left.arrow.right",
+        PanelKind::Diff => "plus.forwardslash.minus",
         PanelKind::SideChat => "bubble.left.and.bubble.right",
         PanelKind::Agents => "network",
         PanelKind::Home => "plus",
@@ -110,7 +123,7 @@ fn tool_icon(kind: PanelKind) -> ui::Icon {
         PanelKind::Terminal => Icon::TERMINAL,
         PanelKind::Files => Icon::FOLDER,
         PanelKind::File => Icon::FILE_TEXT,
-        PanelKind::Diff => Icon::REPLACE,
+        PanelKind::Diff => Icon::DIFF,
         PanelKind::SideChat => Icon::BOT,
         PanelKind::Agents => Icon::NETWORK,
         PanelKind::Home => Icon::PLUS,
@@ -204,7 +217,7 @@ pub(crate) fn screen(leading: Option<AnyElement>) -> impl IntoElement {
             |surface: &PanelSurface| surface.id,
             move |surface, _| {
                 let host = workspace.scope.get_untracked().host;
-                let PanelSurface { id, kind, path } = surface.get_untracked();
+                let PanelSurface { id, kind, path, .. } = surface.get_untracked();
                 match kind {
                     PanelKind::Files => crate::files::screen(id).into_element(),
                     PanelKind::File => file(id),

@@ -37,6 +37,7 @@ final class AppViewModel {
 
     @ObservationIgnored let preferences: DevicePreferences
     private(set) var language: UiLanguage
+    private(set) var composerPreferences: ComposerPreferences
     @ObservationIgnored lazy var sessions = ClientSessions(recentChats: false, clientBuild: Self.clientBuild,
                                                            deviceName: UIDevice.current.name, device: preferences)
     private(set) var chat: ConversationModel?
@@ -58,6 +59,7 @@ final class AppViewModel {
         let empty = Presentation.empty(language: language)
         publication = empty
         settings = empty.settings()
+        composerPreferences = empty.composer().controls().followUp.preferences
         observeLiveActivityRequests()
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let available = path.status == .satisfied
@@ -92,6 +94,10 @@ final class AppViewModel {
         if session?.store() == nil {
             publish(session?.presentation() ?? Presentation.empty(language: next))
         }
+    }
+
+    func selectComposerPreferences(_ value: ComposerPreferences) {
+        perform(.setComposerPreferences(preferences: value))
     }
 
     func selectProfile(_ id: String) {
@@ -275,6 +281,12 @@ extension AppViewModel {
             updateTaskList()
             if list != nil {
                 store?.recordConnectionEvent(phase: .listPublished, value: next.connected() ? 1 : 0)
+            }
+        }
+        if changes.composerControls {
+            let preferences = value.composer().controls().followUp.preferences
+            if composerPreferences != preferences {
+                composerPreferences = preferences
             }
         }
         chat?.publish(value)

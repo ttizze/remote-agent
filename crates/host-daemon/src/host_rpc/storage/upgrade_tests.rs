@@ -445,3 +445,77 @@ fn json_only_upgrade_resolves_native_parent_links_after_restoring_all_bindings()
         decision::Workspace::Missing
     );
 }
+
+#[test]
+fn previous_workspace_scripts_and_interrupted_setup_are_retained_together() {
+    use agent_protocol::workspace::{SetupPhase, SetupScript, WorkspaceSetup, WorkspaceStrategy};
+    let directory = tempfile::tempdir().unwrap();
+    let old = directory.path().join("bex-transcripts.sqlite");
+    previous(&old, false);
+    let connection = Connection::open(&old).unwrap();
+    let body: Vec<u8> = connection
+        .query_row(
+            "SELECT body FROM host_state WHERE name='bindings'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let strategy = WorkspaceStrategy::Worktree {
+        base_ref: "origin/main".into(),
+        start_from_origin: true,
+    };
+    let mut setup = WorkspaceSetup::new(Some("origin/main".into()), 10);
+    setup.script = Some(SetupScript {
+        name: "Setup".into(),
+        command: "echo preparing".into(),
+        asynchronous: false,
+    });
+    setup.worktree_path = Some("/kept/workspace".into());
+    setup.branch = Some("bex/session-kept".into());
+    rows[0]["startup"]["project_cwd"] = serde_json::json!("/original");
+    rows[0]["startup"]["workspace"] = serde_json::json!(strategy);
+    rows[0]["workspace_setup"] = serde_json::json!(setup);
+    connection
+        .execute(
+            "UPDATE host_state SET body=?1 WHERE name='bindings'",
+            [serde_json::to_vec(&rows).unwrap()],
+        )
+        .unwrap();
+    let scripts = vec![agent_protocol::models::ProjectScript {
+        name: "Build".into(),
+        command: "echo build".into(),
+    }];
+    let key = "project-scripts:/original/.git";
+    connection
+        .execute(
+            "INSERT INTO host_state VALUES (?1,?2)",
+            params![key, serde_json::to_vec(&scripts).unwrap()],
+        )
+        .unwrap();
+    drop(connection);
+    let path = directory.path().join("bex-conversations.sqlite");
+    let storage = Storage::open(&path);
+    storage.check_ready().unwrap();
+    assert_eq!(storage.workspace_scripts(key).unwrap(), scripts);
+    let workspace = storage
+        .header(&address())
+        .unwrap()
+        .details
+        .workspace
+        .unwrap();
+    assert_eq!(workspace.project_cwd, "/original");
+    assert_eq!(workspace.strategy, Some(strategy));
+    let recovered = workspace.setup.as_ref().unwrap();
+    assert_eq!(recovered.phase, SetupPhase::Cancelled);
+    assert_eq!(recovered.script, setup.script);
+    assert_eq!(recovered.worktree_path, setup.worktree_path);
+    assert_eq!(recovered.branch, setup.branch);
+    drop(storage);
+    let storage = Storage::open(&path);
+    assert_eq!(storage.workspace_scripts(key).unwrap(), scripts);
+    assert_eq!(
+        storage.header(&address()).unwrap().details.workspace,
+        Some(workspace)
+    );
+}

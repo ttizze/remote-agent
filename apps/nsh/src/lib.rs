@@ -275,29 +275,28 @@ fn app_content(
     provide_context(terminal::Focus::new());
     provide_context(find::Find::new());
     let failure = computed(move || state.with(|state| state.failure.clone().map(l10n::localized)));
+    use nsh_base::text_view::{TextViewPart, TextViewParts};
+    // Native composers use 17pt on iOS (scaled once by its NSH environment)
+    // and 14pt on desktop. Use the system font's natural line metrics in both;
+    // small headings must not become smaller than the body.
+    let body_size = if cfg!(target_os = "ios") { 17.0 } else { 14.0 };
+    let typography = [
+        TextViewPart::Root,
+        TextViewPart::Heading4,
+        TextViewPart::Heading5,
+        TextViewPart::Heading6,
+    ]
+    .into_iter()
+    .fold(TextViewParts::new(), |parts, part| {
+        parts.part(part, move |style| {
+            style
+                .text_size(px(body_size))
+                .line_height(nsh_core::LineHeight::Normal)
+        })
+    });
+    provide_context(typography);
     #[cfg(target_os = "ios")]
     if matches!(area, Area::Conversation { .. }) {
-        use nsh_base::text_view::{TextViewPart, TextViewParts};
-
-        // SwiftUI's .body is 17pt before Dynamic Type scaling. Let the system
-        // font supply its line height, as the native composer does; NSH's iOS
-        // environment already applies the user's body-text scale. Small bold
-        // headings match .headline so they never become smaller than the body.
-        let typography = [
-            TextViewPart::Root,
-            TextViewPart::Heading4,
-            TextViewPart::Heading5,
-            TextViewPart::Heading6,
-        ]
-        .into_iter()
-        .fold(TextViewParts::new(), |parts, part| {
-            parts.part(part, |style| {
-                style
-                    .text_size(px(17.0))
-                    .line_height(nsh_core::LineHeight::Normal)
-            })
-        });
-        provide_context(typography);
         if let Some(actions) = use_context::<native::ExternalActions>() {
             effect(move || {
                 if let Some(error) = failure.get() {
@@ -307,6 +306,8 @@ fn app_content(
             });
         }
         let timeline = conversation::Timeline::new(signal(true));
+        let inset = use_context::<root::ComposerInset>().unwrap().0;
+        effect(move || timeline.cover(inset.get()));
         return view()
             .flex_1()
             .child(media::preview())
@@ -350,7 +351,7 @@ fn app_content(
     #[cfg(desktop)]
     let project = computed(move || connection.context.with(|p| p.workspace_project()));
     let list = move || {
-        threads::list(query, move || {
+        threads::List::new(query).view(move || {
             dismiss_keyboard();
             if !is_desktop() {
                 routes.set(vec![0, 1]);
@@ -465,6 +466,7 @@ fn app_content(
     match area {
         #[cfg(desktop)]
         Area::Shell => {
+            let list = threads::List::new(query);
             use nsh_core::desktop::{TitleBarOptions, TitleBarStyle, WindowAttributes};
             let mut bar = TitleBarOptions::default();
             bar.style = TitleBarStyle::Hidden;
@@ -600,6 +602,7 @@ fn app_content(
                         .flex_1()
                         .min_w_0()
                         .accessibility_elements_hidden(move || settings.get())
+                        .child(list.projects.view())
                         .child(
                             nsh_base::h_resizable()
                                 .handle_class("bg-border group-hover:bg-primary group-active:bg-primary")
@@ -616,7 +619,7 @@ fn app_content(
                                             view()
                                                 .size_full()
                                                 .accessibility_elements_hidden(move || !sidebar.get() || setup.get())
-                                                .child(sidebar::sidebar(hosts, move || toolbar_action("compose"))),
+                                                .child(sidebar::sidebar(hosts, list, move || toolbar_action("compose"))),
                                         ),
                                 )
                                 .child(
@@ -646,6 +649,7 @@ fn app_content(
                                                     move || {
                                                         sidebar::sheet(
                                                             hosts,
+                                                            list,
                                                             move || toolbar_action("compose"),
                                                             move || navigate(Navigation::DismissSidebarSheet),
                                                         )

@@ -35,6 +35,7 @@ async fn child_discovery_uses_the_public_parent_and_preserves_already_received_w
             &service,
             connection.id(),
             Call::CreateConversation(records::Create {
+                workspace: None,
                 provider: ProviderKind::Codex,
                 session: parent.clone(),
                 subscription: Uuid::new_v4(),
@@ -163,6 +164,7 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
                 &service,
                 connection.id(),
                 Call::CreateConversation(records::Create {
+                    workspace: None,
                     provider: ProviderKind::Codex,
                     session: target.clone(),
                     subscription: Uuid::new_v4(),
@@ -314,6 +316,7 @@ async fn command_output_case(stopped: bool) {
         &service,
         connection.id(),
         Call::CreateConversation(records::Create {
+            workspace: None,
             provider: ProviderKind::Codex,
             session: target.clone(),
             subscription: Uuid::new_v4(),
@@ -519,6 +522,7 @@ async fn native_reply_before_submit_ack_commits_one_turn_and_replay_never_sends_
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let operation = Uuid::new_v4();
     let request = records::Create {
+        workspace: None,
         provider: agent_protocol::session::ProviderKind::Codex,
         subscription: Uuid::new_v4(),
         session: target.clone(),
@@ -632,6 +636,7 @@ async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resour
         &service,
         connection.id(),
         Call::CreateConversation(records::Create {
+            workspace: None,
             provider: agent_protocol::session::ProviderKind::Codex,
             session: target.clone(),
             subscription: Uuid::new_v4(),
@@ -720,6 +725,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         &service,
         connection.id(),
         Call::CreateConversation(records::Create {
+            workspace: None,
             provider: agent_protocol::session::ProviderKind::Codex,
             session: target.clone(),
             subscription: Uuid::new_v4(),
@@ -905,6 +911,7 @@ async fn an_update_restart_continues_each_interrupted_root_once_in_its_original_
         &service,
         connection.id(),
         Call::CreateConversation(records::Create {
+            workspace: None,
             provider: agent_protocol::session::ProviderKind::Codex,
             session: target.clone(),
             subscription: Uuid::new_v4(),
@@ -1018,6 +1025,7 @@ async fn explicit_native_imports_preserve_host_turns_and_refresh_external_text_o
         &service,
         connection.id(),
         Call::CreateConversation(records::Create {
+            workspace: None,
             provider: agent_protocol::session::ProviderKind::Codex,
             session: target.clone(),
             subscription: Uuid::new_v4(),
@@ -1353,6 +1361,7 @@ async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_anot
         &service,
         connection.id(),
         Call::CreateConversation(records::Create {
+            workspace: None,
             provider: ProviderKind::Codex,
             session: target.clone(),
             subscription: Uuid::new_v4(),
@@ -1556,6 +1565,7 @@ async fn discovery_cannot_publish_a_private_source_before_its_creation_receipt()
             &service,
             connection.id(),
             Call::CreateConversation(records::Create {
+                workspace: None,
                 provider: ProviderKind::Codex,
                 session: target.clone(),
                 subscription: Uuid::new_v4(),
@@ -1609,6 +1619,7 @@ async fn ending_a_turn_releases_its_answer_resource_without_a_resolved_notificat
         let connection = service.open_session();
         let target = SessionRef::new(None,Uuid::new_v4().to_string()).unwrap();
         let _: records::Opened = call(&service,connection.id(),Call::CreateConversation(records::Create {
+                workspace: None,
             provider:ProviderKind::Codex,session:target.clone(),subscription:Uuid::new_v4(),cwd:Some(directory.path().to_str().unwrap().into()),selection:Default::default(),initial:Some((Uuid::new_v4().to_string().into(),content())),
         })).await.unwrap();
         completed(&service,&target,1).await;

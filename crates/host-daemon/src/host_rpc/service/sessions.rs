@@ -20,41 +20,6 @@ impl HostRpcService {
         Ok(agent)
     }
 
-    /// Returns the session's working directory and whether this call created its checkout.
-    pub(in crate::host_rpc) async fn prepare_directory(
-        &self,
-        cwd: Option<&str>,
-    ) -> Result<(String, bool), Failure> {
-        // A missing selection must not inherit the App Server's checkout.
-        // Keep the real cwd on the thread; project enrichment identifies
-        // this persisted location as a chat even after a Host restart.
-        if cwd.is_none_or(|cwd| cwd.trim().is_empty()) {
-            let directory = self.inner.projects.chat_directory();
-            tokio::fs::create_dir_all(&directory)
-                .await
-                .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
-            let directory = tokio::fs::canonicalize(directory)
-                .await
-                .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
-            let directory = dunce::simplified(&directory).to_owned();
-            return directory
-                .into_os_string()
-                .into_string()
-                .map(|directory| (directory, false))
-                .map_err(|_| Failure::new("chat_directory_unavailable", "chat path is not UTF-8"));
-        }
-        match self.inner.worktrees.prepare(cwd).await {
-            Ok(Some(created)) => created
-                .into_os_string()
-                .into_string()
-                .map(|created| (created, true))
-                .map_err(|_| {
-                    Failure::new("worktree_creation_failed", "worktree path is not UTF-8")
-                }),
-            Ok(None) => Ok((cwd.unwrap_or_default().into(), false)),
-            Err(error) => Err(Failure::new("worktree_creation_failed", error)),
-        }
-    }
     pub(super) async fn list_agents(
         &self,
         params: &op::ListAgents,

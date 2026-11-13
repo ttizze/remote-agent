@@ -288,6 +288,7 @@ mod tests {
         // These tests publish explicit Host facts. Discovery must not race those facts.
         let selection_path = root.join("connection-selection.json");
         let explorer_width_path = root.join("file-explorer-width.json");
+        let sidebar_projects_path = root.join("sidebar-projects.json");
         let (runtime, client, _) = crate::client::Client::new(root, None).unwrap();
         let (state, _) = tokio::sync::watch::channel(Arc::new(State::default()));
         let app = Arc::new(Application {
@@ -301,6 +302,7 @@ mod tests {
             #[cfg(desktop)]
             onboarding_path: std::path::PathBuf::new(),
             explorer_width_path,
+            sidebar_projects_path,
             #[cfg(desktop)]
             updater: None,
         });

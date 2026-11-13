@@ -17,7 +17,7 @@ expect "日本語のファイル" after ツールを追加
 expect_absent "new file mode"
 screenshot file
 press ツールを追加
-press 差分
+press 変更
 expect "new file mode" after ツールを追加
 expect "編集を確認します。" after ツールを追加
 screenshot diff

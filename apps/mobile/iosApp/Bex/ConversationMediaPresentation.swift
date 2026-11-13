@@ -33,6 +33,15 @@ import SwiftUI
         } failed: { self.imageError = $0 }
     }
 
+    func openPreview(_ file: Result<SharedFile, Error>) {
+        cancelPending()
+        imageError = nil
+        switch file {
+        case let .success(file): preview = file
+        case let .failure(error): imageError = error.localizedDescription
+        }
+    }
+
     func share(_ path: String, download: @escaping @MainActor (String) async throws -> URL) {
         shareFailure = nil
         load { try await download(path) } present: {

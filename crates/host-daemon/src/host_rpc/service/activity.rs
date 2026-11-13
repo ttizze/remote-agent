@@ -357,6 +357,7 @@ rl.on('line', line => {
             &service,
             phone.id(),
             Call::CreateConversation(records::Create {
+                workspace: None,
                 provider: agent_protocol::session::ProviderKind::Codex,
                 session: id.clone(),
                 subscription: uuid::Uuid::new_v4(),

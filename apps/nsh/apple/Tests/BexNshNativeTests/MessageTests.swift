@@ -8,6 +8,36 @@ import XCTest
 #endif
 
 final class MessageTests: XCTestCase {
+    #if os(macOS)
+        @MainActor func testWebLinkMenuReportsExplicitDestinationAndOriginalUrl() throws {
+            let url = "https://example.com/path?q=1#section"
+            let json = """
+            {"text":"Read this", "strong":false, "emphasis":false, "strikethrough":false,
+             "code":false, "link":"\(url)", "webMenu":[
+               {"id":"systemBrowser", "title":"Open in default browser"},
+               {"id":"inAppBrowser", "title":"Open in Bex"},
+               {"id":"copyLink", "title":"Copy link"}]}
+            """
+            let run = try JSONDecoder().decode(MessageRun.self, from: Data(json.utf8))
+            let block = MessageParagraph(header: nil, marker: nil, code: false, quoted: false,
+                                         depth: 0, alignment: "left", runs: [run])
+            let text = MessageAttributes.text([block], secondary: false, dark: true)
+            let link = try XCTUnwrap(text.attribute(.messageWebLink, at: 0, effectiveRange: nil) as? MessageWebLink)
+            let view = MessageTextView()
+            var actions: [[String: Any]] = []
+            view.action = { actions.append($0) }
+            let menu = view.fileMenu(link.menu, link: link.link, action: "webLink")
+            XCTAssertEqual(menu.items.map(\.title), ["Open in default browser", "Open in Bex", "Copy link"])
+            for (index, id) in ["systemBrowser", "inAppBrowser", "copyLink"].enumerated() {
+                let item = menu.items[index]
+                _ = item.target?.perform(item.action, with: item)
+                XCTAssertEqual(actions.last?["action"] as? String, "webLink")
+                XCTAssertEqual(actions.last?["id"] as? String, id)
+                XCTAssertEqual(actions.last?["text"] as? String, url)
+            }
+        }
+    #endif
+
     @MainActor func testFileChipKeepsItsIconAccentAndLinkWithoutCodeStyling() throws {
         let url = try XCTUnwrap(Bundle.module.url(forResource: "file-chip", withExtension: "json"))
         let block = try JSONDecoder().decode(MessageParagraph.self, from: Data(contentsOf: url))

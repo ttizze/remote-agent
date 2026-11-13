@@ -8,6 +8,7 @@ use agent_core::{
     presentation::markdown::{
         MarkdownAlignment, MarkdownBlock, MarkdownFileReference, MarkdownRun, MarkdownStyle,
     },
+    presentation::web_links::{WebLinkAction, WebLinkTarget, web_link_menu, web_link_target},
     state::DraftKey,
 };
 use nsh_core::{element::ImageSrc, prelude::*};
@@ -127,6 +128,20 @@ struct Target {
     provider: Option<agent_protocol::session::ProviderKind>,
 }
 
+#[cfg(any(
+    feature = "standard-text",
+    not(any(target_os = "macos", target_os = "ios")),
+    all(target_os = "macos", debug_assertions),
+    test
+))]
+/// Preserve both appearances when Core supplies an annotated run's colors.
+fn run_color(run: &Value) -> Option<AdaptiveColor> {
+    let color = |key: &str| run[key].as_u64().and_then(|c| u32::try_from(c).ok());
+    let light = color("lightColor");
+    let dark = color("darkColor");
+    Some(AdaptiveColor::rgb(light.or(dark)?, dark.or(light)?))
+}
+
 /// What message content reaches. List rows are made outside the context
 /// their list was made in, so they receive these rather than look them up.
 #[derive(Clone, Copy)]
@@ -174,19 +189,46 @@ impl Surroundings {
         })
     }
 
-    /// Opens a link clicked in `target`'s text, `command` (⌘, Ctrl off the
-    /// Mac) held or not, as the desktop client's links did: a web page in the
-    /// in-app browser with it; on the desktop, a file by its primary action,
-    /// which the editor takes with it; anything else as the file browser does.
+    /// Web pages follow this device's preference; ⌘/Ctrl opens them externally.
+    /// Files retain their primary action and modifier shortcut to the editor.
     fn open_link(self, link: String, target: Target, command: bool) {
         #[cfg(any(desktop, target_os = "ios"))]
         if let Some(actions) = self.external_actions {
             return actions.emit(json!({"action":"link", "text":link}));
         }
-        if command && (link.starts_with("https://") || link.starts_with("http://")) {
-            return self.workspace.browse(link);
+        let preference = self
+            .connection
+            .publication
+            .with_untracked(|p| p.snapshot.catalog.web_link_target);
+        if let Some(destination) = web_link_target(&link, preference, command) {
+            return self.open_web_link(link, destination);
         }
         crate::file_actions::press(self.connection, self.files, target.link(link), command);
+    }
+
+    fn open_web_link(self, link: String, destination: WebLinkTarget) {
+        match destination {
+            WebLinkTarget::SystemBrowser => crate::native::open_link(link),
+            WebLinkTarget::InAppBrowser => self.workspace.browse(link),
+        }
+    }
+
+    fn choose_link(self, link: String, target: Target, id: &str) {
+        if web_link_target(&link, WebLinkTarget::SystemBrowser, false).is_some()
+            && let Ok(action) = serde_json::from_value::<WebLinkAction>(json!(id))
+        {
+            match action {
+                WebLinkAction::SystemBrowser => {
+                    self.open_web_link(link, WebLinkTarget::SystemBrowser)
+                }
+                WebLinkAction::InAppBrowser => {
+                    self.open_web_link(link, WebLinkTarget::InAppBrowser)
+                }
+                WebLinkAction::CopyLink => set_clipboard(link),
+            }
+            return;
+        }
+        crate::file_actions::choose(self.connection, self.files, target.link(link), id);
     }
 }
 
@@ -382,12 +424,9 @@ pub(crate) fn action(surroundings: Surroundings, data: &Value) {
             target,
             data["command"].as_bool().unwrap_or(false),
         ),
-        Some("file") => crate::file_actions::choose(
-            connection,
-            surroundings.files,
-            target.link(text.into()),
-            data["id"].as_str().unwrap_or_default(),
-        ),
+        Some("file" | "webLink") => {
+            surroundings.choose_link(text.into(), target, data["id"].as_str().unwrap_or_default())
+        }
         _ => {}
     }
 }
@@ -1144,12 +1183,7 @@ mod drawn {
             },
             choose: move |link: String, id: String| {
                 if let Some(target) = target() {
-                    crate::file_actions::choose(
-                        surroundings.connection,
-                        surroundings.files,
-                        target.link(link),
-                        &id,
-                    );
+                    surroundings.choose_link(link, target, &id);
                 }
             },
         };
@@ -1277,27 +1311,15 @@ mod drawn {
                     .font_family(SharedString::from("monospace"))
                     .bg(colors::RAISED);
             }
-            // The app's look is dark: a run's own color is its dark variant.
-            if let Some(color) = run["darkColor"]
-                .as_u64()
-                .and_then(|c| u32::try_from(c).ok())
-            {
-                span = span.text_color(rgb(color));
+            if let Some(color) = super::run_color(run) {
+                span = span.text_color(color);
             }
             if let Some(link) = run["link"].as_str().map(str::to_owned) {
                 if let Some(chip) = run.get("file") {
                     line = line.child(chip_span(span, chip, link, links));
                     continue;
                 }
-                let open = links.open;
-                span = span.text_color(colors::ACCENT).underline().on_press(
-                    move |event: &PressEvent| {
-                        open(
-                            link.clone(),
-                            crate::file_actions::primary_modifier(event.modifiers, apple_keys()),
-                        )
-                    },
-                );
+                span = web_span(span, link, run["webMenu"].clone(), links);
             }
             line = line.child(span);
         }
@@ -1369,6 +1391,33 @@ mod drawn {
         span
     }
 
+    /// A web link's explicit destinations share the native text actions.
+    pub(super) fn web_span<O, C>(label: Text, link: String, menu: Value, links: Links<O, C>) -> Text
+    where
+        O: Fn(String, bool) + Copy + 'static,
+        C: Fn(String, String) + Copy + 'static,
+    {
+        let (open, choose) = (links.open, links.choose);
+        let pressed = link.clone();
+        let span =
+            label
+                .text_color(colors::ACCENT)
+                .underline()
+                .on_press(move |event: &PressEvent| {
+                    open(
+                        pressed.clone(),
+                        crate::file_actions::primary_modifier(event.modifiers, apple_keys()),
+                    );
+                });
+        if !menu.is_array() {
+            return span;
+        }
+        span.on_context_menu(move |_: &ContextMenuEvent| {
+            let link = link.clone();
+            crate::ui::popup(&menu, move |id: &str| choose(link.clone(), id.into()));
+        })
+    }
+
     /// A file chip as the desktop client's: its glyph and label in the file's accent, at
     /// medium weight, its full path and size over it, its menu on a secondary
     /// press; a press opens it as a link does.
@@ -1382,10 +1431,7 @@ mod drawn {
         O: Fn(String, bool) + Copy + 'static,
         C: Fn(String, String) + Copy + 'static,
     {
-        let color = chip["darkColor"]
-            .as_u64()
-            .and_then(|c| u32::try_from(c).ok())
-            .map_or(colors::ACCENT, rgb);
+        let color = super::run_color(chip).unwrap_or_else(|| colors::ACCENT.into());
         let glyph = if chip["folder"].as_bool().unwrap_or(false) {
             crate::ui::icon(crate::ui::Icon::FOLDER, 14.0).into_element()
         } else {
@@ -1429,11 +1475,17 @@ pub(crate) fn paragraph(runs: Vec<MarkdownRun>, style: &MarkdownStyle, chip: Chi
         "quoted": style.quoted, "depth": style.list_depth,
         "alignment": match style.alignment { MarkdownAlignment::Left => "left", MarkdownAlignment::Center => "center", MarkdownAlignment::Right => "right" },
         "runs": runs.into_iter().map(|run| {
+            let web_menu = run.link.as_deref()
+                .filter(|link| web_link_target(link, WebLinkTarget::SystemBrowser, false).is_some())
+                .map(|_| web_link_menu(crate::l10n::language()));
             let mut value = json!({
                 "text": run.text, "strong": run.strong, "emphasis": run.emphasis,
                 "strikethrough": run.strikethrough, "code": run.code, "link": run.link,
                 "darkColor": run.dark_color, "lightColor": run.light_color,
             });
+            if let Some(menu) = web_menu {
+                value["webMenu"] = json!(menu);
+            }
             if let Some(chip) = run.file.as_ref().and_then(chip) {
                 value["file"] = chip;
             }
@@ -1627,6 +1679,24 @@ mod tests {
     }
 
     #[test]
+    fn annotated_colors_keep_both_appearances_and_use_the_available_variant() {
+        for (run, expected) in [
+            (
+                json!({"lightColor":0x112233, "darkColor":0xaabbcc}),
+                [0x112233ff, 0xaabbccff],
+            ),
+            (json!({"lightColor":0x112233}), [0x112233ff, 0x112233ff]),
+            (json!({"darkColor":0xaabbcc}), [0xaabbccff, 0xaabbccff]),
+        ] {
+            let color = run_color(&run).unwrap();
+            assert_eq!(nsh_core::Color::from(color.light).0, expected[0]);
+            assert_eq!(nsh_core::Color::from(color.dark).0, expected[1]);
+        }
+        assert!(run_color(&json!({})).is_none());
+        assert!(run_color(&json!({"lightColor":u64::MAX, "darkColor":"bad"})).is_none());
+    }
+
+    #[test]
     fn native_text_contract_preserves_unicode_style_links_and_selection_target() {
         let blocks = vec![paragraph(
             vec![
@@ -1656,6 +1726,36 @@ mod tests {
                 "menu": {"quote": "チャットに追加", "sideChat": "サイドチャットで質問"}}),
             expected
         );
+    }
+
+    #[test]
+    fn web_link_runs_carry_explicit_destinations_without_giving_file_links_web_actions() {
+        let block = paragraph(
+            [
+                "https://example.com/path?q=1#part",
+                "file:///tmp/readme.md",
+                "mailto:user@example.com",
+            ]
+            .map(|link| MarkdownRun {
+                text: link.into(),
+                link: Some(link.into()),
+                ..Default::default()
+            })
+            .into(),
+            &MarkdownStyle::default(),
+            &|_| None,
+        );
+        assert_eq!(
+            block["runs"][0]["webMenu"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["systemBrowser", "inAppBrowser", "copyLink"]
+        );
+        assert!(block["runs"][1].get("webMenu").is_none());
+        assert!(block["runs"][2].get("webMenu").is_none());
     }
 
     #[test]

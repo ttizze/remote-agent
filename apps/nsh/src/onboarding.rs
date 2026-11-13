@@ -88,6 +88,7 @@ fn connected(connection: Connection) -> bool {
 
 /// Step 1: the Host to work on, its AI, and pairing another PC.
 fn environment_step(connection: Connection, hosts: Memo<Vec<Host>>) -> View {
+    environment::read_settings(connection);
     let application = connection.application;
     let adding = signal(false);
     let start = computed(move || {

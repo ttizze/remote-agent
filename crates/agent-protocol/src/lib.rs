@@ -27,3 +27,4 @@ pub mod requests;
 pub mod session;
 pub mod sync;
 pub mod tool_output;
+pub mod workspace;

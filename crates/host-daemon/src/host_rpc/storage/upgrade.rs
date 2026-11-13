@@ -35,6 +35,8 @@ struct Handoff {
 }
 #[derive(Deserialize)]
 struct Startup {
+    project_cwd: Option<String>,
+    workspace: Option<agent_protocol::workspace::WorkspaceStrategy>,
     preparation: SessionPreparation,
 }
 #[derive(Deserialize)]
@@ -47,6 +49,7 @@ struct Conversation {
     bindings: Vec<Binding>,
     handoffs: Vec<Handoff>,
     startup: Option<Startup>,
+    workspace_setup: Option<agent_protocol::workspace::WorkspaceSetup>,
 }
 #[derive(Deserialize)]
 struct Read {
@@ -73,6 +76,7 @@ pub(super) struct Previous {
     reads: Vec<Read>,
     models: Vec<Selection>,
     projects: Vec<agent_protocol::models::Project>,
+    workspace_scripts: BTreeMap<String, Vec<agent_protocol::models::ProjectScript>>,
     backup: tempfile::TempDir,
 }
 
@@ -116,6 +120,26 @@ fn state<T: serde::de::DeserializeOwned>(
         }
     }
     Ok(file(&path.with_file_name(filename))?.unwrap_or_default())
+}
+
+fn read_workspace_scripts(
+    connection: Option<&Connection>,
+) -> Result<BTreeMap<String, Vec<agent_protocol::models::ProjectScript>>, String> {
+    let mut workspace_scripts = BTreeMap::new();
+    if let Some(connection) = connection
+        && table(connection, "host_state")?
+    {
+        let mut statement = connection
+            .prepare("SELECT name,body FROM host_state WHERE name LIKE 'project-scripts:%'")
+            .map_err(failure)?;
+        let mut rows = statement.query([]).map_err(failure)?;
+        while let Some(row) = rows.next().map_err(failure)? {
+            let name: String = row.get(0).map_err(failure)?;
+            let body: Vec<u8> = row.get(1).map_err(failure)?;
+            workspace_scripts.insert(name, serde_json::from_slice(&body).map_err(failure)?);
+        }
+    }
+    Ok(workspace_scripts)
 }
 
 pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
@@ -236,6 +260,7 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
         });
     }
     projects.retain(|project| !project.roots.is_empty());
+    let workspace_scripts = read_workspace_scripts(connection.as_ref())?;
     let parent = path.parent().ok_or("missing storage directory")?;
     let backup = tempfile::Builder::new()
         .prefix("before-conversation-rows-")
@@ -275,6 +300,7 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
         reads,
         models,
         projects,
+        workspace_scripts,
         backup,
     }))
 }
@@ -321,6 +347,14 @@ impl Previous {
                 &jobs::Work::ProjectsChanged,
             )?;
         }
+        for (root, scripts) in &self.workspace_scripts {
+            transaction
+                .execute(
+                    "INSERT INTO workspace_scripts(root,body) VALUES (?1,?2)",
+                    params![root, protocol::encode(scripts).map_err(failure)?],
+                )
+                .map_err(failure)?;
+        }
         // Parents can appear later in the previous database. Insert identities
         // first, then attach the validated links in a second pass.
         for (id, response) in &history {
@@ -332,6 +366,34 @@ impl Previous {
                 .find(|selection| &selection.session == id)
             {
                 header.details.selection = selection.options.clone();
+            }
+            if let Some(row) = self.conversations.iter().find(|row| &row.id == id)
+                && (row.startup.is_some() || row.workspace_setup.is_some())
+            {
+                let mut setup = row.workspace_setup.clone();
+                if let Some(setup) = &mut setup
+                    && setup.phase == agent_protocol::workspace::SetupPhase::Running
+                {
+                    setup.finish(
+                        agent_protocol::workspace::SetupPhase::Cancelled,
+                        None,
+                        now.max(0) as u64,
+                    );
+                }
+                header.details.workspace = Some(decision::records::WorkspacePreparation {
+                    project_cwd: row
+                        .startup
+                        .as_ref()
+                        .and_then(|startup| startup.project_cwd.clone())
+                        .unwrap_or_else(|| row.cwd.clone()),
+                    strategy: row
+                        .startup
+                        .as_ref()
+                        .and_then(|startup| startup.workspace.clone()),
+                    generation: Uuid::new_v4(),
+                    visible: setup.is_some(),
+                    setup,
+                });
             }
             history::insert_header(transaction, id, &header, &Counters::default(), sequence)?;
         }

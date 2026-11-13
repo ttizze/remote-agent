@@ -349,6 +349,7 @@ rl.on('line', line => {
             .unwrap(),
         );
         let mut events = process.subscribe();
+        assert!(matches!(events.recv().await.unwrap(), agent_transport::peer::PeerEvent::Response { .. }), "consume the retained initialization response before observing unsubscribe");
         let scopes = Arc::new(crate::providers::scopes::Scopes::default());
         let first = uuid::Uuid::new_v4();
         let next = uuid::Uuid::new_v4();

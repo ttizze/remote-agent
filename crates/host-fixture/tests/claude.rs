@@ -1455,13 +1455,13 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
         assert_eq!(preparation.submission.client_user_message_id, input_id("auth-failure"));
         assert!(snapshot.sessions.conversations[&id].turns.as_ref().is_none_or(|turns| turns.is_empty()));
         std::fs::write(&config, json!({"initializeError":true}).to_string()).unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), input_id: input_id("auth-failure") })).await.unwrap();
+        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), input_id: input_id("auth-failure"), work_locally: false })).await.unwrap();
         let snapshot = until(&store, |snapshot| {
             snapshot.sessions.conversations[&id].preparations.iter().any(|preparation| matches!(&preparation.status, agent_protocol::session::PreparationStatus::Failed { error } if error.message.contains("fixture initialization failed")))
         }).await;
         assert!(snapshot.sessions.conversations[&id].turns.as_ref().is_none_or(|turns| turns.is_empty()));
         std::fs::write(&config, json!({"resultError":true}).to_string()).unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), input_id: input_id("auth-failure") })).await.unwrap();
+        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), input_id: input_id("auth-failure"), work_locally: false })).await.unwrap();
         let snapshot = completed(&store, &id, 1, "failed").await;
         assert_eq!(
             snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0]
@@ -1698,6 +1698,7 @@ async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resiz
         owner
             .peer
             .call(&rpc::StartTerminal {
+                command: None,
                 handle: "owned".into(),
                 cwd: root.path().to_str().unwrap().into(),
                 size: rpc::TerminalSize { rows: 24, cols: 80 },

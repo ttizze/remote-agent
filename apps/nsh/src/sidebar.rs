@@ -8,12 +8,17 @@ use crate::{
 use nsh_core::prelude::*;
 use serde_json::json;
 
+mod projects;
+
 pub(crate) const WIDTH: f32 = 272.0;
 
 /// The sidebar fills its native split pane or narrow-window sheet.
-pub(crate) fn sidebar(hosts: Memo<Vec<Host>>, compose: impl Fn() + 'static) -> impl IntoElement {
+pub(crate) fn sidebar(
+    hosts: Memo<Vec<Host>>,
+    list: crate::threads::List,
+    compose: impl Fn() + 'static,
+) -> impl IntoElement {
     let connection = use_context::<Connection>().unwrap();
-    let query = signal(String::new());
     let navigate = move |action| {
         connection
             .application
@@ -48,21 +53,35 @@ pub(crate) fn sidebar(hosts: Memo<Vec<Host>>, compose: impl Fn() + 'static) -> i
                         .flex_row()
                         .items_center()
                         .gap_1()
-                        .child(ui::search(query, tr("会話を検索")).flex_1().min_w_0())
+                        .child(search(list.query).flex_1().min_w_0())
                         .child(
-                            ui::icon_button(
-                                Icon::NEW_CHAT,
-                                tr("新しいチャット"),
-                                move || {
-                                    leave();
-                                    compose();
-                                },
-                            )
-                            .enabled(connected),
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .child(projects::filter(list))
+                                .child(crate::projects::folder_button(
+                                    connection.application,
+                                    connection.host,
+                                    list.sources,
+                                ))
+                                .child(
+                                    ui::icon_button_sized(
+                                        Icon::NEW_CHAT,
+                                        tr("新しいチャット"),
+                                        28.0,
+                                        16.0,
+                                        move || {
+                                            leave();
+                                            compose();
+                                        },
+                                    )
+                                    .text_color(colors::muted())
+                                    .enabled(connected),
+                                ),
                         ),
                 ),
         )
-        .child(crate::threads::list(query, leave))
+        .child(list.view(leave))
         .child(
             view()
                 .flex_row()
@@ -91,11 +110,70 @@ pub(crate) fn sidebar(hosts: Memo<Vec<Host>>, compose: impl Fn() + 'static) -> i
         )
 }
 
+/// The sidebar's compact search, including clearing without leaving the field.
+fn search(query: Signal<String>) -> View {
+    let field = element_ref();
+    let focused = signal(false);
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .h(px(32.0))
+        .px_2()
+        .rounded(px(ui::RADIUS))
+        .text_color(colors::muted())
+        .hover(|s| s.bg(colors::ROW_HOVER).text_color(colors::foreground()))
+        .focus_within(|s| s.bg(colors::ROW_HOVER))
+        .child(ui::icon(Icon::SEARCH, 16.0))
+        .child(
+            nsh_core::element::input()
+                .element_ref(&field)
+                .auto_correct(false)
+                .auto_capitalize(AutoCapitalize::None)
+                .label(tr("会話を検索"))
+                .placeholder(tr("検索"))
+                .value(move || query.get())
+                .on_change(move |text: &str| query.set(text.to_owned()))
+                .on_focus(move || focused.set(true))
+                .on_blur(move || focused.set(false))
+                .text_size(px(14.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors::foreground())
+                .placeholder_color(colors::muted())
+                .flex_1()
+                .min_w_0(),
+        )
+        .child(when(
+            move || !query.with(String::is_empty),
+            move || {
+                ui::small_icon_button(Icon::CLOSE, tr("検索をクリア"), move || {
+                    query.set(String::new());
+                    field.focus();
+                })
+            },
+        ))
+        .child(when(
+            move || focused.get() && !query.with(String::is_empty),
+            move || {
+                on_key_with(
+                    "escape",
+                    KeyOptions {
+                        when: nsh_core::keymap::When::Always,
+                        ..Default::default()
+                    },
+                    move |_| query.set(String::new()),
+                );
+                view()
+            },
+        ))
+}
+
 /// The sidebar over the content in a narrow window, as T3 Code's sheet: from the
 /// window's leading edge to 12 points short of its other, over a dimmed
 /// backdrop that, as Escape, closes it.
 pub(crate) fn sheet(
     hosts: Memo<Vec<Host>>,
+    list: crate::threads::List,
     compose: impl Fn() + 'static,
     dismiss: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {
@@ -108,7 +186,12 @@ pub(crate) fn sheet(
         .right(px(0.0))
         .bottom(px(0.0))
         .flex_row()
-        .child(view().w(width).flex_row().child(sidebar(hosts, compose)))
+        .child(
+            view()
+                .w(width)
+                .flex_row()
+                .child(sidebar(hosts, list, compose)),
+        )
         // T3's backdrop: the content dimmed to 60% and blurred by 4 points
         // (`bg-background/60 backdrop-blur-xs`). The sheet hides the rest of
         // it, so it lies beside the sheet, after it for assistive technologies.

@@ -56,6 +56,13 @@ mod tests {
             .map(str::to_owned)
             .into(),
             project_delete_unchanged: [("project".into(), false)].into(),
+            setup_script: Some(agent_protocol::workspace::SetupScript {
+                name: "Install".into(),
+                command: "npm ci".into(),
+                asynchronous: false,
+            }),
+            project_setup_scripts: Default::default(),
+            init_submodules: true,
         };
         let normalized = normalize_worktree_settings(settings.clone());
         assert_eq!(normalized.worktree_directory, "/fixture/work trees");

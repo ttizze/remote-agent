@@ -117,6 +117,7 @@ contracts! {
     Upload, "host/blob/upload" => (op::Upload, m::TransferGrant),
     Download, "host/blob/download" => (op::ListFiles, m::TransferGrant),
     ReadVisualization, "host/visualize/read" => (op::LoadVisualization, String) [clone],
+    ChangeWorkspace, "host/workspace/change" => (op::ChangeWorkspace, m::Empty) [clone],
     ReviewWorkspace, "host/workspace/review" => (op::ReviewWorkspace, m::WorkspaceReview) [clone],
     ReadWorktreeSettings, "host/worktree/settings/read" => (m::Empty, m::WorktreeSettings),
     UpdateWorktreeSettings, "host/worktree/settings/update" => (m::WorktreeSettings, m::WorktreeSettings),

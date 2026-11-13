@@ -1035,7 +1035,14 @@ fn failed_preparation_retries_the_same_stage_with_a_new_action() {
     );
     assert_eq!(failed.outcome, Outcome::Accepted);
     let state = state.apply(&failed.changes);
-    let retried = command(&state, 3, Command::RetryInput(id.clone()));
+    let retried = command(
+        &state,
+        3,
+        Command::RetryInput {
+            id: id.clone(),
+            work_locally: false,
+        },
+    );
     assert!(
         matches!(&retried.actions[..], [Action::Prepare { action: next, stage: PreparationStage::Workspace, .. }] if next != action)
     );
@@ -1450,7 +1457,14 @@ fn cancelling_preparation_keeps_the_saved_stage_and_fences_its_late_completion()
         ),
         Step::default()
     );
-    let retry = command(&state, 4, Command::RetryInput(id.clone()));
+    let retry = command(
+        &state,
+        4,
+        Command::RetryInput {
+            id: id.clone(),
+            work_locally: false,
+        },
+    );
     assert!(
         matches!(&retry.actions[..], [Action::Prepare { action: next, stage: PreparationStage::Workspace, .. }] if next != action)
     );
@@ -2037,7 +2051,14 @@ fn retrying_a_failed_input_uses_the_workspace_and_binding_established_by_later_i
     state = state.apply(&delivered.changes);
     let completed = observe(&state, &attempt, Observation::Completed, 8);
     state = state.apply(&completed.changes);
-    let retried = command(&state, 9, Command::RetryInput(id.clone()));
+    let retried = command(
+        &state,
+        9,
+        Command::RetryInput {
+            id: id.clone(),
+            work_locally: false,
+        },
+    );
     assert!(
         matches!(&retried.actions[..], [Action::Deliver { cwd, attempt, .. }]
         if cwd == "/worktree" && attempt.source == "native-second")
@@ -2177,7 +2198,14 @@ fn preparation_completion_drains_the_head_after_retry_changes_queue_order() {
     let state = state.apply(&failed.changes);
     let second = submit(&state, 3, FollowUp::Queue);
     let mut state = state.apply(&second.changes);
-    let retried = command(&state, 4, Command::RetryInput(first_id.clone()));
+    let retried = command(
+        &state,
+        4,
+        Command::RetryInput {
+            id: first_id.clone(),
+            work_locally: false,
+        },
+    );
     assert!(retried.actions.is_empty());
     state = state.apply(&retried.changes);
     let Action::Prepare { id, action, .. } = &second.actions[0] else {

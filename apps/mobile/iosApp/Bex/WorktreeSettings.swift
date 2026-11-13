@@ -24,6 +24,8 @@ struct SettingsScreen: View {
                     .disabled(model.profiles.isEmpty)
             }
             LanguageSettings(language: model.language, select: model.selectLanguage)
+            FollowUpSettings(preferences: model.composerPreferences, select: model.selectComposerPreferences)
+                .disabled(model.profiles.isEmpty)
             Section("プロジェクトと会話") {
                 NavigationLink {
                     WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
@@ -59,10 +61,35 @@ struct LanguageSettings: View {
     }
 }
 
+/// What a message sent while the agent works does, as the Mac's general settings choose.
+struct FollowUpSettings: View {
+    let preferences: ComposerPreferences
+    let select: (ComposerPreferences) -> Void
+
+    var body: some View {
+        Section {
+            Picker("フォローアップの動作", selection: Binding(get: { preferences.followUp }, set: { value in
+                var next = preferences
+                next.followUp = value
+                select(next)
+            })) {
+                Text("キュー").tag(FollowUp.queue)
+                Text("追加の指示").tag(FollowUp.steer)
+            }
+            .accessibilityIdentifier("settings.followUp")
+        } footer: {
+            Text("エージェントの実行中に送るメッセージを、キューに追加するか実行中の作業に追加で指示するかを選択します。")
+        }
+    }
+}
+
 struct WorktreeSettingsScreen: View {
     let model: AppViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var inputs = WorktreeSettingsInputs()
+    @State private var setupScript: SetupScript?
+    @State private var projectSetupScripts: [String: SetupScript] = [:]
+    @State private var initSubmodules = false
     @State private var project: String?
     @State private var loaded = false
     @State private var busy = false
@@ -83,6 +110,12 @@ struct WorktreeSettingsScreen: View {
             }
             WorktreeSettingsFields(inputs: $inputs, project: project,
                                    enabled: loaded && !busy && model.isConnected)
+            SetupScriptSettings(shared: $setupScript, projects: $projectSetupScripts, project: project)
+                .disabled(!loaded || busy || !model.isConnected)
+            if project == nil {
+                Section { Toggle("サブモジュールを初期化", isOn: $initSubmodules) }
+                    .disabled(!loaded || busy || !model.isConnected)
+            }
             if busy {
                 ProgressView().accessibilityLabel("設定を通信中")
             }
@@ -130,6 +163,9 @@ struct WorktreeSettingsScreen: View {
                 copyPaths: settings.copyPaths, worktreeDirectory: settings.worktreeDirectory,
                 deleteUnchanged: settings.deleteUnchanged, projectDeleteUnchanged: settings.projectDeleteUnchanged
             )
+            setupScript = settings.setupScript
+            initSubmodules = settings.initSubmodules
+            projectSetupScripts = settings.projectSetupScripts
             loaded = true
         }
     }
@@ -139,6 +175,8 @@ struct WorktreeSettingsScreen: View {
         let settings = normalizeWorktreeSettings(settings: WorktreeSettings(
             createOnNewSession: inputs.createOnNewSession, copyOnCreate: inputs.copyOnCreate,
             copyPaths: inputs.copyPaths, worktreeDirectory: inputs.worktreeDirectory,
+            initSubmodules: initSubmodules,
+            setupScript: setupScript, projectSetupScripts: projectSetupScripts,
             deleteUnchanged: inputs.deleteUnchanged, projectDeleteUnchanged: inputs.projectDeleteUnchanged
         ))
         model.requestSnapshot(.updateWorktreeSettings(UpdateWorktreeSettings(settings: settings))) { snapshot, result in

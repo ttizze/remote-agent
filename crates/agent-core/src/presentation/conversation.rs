@@ -154,6 +154,48 @@ pub struct PreparationPresentation {
     /// Setting up a worktree, which shimmers as T3 Code's "Setting up worktree…".
     pub shimmer: bool,
     pub retry: Option<agent_protocol::operations::RetryPreparation>,
+    pub steps: Vec<PreparationStep>,
+    pub show_steps: bool,
+    pub details: Vec<PreparationDetail>,
+    pub started_at_ms: Option<u64>,
+    pub ended_at_ms: Option<u64>,
+    pub cancel: Option<agent_protocol::operations::Interrupt>,
+    pub terminal: Option<SetupTerminal>,
+    pub work_locally: Option<agent_protocol::operations::RetryPreparation>,
+    pub error: Option<String>,
+}
+#[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PreparationStep {
+    pub id: String,
+    pub label: String,
+    pub state: String,
+    pub detail: Option<String>,
+    pub started_at_ms: Option<u64>,
+    pub ended_at_ms: Option<u64>,
+    pub tail: Vec<String>,
+}
+#[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PreparationDetail {
+    pub label: String,
+    pub value: String,
+}
+#[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct SetupTerminal {
+    pub handle: String,
+    pub cwd: String,
+}
+mod preparation;
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn preparation_elapsed(language: UiLanguage, start: u64, end: Option<u64>, now: u64) -> String {
+    let ms = end.unwrap_or(now).saturating_sub(start);
+    if ms < 1000 {
+        String::new()
+    } else {
+        super::duration_text(language, ms)
+    }
 }
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -863,16 +905,29 @@ pub fn project_conversation(
             },
         })
         .collect();
+    if let Some(setup) = &source.workspace_setup {
+        session_rows.push(ConversationRow {
+            id: "workspace-setup".into(),
+            timestamp_ms: Some(setup.started_at_ms),
+            steer: false,
+            queued: false,
+            edit_turn_id: None,
+            content: ConversationRowContent::Preparation {
+                preparation: preparation::project(language, &source, setup),
+            },
+        });
+    }
     let running = native
         .iter()
         .any(|turn| turn.status == models::TurnStatus::Running);
     for preparation in preparations.iter().filter(|input| {
-        !running
-            || !matches!(
-                input.status,
-                agent_protocol::session::PreparationStatus::Preparing
-                    | agent_protocol::session::PreparationStatus::Sending
-            )
+        source.workspace_setup.is_none()
+            && (!running
+                || !matches!(
+                    input.status,
+                    agent_protocol::session::PreparationStatus::Preparing
+                        | agent_protocol::session::PreparationStatus::Sending
+                ))
     }) {
         session_rows.push(ConversationRow {
             id: format!(
@@ -938,7 +993,9 @@ fn preparation_presentation(
     let (text, in_progress, retry) = match &preparation.status {
         PreparationStatus::Preparing | PreparationStatus::Sending => {
             let text = match preparation.stage {
-                PreparationStage::Worktree => "ワークツリーを準備中…",
+                PreparationStage::Worktree | PreparationStage::SetupScript => {
+                    "ワークツリーを準備中…"
+                }
                 PreparationStage::Workspace | PreparationStage::Provider => "開始中…",
             };
             (language.text(text).into(), true, false)
@@ -970,7 +1027,17 @@ fn preparation_presentation(
         retry: retry.then(|| RetryPreparation {
             input_id: preparation.submission.client_user_message_id.clone(),
             thread_id: preparation.submission.thread_id.clone(),
+            work_locally: false,
         }),
+        steps: Vec::new(),
+        show_steps: false,
+        details: Vec::new(),
+        started_at_ms: None,
+        ended_at_ms: None,
+        cancel: None,
+        terminal: None,
+        work_locally: None,
+        error: None,
     }
 }
 

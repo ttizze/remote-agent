@@ -209,6 +209,7 @@ pub struct SessionPreparation {
 pub enum PreparationStage {
     Workspace,
     Worktree,
+    SetupScript,
     Provider,
 }
 

@@ -74,6 +74,11 @@ pub(crate) struct State {
     pub provider: Option<agent_protocol::session::ProviderKind>,
     pub account_pending: bool,
     pub sidebar: agent_core::presentation::sidebar::SidebarState,
+    #[cfg(any(desktop, test))]
+    pub sidebar_projects: Vec<agent_core::presentation::sidebar::ProjectKey>,
+    /// Each Host's observed navigation survives sidebar and language remounts.
+    #[cfg(any(desktop, test))]
+    sidebar_routes: BTreeMap<String, agent_core::presentation::sidebar::ProjectReveal>,
     pub file_line: Option<(u64, Option<u32>)>,
     pub side_chats: BTreeMap<u64, SideChat>,
     pub browser_renderer: String,
@@ -109,6 +114,10 @@ impl Default for State {
             provider: None,
             account_pending: false,
             sidebar: Default::default(),
+            #[cfg(any(desktop, test))]
+            sidebar_projects: Vec::new(),
+            #[cfg(any(desktop, test))]
+            sidebar_routes: BTreeMap::new(),
             file_line: None,
             side_chats: BTreeMap::new(),
             browser_renderer: String::new(),
@@ -243,6 +252,8 @@ pub(crate) struct Application {
     onboarding_path: PathBuf,
     #[cfg(any(desktop, test))]
     explorer_width_path: PathBuf,
+    #[cfg(any(desktop, test))]
+    sidebar_projects_path: PathBuf,
     #[cfg(desktop)]
     updater: Option<Arc<agent_core::updates::Updater>>,
 }
@@ -290,6 +301,13 @@ impl Application {
             .map(|borrowed| borrowed.session.snapshot().catalog.ui_language);
         #[cfg(any(desktop, test))]
         let explorer_width_path = root.join("file-explorer-width.json");
+        #[cfg(any(desktop, test))]
+        let sidebar_projects_path = root.join("sidebar-projects.json");
+        #[cfg(any(desktop, test))]
+        let sidebar_projects = crate::storage::read(&sidebar_projects_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
         // As the language, an unreadable width is the default's.
         #[cfg(any(desktop, test))]
         let explorer_width = crate::storage::read(&explorer_width_path)
@@ -325,6 +343,8 @@ impl Application {
             contrast,
             #[cfg(any(desktop, test))]
             explorer_width,
+            #[cfg(any(desktop, test))]
+            sidebar_projects,
             #[cfg(desktop)]
             onboarding: agent_core::presentation::onboarding::Onboarding::new(
                 onboarding_path.is_file(),
@@ -343,6 +363,8 @@ impl Application {
             onboarding_path,
             #[cfg(any(desktop, test))]
             explorer_width_path,
+            #[cfg(any(desktop, test))]
+            sidebar_projects_path,
             #[cfg(desktop)]
             updater,
         });
@@ -359,7 +381,7 @@ impl Application {
                 };
                 let Some(owner) = owner.upgrade() else { break };
                 let listed = matches!(update, Update::Hosts(_));
-                owner.state.send_modify(|state| Arc::make_mut(state).receive(update));
+                owner.receive(update);
                 // A chosen WSL distro's Host starts once it is listed; the
                 // client starts no distro on its own.
                 let host = owner.snapshot().host.clone();
@@ -369,6 +391,48 @@ impl Application {
             }
         }, runtime.handle());
         Ok((runtime, application))
+    }
+
+    fn receive(&self, update: Update) {
+        self.state.send_modify(|state| {
+            let state = Arc::make_mut(state);
+            #[cfg(any(desktop, test))]
+            let published_host = match &update {
+                Update::Presentation { host, .. } => Some(host.clone()),
+                _ => None,
+            };
+            state.receive(update);
+            #[cfg(any(desktop, test))]
+            if let Some(host) = published_host
+                && let Some(value) = state.publications.get(&host)
+            {
+                let route = value
+                    .snapshot
+                    .sidebar_route(host.clone(), &value.context.navigation());
+                let previous = state.sidebar_routes.get(&host).cloned().unwrap_or_default();
+                let (observed, reveal) =
+                    previous.observe(&route.draft, &route.project, host == state.host);
+                state.sidebar_routes.insert(host, observed);
+                // Resolve project metadata only for new navigation, never for
+                // every streamed update of an already observed conversation.
+                let widens = reveal && {
+                    let inputs = state.list_inputs();
+                    let catalogs = inputs
+                        .iter()
+                        .map(|(host, list)| (host.as_str(), &**list))
+                        .collect::<Vec<_>>();
+                    let selected = agent_core::presentation::sidebar::resolve_projects(
+                        &state.sidebar_projects,
+                        &catalogs,
+                        state.sidebar_catalog_ready(),
+                    );
+                    agent_core::presentation::sidebar::widens_scope(&selected, &route)
+                };
+                if widens {
+                    self.write_sidebar_projects(state, Vec::new());
+                }
+            }
+        });
     }
 
     /// Views read the update with the rest of the application's state.
@@ -468,6 +532,32 @@ impl Application {
                 state.failure = Some(reason.to_string());
             }
         });
+    }
+
+    #[cfg(any(desktop, test))]
+    pub fn select_sidebar_projects(
+        &self,
+        selected: Vec<agent_core::presentation::sidebar::ProjectKey>,
+    ) {
+        if self.snapshot().sidebar_projects == selected {
+            return;
+        }
+        self.state.send_modify(|state| {
+            self.write_sidebar_projects(Arc::make_mut(state), selected);
+        });
+    }
+
+    #[cfg(any(desktop, test))]
+    fn write_sidebar_projects(
+        &self,
+        state: &mut State,
+        selected: Vec<agent_core::presentation::sidebar::ProjectKey>,
+    ) {
+        let saved = agent_local_host::save_private_json(&self.sidebar_projects_path, &selected);
+        state.sidebar_projects = selected;
+        if let Err(reason) = saved {
+            state.failure = Some(reason.to_string());
+        }
     }
 
     /// Saves the UI language, then publishes it so the root is made again in it.
@@ -675,10 +765,28 @@ impl Application {
         });
     }
 
+    pub fn open_script(&self, scope: PanelScope, cwd: String, command: String) {
+        self.state.send_modify(|state| {
+            let next = state.panels.clone().open_script(scope, cwd, command);
+            Arc::make_mut(state).panels = next.panels;
+        });
+    }
+
     pub fn set_panel_open(&self, scope: PanelScope, open: bool) {
         self.state.send_modify(|state| {
             let panels = state.panels.clone().set_open(scope, open);
             Arc::make_mut(state).panels = panels;
+        });
+    }
+
+    pub fn open_setup_terminal(
+        &self,
+        scope: PanelScope,
+        terminal: agent_core::presentation::conversation::SetupTerminal,
+    ) {
+        self.state.send_modify(|state| {
+            let opened = state.panels.clone().open_setup_terminal(scope, terminal);
+            Arc::make_mut(state).panels = opened.panels;
         });
     }
 
@@ -690,6 +798,7 @@ impl Application {
     }
 
     pub fn close_panel(&self, scope: PanelScope, id: u64) {
+        let handle = self.terminal_handle(id);
         let mut terminal = false;
         let closed = self.state.send_if_modified(|state| {
             if state.panels.scope(id).as_ref() != Some(&scope) {
@@ -715,18 +824,26 @@ impl Application {
         }
         self.client.close_pane(id);
         if terminal {
-            self.client.dispatch(
-                &scope.host,
-                None,
-                Intent::CloseTerminal {
-                    handle: self.terminal_handle(id),
-                },
-            );
+            self.client
+                .dispatch(&scope.host, None, Intent::CloseTerminal { handle });
         }
     }
 
     pub fn terminal_handle(&self, id: u64) -> String {
-        format!("agent-terminal-{}-{id}", self.instance)
+        let state = self.snapshot();
+        state
+            .panels
+            .scope(id)
+            .and_then(|scope| {
+                state
+                    .panels
+                    .get(scope)
+                    .surfaces
+                    .into_iter()
+                    .find(|surface| surface.id == id)
+            })
+            .and_then(|surface| surface.terminal_handle)
+            .unwrap_or_else(|| format!("agent-terminal-{}-{id}", self.instance))
     }
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {
@@ -980,6 +1097,318 @@ mod tests {
         restored.select_language(UiLanguage::Japanese);
         assert_eq!(crate::l10n::tr("設定"), "設定");
         runtime.block_on(restored.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn sidebar_projects_survive_relaunch_and_a_failed_save_keeps_the_current_choice() {
+        let directory = tempfile::tempdir().unwrap();
+        let selected = vec![agent_core::presentation::sidebar::ProjectKey {
+            host_id: "host".into(),
+            project_id: "repo".into(),
+        }];
+        let (runtime, application) = Application::new(directory.path().into(), None).unwrap();
+        application.select_sidebar_projects(selected.clone());
+        assert_eq!(application.snapshot().sidebar_projects, selected);
+        runtime.block_on(application.shutdown()).unwrap();
+        let (runtime, restored) = Application::new(directory.path().into(), None).unwrap();
+        assert_eq!(restored.snapshot().sidebar_projects, selected);
+        std::fs::remove_file(&restored.sidebar_projects_path).unwrap();
+        std::fs::create_dir(&restored.sidebar_projects_path).unwrap();
+        restored.select_sidebar_projects(Vec::new());
+        assert!(restored.snapshot().sidebar_projects.is_empty());
+        assert!(restored.snapshot().failure.is_some());
+        runtime.block_on(restored.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn sidebar_scope_survives_sheet_and_language_remounts_and_reveals_only_new_outside_routes() {
+        use agent_core::{
+            presentation::sidebar::ProjectKey,
+            state::{Event, reduce},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, application) = Application::new(directory.path().into(), None).unwrap();
+        // Exercise publications deterministically without a running Host/receiver.
+        runtime.block_on(application.shutdown()).unwrap();
+        application.state.send_modify(|state| {
+            let state = Arc::make_mut(state);
+            state.host = "host".into();
+            state.hosts = vec![Host {
+                id: "host".into(),
+                name: "Host".into(),
+            }];
+        });
+        let mut snapshot = Snapshot::default();
+        snapshot.connection.connected = true;
+        snapshot.lists.threads = Some(Arc::new(
+            serde_json::from_value(serde_json::json!({
+            "projects": [{"id":"repo", "name":"Repo", "roots":[{"path":"/repo"}]},
+                         {"id":"other", "name":"Other", "roots":[{"path":"/other"}]}],
+                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":false, "projectPages":{}
+            }))
+            .unwrap(),
+        ));
+        snapshot = reduce(
+            &snapshot,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/repo".into(),
+            }),
+        )
+        .0;
+        let publish = |snapshot: &Snapshot| {
+            application.receive(Update::Presentation {
+                host: "host".into(),
+                value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+            })
+        };
+        publish(&snapshot);
+        let chosen = vec![ProjectKey {
+            host_id: "host".into(),
+            project_id: "other".into(),
+        }];
+        application.select_sidebar_projects(chosen.clone());
+        // Opening/closing the narrow sheet and rebuilding localized UI do not navigate.
+        for _ in 0..4 {
+            application.navigate(Navigation::ToggleSidebar(600.0));
+            publish(&snapshot);
+            assert_eq!(application.snapshot().sidebar_projects, chosen);
+        }
+        for language in [UiLanguage::English, UiLanguage::Japanese] {
+            application.select_language(language);
+            publish(&snapshot);
+            assert_eq!(application.snapshot().sidebar_projects, chosen);
+        }
+        let in_project = vec![ProjectKey {
+            host_id: "host".into(),
+            project_id: "repo".into(),
+        }];
+        application.select_sidebar_projects(in_project.clone());
+        snapshot = reduce(
+            &snapshot,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/repo".into(),
+            }),
+        )
+        .0;
+        publish(&snapshot);
+        assert_eq!(application.snapshot().sidebar_projects, in_project);
+        application.select_sidebar_projects(chosen.clone());
+        let mut search = snapshot.clone();
+        Arc::make_mut(&mut search.lists.list_query).search_term = "no matches".into();
+        Arc::make_mut(search.lists.threads.as_mut().unwrap())
+            .projects
+            .clear();
+        publish(&search);
+        assert_eq!(application.snapshot().sidebar_projects, chosen);
+        Arc::make_mut(&mut search.lists.list_query)
+            .search_term
+            .clear();
+        Arc::make_mut(&mut search.operations).insert(
+            agent_core::state::operations::OperationKey::SessionList,
+            agent_core::state::operations::OperationState {
+                generation: 1,
+                phase: agent_core::state::operations::OperationPhase::Running,
+            },
+        );
+        publish(&search);
+        assert_eq!(application.snapshot().sidebar_projects, chosen);
+        publish(&snapshot);
+        assert_eq!(application.snapshot().sidebar_projects, chosen);
+        // A hidden choice makes the effective scope All. Navigating while it
+        // is hidden must retain the saved choice for a later restore.
+        application.select_sidebar_projects(in_project.clone());
+        snapshot = reduce(
+            &snapshot,
+            "",
+            Event::Intent(Intent::SetProjectHidden {
+                project_id: "repo".into(),
+                hidden: true,
+            }),
+        )
+        .0;
+        publish(&snapshot);
+        snapshot = reduce(
+            &snapshot,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/other".into(),
+            }),
+        )
+        .0;
+        publish(&snapshot);
+        assert_eq!(application.snapshot().sidebar_projects, in_project);
+        let saved: Vec<ProjectKey> =
+            serde_json::from_slice(&std::fs::read(&application.sidebar_projects_path).unwrap())
+                .unwrap();
+        assert_eq!(saved, in_project);
+        snapshot = reduce(
+            &snapshot,
+            "",
+            Event::Intent(Intent::SetProjectHidden {
+                project_id: "repo".into(),
+                hidden: false,
+            }),
+        )
+        .0;
+        publish(&snapshot);
+        assert_eq!(application.snapshot().sidebar_projects, in_project);
+        let inputs = application.snapshot().list_inputs();
+        let catalogs = inputs
+            .iter()
+            .map(|(host, list)| (host.as_str(), &**list))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            agent_core::presentation::sidebar::resolve_projects(&in_project, &catalogs, true),
+            in_project
+        );
+        // A complete catalog that loses the project also has no active scope.
+        snapshot = reduce(
+            &snapshot,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/repo".into(),
+            }),
+        )
+        .0;
+        publish(&snapshot);
+        let projects = snapshot.lists.threads.as_ref().unwrap().projects.clone();
+        Arc::make_mut(snapshot.lists.threads.as_mut().unwrap())
+            .projects
+            .retain(|project| project.id != "repo");
+        snapshot = reduce(
+            &snapshot,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/other".into(),
+            }),
+        )
+        .0;
+        publish(&snapshot);
+        assert_eq!(application.snapshot().sidebar_projects, in_project);
+        let saved: Vec<ProjectKey> =
+            serde_json::from_slice(&std::fs::read(&application.sidebar_projects_path).unwrap())
+                .unwrap();
+        assert_eq!(saved, in_project);
+        Arc::make_mut(snapshot.lists.threads.as_mut().unwrap()).projects = projects;
+        publish(&snapshot);
+        assert_eq!(application.snapshot().sidebar_projects, in_project);
+        snapshot = reduce(
+            &snapshot,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/outside".into(),
+            }),
+        )
+        .0;
+        publish(&snapshot);
+        assert!(application.snapshot().sidebar_projects.is_empty());
+        let saved: Vec<ProjectKey> =
+            serde_json::from_slice(&std::fs::read(&application.sidebar_projects_path).unwrap())
+                .unwrap();
+        assert!(
+            saved.is_empty(),
+            "revealing an outside route also clears persisted scope"
+        );
+    }
+
+    #[test]
+    fn sidebar_switching_hosts_ignores_queued_navigation_until_that_hosts_route_changes() {
+        use agent_core::{
+            presentation::sidebar::ProjectKey,
+            state::{Event, operations as op, reduce},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, application) = Application::new(directory.path().into(), None).unwrap();
+        runtime.block_on(application.shutdown()).unwrap();
+        application.state.send_modify(|state| {
+            let state = Arc::make_mut(state);
+            state.host = "a".into();
+            state.all_hosts = true;
+            state.hosts = vec![
+                Host {
+                    id: "a".into(),
+                    name: "A".into(),
+                },
+                Host {
+                    id: "b".into(),
+                    name: "B".into(),
+                },
+            ];
+        });
+        let mut base = Snapshot::default();
+        base.connection.connected = true;
+        base.lists.threads = Some(Arc::new(serde_json::from_value(serde_json::json!({
+            "projects": [{"id":"repo", "name":"Repo", "roots":[{"path":"/repo"}]},
+                         {"id":"other", "name":"Other", "roots":[{"path":"/other"}]}],
+            "data": [{"id":{"provider":"codex", "id":"repo-chat"}, "projectId":"repo", "cwd":"/repo"},
+                     {"id":{"provider":"codex", "id":"old-chat"}, "projectId":"other", "cwd":"/other"}],
+            "limit":60, "hasMore":false, "hasMoreProjects":false, "projectPages":{}
+        })).unwrap()));
+        let target = SessionRef {
+            provider: ProviderKind::Codex,
+            id: "repo-chat".into(),
+        };
+        let old = SessionRef {
+            provider: ProviderKind::Codex,
+            id: "old-chat".into(),
+        };
+        let a = reduce(
+            &base,
+            "",
+            Event::Intent(Intent::ReadThread(op::ReadThread::open(target.clone()))),
+        )
+        .0;
+        let b = reduce(
+            &base,
+            "",
+            Event::Intent(Intent::ReadThread(op::ReadThread::open(old))),
+        )
+        .0;
+        let publish = |host: &str, snapshot: &Snapshot| {
+            application.receive(Update::Presentation {
+                host: host.into(),
+                value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+            })
+        };
+        publish("a", &a);
+        // An inactive Host is observed even while search hides its membership.
+        let mut searching = b.clone();
+        Arc::make_mut(&mut searching.lists.list_query).search_term = "repo".into();
+        publish("b", &searching);
+        let selected = vec![ProjectKey {
+            host_id: "b".into(),
+            project_id: "repo".into(),
+        }];
+        application.select_sidebar_projects(selected.clone());
+        // A row selects its destination Host before ReadThread's publication.
+        application
+            .state
+            .send_modify(|state| Arc::make_mut(state).host = "b".into());
+        publish("b", &b);
+        assert_eq!(
+            application.snapshot().sidebar_projects,
+            selected,
+            "the queued old conversation must not widen scope"
+        );
+        let opened = reduce(
+            &b,
+            "",
+            Event::Intent(Intent::ReadThread(op::ReadThread::open(target.clone()))),
+        )
+        .0;
+        assert_eq!(
+            opened.panes.primary().navigation.thread_id.as_ref(),
+            Some(&target)
+        );
+        publish("b", &opened);
+        assert_eq!(application.snapshot().sidebar_projects, selected);
+        assert!(application.snapshot().all_hosts);
+        let saved: Vec<ProjectKey> =
+            serde_json::from_slice(&std::fs::read(&application.sidebar_projects_path).unwrap())
+                .unwrap();
+        assert_eq!(saved, selected);
     }
 
     #[test]

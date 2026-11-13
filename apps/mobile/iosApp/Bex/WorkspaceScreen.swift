@@ -57,7 +57,7 @@ extension PanelKind {
         case .browser: "globe"
         case .terminal: "terminal"
         case .files, .file: "folder"
-        case .diff: "arrow.left.arrow.right"
+        case .diff: "plus.forwardslash.minus"
         case .sideChat: "bubble.left.and.bubble.right"
         case .agents: "network"
         case .home: "plus"
@@ -93,15 +93,25 @@ extension ConversationModel {
     }
 
     func closeWorkbench(_ surface: PanelSurface, scope: PanelScope) {
+        let terminalHandle = workbenchTerminalHandle(surface.id)
         panels = panels.close(key: scope, id: surface.id)
         if surface.kind == .terminal {
-            perform(.closeTerminal(handle: workbenchTerminalHandle(surface.id)))
+            perform(.closeTerminal(handle: terminalHandle))
         }
         workbenchSideChats.removeValue(forKey: surface.id)
     }
 
     func workbenchTerminalHandle(_ id: UInt64) -> String {
-        "agent-terminal-\(workbenchInstance)-\(id)"
+        if let scope = panels.scope(id: id),
+           let handle = panels.get(key: scope).surfaces.first(where: { $0.id == id })?.terminalHandle {
+            return handle
+        }
+        return "agent-terminal-\(workbenchInstance)-\(id)"
+    }
+
+    func openSetupTerminal(_ terminal: SetupTerminal) {
+        let scope = snapshot.panelScope(host: host, draft: coreDraftKey)
+        panels = panels.openSetupTerminal(key: scope, terminal: terminal).panels
     }
 }
 
@@ -217,7 +227,7 @@ private struct WorkspaceToolsScreen: View {
             TerminalScreen(model: model, cwd: directory, handle: model.workbenchTerminalHandle(surface.id))
         case .files, .file:
             WorkspaceScreen(model: model, root: directory, draft: scope.draft, close: close)
-                .onDisappear { model.perform(.reviewWorkspace(ReviewWorkspace(cwd: directory))) }
+                .onDisappear { model.perform(.reviewWorkspace(ReviewWorkspace(cwd: directory, baseRef: nil))) }
         case .diff:
             WorkspaceDiffScreen(model: model, root: directory)
         case .agents:

@@ -9,6 +9,7 @@ use agent_protocol::live_activity::*;
 use agent_protocol::permissions::*;
 use agent_protocol::project_import::ScanProjects;
 use agent_protocol::providers::*;
+use agent_protocol::workspace::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
 #[uniffi::remote(Record)]
@@ -259,6 +260,9 @@ struct WorktreeSettings {
     pub copy_on_create: bool,
     pub copy_paths: Vec<String>,
     pub worktree_directory: String,
+    pub init_submodules: bool,
+    pub setup_script: Option<SetupScript>,
+    pub project_setup_scripts: std::collections::HashMap<String, SetupScript>,
     pub delete_unchanged: bool,
     pub project_delete_unchanged: std::collections::HashMap<String, bool>,
 }
@@ -794,6 +798,7 @@ struct OpenRequest {
 }
 #[uniffi::remote(Record)]
 struct StartTerminal {
+    pub command: Option<String>,
     pub handle: String,
     pub cwd: String,
     pub size: TerminalSize,
@@ -805,9 +810,31 @@ struct StartAccountTerminal {
     pub id: String,
     pub size: TerminalSize,
 }
+#[uniffi::remote(Enum)]
+enum WorkspaceAction {
+    SwitchBranch {
+        name: String,
+    },
+    CreateBranch {
+        name: String,
+    },
+    Push {
+        remote: String,
+    },
+    SaveScript {
+        previous_name: Option<String>,
+        name: String,
+        command: String,
+    },
+    RemoveScript {
+        name: String,
+    },
+}
 #[uniffi::remote(Record)]
-struct ReviewWorkspace {
+struct ChangeWorkspace {
     pub cwd: String,
+    pub branch: String,
+    pub action: agent_protocol::operations::WorkspaceAction,
 }
 #[uniffi::remote(Record)]
 struct WriteWorkspaceFile {
@@ -849,12 +876,23 @@ struct RewindSession {
     pub thread_id: SessionRef,
     pub turn_id: agent_protocol::ids::TurnId,
 }
+
+#[uniffi::remote(Enum)]
+enum WorkspaceStrategy {
+    Root,
+    ExistingWorktree {
+        path: String,
+    },
+    Worktree {
+        base_ref: String,
+        start_from_origin: bool,
+    },
+}
 #[uniffi::remote(Record)]
-struct InitialInput {
-    pub client_user_message_id: agent_protocol::ids::ClientInputId,
-    pub input: Vec<Input>,
-    pub effort: Option<String>,
-    pub service_tier: Option<String>,
+struct SetupScript {
+    pub name: String,
+    pub command: String,
+    pub asynchronous: bool,
 }
 #[uniffi::remote(Enum)]
 enum Input {
@@ -867,6 +905,7 @@ enum Input {
 struct RetryPreparation {
     pub input_id: agent_protocol::ids::ClientInputId,
     pub thread_id: SessionRef,
+    pub work_locally: bool,
 }
 #[uniffi::remote(Record)]
 struct Interrupt {

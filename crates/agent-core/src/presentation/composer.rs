@@ -15,6 +15,8 @@ use std::sync::{Arc, OnceLock};
 pub const RESUME_PROMPT: &str = "Continue where you left off.";
 
 pub mod footer;
+mod workspace;
+pub use workspace::WorkspaceSelection;
 #[cfg(test)]
 mod tests;
 
@@ -38,6 +40,7 @@ fn resumable(thread: &crate::models::Thread) -> bool {
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerControls {
+    pub workspace: Option<WorkspaceSelection>,
     pub navigation: Navigation,
     pub connected: bool,
     /// The selected conversation is loaded, or the draft starts a new one. One
@@ -220,6 +223,7 @@ impl ComposerPresentation {
         let provider = snapshot.model_provider_for_draft(key.clone());
         let question = session.and_then(|id| snapshot.question_prompt(id.clone()));
         let controls = ComposerControls {
+            workspace: workspace::project(snapshot, pane, &draft),
             navigation: pane.navigation.as_ref().clone(),
             connected: snapshot.connection.connected,
             loaded: session.is_none() || thread.is_some(),

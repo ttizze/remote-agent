@@ -49,5 +49,5 @@ threads-required = "num-test-threads"
 # Preparation observes five-second stage deadlines while Git creates a checkout.
 # Keep competing filesystem and provider fixtures out of that budget on Windows.
 [[profile.default.overrides]]
-filter = 'test(=host_rpc::service::preparation::tests::preparation_publishes_worktree_setup_only_when_it_creates_a_checkout)'
+filter = 'test(=host_rpc::service::workspace_setup::tests::remote_start_fetches_before_checkout_and_retains_the_completed_card)'
 threads-required = "num-test-threads"

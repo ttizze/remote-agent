@@ -1,6 +1,7 @@
 //! The worktree settings page: the application owns the editor's lifetime and
 //! Core owns its Host operations; this page keeps only the unsaved inputs.
 use super::choice;
+mod setup;
 use crate::Connection;
 use crate::application::{WorktreeAction, WorktreeEditor};
 use crate::l10n::{localized, tr, tr_format};
@@ -122,6 +123,7 @@ pub(super) fn page(connection: Connection) -> View {
             move || editor.with(|e| e.as_ref().is_some_and(|e| e.error.is_some())),
             move || failure(editor, busy, connected, emit, save),
         ))
+        .child(setup::editor(inputs, project, enabled, edit))
         .child(managed(connection, editor, busy, connected, emit))
 }
 
@@ -204,7 +206,7 @@ fn scope(
             if project.with(Option::is_none) {
                 tr("この環境に保存し、新しい会話に適用します。").into()
             } else {
-                tr("プロジェクトごとに変えられるのは自動削除だけです。").into()
+                tr("このプロジェクトの設定を変更します。").into()
             }
         },
         view()
@@ -296,6 +298,7 @@ fn shared(
             )),
         ]))
         .child(note(tr("保存先に「セッション名/リポジトリ名」の構成で作ります。空欄なら元のリポジトリ内の .worktree に保存します。既存のワークツリーは移動しません。")))
+        .child(ui::setting(tr("サブモジュールを初期化"), || "".into(), switch(tr("サブモジュールを初期化"), value(|settings| settings.init_submodules), enabled, move |on| edit(&|settings| settings.init_submodules = on))))
         .child(heading(tr("コピー対象")))
         .child(ui::card(vec![
             ui::setting(

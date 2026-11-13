@@ -1,4 +1,4 @@
-//! The same FFF release, walker, parser and scoring options used by T3's
+//! The same FFF release and scoring options used by T3's
 //! WorkspaceSearchIndex. The Host owns the index/watchers; no Node runtime is involved.
 use super::*;
 use agent_protocol::file_tree::SearchTreeEntries;
@@ -211,6 +211,113 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn search_matches_path_globs_with_nested_ignore_rules() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::create_dir_all(root.path().join("src/nested")).unwrap();
+        fs::write(root.path().join("src/.gitignore"), "ignored.rs\n").unwrap();
+        for path in [
+            "src/main.rs",
+            "src/nested/lib.rs",
+            "src/ignored.rs",
+            "src/readme.md",
+        ] {
+            fs::write(root.path().join(path), "content").unwrap();
+        }
+        let indexes = Arc::new(SearchIndexes::default());
+        for files_only in [false, true] {
+            let result = indexes
+                .search(SearchTreeEntries {
+                    root: root.path().to_str().unwrap().into(),
+                    query: "src/**/*.rs".into(),
+                    limit: 200,
+                    files_only,
+                })
+                .await
+                .unwrap();
+            assert!(!result.truncated);
+            let mut paths = result
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>();
+            paths.sort_unstable();
+            assert_eq!(paths, ["src/main.rs", "src/nested/lib.rs"]);
+            assert!(
+                result
+                    .entries
+                    .iter()
+                    .all(|entry| entry.kind == EntryKind::File && !entry.ignored)
+            );
+        }
+    }
+    #[tokio::test]
+    async fn cached_search_observes_created_and_removed_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("existing.txt"), "content").unwrap();
+        let indexes = Arc::new(SearchIndexes::default());
+        let request = SearchTreeEntries {
+            root: root.path().to_str().unwrap().into(),
+            query: "needle".into(),
+            limit: 200,
+            files_only: true,
+        };
+        assert!(
+            indexes
+                .search(request.clone())
+                .await
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        let index = indexes
+            .entries
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .1
+            .clone();
+        fs::write(root.path().join("needle.txt"), "content").unwrap();
+        wait_for_search_paths(&indexes, &request, &["needle.txt"]).await;
+        fs::remove_file(root.path().join("needle.txt")).unwrap();
+        wait_for_search_paths(&indexes, &request, &[]).await;
+        assert!(Arc::ptr_eq(
+            &index,
+            &indexes.entries.lock().unwrap().values().next().unwrap().1
+        ));
+    }
+    async fn wait_for_search_paths(
+        indexes: &Arc<SearchIndexes>,
+        request: &SearchTreeEntries,
+        expected: &[&str],
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let result = indexes.search(request.clone()).await.unwrap();
+                let paths = result
+                    .entries
+                    .iter()
+                    .map(|entry| entry.path.as_str())
+                    .collect::<Vec<_>>();
+                if paths == expected && !result.truncated {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("filesystem changes must reach the cached search index");
+    }
     #[tokio::test]
     async fn file_only_search_excludes_directories_before_ranking_and_limiting() {
         let root = tempfile::tempdir().unwrap();

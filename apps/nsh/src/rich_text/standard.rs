@@ -145,32 +145,33 @@ fn custom(
             Some(controls) => diagram(&node.data, surroundings, target, controls),
             None => view().into_element(),
         },
-        "bex:file" => {
-            let label = run(&node.data, surroundings);
+        "bex:file" | "bex:link" => {
+            let mut label = run(&node.data, surroundings);
+            if node.name == "bex:link" && node.data["code"] == true {
+                label = label
+                    .font_family(SharedString::from("monospace"))
+                    .bg(crate::ui::colors::RAISED);
+            }
             let resolve = move || serde_json::from_str::<Target>(&target.get_untracked()).ok();
-            super::drawn::chip_span(
-                label,
-                &node.data["file"],
-                node.data["link"].as_str().unwrap_or_default().into(),
-                super::drawn::Links {
-                    open: move |link, command| {
-                        if let Some(target) = resolve() {
-                            surroundings.open_link(link, target, command);
-                        }
-                    },
-                    choose: move |link, id: String| {
-                        if let Some(target) = resolve() {
-                            crate::file_actions::choose(
-                                surroundings.connection,
-                                surroundings.files,
-                                target.link(link),
-                                &id,
-                            );
-                        }
-                    },
+            let links = super::drawn::Links {
+                open: move |link, command| {
+                    if let Some(target) = resolve() {
+                        surroundings.open_link(link, target, command);
+                    }
                 },
-            )
-            .into_element()
+                choose: move |link, id: String| {
+                    if let Some(target) = resolve() {
+                        surroundings.choose_link(link, target, &id);
+                    }
+                },
+            };
+            let link = node.data["link"].as_str().unwrap_or_default().into();
+            if node.name == "bex:link" {
+                super::drawn::web_span(label, link, node.data["webMenu"].clone(), links)
+                    .into_element()
+            } else {
+                super::drawn::chip_span(label, &node.data["file"], link, links).into_element()
+            }
         }
         "bex:code-run" => run(&node.data, surroundings)
             .font_family(SharedString::from("monospace"))
@@ -184,11 +185,8 @@ fn custom(
 #[cfg(any(feature = "standard-text", all(target_os = "macos", debug_assertions)))]
 fn run(run: &Value, surroundings: Surroundings) -> Text {
     let text = super::drawn::highlighted_run(run, surroundings.find, None, true);
-    match run["darkColor"]
-        .as_u64()
-        .and_then(|c| u32::try_from(c).ok())
-    {
-        Some(color) => text.text_color(rgb(color)),
+    match super::run_color(run) {
+        Some(color) => text.text_color(color),
         None => text,
     }
 }

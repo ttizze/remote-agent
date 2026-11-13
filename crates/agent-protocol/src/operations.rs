@@ -431,6 +431,7 @@ pub struct OpenRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTerminal {
+    pub command: Option<String>,
     #[serde(rename = "processHandle")]
     pub handle: String,
     pub cwd: String,
@@ -446,8 +447,40 @@ pub struct StartAccountTerminal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReviewWorkspace {
     pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_options: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeWorkspace {
+    pub cwd: String,
+    pub branch: String,
+    pub action: WorkspaceAction,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WorkspaceAction {
+    SwitchBranch {
+        name: String,
+    },
+    CreateBranch {
+        name: String,
+    },
+    Push {
+        remote: String,
+    },
+    SaveScript {
+        previous_name: Option<String>,
+        name: String,
+        command: String,
+    },
+    RemoveScript {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -576,18 +609,10 @@ impl RewindSession {
 /// Creating a task admits its first input before workspace/provider preparation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InitialInput {
-    pub client_user_message_id: crate::ids::ClientInputId,
-    pub input: Vec<Input>,
-    pub effort: Option<String>,
-    pub service_tier: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RetryPreparation {
     pub input_id: crate::ids::ClientInputId,
     pub thread_id: crate::session::SessionRef,
+    pub work_locally: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

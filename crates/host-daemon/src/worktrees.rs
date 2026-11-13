@@ -1,5 +1,8 @@
 use agent_protocol::models::{Worktree, WorktreeSettings};
+mod preparation;
 use anyhow::{Context as _, Result, anyhow};
+pub(crate) use preparation::default_base;
+pub(crate) use preparation::{Observer, Progress};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -273,18 +276,17 @@ impl Worktrees {
         ?
     }
 
-    pub(crate) async fn prepare(&self, cwd: Option<&str>) -> Result<Option<PathBuf>> {
-        // Automatic worktrees need an explicitly selected checkout.
-        let Some(cwd) = cwd else {
-            return Ok(None);
-        };
+    pub(crate) async fn prepare_selected(
+        &self,
+        cwd: &str,
+        base: String,
+        fetch: bool,
+        observer: Observer,
+    ) -> Result<PathBuf> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         let state_path = path.clone();
         let mut state = tokio::task::spawn_blocking(move || read(&state_path)).await??;
-        if !state.settings.create_on_new_session {
-            return Ok(None);
-        }
         let cwd = PathBuf::from(cwd);
         tokio::task::spawn_blocking(move || {
             let cwd = dunce::canonicalize(&cwd)?;
@@ -292,6 +294,7 @@ impl Worktrees {
                 crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
             )?;
             let relative_cwd = cwd.strip_prefix(&root)?;
+            let base = preparation::start_ref(&root, &base, fetch, &observer)?;
             let original = match state
                 .workspace_roots
                 .get(root.to_str().context("project path is not UTF-8")?)
@@ -346,18 +349,50 @@ impl Worktrees {
                     .context("リポジトリのフォルダ名を取得できません。")?,
             );
             let branch = format!("bex/{}", session.file_name().unwrap().to_string_lossy());
-            let target = create_checkout(
+            observer.send(Progress::Stage(
+                agent_protocol::workspace::SetupStageId::Checkout,
+                agent_protocol::workspace::SetupStageStatus::Running,
+            ))?;
+            let target = create_checkout_observed(
                 &root,
                 &destination,
                 &branch,
-                "HEAD",
+                &base,
                 if state.settings.copy_on_create {
                     &state.settings.copy_paths
                 } else {
                     &[]
                 },
                 relative_cwd,
+                &observer,
             )?;
+            observer
+                .send(Progress::Stage(
+                    agent_protocol::workspace::SetupStageId::Checkout,
+                    agent_protocol::workspace::SetupStageStatus::Done,
+                ))
+                .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+            if state.settings.init_submodules && destination.join(".gitmodules").is_file() {
+                use agent_protocol::workspace::{SetupStageId, SetupStageStatus};
+                observer
+                    .send(Progress::Stage(
+                        SetupStageId::Submodules,
+                        SetupStageStatus::Running,
+                    ))
+                    .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+                preparation::git(
+                    &destination,
+                    &["submodule", "update", "--init", "--recursive", "--progress"],
+                    &observer,
+                )
+                .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+                observer
+                    .send(Progress::Stage(
+                        SetupStageId::Submodules,
+                        SetupStageStatus::Done,
+                    ))
+                    .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
+            }
             state.workspace_roots.insert(
                 destination
                     .to_str()
@@ -367,7 +402,16 @@ impl Worktrees {
             );
             save(&path, &state)
                 .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
-            Ok(Some(target))
+            let observed = observer.send(Progress::Created {
+                path: target.to_string_lossy().into_owned(),
+                branch: branch.clone(),
+            });
+            if let Err(error) = observed {
+                state.workspace_roots.remove(destination.to_str().unwrap());
+                let _ = save(&path, &state);
+                return Err(discard_checkout(&root, &destination, &branch, error));
+            }
+            Ok(target)
         })
         .await?
     }
@@ -474,6 +518,26 @@ fn create_checkout(
     copy_paths: &[String],
     relative_cwd: &Path,
 ) -> Result<PathBuf> {
+    create_checkout_observed(
+        source,
+        destination,
+        branch,
+        base,
+        copy_paths,
+        relative_cwd,
+        &Observer::default(),
+    )
+}
+
+fn create_checkout_observed(
+    source: &Path,
+    destination: &Path,
+    branch: &str,
+    base: &str,
+    copy_paths: &[String],
+    relative_cwd: &Path,
+    observer: &Observer,
+) -> Result<PathBuf> {
     let base = crate::workspace_review::comparison::source_ref(source, base)?;
     let destination_text = destination.to_str().context("worktree path is not UTF-8")?;
     if let Some(parent) = destination.parent() {
@@ -486,9 +550,17 @@ fn create_checkout(
     }
     // Create the branch separately so a locked/missing checkout cannot leak it.
     // One --force replaces a missing registration but continues to respect locks.
-    if let Err(error) = crate::git::text(
+    if let Err(error) = preparation::git(
         source,
-        &["worktree", "add", "--force", destination_text, branch],
+        &[
+            "worktree",
+            "add",
+            "--no-checkout",
+            "--force",
+            destination_text,
+            branch,
+        ],
+        observer,
     ) {
         let _ = fs::remove_dir(destination);
         return Err(match crate::git::text(source, &["branch", "-D", branch]) {
@@ -497,6 +569,13 @@ fn create_checkout(
         });
     }
     let prepared = (|| {
+        // `worktree add` does not accept --progress. Populate this fresh
+        // registration with checkout, whose stderr reports real file progress.
+        preparation::git(
+            destination,
+            &["checkout", "--force", "--progress", branch, "--"],
+            observer,
+        )?;
         crate::git::text(
             source,
             &[
@@ -835,7 +914,15 @@ mod tests {
                 .configure(Some(json!({"createOnNewSession":true})))
                 .await
                 .unwrap();
-            let cwd = store.prepare(root.to_str()).await.unwrap().unwrap();
+            let cwd = store
+                .prepare_selected(
+                    root.to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default(),
+                )
+                .await
+                .unwrap();
             fs::write(cwd.join("tracked.txt"), "worktree commit").unwrap();
             crate::git::text(&cwd, &["add", "tracked.txt"]).unwrap();
             crate::git::text(
@@ -1022,14 +1109,30 @@ mod tests {
             project: project.map(str::to_owned),
             base: base.clone(),
         };
-        let fresh = store.prepare(root.to_str()).await.unwrap().unwrap();
+        let fresh = store
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         store
             .remove(fresh.to_str().unwrap().into(), unchanged(None))
             .await
             .unwrap();
         assert!(!fresh.exists(), "a checkout without commits is unchanged");
 
-        let cwd = store.prepare(root.to_str()).await.unwrap().unwrap();
+        let cwd = store
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         let target = cwd.to_str().unwrap().to_owned();
         let branch = crate::git::text(&cwd, &["branch", "--show-current"])
             .unwrap()
@@ -1095,7 +1198,15 @@ mod tests {
             }))
             .await
             .unwrap();
-        let cwd = store.prepare(root.to_str()).await.unwrap().unwrap();
+        let cwd = store
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         commit(&cwd, "work");
         let base = integration_base(&root).unwrap();
         assert_eq!(
@@ -1136,7 +1247,15 @@ mod tests {
             }))
             .await
             .unwrap();
-        let cwd = store.prepare(root.to_str()).await.unwrap().unwrap();
+        let cwd = store
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         let branch = crate::git::text(&cwd, &["branch", "--show-current"])
             .unwrap()
             .trim()
@@ -1274,8 +1393,24 @@ mod tests {
             }))
             .await
             .unwrap();
-        let first = worktrees.prepare(root.to_str()).await.unwrap().unwrap();
-        let other = worktrees.prepare(root.to_str()).await.unwrap().unwrap();
+        let first = worktrees
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
+        let other = worktrees
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         let first_path = first.to_str().unwrap().to_owned();
         let branch = crate::git::text(&first, &["branch", "--show-current"])
             .unwrap()
@@ -1401,7 +1536,15 @@ mod tests {
             .unwrap();
         assert_eq!(Worktrees::new(&state).list().await.unwrap().len(), 2);
         assert_eq!(fs::read_to_string(unrelated).unwrap(), "preserve");
-        let registered = worktrees.prepare(root.to_str()).await.unwrap().unwrap();
+        let registered = worktrees
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         fs::remove_dir_all(&registered).unwrap();
         let entries = worktrees.list().await.unwrap();
         let entry = entries
@@ -1423,12 +1566,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_persist_and_toggles_control_real_worktree_creation_and_copying() {
+    async fn settings_persist_and_control_checkout_copying() {
         let directory = repository();
         let root = dunce::canonicalize(directory.path()).unwrap();
         let projects = root.join("projects.json");
         let store = Worktrees::new(&projects);
-        assert!(store.prepare(None).await.unwrap().is_none());
         fs::write(root.join("tracked.txt"), "uncommitted\n").unwrap();
         fs::write(root.join("config.txt"), "local config\n").unwrap();
         fs::write(root.join(".env"), "FIXTURE_TOKEN=isolated\n").unwrap();
@@ -1436,11 +1578,19 @@ mod tests {
         fs::set_permissions(root.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir(root.join("local")).unwrap();
         fs::write(root.join("local/value"), "local data").unwrap();
-        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"],"worktreeDirectory":"","deleteUnchanged":false,"projectDeleteUnchanged":{}});
+        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"],"worktreeDirectory":"","initSubmodules":false,"setupScript":null,"projectSetupScripts":{},"deleteUnchanged":false,"projectDeleteUnchanged":{}});
         store.configure(Some(settings.clone())).await.unwrap();
         let loaded = Worktrees::new(&projects);
         assert_eq!(loaded.configure(None).await.unwrap(), settings);
-        let first = loaded.prepare(root.to_str()).await.unwrap().unwrap();
+        let first = loaded
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         assert_eq!(first.file_name(), root.file_name());
         assert_eq!(
             first.parent().unwrap().parent().unwrap(),
@@ -1492,16 +1642,17 @@ mod tests {
             ))
             .await
             .unwrap();
-        let second = store.prepare(root.to_str()).await.unwrap().unwrap();
-        assert_ne!(first, second);
-        assert!(!second.join(".env").exists());
-        store
-            .configure(Some(
-                json!({"createOnNewSession":false,"copyOnCreate":true,"copyPaths":[".env"]}),
-            ))
+        let second = store
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
             .unwrap();
-        assert!(store.prepare(root.to_str()).await.unwrap().is_none());
+        assert_ne!(first, second);
+        assert!(!second.join(".env").exists());
         assert_eq!(
             fs::read_to_string(root.join("tracked.txt")).unwrap(),
             "uncommitted\n"
@@ -1531,7 +1682,15 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                store.prepare(root.to_str()).await.is_err(),
+                store
+                    .prepare_selected(
+                        root.to_str().unwrap(),
+                        String::new(),
+                        true,
+                        crate::worktrees::Observer::default()
+                    )
+                    .await
+                    .is_err(),
                 "{path} must be rejected"
             );
             assert_eq!(
@@ -1550,7 +1709,7 @@ mod tests {
     async fn invalid_settings_never_replace_saved_preferences() {
         let directory = repository();
         let store = Worktrees::new(&directory.path().join("projects.json"));
-        let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"],"worktreeDirectory":"","deleteUnchanged":false,"projectDeleteUnchanged":{}});
+        let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"],"worktreeDirectory":"","initSubmodules":false,"setupScript":null,"projectSetupScripts":{},"deleteUnchanged":false,"projectDeleteUnchanged":{}});
         store.configure(Some(valid.clone())).await.unwrap();
         for path in [
             "",
@@ -1598,7 +1757,15 @@ mod tests {
         let mut settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":root.join("storage/new folder")});
         store.configure(Some(settings.clone())).await.unwrap();
         let restarted = Worktrees::new(&projects);
-        let first = restarted.prepare(root.to_str()).await.unwrap().unwrap();
+        let first = restarted
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         assert_eq!(first.file_name(), root.file_name());
         assert_eq!(
             first.parent().unwrap().parent().unwrap(),
@@ -1615,7 +1782,15 @@ mod tests {
         );
         settings["worktreeDirectory"] = json!(real_parent.join("second"));
         store.configure(Some(settings)).await.unwrap();
-        let second = restarted.prepare(first.to_str()).await.unwrap().unwrap();
+        let second = restarted
+            .prepare_selected(
+                first.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
+            .await
+            .unwrap();
         assert_eq!(second.file_name(), root.file_name());
         assert_eq!(
             second.parent().unwrap().parent().unwrap(),
@@ -1680,9 +1855,13 @@ mod tests {
             save(&projects.with_file_name("bex-worktrees.json"), &state).unwrap();
             let store = Worktrees::new(&projects);
             let first = store
-                .prepare(legacy.join("packages/app").to_str())
+                .prepare_selected(
+                    legacy.join("packages/app").to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default(),
+                )
                 .await
-                .unwrap()
                 .unwrap();
             let checkout = first.parent().unwrap().parent().unwrap();
             assert_eq!(
@@ -1704,9 +1883,13 @@ mod tests {
             );
             assert!(!root.join("packages/app/source.txt").exists());
             let second = Worktrees::new(&projects)
-                .prepare(first.to_str())
+                .prepare_selected(
+                    first.to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default(),
+                )
                 .await
-                .unwrap()
                 .unwrap();
             let second_checkout = second.parent().unwrap().parent().unwrap();
             assert_eq!(second_checkout.file_name(), root.file_name());
@@ -1750,8 +1933,28 @@ mod tests {
             .configure(Some(json!({"createOnNewSession":true})))
             .await
             .unwrap();
-        assert!(store.prepare(directory.path().to_str()).await.is_err());
+        assert!(
+            store
+                .prepare_selected(
+                    directory.path().to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default()
+                )
+                .await
+                .is_err()
+        );
         crate::git::text(directory.path(), &["init", "--quiet"]).unwrap();
-        assert!(store.prepare(directory.path().to_str()).await.is_err());
+        assert!(
+            store
+                .prepare_selected(
+                    directory.path().to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default()
+                )
+                .await
+                .is_err()
+        );
     }
 }

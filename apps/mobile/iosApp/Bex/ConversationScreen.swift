@@ -137,12 +137,18 @@ struct ThreadScreen: View {
 
     @ViewBuilder private var conversationBody: some View {
         #if BEX_NSH_CONVERSATION
-            NshConversationView(host: model.host, session: model.session, pane: model.pane,
-                                perform: messageAction)
-                .id(ObjectIdentifier(model))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("task.detail")
+            GeometryReader { viewport in
+                GeometryReader { canvas in
+                    NshConversationView(host: model.host, session: model.session, pane: model.pane,
+                                        composerInset: max(0, canvas.size.height - viewport.size.height),
+                                        perform: messageAction, preview: mediaAccess.presentation.openPreview)
+                        .id(ObjectIdentifier(model))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("task.detail")
+                }
+                .ignoresSafeArea(.container, edges: .bottom)
+            }
         #else
             let history = model.history
             if let thread = conversation {
@@ -219,6 +225,12 @@ extension ThreadScreen {
                 selectedText = text
             case "error":
                 model.notice = text
+            case "setupTerminal":
+                guard let data = text.data(using: .utf8),
+                      let value = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                      let handle = value["handle"], let cwd = value["cwd"] else { return }
+                model.openSetupTerminal(SetupTerminal(handle: handle, cwd: cwd))
+                openTools?(nil)
             case "quote":
                 model.addSelectionToChat(text)
             case "sideChat", "explain":
@@ -226,18 +238,22 @@ extension ThreadScreen {
                 model.askSelectionInSideChat(text)
                 openTools?(.sideChat)
             case "link":
-                guard let url = URL(string: text) else { return }
-                if url.scheme == "https" || url.scheme == "http" ||
-                    markdownFileTarget(source: text, cwd: mediaAccess.cwd, surface: .mobile) == nil {
-                    UIApplication.shared.open(url)
-                } else {
-                    mediaAccess.presentation.openLink(text, resolve: mediaAccess.resolve,
-                                                      download: mediaAccess.download,
-                                                      openDirectory: mediaAccess.openDirectory,
-                                                      openFile: mediaAccess.openFile)
-                }
+                openMessageLink(text)
             default:
                 break
+            }
+        }
+
+        private func openMessageLink(_ text: String) {
+            guard let url = URL(string: text) else { return }
+            if url.scheme == "https" || url.scheme == "http" ||
+                markdownFileTarget(source: text, cwd: mediaAccess.cwd, surface: .mobile) == nil {
+                UIApplication.shared.open(url)
+            } else {
+                mediaAccess.presentation.openLink(text, resolve: mediaAccess.resolve,
+                                                  download: mediaAccess.download,
+                                                  openDirectory: mediaAccess.openDirectory,
+                                                  openFile: mediaAccess.openFile)
             }
         }
 

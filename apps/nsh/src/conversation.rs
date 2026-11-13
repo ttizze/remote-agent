@@ -13,8 +13,11 @@ use nsh_core::geometry::Points;
 use nsh_core::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+mod copy_tests;
 #[cfg(any(all(target_os = "macos", debug_assertions), test))]
 pub(crate) mod native;
+mod preparation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Renderer {
@@ -89,6 +92,8 @@ pub(crate) mod look {
     /// `text-sm leading-relaxed`, in rows that are not Markdown.
     pub(crate) const TEXT: f32 = 14.0;
     pub(crate) const LINE: f32 = 22.75;
+    /// Touchscreens keep message actions visible; desktops reveal them on hover.
+    pub(crate) const IDLE_ACTION_OPACITY: f32 = if cfg!(target_os = "ios") { 1.0 } else { 0.0 };
     /// A work log row's icon box (`size-6`), its icon (`size-4`) and the gap
     /// to its label (`gap-1.5`).
     pub(crate) const ICON_BOX: f32 = 24.0;
@@ -113,18 +118,25 @@ pub(crate) enum Kind {
 /// What a row draws, as T3 Code's timeline rows.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Shape {
+    Preparation,
     /// A message: the user's, an answer, or text a client shows as it is.
     Message,
     /// Commentary between the work, without an answer's actions.
     Commentary,
     /// A completed turn's "Worked for …".
-    Fold { open: bool },
+    Fold {
+        open: bool,
+    },
     /// A running turn's "Working for …".
     Working,
     /// Work under its summary.
-    Group { open: bool },
+    Group {
+        open: bool,
+    },
     /// A tool's row; a `member` of an open group sits tight in it.
-    Work { member: bool },
+    Work {
+        member: bool,
+    },
     /// The running turn's latest work, Thinking, a retry.
     Live,
     /// The turn's error.
@@ -153,6 +165,7 @@ impl Shape {
 
 #[derive(Clone, PartialEq)]
 struct Row {
+    preparation: Option<agent_core::presentation::conversation::PreparationPresentation>,
     id: String,
     body: SharedString,
     streaming: bool,
@@ -193,6 +206,7 @@ struct Row {
 impl Row {
     fn new(id: String, kind: Kind, shape: Shape, body: impl Into<SharedString>) -> Self {
         Self {
+            preparation: None,
             id,
             body: body.into(),
             streaming: false,
@@ -233,6 +247,7 @@ fn project(
             rows.extend(turn_row(row, &key, turn));
         }
     }
+    let native_end = rows.len();
     rows.extend(conversation.queued.iter().filter_map(|item| {
         source_row(agent_core::presentation::conversation::ConversationRow {
             id: item.data.id.clone(),
@@ -249,6 +264,12 @@ fn project(
             .iter()
             .cloned()
             .filter_map(source_row),
+    );
+    agent_core::presentation::conversation::rows::position_workspace_setup(
+        &mut rows,
+        native_end,
+        |row| row.kind == Kind::User,
+        |row| row.preparation.is_some(),
     );
     let mut previous_steer = false;
     let mut in_group = false;
@@ -457,9 +478,15 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
                 .or_else(|| item.data.title.clone())
                 .unwrap_or_default(),
         ),
-        ConversationRowContent::Preparation { preparation } => {
-            (Kind::Activity, Shape::Message, preparation.text.clone())
-        }
+        ConversationRowContent::Preparation { preparation } => (
+            Kind::Activity,
+            if preparation.steps.is_empty() {
+                Shape::Message
+            } else {
+                Shape::Preparation
+            },
+            preparation.text.clone(),
+        ),
         ConversationRowContent::ProviderHandoff { text } => {
             (Kind::Activity, Shape::Message, text.clone())
         }
@@ -521,8 +548,10 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
             shown.images = item.data.image_sources.clone();
         }
         ConversationRowContent::Preparation { preparation } => {
-            shown.retry = preparation.retry;
-            if preparation.shimmer {
+            shown.retry = preparation.retry.clone();
+            if !preparation.steps.is_empty() {
+                shown.preparation = Some(preparation);
+            } else if preparation.shimmer {
                 shown.status = Some(crate::activity::Status::SettingUp);
             }
         }
@@ -809,6 +838,13 @@ fn list(timeline: Timeline) -> impl IntoElement {
             .context
             .with(|p| p.opening().is_none().then(|| p.history()).flatten())
     });
+    let notice = computed(move || {
+        connection.conversation.with(|conversation| {
+            conversation
+                .as_ref()
+                .and_then(|conversation| conversation.history_notice())
+        })
+    });
     let column = view()
         .role(AccessibilityRole::Group)
         .label(tr("会話の履歴"));
@@ -820,63 +856,15 @@ fn list(timeline: Timeline) -> impl IntoElement {
         .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
         .child(saver.view(connection))
         .child(opening(connection))
-        .child(when(
-            move || history.get().is_some(),
-            move || {
-                view()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        crate::ui::text_button(
-                            move || {
-                                SharedString::from(history.with(|history| {
-                                    history
-                                        .as_ref()
-                                        .map(|history| history.load_label.clone())
-                                        .unwrap_or_default()
-                                }))
-                            },
-                            move || {
-                                following.set(false);
-                                if let Some(thread_id) = connection
-                                    .context
-                                    .with_untracked(|p| p.navigation().thread_id)
-                                {
-                                    connection.dispatch(Intent::ReadOlder { thread_id });
-                                }
-                            },
-                        )
-                        .enabled(move || {
-                            history.with(|history| {
-                                history.as_ref().is_some_and(|history| !history.loading)
-                            })
-                        }),
-                    )
-                    .child(text(move || {
-                        history.with(|history| {
-                            history
-                                .as_ref()
-                                .and_then(|history| history.error.as_ref())
-                                .map(|error| error.to_string())
-                                .unwrap_or_default()
-                        })
-                    }))
-            },
-        ))
-        .child(text(move || {
-            connection.conversation.with(|conversation| {
-                conversation
-                    .as_ref()
-                    .and_then(|conversation| conversation.history_notice())
-                    .unwrap_or_default()
-            })
-        }))
         // Cell measurements and native text views belong to this conversation.
         // Reusing the list across tasks carries their heights and scroll offset
         // into an unrelated history before its native measurements arrive.
         .child(each(
             move || {
-                (column_width.get() > 0.0 && rows.with(|rows| !rows.is_empty()))
+                let has_content = rows.with(|rows| !rows.is_empty())
+                    || history.get().is_some()
+                    || notice.get().is_some();
+                (column_width.get() > 0.0 && has_content)
                     .then(|| target.get())
                     .into_iter()
                     .collect::<Vec<_>>()
@@ -1089,6 +1077,10 @@ fn list(timeline: Timeline) -> impl IntoElement {
                                         },
                                     ))
                                     .child(when(
+                                        move || shape() == Some(Shape::Preparation),
+                                        move || preparation::card(connection, row, clock),
+                                    ))
+                                    .child(when(
                                         move || matches!(shape(), Some(Shape::Group { .. })),
                                         move || {
                                             group_row(row, time, move || {
@@ -1299,6 +1291,7 @@ fn list(timeline: Timeline) -> impl IntoElement {
                             ))
                     },
                 )
+                .header(history_header(connection, following, history, notice))
                 // Start with the latest row in the first layout. Creating an empty
                 // list and jumping after its first commit first mounts older cells
                 // at placeholder heights and measures content the reader never sees.
@@ -1597,7 +1590,7 @@ fn fold_row(
                 .child(when(move || !open(), || icon(Icon::CHEVRON_RIGHT, 14.0))),
         )
         .child(view().flex_1())
-        .child(hover_time(time))
+        .child(row_time(time))
 }
 
 /// A running turn's header, as T3 Code's: how long it has worked, ruled below.
@@ -1670,14 +1663,13 @@ fn group_row(
                 .line_height(px(look::LINE))
                 .text_color(look::muted()),
         ))
-        .child(hover_time(time))
+        .child(row_time(time))
 }
 
-/// A row's time, shown while the pointer is over the row (T3 Code's
-/// `TimelineRowTimestamp`).
-fn hover_time(time: impl Fn() -> String + 'static) -> View {
+/// A row's time, visible on touchscreens and on hover on the desktop.
+fn row_time(time: impl Fn() -> String + 'static) -> View {
     view()
-        .opacity(0.0)
+        .opacity(look::IDLE_ACTION_OPACITY)
         .group_hover(|s| s.opacity(1.0))
         .child(text(time).text_size(px(12.0)).text_color(look::muted()))
 }
@@ -2070,24 +2062,27 @@ fn error_row(
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(tone),
                 ))
-                .child(view().opacity(0.0).group_hover(|s| s.opacity(1.0)).child(
-                    ui::icon_button_sized(
-                        Icon::COPY,
-                        tr("エラーの詳細をコピー"),
-                        24.0,
-                        12.0,
-                        move || {
-                            if let Some(error) = error.get_untracked() {
-                                set_clipboard(format!(
-                                    "{}\n{}\n{}",
-                                    error.title,
-                                    error.message,
-                                    error.details.unwrap_or_default()
-                                ));
-                            }
-                        },
-                    ),
-                ))
+                .child(
+                    view()
+                        .opacity(look::IDLE_ACTION_OPACITY)
+                        .group_hover(|s| s.opacity(1.0))
+                        .child(ui::icon_button_sized(
+                            Icon::COPY,
+                            tr("エラーの詳細をコピー"),
+                            24.0,
+                            12.0,
+                            move || {
+                                if let Some(error) = error.get_untracked() {
+                                    set_clipboard(format!(
+                                        "{}\n{}\n{}",
+                                        error.title,
+                                        error.message,
+                                        error.details.unwrap_or_default()
+                                    ));
+                                }
+                            },
+                        )),
+                )
                 .child(
                     text(time)
                         .ml_2()
@@ -2154,6 +2149,50 @@ fn action(
     crate::ui::icon_button_sized(icon, tr(label), 24.0, 12.0, press).text_color(look::muted())
 }
 
+fn copy_action(
+    label: &'static str,
+    body: impl Fn() -> Option<String> + 'static,
+) -> nsh_base::ButtonElement {
+    use crate::ui::{self, Icon};
+    let copied = signal_with(false, SignalEquals::Never);
+    effect(move || {
+        if copied.get() {
+            // The effect owns the timeout, so another copy restarts it and
+            // removing the message cancels it.
+            set_timeout(std::time::Duration::from_secs(2), move || copied.set(false));
+        }
+    });
+    let label = move || {
+        SharedString::from(tr(if copied.get() {
+            "コピーしました"
+        } else {
+            label
+        }))
+    };
+    ui::ghost(
+        label,
+        view().tooltip(ui::tooltip(label)).child(dynamic(move || {
+            ui::icon(
+                if copied.get() {
+                    Icon::CHECK
+                } else {
+                    Icon::COPY
+                },
+                12.0,
+            )
+        })),
+    )
+    .w(px(24.0))
+    .h(px(24.0))
+    .text_color(look::muted())
+    .on_press(move || {
+        if let Some(body) = body() {
+            set_clipboard(body);
+            copied.set(true);
+        }
+    })
+}
+
 /// An answer's actions, as T3 Code's meta row under it while the pointer is
 /// over the answer: fork from here, copy, its time. `trailing` the work that
 /// ends its turn, they stay in view, closer to that work.
@@ -2180,7 +2219,11 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
         .flex_row()
         .items_center()
         .gap_2()
-        .opacity(if trailing { 1.0 } else { 0.0 })
+        .opacity(if trailing {
+            1.0
+        } else {
+            look::IDLE_ACTION_OPACITY
+        })
         .group_hover(|s| s.opacity(1.0))
         .child(when(
             move || fork().is_some(),
@@ -2198,10 +2241,8 @@ fn response_actions(connection: Connection, row: Memo<Option<Row>>, trailing: bo
                 .enabled(move || !forking())
             },
         ))
-        .child(action(Icon::COPY, "回答をコピー", move || {
-            if let Some(row) = row.get_untracked() {
-                set_clipboard(row.body.to_string());
-            }
+        .child(copy_action("回答をコピー", move || {
+            row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
         }))
         .child(when(forking, || {
             text(tr("分岐を作成中…"))
@@ -2236,7 +2277,7 @@ fn user_actions(connection: Connection, row: Memo<Option<Row>>) -> View {
         .flex_row()
         .items_center()
         .gap_2()
-        .opacity(0.0)
+        .opacity(look::IDLE_ACTION_OPACITY)
         .group_hover(|s| s.opacity(1.0))
         .child(time(row))
         .child(
@@ -2260,12 +2301,8 @@ fn user_actions(connection: Connection, row: Memo<Option<Row>>) -> View {
                         })
                     },
                 ))
-                .child(action(Icon::COPY, "発言をコピー", move || {
-                    if let Some(text) =
-                        row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
-                    {
-                        set_clipboard(text);
-                    }
+                .child(copy_action("発言をコピー", move || {
+                    row.with_untracked(|row| row.as_ref().map(|row| row.body.to_string()))
                 })),
         )
 }

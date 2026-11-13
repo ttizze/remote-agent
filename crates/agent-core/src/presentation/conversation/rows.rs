@@ -98,6 +98,33 @@ pub struct ConversationRows {
 
 type PreviousRows<'a> = HashMap<(&'static str, &'a str), &'a Arc<VisibleConversationRow>>;
 
+/// Preparation stays immediately after the first user input when provider
+/// activity arrives. An admission still shown among queued input keeps its
+/// session row; queued_rows continues to contain only user messages.
+pub fn position_workspace_setup<T>(
+    rows: &mut Vec<T>,
+    native_end: usize,
+    is_user: impl Fn(&T) -> bool,
+    is_setup: impl Fn(&T) -> bool,
+) -> bool {
+    let Some(after_user) = rows[..native_end]
+        .iter()
+        .position(is_user)
+        .map(|index| index + 1)
+    else {
+        return false;
+    };
+    let Some(from) = rows.iter().position(is_setup) else {
+        return false;
+    };
+    if from < native_end {
+        return false;
+    }
+    let setup = rows.remove(from);
+    rows.insert(after_user, setup);
+    true
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl ConversationRows {
     #[cfg_attr(feature = "bindings", uniffi::constructor)]
@@ -153,7 +180,7 @@ impl ConversationRows {
                 &before,
             ));
         }
-        let turn_end = rows.len();
+        let mut turn_end = rows.len();
         for item in &source.queued {
             let data = ConversationRow {
                 id: item.data.id.clone(),
@@ -174,7 +201,7 @@ impl ConversationRows {
             );
             rows.push(row);
         }
-        let queued_end = rows.len();
+        let mut queued_end = rows.len();
         rows.extend(project_rows(
             &source.session_rows,
             &ConversationRowOrigin::Session,
@@ -187,6 +214,15 @@ impl ConversationRows {
             },
             &before,
         ));
+        if position_workspace_setup(
+            &mut rows,
+            turn_end,
+            |row| matches!(row.data.content, ConversationRowContent::User { .. }),
+            |row| matches!(&row.data.content, ConversationRowContent::Preparation { preparation } if !preparation.steps.is_empty()),
+        ) {
+            turn_end += 1;
+            queued_end += 1;
+        }
         Arc::new(Self {
             source,
             scope,

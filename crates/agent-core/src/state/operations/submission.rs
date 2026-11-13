@@ -203,6 +203,7 @@ impl Operation for StartSubmission {
                 session: self.thread_id.clone(),
                 subscription: uuid::Uuid::nil(),
                 cwd: self.cwd.clone(),
+                workspace: self.draft.workspace.clone(),
                 selection: agent_protocol::conversation::records::Selection {
                     model: self.draft.model.clone(),
                     effort: self.draft.effort.clone(),

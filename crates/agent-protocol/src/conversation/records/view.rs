@@ -160,6 +160,11 @@ pub fn project(replica: &Replica) -> Option<models::ThreadResponse> {
             submissions,
             queue,
             preparations,
+            workspace_setup: header
+                .details
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.visible.then(|| workspace.setup.clone()).flatten()),
             background: header.details.activity.background.clone(),
             history_has_more: Some(floor.turn != 0 || floor.item != 0),
             history_cursor: (floor.turn != 0 || floor.item != 0)
@@ -290,6 +295,7 @@ mod tests {
             };
             assert_eq!(request.validate(&response), Err(expected));
             let create = Create {
+                workspace: None,
                 session,
                 provider: ProviderKind::Codex,
                 subscription: uuid::Uuid::new_v4(),

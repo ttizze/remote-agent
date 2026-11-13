@@ -215,10 +215,18 @@ elements = ["details-card", "details-editor", "details-changes"]
 [[state]]
 name = "sidebar"
 screen = "Sidebar"
-description = "The sidebar beside a chat: its search field, actions and project row, against the GPUI client's layout."
+description = "The sidebar beside a chat: its frame, project row and settings button, against the GPUI client's layout."
 reference = "gpui"
 nsh = ["send [immediate] サイドバーを確認します", "expect \"シミュレータで完了しました。\" 30000"]
-elements = ["sidebar", "sidebar-search-field", "sidebar-search-text", "sidebar-search-icon", "sidebar-new-chat", "sidebar-project-row", "sidebar-project-icon", "sidebar-settings"]
+elements = ["sidebar", "sidebar-project-row", "sidebar-project-icon", "sidebar-settings"]
+
+[[state]]
+name = "sidebar-header"
+screen = "Sidebar"
+description = "The search field and project filter, add-project and new-thread controls follow T3 Code's sidebar header."
+nsh = []
+t3 = []
+elements = ["sidebar-search-field", "sidebar-search-text", "sidebar-search-icon", "sidebar-project-filter", "sidebar-add-project", "sidebar-new-chat"]
 
 # ── Elements ────────────────────────────────────────────────────────────────
 # `nsh = {}`: NSH draws no counterpart, so the element is reported missing.
@@ -895,7 +903,7 @@ id = "sidebar-search-field"
 what = "Search field"
 kind = "box"
 nsh = { text = "Search conversations", up = 1 }
-gpui = { x = 12, height = 24, source = "sidebar.rs:741 Input::small(): h_6 (sizing.rs:285); Sidebar header px_3 (sidebar/mod.rs:441)" }
+t3 = "div:has(> input[aria-label='Search threads'])"
 
 [[element]]
 id = "sidebar-search-text"
@@ -904,7 +912,7 @@ kind = "text"
 # The label AppKit's search field draws its placeholder with; the sidebar's
 # field is the window's first.
 nsh = { class = "_TtC6AppKitP33_72EBFCF981BE77E1C6F26FD717D0893922NSTextFieldSimpleLabel" }
-gpui = { source = "sidebar.rs:741 Input::small(), input_text_size text_sm (sizing.rs:248)" }
+t3 = "input[aria-label='Search threads']"
 
 [[element]]
 id = "sidebar-search-icon"
@@ -912,18 +920,32 @@ what = "Search icon in the search field"
 kind = "icon"
 # The field's first part, before its input.
 nsh = { text = "Search conversations", up = 1, down = [0] }
+t3 = "div:has(> input[aria-label='Search threads']) > svg"
 centred_in = "sidebar-search-text"
 # Icon and text are both items_center in the field's row: their drawn centres
 # meet within a point (a line's ink sits a little above its box's centre).
 tolerance = { text = 1.5 }
-gpui = { glyph_dy = 0, source = "sidebar.rs:744 prefix(IconName::Search), input.rs:794 items_center: the glyph on the text's centre line" }
+
+[[element]]
+id = "sidebar-project-filter"
+what = "Filter threads by project"
+kind = "icon"
+nsh = { text = "Filter threads by project" }
+t3 = "button[aria-label='Filter threads by project']"
+
+[[element]]
+id = "sidebar-add-project"
+what = "Add project button"
+kind = "icon"
+nsh = { text = "Add project" }
+t3 = "button[aria-label='Add project']"
 
 [[element]]
 id = "sidebar-new-chat"
 what = "New chat button"
 kind = "icon"
 nsh = { text = "New chat" }
-gpui = { source = "sidebar.rs:750 icon_button" }
+t3 = "button[aria-label='New thread']"
 
 [[element]]
 id = "sidebar-project-row"

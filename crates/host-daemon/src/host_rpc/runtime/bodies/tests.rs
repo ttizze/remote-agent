@@ -264,17 +264,15 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
         )
         .await
         .unwrap();
-        changed
-            .wait_for(|_| {
-                storage
-                    .state(&native)
-                    .unwrap()
-                    .inputs
-                    .values()
-                    .any(|input| matches!(input.state, InputState::Failed(_)))
-            })
-            .await
-            .unwrap();
+        while !storage
+            .state(&native)
+            .unwrap()
+            .inputs
+            .values()
+            .any(|input| matches!(input.state, InputState::Failed(_)))
+        {
+            changed.changed().await.unwrap();
+        }
         assert!(
             claude.inputs.lock().unwrap().is_empty(),
             "required messages must not be omitted on a provider switch"
@@ -292,15 +290,17 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
             &records::Change {
                 session: native.clone(),
                 operation: Uuid::new_v4(),
-                command: Command::RetryInput(input.to_string().into()),
+                command: Command::RetryInput {
+                    id: input.to_string().into(),
+                    work_locally: false,
+                },
             },
         )
         .await
         .unwrap();
-        changed
-            .wait_for(|_| storage.state(&native).unwrap().inputs.is_empty())
-            .await
-            .unwrap();
+        while !storage.state(&native).unwrap().inputs.is_empty() {
+            changed.changed().await.unwrap();
+        }
         let inputs = claude.inputs.lock().unwrap();
         assert_eq!(inputs.len(), 1);
         let text = inputs[0]

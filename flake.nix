@@ -85,7 +85,7 @@
             ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
             ANDROID_NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk-bundle";
           };
-          nativeBuildTools = with pkgs; [ pkg-config cmake clang zig ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.patchelf ];
+          nativeBuildTools = with pkgs; [ pkg-config cmake clang ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.patchelf ];
           # The Host and its tests use these on Linux.
           linuxHostTools = with pkgs; [ lsof openssl procps ];
           runtimeShellHook = ''
@@ -107,7 +107,6 @@
             fi
           '';
           mkDevShell = attrs: pkgs.mkShell (attrs // {
-            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             RUSTC_WRAPPER = "";
             packages = [ pkgs.zsh ] ++ (attrs.packages or [ ]);
             shellHook = (attrs.shellHook or "") + runtimeShellHook;
@@ -166,7 +165,6 @@
               kotlin-language-server
               androidSdk
             ]) ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
-              pkgs.zig
               pkgs.swiftlint
               pkgs.swiftformat
             ];
@@ -176,7 +174,7 @@
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           host-build = mkDevShell {
             packages = with pkgs; [
-              (withCargo buildRustToolchain) just jq gitMinimal nodejs pkg-config cmake clang zig
+              (withCargo buildRustToolchain) just jq gitMinimal nodejs pkg-config cmake clang
             ];
           };
           android-build = pkgs.mkShell (androidBuildEnvironment // {
@@ -197,7 +195,7 @@
               (withCargo (buildRustToolchain.override {
                 targets = [ "aarch64-apple-ios-sim" ];
               }))
-              just jq gitMinimal nodejs zig swiftlint swiftformat
+              just jq gitMinimal nodejs swiftlint swiftformat
             ];
             shellHook = appleSdkHook;
           };

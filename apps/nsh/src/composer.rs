@@ -5,6 +5,7 @@ use agent_core::{panels::PanelKind, presentation::composer::footer};
 use agent_protocol::operations::FollowUp;
 use nsh_core::{GlassEffect, element::input, prelude::*};
 use serde_json::json;
+mod workspace;
 
 /// A key bound while this view lives; it takes up no space.
 pub(crate) fn shortcut(
@@ -910,6 +911,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             },
         ))
         .child(when(is_desktop, shortcuts))
+        .child(workspace::controls())
         .child(when(
             move || follow_up.with(|f| !f.queue.is_empty()),
             move || crate::queue::queued(connection),

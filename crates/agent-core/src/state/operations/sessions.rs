@@ -644,7 +644,10 @@ impl Operation for RetryPreparation {
         command(
             context,
             &self.thread_id,
-            agent_protocol::conversation::Command::RetryInput(self.input_id.clone()),
+            agent_protocol::conversation::Command::RetryInput {
+                id: self.input_id.clone(),
+                work_locally: self.work_locally,
+            },
         )
         .await
     }
@@ -683,6 +686,7 @@ impl Operation for StartConversation {
     ) -> Result<Self::Output, PeerError> {
         let response = context
             .call(&agent_protocol::conversation::records::Create {
+                workspace: None,
                 provider: self.request.provider,
                 session: self.target.clone(),
                 subscription: uuid::Uuid::nil(),

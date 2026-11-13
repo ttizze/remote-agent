@@ -95,6 +95,7 @@ async fn create(
     cwd: &std::path::Path,
 ) -> SessionRef {
     let request = records::Create {
+        workspace: None,
         session: SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap(),
         provider: ProviderKind::Codex,
         subscription: uuid::Uuid::new_v4(),

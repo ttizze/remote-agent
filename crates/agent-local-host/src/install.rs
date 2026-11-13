@@ -337,7 +337,10 @@ pub async fn apply(path: &Path) -> Result<()> {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    ensure!(job.join("apply").is_file(), "更新は開始されませんでした。");
+    // Consume the launcher's authorization before stopping the Host. A process
+    // supervisor may start this worker again after either success or failure;
+    // the same job must never interrupt conversations or relaunch the app twice.
+    fs::remove_file(job.join("apply")).context("更新は開始されていないか、既に実行されました。")?;
     let registry = if plan.isolated {
         LocalHostRegistry::new(plan.directory.clone())
     } else {
@@ -602,6 +605,46 @@ mod tests {
             b"old app"
         );
         assert!(!plan.backup.exists());
+    }
+
+    // macOS relaunches through LaunchServices, which belongs in native checks.
+    // Other platforms can exercise apply's failure and replay without launching
+    // a process because this fixture has no application executable.
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn a_consumed_job_cannot_stop_the_host_or_overwrite_its_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let plan = plan(directory.path());
+        let path = directory.path().join("plan.json");
+        crate::save_private_json(&path, &plan).unwrap();
+        File::create(directory.path().join("app.lock")).unwrap();
+        fs::write(directory.path().join("apply"), b"apply").unwrap();
+
+        assert!(apply(&path).await.is_err());
+        assert!(last_result(directory.path()).unwrap().error.is_some());
+        assert!(!directory.path().join("apply").exists());
+        let result = fs::read(directory.path().join(RESULT_FILE)).unwrap();
+
+        // Restoring the payload cannot authorize the consumed job again.
+        fs::create_dir(&plan.payload).unwrap();
+        let _host = LocalHostRegistry::new(plan.directory.clone())
+            .acquire(&plan.directory)
+            .unwrap();
+
+        assert!(
+            apply(&path)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("既に実行")
+        );
+        assert_eq!(
+            fs::read(directory.path().join(RESULT_FILE)).unwrap(),
+            result
+        );
+        assert!(!directory.path().join("host.json").exists());
+        assert!(plan.destination.join("previous-version").is_file());
+        assert!(plan.payload.is_dir());
     }
 
     #[cfg(target_os = "macos")]

@@ -197,7 +197,43 @@ impl Operation for WriteWorkspaceFile {
     }
 }
 
-pub use agent_protocol::operations::ReviewWorkspace;
+pub use agent_protocol::operations::ChangeWorkspace;
+
+impl Operation for ChangeWorkspace {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::WorkspaceAction {
+            pane: String::new(),
+        })
+    }
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Control
+    }
+    rpc_operation!();
+    const REPORT_ERROR: bool = false;
+    fn prepare(&mut self, snapshot: &mut Snapshot, pane_id: &str) -> Result<(), String> {
+        let pane = snapshot.panes.get(pane_id).ok_or("pane is closed")?;
+        if self.cwd.is_empty() || snapshot.selected_directory(pane) != self.cwd {
+            return Err("The workspace changed. Refresh and try again.".into());
+        }
+        Ok(())
+    }
+    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, _: Self::Output) -> Vec<Effect> {
+        review_workspace(snapshot, pane_id).into_iter().collect()
+    }
+}
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewWorkspace {
+    pub cwd: String,
+    pub base_ref: Option<String>,
+}
+rpc::rpc_method!(ReviewWorkspace, ReviewWorkspace, |self| {
+    rpc::ReviewWorkspace {
+        cwd: self.cwd.clone(),
+        include_options: false,
+        base_ref: self.base_ref.clone(),
+    }
+});
 
 /// Navigation and notifications already belong to an epoch. Their review read
 /// shares it instead of dispatching a second intent that invalidates siblings.
@@ -223,6 +259,7 @@ pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot, pane_id: &str)
         return None;
     }
     let mut operation = ReviewWorkspace {
+        base_ref: None,
         cwd: pane.navigation.cwd.clone(),
     };
     operation
@@ -240,17 +277,72 @@ impl Operation for ReviewWorkspace {
             pane: String::new(),
         })
     }
-    rpc_operation!();
+    type Input = bool;
+    fn capture(&self, snapshot: &Snapshot, pane_id: &str) -> Result<bool, PeerError> {
+        // New-chat options share the existing workspace read. Refreshes of a
+        // running conversation never resolve remote defaults or reload refs.
+        Ok(snapshot.panes.get(pane_id).is_some_and(|pane| {
+            pane.navigation.thread_id.is_none() && pane.navigation.cwd == self.cwd
+        }) && !snapshot.files.workspace.options.contains_key(&self.cwd))
+    }
+    type Output = crate::models::WorkspaceReview;
+    async fn run(
+        &self,
+        include_options: bool,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        context
+            .call(&rpc::ReviewWorkspace {
+                cwd: self.cwd.clone(),
+                base_ref: self.base_ref.clone(),
+                include_options,
+            })
+            .await
+    }
     fn prepare(&mut self, snapshot: &mut Snapshot, pane_id: &str) -> Result<(), String> {
         let pane = snapshot.panes.get_mut(pane_id).ok_or("pane is closed")?;
+        let current_directory = pane.navigation.cwd == self.cwd;
         let workspace = Arc::make_mut(&mut Arc::make_mut(pane).workspace);
         if workspace.review_cwd.as_ref() != Some(&self.cwd) {
             workspace.review = None;
         }
+        if current_directory {
+            self.base_ref = workspace.comparison.clone();
+        }
         workspace.review_cwd = Some(self.cwd.clone());
         Ok(())
     }
-    fn apply(self, snapshot: &mut Snapshot, pane_id: &str, review: Self::Output) -> Vec<Effect> {
+    fn apply(
+        self,
+        snapshot: &mut Snapshot,
+        pane_id: &str,
+        mut review: Self::Output,
+    ) -> Vec<Effect> {
+        if let Some(options) = review.options.take() {
+            if let Some(pane) = snapshot.panes.get(pane_id)
+                && pane.navigation.thread_id.is_none()
+                && pane.navigation.cwd == self.cwd
+            {
+                let draft = Arc::make_mut(
+                    Arc::make_mut(&mut snapshot.input.drafts)
+                        .entry(pane.navigation.draft_key.clone())
+                        .or_default(),
+                );
+                draft.workspace.get_or_insert_with(|| {
+                    if options.is_repository && options.default_worktree {
+                        agent_protocol::workspace::WorkspaceStrategy::Worktree {
+                            base_ref: options.default_base.clone(),
+                            start_from_origin: true,
+                        }
+                    } else {
+                        agent_protocol::workspace::WorkspaceStrategy::Root
+                    }
+                });
+            }
+            Arc::make_mut(&mut snapshot.files.workspace)
+                .options
+                .insert(self.cwd, Arc::new(options));
+        }
         if let Some(pane) = snapshot.panes.get_mut(pane_id) {
             Arc::make_mut(&mut Arc::make_mut(pane).workspace).review = Some(Arc::new(review));
         }
@@ -465,6 +557,69 @@ mod read_result_tests {
 #[cfg(test)]
 mod path_tests {
     use super::*;
+
+    #[test]
+    fn draft_review_loads_choices_once_and_running_conversation_reviews_only_read_changes() {
+        let mut snapshot = Snapshot::default();
+        let operation = ReviewWorkspace {
+            base_ref: None,
+            cwd: "/project".into(),
+        };
+        Arc::make_mut(&mut Arc::make_mut(snapshot.panes.get_mut("").unwrap()).navigation).cwd =
+            "/project".into();
+        assert!(operation.capture(&snapshot, "").unwrap());
+        operation.clone().apply(
+            &mut snapshot,
+            "",
+            crate::models::WorkspaceReview {
+                controls: Default::default(),
+                options: Some(agent_protocol::workspace::WorkspaceOptions {
+                    is_repository: true,
+                    default_worktree: true,
+                    default_base: "origin/main".into(),
+                    refs: vec!["origin/main".into()],
+                    worktrees: vec!["/existing".into()],
+                }),
+                branch: "main".into(),
+                base_ref: None,
+                additions: 0,
+                deletions: 0,
+                files: vec![],
+                diff: String::new(),
+            },
+        );
+        assert!(!operation.capture(&snapshot, "").unwrap());
+        assert_eq!(
+            snapshot.files.workspace.options["/project"].default_base,
+            "origin/main"
+        );
+        let key = snapshot.panes.primary().navigation.draft_key.clone();
+        assert_eq!(
+            snapshot.input.drafts[&key].workspace,
+            Some(agent_protocol::workspace::WorkspaceStrategy::Worktree {
+                base_ref: "origin/main".into(),
+                start_from_origin: true,
+            })
+        );
+        assert!(
+            snapshot
+                .panes
+                .primary()
+                .workspace
+                .review
+                .as_ref()
+                .unwrap()
+                .options
+                .is_none()
+        );
+        Arc::make_mut(&mut snapshot.files.workspace).options.clear();
+        Arc::make_mut(&mut Arc::make_mut(snapshot.panes.get_mut("").unwrap()).navigation)
+            .thread_id = Some(
+            crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "existing".into())
+                .unwrap(),
+        );
+        assert!(!operation.capture(&snapshot, "").unwrap());
+    }
 
     #[test]
     fn folder_navigation_accepts_home_paths_and_rejects_workspace_relative_paths() {

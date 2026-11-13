@@ -119,7 +119,10 @@ extension ThreadScreen {
             let row = projected.data()
             switch (row.content, item) {
             case let (.preparation(preparation), _):
-                ThreadPreparationRow(preparation: preparation) { model.perform($0) }
+                SetupProgressCard(preparation: preparation, openTerminal: {
+                    model.openSetupTerminal($0)
+                    openTools?(nil)
+                }, perform: { model.perform($0) })
             case let (.providerHandoff(text), _):
                 Text(text).font(.caption).foregroundStyle(.secondary).padding(.vertical, 8)
             case let (.notification(reports, _), _):
@@ -219,25 +222,6 @@ extension ThreadScreen {
 }
 
 #if !BEX_NSH_CONVERSATION
-    private struct ThreadPreparationRow: View {
-        let preparation: PreparationPresentation
-        let perform: (Intent) -> Void
-
-        var body: some View {
-            if preparation.inProgress {
-                ThreadActivityHeader(summary: preparation.text, canCollapse: false, isInProgress: true, expanded: false)
-                    .accessibilityIdentifier("task.preparation")
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(verbatim: preparation.text).font(.caption).foregroundStyle(.secondary)
-                    if let retry = preparation.retry {
-                        Button("再試行") { perform(.retryPreparation(retry)) }
-                    }
-                }.accessibilityIdentifier("task.preparation")
-            }
-        }
-    }
-
     /// What the background work the agent woke for did, in the app's language.
     private struct NotificationRow: View {
         let reports: [BackgroundReport]

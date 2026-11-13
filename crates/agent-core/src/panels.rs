@@ -28,6 +28,9 @@ pub struct PanelSurface {
     pub id: u64,
     pub kind: PanelKind,
     pub path: Option<String>,
+    pub command: Option<String>,
+    #[cfg_attr(feature = "bindings", uniffi(default = None))]
+    pub terminal_handle: Option<String>,
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,7 +67,7 @@ pub fn panel_tools(connected: bool, has_directory: bool) -> Vec<PanelTool> {
         (PanelKind::Browser, "browser", "ブラウザ", "B"),
         (PanelKind::Terminal, "terminal", "ターミナル", "T"),
         (PanelKind::Files, "files", "ファイル", "F"),
-        (PanelKind::Diff, "diff", "差分", "D"),
+        (PanelKind::Diff, "diff", "変更", "D"),
         (PanelKind::SideChat, "sideChat", "サイドチャット", "S"),
         (PanelKind::Agents, "agents", "エージェント", "A"),
     ]
@@ -155,12 +158,36 @@ impl Panels {
         }
         let id = next.next_id;
         next.next_id += 1;
-        panel.surfaces.push(PanelSurface { id, kind, path });
+        panel.surfaces.push(PanelSurface {
+            id,
+            kind,
+            path,
+            command: None,
+            terminal_handle: None,
+        });
         panel.active = Some(id);
         OpenedPanel {
             panels: Arc::new(next),
             id,
         }
+    }
+    pub fn open_script(
+        self: Arc<Self>,
+        key: PanelScope,
+        cwd: String,
+        command: String,
+    ) -> OpenedPanel {
+        let mut opened = self.open(key.clone(), PanelKind::Terminal, Some(cwd));
+        let panels = Arc::make_mut(&mut opened.panels);
+        let surface = panels
+            .threads
+            .get_mut(&key)
+            .unwrap()
+            .surfaces
+            .last_mut()
+            .unwrap();
+        surface.command = Some(command);
+        opened
     }
     pub fn activate(self: Arc<Self>, key: PanelScope, id: u64) -> ActivatedPanel {
         if self
@@ -181,6 +208,36 @@ impl Panels {
             panels: Arc::new(next),
             activated: true,
         }
+    }
+
+    pub fn open_setup_terminal(
+        self: Arc<Self>,
+        key: PanelScope,
+        terminal: crate::presentation::conversation::SetupTerminal,
+    ) -> OpenedPanel {
+        if let Some(surface) = self
+            .get(key.clone())
+            .surfaces
+            .iter()
+            .find(|surface| surface.terminal_handle.as_deref() == Some(&terminal.handle))
+        {
+            let id = surface.id;
+            return OpenedPanel {
+                panels: self.activate(key, id).panels,
+                id,
+            };
+        }
+        let mut opened = self.open(key.clone(), PanelKind::Terminal, Some(terminal.cwd));
+        Arc::make_mut(&mut opened.panels)
+            .threads
+            .get_mut(&key)
+            .unwrap()
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.id == opened.id)
+            .unwrap()
+            .terminal_handle = Some(terminal.handle);
+        opened
     }
     pub fn close(self: Arc<Self>, key: PanelScope, id: u64) -> Arc<Self> {
         let Some(index) = self
@@ -283,6 +340,31 @@ mod tests {
             draft: draft.into(),
         }
     }
+    #[test]
+    fn scripts_open_independent_terminals_and_preserve_the_shell() {
+        let key = scope("chat");
+        let shell = Panels::new().open(key.clone(), PanelKind::Terminal, Some("/project".into()));
+        let first =
+            shell
+                .panels
+                .clone()
+                .open_script(key.clone(), "/project".into(), "npm test".into());
+        let second =
+            first
+                .panels
+                .clone()
+                .open_script(key.clone(), "/project".into(), "npm test".into());
+        let panel = second.panels.get(key.clone());
+        assert_eq!(panel.surfaces.len(), 3);
+        assert_eq!(panel.surfaces[0].command, None);
+        assert_eq!(panel.surfaces[1].command.as_deref(), Some("npm test"));
+        assert_eq!(panel.selected().unwrap().id, second.id);
+        assert_ne!(first.id, second.id);
+        assert_eq!(second.panels.scope(second.id), Some(key));
+        assert_eq!(shell.panels.get(scope("chat")).surfaces.len(), 1);
+        assert!(second.panels.get(scope("other")).surfaces.is_empty());
+    }
+
     #[test]
     fn a_new_conversation_starts_at_the_launcher_without_starting_a_tool() {
         let mut panels = Panels::new();

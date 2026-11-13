@@ -72,3 +72,32 @@ impl Storage {
         })
     }
 }
+
+pub(super) fn native_status(
+    connection: &Transaction<'_>,
+    target: &SessionRef,
+    (provider, source, status): (ProviderKind, &str, agent_protocol::models::SessionStatus),
+    active: Option<(bool, bool)>,
+    activity: &mut decision::records::Activity,
+    now: i64,
+) -> Result<bool, String> {
+    use agent_protocol::models::SessionStatus;
+    if status == SessionStatus::Idle && active == Some((true, false)) {
+        imports::queue(
+            connection,
+            target,
+            &SessionRef::new(provider, source.to_owned()).map_err(failure)?,
+            now,
+        )?;
+    }
+    if active.is_none()
+        && activity.status != SessionStatus::Preparing
+        && activity.latest != Some(agent_protocol::execution::TurnStatus::Running)
+        && matches!(status, SessionStatus::Idle | SessionStatus::Running)
+    {
+        let changed = activity.status != status;
+        activity.status = status;
+        return Ok(changed);
+    }
+    Ok(false)
+}

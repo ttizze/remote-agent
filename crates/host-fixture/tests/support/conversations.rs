@@ -263,6 +263,7 @@ pub fn create_request(
     model: Option<agent_protocol::models::ModelRef>,
 ) -> records::Create {
     records::Create {
+        workspace: None,
         session: SessionRef::new(None, Uuid::new_v4().to_string()).unwrap(),
         provider,
         subscription: Uuid::new_v4(),

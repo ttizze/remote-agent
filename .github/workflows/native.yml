@@ -628,11 +628,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ needs.toolchain.outputs.node-version }}
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.16.0
-          # Cargo's dependency cache retains FFF's build outputs; per-run Zig caches only evict them.
-          use-cache: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: ${{ needs.toolchain.outputs.rust-version }}

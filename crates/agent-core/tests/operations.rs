@@ -46,6 +46,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "startThread" => {
             let opened = client
                 .call(&records::Create {
+                    workspace: None,
                     provider: agent_protocol::session::ProviderKind::Codex,
                     session: SessionRef {
                         provider: None,
@@ -231,6 +232,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             text: text(command, "text").to_owned()
         }),
         "reviewWorkspace" => call!(ReviewWorkspace {
+            base_ref: None,
             cwd: text(command, "cwd").to_owned()
         }),
         "worktreeSettings" => call!(ReadWorktreeSettings {}),

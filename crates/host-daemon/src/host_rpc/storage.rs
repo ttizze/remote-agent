@@ -33,6 +33,7 @@ mod titles;
 mod upgrade;
 #[cfg(test)]
 mod upgrade_tests;
+pub(in crate::host_rpc) mod workspace;
 
 #[derive(Debug)]
 pub(crate) struct Storage {
@@ -419,7 +420,7 @@ impl Storage {
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
-            let event = self.receipted(&transaction, id, event)?;
+            let mut event = self.receipted(&transaction, id, event)?;
             let (key, created) = match existing_key(&transaction, id)? {
                 Some(key) => (key, false),
                 None => {
@@ -446,20 +447,26 @@ impl Storage {
             };
             let native_items = match &event { Event::Provider { attempt, native_items, .. } => Some((*attempt, native_items.clone())), _ => None };
             let (mut header,counters)=rows::header(&transaction,key)?;
-            let status_changed=if let Event::NativeStatus {provider,source,status}=&event {
-                let current=decision::current_source(state.thread.provider,state.bindings.get(provider),*provider,source);
-                if current && *status==agent_protocol::models::SessionStatus::Idle && state.active_turn().is_some_and(|turn|turn.observed && !state.attempts.contains_key(&turn.id)) {
-                    imports::queue(&transaction,id,&SessionRef::new(*provider,source.clone()).map_err(failure)?,context.now)?;
+            let status_changed = if let Event::NativeStatus { provider, source, status } = &event
+                && decision::current_source(state.thread.provider, state.bindings.get(provider), *provider, source) {
+                let active = state.active_turn().map(|turn| (turn.observed, state.attempts.contains_key(&turn.id)));
+                let changed = activity::native_status(&transaction, id, (*provider, source, *status), active, &mut header.details.activity, context.now)?;
+                if changed { transaction.execute("UPDATE threads SET body=?1 WHERE key=?2", params![codec::header(&header,&counters)?,key]).map_err(failure)?; }
+                changed
+            } else { false };
+            let retry = if let Event::Command { id, command: decision::Command::RetryInput { id: input, work_locally }, receipt: None } = &event {
+                match workspace::retry(header.details.workspace.as_ref(), state.inputs.get(input).map(|input| &input.state), state.thread.workspace.cwd(), state.bindings.is_empty(), *work_locally) {
+                    Ok(retry) => retry,
+                    Err(reason) => { event = Event::RejectedCommand { id: id.clone(), reason: reason.into(), receipt: None }; None }
                 }
-                if current && state.active_turn().is_none() && header.details.activity.status!=agent_protocol::execution::SessionStatus::Preparing && header.details.activity.latest!=Some(agent_protocol::execution::TurnStatus::Running) && matches!(status,agent_protocol::models::SessionStatus::Idle | agent_protocol::models::SessionStatus::Running) {
-                    let changed=header.details.activity.status!=*status;
-                    header.details.activity.status=*status;
-                    if changed {transaction.execute("UPDATE threads SET body=?1 WHERE key=?2",params![codec::header(&header,&counters)?,key]).map_err(failure)?;}
-                    changed
-                } else {false}
-            } else {false};
+            } else { None };
+            if let Some((_, cwd)) = &retry { state.thread.workspace = decision::Workspace::Folder(cwd.clone()); }
             let context=Context {external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
             let mut step = decision::step(&state, event, context);
+            if let Some((workspace, _)) = retry.filter(|_| step.outcome == Outcome::Accepted) {
+                header.details.workspace = Some(workspace);
+                transaction.execute("UPDATE threads SET body=?1 WHERE key=?2", params![codec::header(&header,&counters)?, key]).map_err(failure)?;
+            }
             let reset = step.changes.iter().any(|change| matches!(change, Change::Turn(turn) if turn.state == decision::TurnState::RolledBack));
             let from = cursor(&transaction)?;
             let changed = status_changed || !step.changes.is_empty()
@@ -493,7 +500,7 @@ impl Storage {
                 let selected = body
                     .map(|body| protocol::decode::<decision::records::Selection>(&body).map_err(failure))
                     .transpose()?
-                    .unwrap_or(rows::header(&transaction, key)?.0.details.selection);
+                    .unwrap_or(header.details.selection.clone());
                 let selected = selected.resolve(
                     content.model.as_ref(),
                     content.effort.as_deref(),

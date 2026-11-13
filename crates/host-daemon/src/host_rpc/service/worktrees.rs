@@ -423,9 +423,13 @@ pub(super) mod tests {
             let checkout = host
                 .inner
                 .worktrees
-                .prepare(repository.to_str())
+                .prepare_selected(
+                    repository.to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default(),
+                )
                 .await
-                .unwrap()
                 .unwrap();
             let response = agent
                 .create(checkout.to_str().unwrap(), None, None)
@@ -495,9 +499,13 @@ pub(super) mod tests {
                 let checkout = host
                     .inner
                     .worktrees
-                    .prepare(repository.to_str())
+                    .prepare_selected(
+                        repository.to_str().unwrap(),
+                        String::new(),
+                        true,
+                        crate::worktrees::Observer::default(),
+                    )
                     .await
-                    .unwrap()
                     .unwrap();
                 let mut response = agent
                     .create(checkout.to_str().unwrap(), None, None)
@@ -563,9 +571,13 @@ pub(super) mod tests {
         let checkout = host
             .inner
             .worktrees
-            .prepare(repository.to_str())
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         agent
             .create(checkout.to_str().unwrap(), None, None)
@@ -655,9 +667,13 @@ pub(super) mod tests {
                     .unwrap();
                 host.inner
                     .worktrees
-                    .prepare(repository.to_str())
+                    .prepare_selected(
+                        repository.to_str().unwrap(),
+                        String::new(),
+                        true,
+                        crate::worktrees::Observer::default(),
+                    )
                     .await
-                    .unwrap()
                     .unwrap();
                 let expected = if listing_fails {
                     "稼働状況を確認できないため削除できません: codex list failed\nclaude startup failed\ndeepseek startup failed"
@@ -811,16 +827,24 @@ pub(super) mod tests {
         let first = service
             .inner
             .worktrees
-            .prepare(repository.to_str())
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let other = service
             .inner
             .worktrees
-            .prepare(repository.to_str())
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let id = "12345678-1234-4234-8234-123456789abc";
         let transcript = project.join(format!("{id}.jsonl"));
@@ -904,6 +928,7 @@ pub(super) mod tests {
             &host,
             client.id(),
             Call::CreateConversation(records::Create {
+                workspace: None,
                 provider: agent_protocol::session::ProviderKind::Codex,
                 session: target.clone(),
                 subscription: uuid::Uuid::new_v4(),
@@ -980,9 +1005,13 @@ pub(super) mod tests {
         let kept = host
             .inner
             .worktrees
-            .prepare(repository.to_str())
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         host.cleanup_unchanged_worktrees().await.unwrap();
         assert!(

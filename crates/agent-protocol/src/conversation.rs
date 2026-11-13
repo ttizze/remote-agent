@@ -511,7 +511,10 @@ pub enum Command {
         id: ClientInputId,
         retry: bool,
     },
-    RetryInput(ClientInputId),
+    RetryInput {
+        id: ClientInputId,
+        work_locally: bool,
+    },
     ContinueAfterRestart {
         source: TurnId,
         enabled: bool,

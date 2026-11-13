@@ -92,6 +92,7 @@ mod tests {
             "shell".into(),
             Arc::new(Terminal {
                 target: crate::state::TerminalTarget::Shell {
+                    command: None,
                     cwd: "/project".into(),
                 },
                 size: agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },

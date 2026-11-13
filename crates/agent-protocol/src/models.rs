@@ -102,6 +102,8 @@ pub struct Thread {
     pub queue: crate::operations::InputQueue,
     #[serde(default)]
     pub preparations: Vec<crate::session::SessionPreparation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_setup: Option<crate::workspace::WorkspaceSetup>,
     pub id: Option<crate::session::SessionRef>,
     /// The public identity remains stable across provider handoffs.
     pub active_provider: Option<crate::session::ProviderKind>,
@@ -455,6 +457,9 @@ pub struct WorktreeSettings {
     pub copy_on_create: bool,
     pub copy_paths: Vec<String>,
     pub worktree_directory: String,
+    pub init_submodules: bool,
+    pub setup_script: Option<crate::workspace::SetupScript>,
+    pub project_setup_scripts: std::collections::HashMap<String, crate::workspace::SetupScript>,
     /// Remove idle checkouts whose HEAD the default branch already contains.
     pub delete_unchanged: bool,
     /// Project IDs that override `delete_unchanged`; other projects inherit it.
@@ -486,11 +491,29 @@ pub struct WorktreeThread {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceReview {
+    pub controls: WorkspaceControls,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<crate::workspace::WorkspaceOptions>,
     pub branch: String,
+    /// The reference whose merge base produced the diff, for example `origin/main`.
+    pub base_ref: Option<String>,
     pub additions: u64,
     pub deletions: u64,
     pub files: Vec<ChangedFile>,
     pub diff: String,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceControls {
+    pub branches: Vec<String>,
+    pub references: Vec<String>,
+    pub remotes: Vec<String>,
+    pub can_push: bool,
+    pub scripts: Vec<ProjectScript>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectScript {
+    pub name: String,
+    pub command: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangedFile {

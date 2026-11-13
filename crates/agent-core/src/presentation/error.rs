@@ -140,6 +140,7 @@ fn operation_notice(key: &OperationKey) -> Option<(ErrorScope, &'static str)> {
         Directory { .. } => (Workspace, "フォルダを読み込めませんでした"),
         File { .. } => (Workspace, "ファイルを読み込めませんでした"),
         SaveFile { .. } => (Workspace, "ファイルを保存できませんでした"),
+        WorkspaceAction { .. } => (Workspace, "ワークスペースの操作に失敗しました"),
         WorkspaceReview { .. } => (Workspace, "変更を読み込めませんでした"),
         CodexCli => (Settings, "Codex CLIの操作に失敗しました"),
         ProviderSettings => (Settings, "プロバイダーの設定を変更できませんでした"),
@@ -204,6 +205,7 @@ impl Snapshot {
             OperationKey::WorkspaceReview { pane } => (
                 "再試行",
                 Intent::ReviewWorkspace(op::ReviewWorkspace {
+                    base_ref: None,
                     cwd: self.panes.get(&pane)?.workspace.review_cwd.clone()?,
                 }),
             ),
@@ -1216,6 +1218,7 @@ mod notice_tests {
                     pane: String::new(),
                 },
                 Intent::ReviewWorkspace(op::ReviewWorkspace {
+                    base_ref: None,
                     cwd: "/reviewed".into(),
                 }),
             ),

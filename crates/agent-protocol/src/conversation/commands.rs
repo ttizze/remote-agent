@@ -57,7 +57,7 @@ pub(super) fn command(
             Some(_) => append_advance(state, accepted(vec![Change::RemoveInput(id)]), context),
         },
         Command::ResolveUnknown { id, retry } => resolve_unknown(state, &id, retry),
-        Command::RetryInput(id) => retry_input(state, &id, context),
+        Command::RetryInput { id, work_locally } => retry_input(state, &id, work_locally, context),
         Command::ContinueAfterRestart {
             source,
             enabled,
@@ -290,17 +290,27 @@ fn continue_after_restart(
     submit(state, operation, id.to_string().into(), content, context)
 }
 
-fn retry_input(state: &State, id: &ClientInputId, context: Context) -> Step {
+fn retry_input(state: &State, id: &ClientInputId, work_locally: bool, context: Context) -> Step {
     let Some(input) = state.inputs.get(id) else {
         return reject("input does not exist");
     };
-    let InputState::Failed(_) = input.state else {
-        return reject("input has not failed");
+    let cancel = match input.state {
+        InputState::Failed(_) => None,
+        InputState::Preparing {
+            action,
+            stage:
+                PreparationStage::Workspace | PreparationStage::Worktree | PreparationStage::SetupScript,
+            ..
+        } if work_locally => Some(action),
+        _ => return reject("input has not failed"),
     };
     let mut result = accepted(vec![Change::Input(PendingInput {
         state: InputState::Queued { steer: None },
         ..input.clone()
     })]);
+    result
+        .actions
+        .extend(cancel.map(|action| Action::CancelPreparation { action }));
     let next = state.apply(&result.changes);
     let delivery = dispatch(&next, id, context, DeliveryMode::Direct);
     result.changes.extend(delivery.changes);

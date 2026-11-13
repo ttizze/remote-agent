@@ -57,6 +57,11 @@ enum Input {
 }
 
 enum Write {
+    Setup {
+        generation: Uuid,
+        update: super::storage::workspace::SetupChange,
+        now: i64,
+    },
     Discover {
         source: SessionRef,
         header: agent_protocol::conversation::records::Header,
@@ -236,6 +241,51 @@ impl Owners {
             .map_err(|_| "conversation owner stopped before replying".to_owned())?
     }
 
+    pub(super) async fn setup(
+        self: &Arc<Self>,
+        target: &SessionRef,
+        generation: Uuid,
+        update: super::storage::workspace::SetupChange,
+        now: i64,
+    ) -> Result<bool, String> {
+        let (reply, result) = oneshot::channel();
+        self.send(
+            target,
+            Input::Write {
+                write: Write::Setup {
+                    generation,
+                    update,
+                    now,
+                },
+                reply,
+            },
+        )?;
+        let (outcome, _) = result
+            .await
+            .map_err(|_| "conversation owner stopped".to_owned())??;
+        Ok(outcome == Outcome::Accepted)
+    }
+    pub(super) fn setup_progress(
+        self: &Arc<Self>,
+        target: &SessionRef,
+        generation: Uuid,
+        update: super::storage::workspace::SetupChange,
+        now: i64,
+    ) -> Result<(), String> {
+        let (reply, _) = oneshot::channel();
+        self.send(
+            target,
+            Input::Write {
+                write: Write::Setup {
+                    generation,
+                    update,
+                    now,
+                },
+                reply,
+            },
+        )
+    }
+
     pub(super) async fn import_status(
         self: &Arc<Self>,
         target: &SessionRef,
@@ -400,6 +450,11 @@ async fn run(
                 let records = storage.clone();
                 let scope = target.clone();
                 let result = tokio::task::spawn_blocking(move || match write {
+                    Write::Setup {
+                        generation,
+                        update,
+                        now,
+                    } => records.setup(&scope, generation, update, now),
                     Write::Discover {
                         source,
                         header,

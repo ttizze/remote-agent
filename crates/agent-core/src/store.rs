@@ -464,6 +464,7 @@ impl Store {
                 language: snapshot.catalog.ui_language,
                 contrast: None,
                 composer: snapshot.input.composer_preferences,
+                web_link_target: snapshot.catalog.web_link_target,
             })
         });
         let mut device_updates = preferences.subscribe();
@@ -1097,6 +1098,7 @@ fn adopt_preferences(snapshot: &mut Arc<Snapshot>, preferences: &Preferences) ->
         && snapshot.files.preferred_editor == preferences.editor.preferred
         && snapshot.catalog.ui_language == preferences.language
         && snapshot.input.composer_preferences == preferences.composer
+        && snapshot.catalog.web_link_target == preferences.web_link_target
     {
         return false;
     }
@@ -1105,6 +1107,7 @@ fn adopt_preferences(snapshot: &mut Arc<Snapshot>, preferences: &Preferences) ->
     snapshot.files.preferred_editor = preferences.editor.preferred;
     snapshot.catalog.ui_language = preferences.language;
     snapshot.input.composer_preferences = preferences.composer;
+    snapshot.catalog.web_link_target = preferences.web_link_target;
     true
 }
 
@@ -2077,6 +2080,7 @@ mod tests {
             });
         let scheduled = Scheduled::new(
             Effect::execute(op::StartTerminal {
+                command: None,
                 handle: "terminal".into(),
                 cwd: "/fixture".into(),
                 size: agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },
@@ -2140,6 +2144,7 @@ mod tests {
                     discard_draft: false,
                 }),
                 Effect::execute(op::ReviewWorkspace {
+                    base_ref: None,
                     cwd: "/fixture".into(),
                 }),
             ] {
@@ -2461,8 +2466,15 @@ mod tests {
                     ..Default::default()
                 }),
             );
-            let mut effect = op::resolve_saved_input(&snapshot, &input, restore).unwrap();
-            effect.operation.prepare(&mut snapshot, "").unwrap();
+            let thread = snapshot.sessions.conversations[&session].as_ref().clone();
+            crate::test_conversations::open(
+                &mut snapshot,
+                crate::models::ThreadResponse {
+                    thread,
+                    ..Default::default()
+                },
+            );
+            let mut effect = op::resolve_saved_input(&mut snapshot, &input, restore).unwrap();
             effect.operation.capture(&snapshot, "");
             let ((client, _events), mut reader, writer) =
                 host_fixture::connect(&Snapshot::default()).await;
@@ -2491,7 +2503,7 @@ mod tests {
                         CommandOutcome::Rejected("already resolved".into())
                     },
                     cursor: agent_protocol::sync::Cursor {
-                        store: uuid::Uuid::new_v4(),
+                        store: uuid::Uuid::from_u128(1),
                         sequence: 2,
                     },
                 };

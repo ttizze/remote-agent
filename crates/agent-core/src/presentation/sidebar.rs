@@ -4,6 +4,12 @@
 //! goes somewhere from it. The two keep their own open state, so a window
 //! that narrows and widens again finds each as it was.
 
+mod projects;
+pub use projects::{
+    ProjectKey, ProjectReveal, ProjectRoute, matching_projects, order_projects, resolve_projects,
+    scoped_list, select_projects, widens_scope,
+};
+
 /// The narrowest window that keeps the sidebar beside the content (T3's
 /// `max-md` breakpoint, `(max-width: 767px)`).
 pub const SHEET_BREAKPOINT: f32 = 768.;

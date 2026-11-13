@@ -309,7 +309,8 @@ fn prepared(
         );
     };
     let next_stage = match stage {
-        PreparationStage::Workspace | PreparationStage::Worktree => {
+        PreparationStage::Worktree => Some(PreparationStage::SetupScript),
+        PreparationStage::Workspace | PreparationStage::SetupScript => {
             Some(PreparationStage::Provider)
         }
         PreparationStage::Provider => None,
@@ -317,7 +318,9 @@ fn prepared(
     let workspace = match stage {
         // The default chat directory is already prepared. Only an explicitly
         // selected folder goes through automatic worktree creation.
-        PreparationStage::Workspace | PreparationStage::Worktree => Workspace::Ready(cwd.clone()),
+        PreparationStage::Workspace
+        | PreparationStage::Worktree
+        | PreparationStage::SetupScript => Workspace::Ready(cwd.clone()),
         PreparationStage::Provider => {
             if state.thread.workspace.cwd() != Some(cwd.as_str()) {
                 return preparation_failed(

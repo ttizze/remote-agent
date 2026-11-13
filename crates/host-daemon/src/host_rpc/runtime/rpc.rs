@@ -341,6 +341,22 @@ impl Runtime {
             return Ok(());
         }
         let agent = service.creation_agent(request.provider, request.selection.model.as_ref())?;
+        let project_cwd = request.cwd.clone().unwrap_or_else(|| {
+            service
+                .inner
+                .projects
+                .chat_directory()
+                .to_string_lossy()
+                .into_owned()
+        });
+        let strategy = request.workspace.clone().or_else(|| {
+            request
+                .cwd
+                .is_none()
+                .then_some(agent_protocol::workspace::WorkspaceStrategy::Root)
+        });
+        let mut workspace = service.workspace_preparation(project_cwd, strategy).await?;
+        workspace.visible &= request.initial.is_some();
         let header = records::Header {
             state: decision::Thread {
                 name: String::new(),
@@ -353,6 +369,7 @@ impl Runtime {
                 queue_held: false,
             },
             details: records::Details {
+                workspace: Some(workspace),
                 selection: request.selection.clone(),
                 capabilities: records::capabilities(agent.capabilities()),
                 updated_at: now(),

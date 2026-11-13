@@ -41,8 +41,19 @@ impl Selection {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspacePreparation {
+    pub project_cwd: String,
+    pub strategy: Option<crate::workspace::WorkspaceStrategy>,
+    pub generation: uuid::Uuid,
+    pub setup: Option<crate::workspace::WorkspaceSetup>,
+    pub visible: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Details {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspacePreparation>,
     pub parent: Option<SessionRef>,
     pub selection: Selection,
     pub capabilities: Capabilities,
@@ -369,6 +380,8 @@ fn validate_opened(expected: &SessionRef, output: &Opened) -> Result<(), &'stati
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Create {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::workspace::WorkspaceStrategy>,
     pub session: SessionRef,
     pub provider: crate::session::ProviderKind,
     pub subscription: uuid::Uuid,
@@ -395,6 +408,9 @@ impl crate::operations::RpcMethod for Create {
 impl Create {
     pub fn validate_creation(&self) -> Result<(), &'static str> {
         self.session.validate()?;
+        if let Some(workspace) = &self.workspace {
+            workspace.validate()?;
+        }
         if self.session.provider.is_some() {
             return Err("new conversations require a provider-independent UUID");
         }

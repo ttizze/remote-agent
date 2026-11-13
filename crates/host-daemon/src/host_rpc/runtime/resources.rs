@@ -532,6 +532,7 @@ impl Runtime {
                 .await
         }
         .await;
+        let input = id.clone();
         let event = match result {
             Ok(receipt) => Event::Delivered {
                 native_turn: receipt.turn_id,
@@ -549,6 +550,34 @@ impl Runtime {
             }
         };
         Self::event(service, target, event).await?;
+        if let Some(workspace) = runtime.storage.header(target)?.details.workspace {
+            use super::super::storage::workspace::SetupChange;
+            use agent_protocol::workspace::{SetupPhase, SetupStageId, SetupStageStatus};
+            let state = runtime.storage.state(target)?;
+            let update = match state.inputs.get(&input).map(|input| &input.state) {
+                None => Some(SetupChange::Stage {
+                    id: SetupStageId::Agent,
+                    status: SetupStageStatus::Done,
+                    exit_code: None,
+                }),
+                Some(decision::InputState::Failed(error)) => Some(SetupChange::Finish {
+                    phase: SetupPhase::Failed,
+                    error: Some(error.message.clone()),
+                }),
+                Some(decision::InputState::Unknown { .. }) => Some(SetupChange::Finish {
+                    phase: SetupPhase::Failed,
+                    error: Some("入力の配送結果を確認できません。".into()),
+                }),
+                _ => None,
+            };
+            if let Some(update) = update {
+                service
+                    .setup_update(target, workspace.generation, update)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+
         Ok(())
     }
 
@@ -933,8 +962,19 @@ mod tests {
                 }
             }
             if case == "disabled" {
-                crate::providers::Settings::new(directory.path().join("bex-providers.json"))
-                    .set_enabled(ProviderKind::Codex, false)
+                let client = service.open_session();
+                let _: agent_protocol::providers::ProviderSettings =
+                    super::super::native_fixture::call(
+                        &service,
+                        client.id(),
+                        agent_protocol::protocol::Call::SetProviderEnabled(
+                            agent_protocol::providers::SetProviderEnabled {
+                                provider: ProviderKind::Codex,
+                                enabled: false,
+                            },
+                        ),
+                    )
+                    .await
                     .unwrap();
             }
             let effect = Effect {
@@ -996,7 +1036,8 @@ mod tests {
                         "Native continuation is unavailable"
                     } else {
                         "original overload"
-                    }
+                    },
+                    "case {case}"
                 );
             }
         }
