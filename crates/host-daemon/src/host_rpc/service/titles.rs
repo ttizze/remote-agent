@@ -680,16 +680,17 @@ mod tests {
         };
         let public = session(10);
         let active = session(1);
-        for (id, entrypoint, title) in [
-            (1, "sdk-ts", "NSH user conversation"),
-            (2, "sdk-ts", "NSH message text sizing"),
-            (3, "sdk-py", "NSH automated analysis"),
-            (4, "sdk-cli", "NSH CLI review"),
-            (5, "cli", "NSH terminal conversation"),
+        for (id, entrypoint, source, title) in [
+            (1, "sdk-ts", "sdk", "NSH user conversation"),
+            (2, "sdk-ts", "sdk", "NSH message text sizing"),
+            (3, "sdk-py", "sdk", "NSH automated analysis"),
+            (4, "sdk-cli", "sdk", "NSH CLI review"),
+            (5, "cli", "cli", "NSH terminal conversation"),
+            (6, "t3-code", "sdk", "NSH custom entrypoint review"),
         ] {
             let id = session(id).id;
             let rows = [
-                serde_json::json!({"type":"user","sessionId":id,"cwd":cwd,"entrypoint":entrypoint,"promptSource":"sdk","message":{"content":title}}),
+                serde_json::json!({"type":"user","sessionId":id,"cwd":cwd,"entrypoint":entrypoint,"promptSource":source,"message":{"content":title}}),
                 serde_json::json!({"type":"ai-title","sessionId":id,"aiTitle":title}),
             ].map(|row| row.to_string() + "\n").concat();
             std::fs::write(transcripts.join(format!("{id}.jsonl")), rows).unwrap();
@@ -749,7 +750,12 @@ mod tests {
                 side_chat = Some(id);
             }
             let snapshot = service.project_snapshot().await.unwrap();
-            for search in ["", "NSH", "NSH message text sizing"] {
+            for search in [
+                "",
+                "NSH",
+                "NSH message text sizing",
+                "NSH custom entrypoint review",
+            ] {
                 let page = service
                     .host_title_list(
                         search,
@@ -766,7 +772,10 @@ mod tests {
                     .into_iter()
                     .map(|thread| thread.id.unwrap())
                     .collect();
-                let expected = if search == "NSH message text sizing" {
+                let expected = if matches!(
+                    search,
+                    "NSH message text sizing" | "NSH custom entrypoint review"
+                ) {
                     std::collections::HashSet::new()
                 } else {
                     [public.clone(), session(5), side_chat.clone().unwrap()]
