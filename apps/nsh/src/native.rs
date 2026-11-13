@@ -269,5 +269,3 @@ pub fn date_time(seconds: i64) -> String {
         })
         .unwrap_or_else(|| seconds.to_string())
 }
-#[cfg(all(target_os = "macos", debug_assertions))]
-mod conversation_macos;

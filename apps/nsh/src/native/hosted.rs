@@ -19,7 +19,6 @@ struct Bridge {
     view: unsafe extern "C" fn(*mut c_void) -> *mut PlatformView,
     update: unsafe extern "C" fn(*mut c_void, *const u8, isize),
     release: unsafe extern "C" fn(*mut c_void),
-    command: Option<unsafe extern "C" fn(*mut c_void, *const u8, isize)>,
 }
 impl Bridge {
     fn load(prefix: &str) -> Result<Self, String> {
@@ -29,7 +28,6 @@ impl Bridge {
                 view: super::apple::symbol(format!("{prefix}_view\0").as_bytes())?,
                 update: super::apple::symbol(format!("{prefix}_update\0").as_bytes())?,
                 release: super::apple::symbol(format!("{prefix}_release\0").as_bytes())?,
-                command: super::apple::symbol(format!("{prefix}_command\0").as_bytes()).ok(),
             })
         }
     }
@@ -52,14 +50,7 @@ unsafe extern "C" fn event(context: *mut c_void, bytes: *const u8, count: isize)
     let context = unsafe { &*context.cast::<ComponentContext>() };
     let bytes = unsafe { std::slice::from_raw_parts(bytes, count as usize) };
     if let Ok(value) = serde_json::from_slice::<JsonValue>(bytes) {
-        if let Some(height) = value["measuredHeight"].as_f64() {
-            let width = value["measuredWidth"].as_f64().unwrap_or(0.0);
-            if height.is_finite() && height >= 0.0 && width.is_finite() && width >= 0.0 {
-                context.set_size(width as f32, height as f32);
-            }
-        } else {
-            context.emit("action", value);
-        }
+        context.emit("action", value);
     }
 }
 pub(super) struct Hosted {
@@ -121,14 +112,6 @@ impl NativeComponent for Hosted {
                     data.len() as isize,
                 );
             }
-        }
-    }
-    fn command(&mut self, name: &str, args: &JsonValue) {
-        if let Some(resource) = &self.resource
-            && let Some(command) = resource.bridge.command
-            && let Ok(data) = serde_json::to_vec(&serde_json::json!({"name": name, "args": args}))
-        {
-            unsafe { command(resource.handle.as_ptr(), data.as_ptr(), data.len() as isize) };
         }
     }
 }

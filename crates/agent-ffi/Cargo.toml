@@ -16,4 +16,4 @@ nsh-conversation = ["dep:agent-nsh"]
 agent-core = { path = "../agent-core", features = ["bindings"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-agent-nsh = { path = "../../apps/nsh", features = ["standard-text"], optional = true }
+agent-nsh = { path = "../../apps/nsh", optional = true }

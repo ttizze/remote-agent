@@ -15,36 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 mod copy_tests;
-#[cfg(any(all(target_os = "macos", debug_assertions), test))]
-pub(crate) mod native;
 mod preparation;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Renderer {
-    Hybrid,
-    Native,
-    Nsh,
-    Standard,
-}
-
-impl Renderer {
-    fn named(name: Option<&str>) -> Self {
-        match name {
-            Some("native") => Self::Native,
-            Some("nsh") => Self::Nsh,
-            Some("standard") => Self::Standard,
-            _ if cfg!(feature = "standard-text") => Self::Standard,
-            _ => Self::Hybrid,
-        }
-    }
-}
-
-pub(crate) fn renderer() -> Renderer {
-    #[cfg(all(target_os = "macos", debug_assertions))]
-    return Renderer::named(std::env::var("BEX_CONVERSATION_RENDERER").ok().as_deref());
-    #[cfg(not(all(target_os = "macos", debug_assertions)))]
-    Renderer::named(None)
-}
 
 /// T3 Code's timeline as its dark theme draws it.
 pub(crate) mod look {
@@ -642,10 +613,6 @@ impl Timeline {
     /// Brings a row into view.
     pub(crate) fn reveal(self, row: usize) {
         self.following.set(false);
-        if renderer() == Renderer::Native {
-            self.list.command("reveal", serde_json::json!({"row": row}));
-            return;
-        }
         reveal_row(self.list, row as u32);
     }
 
@@ -678,8 +645,6 @@ impl Timeline {
                     })
                     .unwrap_or_default()
             });
-            #[cfg(all(target_os = "macos", debug_assertions))]
-            crate::acceptance::rows_ready(projected.len());
             Shared(std::sync::Arc::new(projected))
         });
         Self {
@@ -713,20 +678,13 @@ impl Timeline {
     }
 
     pub(crate) fn list(self) -> AnyElement {
-        #[cfg(all(target_os = "macos", debug_assertions))]
-        if renderer() == Renderer::Native {
-            return native::view(self).into_element();
-        }
         list(self).into_element()
     }
 
     /// T3 Code's minimap at the leading edge of the conversation, beside its
     /// timeline and composer, on a canvas `canvas` points wide.
     pub(crate) fn minimap(self, canvas: impl Fn() -> f32 + Copy + 'static) -> impl IntoElement {
-        when(
-            move || is_desktop() && renderer() != Renderer::Native,
-            move || minimap(self, canvas),
-        )
+        when(is_desktop, move || minimap(self, canvas))
     }
 }
 

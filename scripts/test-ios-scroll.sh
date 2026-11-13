@@ -72,4 +72,3 @@ run_test apps/mobile/iosApp/UITests/Fixtures/navigation-tests.swift apps/mobile/
 run_test apps/mobile/iosApp/UITests/Fixtures/scroll-tests.swift apps/mobile/iosApp/Bex/ConversationList.swift apps/mobile/iosApp/Bex/ConversationListLayout.swift
 run_test apps/mobile/iosApp/UITests/Fixtures/text-view-tests.swift apps/mobile/iosApp/Bex/ConversationTextLayout.swift apps/mobile/iosApp/Bex/ConversationTextDiagnostics.swift
 run_test apps/mobile/iosApp/UITests/Fixtures/text-view-tests.swift --dev apps/mobile/iosApp/Bex/ConversationTextLayout.swift apps/mobile/iosApp/Bex/ConversationTextDiagnostics.swift
-run_test apps/nsh/apple/Tests/Fixtures/message-layout-tests.swift apps/nsh/apple/Sources/BexNshNative/MessageAttributes.swift apps/nsh/apple/Sources/BexNshNative/MessageText.swift

@@ -416,7 +416,7 @@ pub(crate) async fn scenario(
 /// A process of the scenario that sees none of the shell's `AGENT_*` or `BEX_*`
 /// settings, which can name an installed app's runtime, Host or state. Its
 /// runtime (the Claude SDK bridge, Node and the provider supervisor) is the
-/// freshly built app's. Only the debug conversation renderer is forwarded.
+/// freshly built app's.
 fn isolated(program: &Path, tools: &Tools) -> Command {
     let mut command = Command::new(program);
     for (name, _) in std::env::vars_os() {
@@ -426,11 +426,6 @@ fn isolated(program: &Path, tools: &Tools) -> Command {
         {
             command.env_remove(name);
         }
-    }
-    if program == tools.app
-        && let Some(preview) = std::env::var_os("BEX_CONVERSATION_RENDERER")
-    {
-        command.env("BEX_CONVERSATION_RENDERER", preview);
     }
     let runtime = tools
         .app

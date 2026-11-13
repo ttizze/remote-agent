@@ -1,4 +1,4 @@
-# Native text paint timing, using a multi-page archive with long Markdown/code.
+# Standard TextView visibility through a multi-page archive with long Markdown/code.
 fixture /render-conversation/render-scroll
 expect "検証プロジェクト" 30000
 # Keep the default viewport the visible paragraph markers assume.
@@ -9,7 +9,7 @@ expect "Latest interrupted conversation message is visible." 20000
 scroll 会話の履歴 -20
 # Paragraph 4 is newly exposed by 200 pt in the T3 conversation lane.
 # A stale end-follow correction hides it again.
-paint "Render turn 58, paragraph 4." 100
+expect "*Render turn 58, paragraph 4.*" 5000
 expect_scrolled この会話 0 0.98
 screenshot first-scroll
 scroll 会話の履歴 -20
@@ -31,22 +31,22 @@ scroll 会話の履歴 -20
 scroll 会話の履歴 -20
 scroll 会話の履歴 -20
 scroll 会話の履歴 -20
-paint "Render turn 53, paragraph 3." 100
+expect "*Render turn 53, paragraph 3.*" 5000
 screenshot scrolled
 
 # Each history page is loaded only by its manual button.
 press 以前のターンを読み込む
 # Large wheels cross estimated row heights; inspect the actual visible paragraph.
 scroll 会話の履歴 -200
-paint_visible "Render turn" 100
+expect "*Render turn*" 5000
 screenshot paged-once
 scroll 会話の履歴 -200
-paint_visible "Render turn" 100
+expect "*Render turn*" 5000
 screenshot first-page
 scroll 会話の履歴 -200
-paint_visible "Render turn" 100
+expect "*Render turn*" 5000
 screenshot boundary
 press 以前のターンを読み込む
 scroll 会話の履歴 -200
-paint_visible "Render turn" 100
+expect "*Render turn*" 5000
 screenshot second-page

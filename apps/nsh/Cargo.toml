@@ -5,10 +5,6 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[features]
-# Build the preview with NSH's standard message TextView on every platform.
-standard-text = []
-
 [dependencies]
 agent-core = { path = "../../crates/agent-core", features = ["bindings", "diagrams"] }
 agent-local-host = { path = "../../crates/agent-local-host" }

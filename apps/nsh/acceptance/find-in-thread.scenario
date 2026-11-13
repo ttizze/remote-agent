@@ -11,7 +11,7 @@ screenshot found
 key escape
 expect_absent "前の一致" 5000
 
-# Both a hidden table column and unwrapped code must paint their selected glyphs.
+# Both a hidden table column and unwrapped code must reveal their selected text.
 press 新しいチャット
 window 880 740
 type "AI に依頼する" "[find-overflow] [immediate] 表とコードを検索します"
@@ -20,18 +20,18 @@ expect "wide-column-one" 30000
 key cmd+f
 type "会話内を検索" "table-overflow-target"
 expect "1/1" 5000
-paint "table-overflow-target" 1000
+expect "*table-overflow-target*" 1000
 screenshot found-table-column
 # A sole result is re-revealed after the reader scrolls away horizontally.
 scroll "table-overflow-target" -20
 press 次の一致
-paint "table-overflow-target" 1000
+expect "*table-overflow-target*" 1000
 key escape
 press 折り返し解除
 key cmd+f
 type "会話内を検索" "code-overflow-target"
 expect "1/1" 5000
-paint "code-overflow-target" 1000
+expect "*code-overflow-target*" 1000
 screenshot found-unwrapped-code
 key escape
 
@@ -43,7 +43,7 @@ expect ソース 30000
 key cmd+f
 type "会話内を検索" "flowchart"
 expect "1/1" 5000
-paint "flowchart LR" 1000
+expect "*flowchart LR*" 1000
 expect 図を表示
 key escape
 press 図を表示

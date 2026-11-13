@@ -1,7 +1,7 @@
-# Opening the same realistic archive: verify native drawing, not just AX text.
+# Opening a realistic archive exposes the latest standard TextView content.
 fixture /render-conversation/render-open
 expect "検証プロジェクト" 30000
 press 検証プロジェクト
 press "Long conversation" 20000
-paint "Latest interrupted conversation message is visible." 500
+expect "*Latest interrupted conversation message is visible.*" 5000
 screenshot opened

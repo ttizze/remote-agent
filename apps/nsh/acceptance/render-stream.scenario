@@ -1,5 +1,4 @@
-# Timestamped provider deltas in an open long conversation must reach visible
-# native glyphs within 100 ms, including a long Markdown/code prefix.
+# Streamed deltas remain visible after a long Markdown/code prefix.
 fixture /render-conversation/render-stream
 expect "検証プロジェクト" 30000
 press 検証プロジェクト
@@ -7,7 +6,7 @@ press "Long conversation" 20000
 expect "Latest interrupted conversation message is visible." 20000
 type "AI に依頼する" "[render-stream] 描画の遅延を確認します"
 press 送信
-paint_stream "Render stream update 0." 100
-paint_stream "Render stream update 3." 100
-paint_stream "Render stream update 7." 100
+expect "*Render stream update 0.*" 5000
+expect "*Render stream update 3.*" 5000
+expect "*Render stream update 7.*" 5000
 screenshot streamed

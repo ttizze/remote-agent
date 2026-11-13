@@ -10,38 +10,6 @@ mod script;
 #[cfg(target_os = "macos")]
 mod driver;
 
-#[cfg(target_os = "macos")]
-static ROWS: std::sync::Mutex<Option<(usize, f64)>> = std::sync::Mutex::new(None);
-
-/// When this fixture's current row count first became available to the engine.
-#[cfg(target_os = "macos")]
-pub(crate) fn rows_available(count: usize) -> Option<f64> {
-    ROWS.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .filter(|(rows, _)| *rows == count)
-        .map(|(_, at)| at)
-}
-
-/// Engine-side availability, before the native mount/measurement handshake.
-#[cfg(target_os = "macos")]
-pub(crate) fn rows_ready(count: usize) {
-    use std::io::Write;
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ENABLED.get_or_init(|| std::env::var_os("BEX_ACCEPTANCE_OUTPUT").is_some()) {
-        let at = objc2_foundation::NSDate::timeIntervalSinceReferenceDate_class();
-        {
-            let mut ready = ROWS.lock().unwrap_or_else(|e| e.into_inner());
-            if ready.is_none_or(|(rows, _)| rows != count) {
-                *ready = Some((count, at));
-            }
-        }
-        let fields = serde_json::json!({"at": at, "count": count});
-        let _ = std::io::stderr()
-            .lock()
-            .write_all(format!("render-rows {fields}\n").as_bytes());
-    }
-}
-
 /// Starts the scenario the environment names, if any. The flag says whether it
 /// passed once the app's event loop returns.
 #[cfg(target_os = "macos")]
