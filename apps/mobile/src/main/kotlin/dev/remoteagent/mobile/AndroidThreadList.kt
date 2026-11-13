@@ -61,7 +61,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ListQuery
-import dev.remoteagent.core.ListSessions
 import dev.remoteagent.core.ProjectIconImages
 import dev.remoteagent.core.ProjectSummary
 import dev.remoteagent.core.ReadThread
@@ -88,7 +87,7 @@ internal fun ThreadListScreen(
     fun closeSearch() {
         search = null
         focusManager.clearFocus()
-        perform(Intent.ListSessions(ListSessions(query = query.copy(searchTerm = ""))), null)
+        perform(Intent.ListSessions(query.copy(searchTerm = "")), null)
     }
     BackHandler(enabled = search != null) { closeSearch() }
     var selectedTab by rememberSaveable { mutableStateOf(0) }
@@ -103,7 +102,7 @@ internal fun ThreadListScreen(
             .collectLatest { term ->
                 if (term != null) {
                     kotlinx.coroutines.delay(SEARCH_DEBOUNCE_MILLIS)
-                    dispatch(Intent.ListSessions(ListSessions(query = currentQuery.copy(searchTerm = term))), null)
+                    dispatch(Intent.ListSessions(currentQuery.copy(searchTerm = term)), null)
                 }
             }
     }
@@ -112,7 +111,7 @@ internal fun ThreadListScreen(
             search = search,
             loadingThreads = loadingThreads,
             changeSearch = { if (it == null) closeSearch() else search = it },
-            refresh = { perform(Intent.ListSessions(ListSessions(query = query)), null) },
+            refresh = { perform(Intent.ListSessions(query), null) },
             title = title,
         )
         if (emptyContent != null) {

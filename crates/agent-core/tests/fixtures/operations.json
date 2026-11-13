@@ -374,19 +374,17 @@
       }
     ],
     "result": {
-      "item": {
-        "id": "item-1",
-        "status": "completed",
-        "clientInputId": null,
-        "body": {
-          "inline": {
-            "body": {
-              "commandExecution": {
-                "command": "cat log",
-                "cwd": null,
-                "output": "first\nlast",
-                "exitCode": null
-              }
+      "id": "item-1",
+      "status": "completed",
+      "clientInputId": null,
+      "body": {
+        "inline": {
+          "body": {
+            "commandExecution": {
+              "command": "cat log",
+              "cwd": null,
+              "output": "first\nlast",
+              "exitCode": null
             }
           }
         }

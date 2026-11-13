@@ -234,6 +234,18 @@ mod tests {
         assert!(uncertain.cancel.is_none());
         assert!(uncertain.retry.is_none());
         assert!(uncertain.work_locally.is_none());
+        for status in [
+            PreparationStatus::Interrupted,
+            PreparationStatus::Failed {
+                error: Default::default(),
+            },
+        ] {
+            source.preparations.first_mut().unwrap().status = status;
+            let stopped = project(UiLanguage::English, &source, &setup);
+            assert!(stopped.retry.is_some());
+            assert!(stopped.work_locally.unwrap().work_locally);
+            assert!(stopped.cancel.is_none());
+        }
     }
 
     #[test]

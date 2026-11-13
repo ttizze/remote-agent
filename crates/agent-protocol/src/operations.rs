@@ -184,12 +184,6 @@ pub fn validate_thread(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ItemResponse {
-    pub item: crate::models::Item,
-    pub transfer: Option<crate::models::TransferGrant>,
-}
-
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct ListModels {
     pub provider: crate::session::ProviderKind,

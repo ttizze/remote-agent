@@ -31,7 +31,6 @@ import dev.remoteagent.core.ConversationRows
 import dev.remoteagent.core.DevicePreferences
 import dev.remoteagent.core.ErrorScope
 import dev.remoteagent.core.Intent
-import dev.remoteagent.core.ListSessions
 import dev.remoteagent.core.OperationKey
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.PanelScope
@@ -581,7 +580,7 @@ internal class AndroidAppModel(private val context: Context, private val prefere
 internal fun AndroidAppModel.showThreads() {
     screen = Screen.Threads
     perform(Intent.ShowThreadList)
-    performList(Intent.ListSessions(ListSessions(query = snapshot.listQuery())))
+    performList(Intent.ListSessions(snapshot.listQuery()))
 }
 
 internal fun AndroidAppModel.showHosts() {

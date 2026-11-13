@@ -567,7 +567,7 @@ pub(super) fn write(
         Change::Input(value)
             if matches!(
                 value.state,
-                InputState::Failed(_) | InputState::Queued { .. }
+                InputState::Failed { .. } | InputState::Queued { .. }
             ) =>
         {
             Some(&value.id)

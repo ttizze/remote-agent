@@ -23,7 +23,7 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(60);
 pub(super) struct Subscriptions {
     activity: Mutex<Activity>,
     /// Held across subscription requests so a release cannot overtake a resume.
-    released: tokio::sync::Mutex<HashSet<String>>,
+    access: tokio::sync::Mutex<()>,
     scopes: Arc<crate::providers::scopes::Scopes>,
     processed: tokio::sync::watch::Receiver<u64>,
     stopped: CancellationToken,
@@ -36,7 +36,7 @@ impl Subscriptions {
     ) -> Self {
         Self {
             activity: Default::default(),
-            released: Default::default(),
+            access: Default::default(),
             scopes,
             processed,
             stopped,
@@ -62,14 +62,13 @@ impl Subscriptions {
         reload: bool,
         resume: impl Future<Output = Result<(), Failure>>,
     ) -> Result<(), Failure> {
-        let mut released = self.released.lock().await;
+        let _access = self.access.lock().await;
         let subscribed = lock(&self.activity)
             .threads
             .get(id)
             .is_some_and(|thread| thread.subscribed);
-        if reload || released.contains(id) || !subscribed {
+        if reload || !subscribed {
             resume.await?;
-            released.remove(id);
         }
         self.touch(id);
         Ok(())
@@ -81,7 +80,7 @@ impl Subscriptions {
         id: &str,
         only_idle: bool,
     ) -> Result<(), String> {
-        let mut released = self.released.lock().await;
+        let _access = self.access.lock().await;
         if only_idle && !lock(&self.activity).releasable(id, Instant::now()) {
             return Ok(());
         }
@@ -101,7 +100,6 @@ impl Subscriptions {
         for source in lock(&self.activity).tree_ids(id) {
             self.scopes.forget(&source);
         }
-        released.insert(id.to_owned());
         lock(&self.activity).forget(id);
         Ok(())
     }

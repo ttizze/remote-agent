@@ -351,28 +351,26 @@ impl Runtime {
         };
         let reused = reusable.is_some();
         let covered = reusable.as_ref().map_or(0, |(_, covered)| *covered);
-        // Hydrate the exact rows that will cross the provider boundary. A
-        // summary is enough for display, but cannot replace message history.
-        let (history, missing_message) = Self::handoff_history(service, target, covered).await?;
-        if missing_message
-            || history
+        // Native forks retain their context. Only portable handoff needs bodies.
+        let mut messages = if fork.is_none() {
+            let (history, missing_message) =
+                Self::handoff_history(service, target, covered).await?;
+            if missing_message {
+                return Err(Failure::new(
+                    "incomplete_history",
+                    "会話の履歴を読み込めませんでした。",
+                ));
+            }
+            history
                 .thread
-                .history_read_state
-                .as_ref()
-                .is_some_and(|state| {
-                    matches!(
-                        state.kind,
-                        agent_protocol::session::HistoryReadKind::Loading
-                            | agent_protocol::session::HistoryReadKind::Incomplete
-                            | agent_protocol::session::HistoryReadKind::Unavailable
-                    )
-                })
-        {
-            return Err(Failure::new(
-                "incomplete_history",
-                "会話の履歴を読み込めませんでした。",
-            ));
-        }
+                .turns
+                .iter()
+                .flatten()
+                .flat_map(|turn| agent_protocol::handoff::Message::from_turn(turn))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let browser = service.browser_config(&target.to_string())?;
         // A newly created private source must be recorded before discovery can
         // publish that same native identity as a separate public conversation.
@@ -434,15 +432,8 @@ impl Runtime {
             return Err(Failure::new("preparation_cancelled","input preparation is no longer current"));
         }
         Self::release_inactive_sources(service,target,id,action,provider).await?;
-        let mut messages: Vec<_> = history
-            .thread
-            .turns
-            .iter()
-            .flatten()
-            .flat_map(|turn| agent_protocol::handoff::Message::from_turn(turn))
-            .collect();
         let mut inline = previous_context;
-        if fork.is_none() && !messages.is_empty() {
+        if !messages.is_empty() {
             if let Some(previous) = &inline {
                 let mut pending = previous.messages.clone();
                 pending.append(&mut messages);
@@ -595,7 +586,18 @@ impl Runtime {
             }
         };
         Self::event(service, target, event).await?;
-        if let Some(workspace) = runtime.storage.header(target)?.details.workspace {
+        if let Some(workspace) =
+            runtime
+                .storage
+                .header(target)?
+                .details
+                .workspace
+                .filter(|workspace| {
+                    workspace.setup.as_ref().is_some_and(|setup| {
+                        setup.phase == agent_protocol::workspace::SetupPhase::Running
+                    })
+                })
+        {
             use super::super::storage::workspace::SetupChange;
             use agent_protocol::workspace::{SetupPhase, SetupStageId, SetupStageStatus};
             let saved = runtime.storage.input(target, &input)?;
@@ -606,9 +608,13 @@ impl Runtime {
                     exit_code: None,
                     error: None,
                 }),
-                Some(decision::InputState::Failed(error)) => Some(SetupChange::Finish {
-                    phase: SetupPhase::Failed,
-                    error: Some(error.message.clone()),
+                Some(decision::InputState::Failed { error, .. }) => Some(SetupChange::Finish {
+                    phase: if error.is_some() {
+                        SetupPhase::Failed
+                    } else {
+                        SetupPhase::Cancelled
+                    },
+                    error: error.as_ref().map(|error| error.message.clone()),
                 }),
                 Some(decision::InputState::Unknown { .. }) => Some(SetupChange::Finish {
                     phase: SetupPhase::Failed,
@@ -810,6 +816,7 @@ impl Runtime {
         token: Uuid,
         answer: Answer,
     ) -> Result<(), String> {
+        let _workspace = service.inner.worktree_access.read().await;
         let runtime = &service.inner.conversation;
         let source = runtime.source(target, &attempt);
         let _io = source.io.lock().await;
@@ -829,7 +836,9 @@ impl Runtime {
             .get(&id)
             .filter(|request| request.target == *target && request.attempt == attempt)
             .map(|request| (request.origin.clone(), request.body.clone()));
-        let result = if let Some((origin, body)) = request {
+        let result = if service.require_not_updating().is_err() {
+            Err(agent_protocol::error::Delivery::NotSent)
+        } else if let Some((origin, body)) = request {
             match origin
                 .source
                 .prepare(&origin.native_id, &body, &answer)

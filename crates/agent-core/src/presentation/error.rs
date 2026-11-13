@@ -194,7 +194,7 @@ impl Snapshot {
             | OperationKey::ListSearch
             | OperationKey::ListDecorations { .. } => (
                 "会話一覧を再読み込み",
-                Intent::ListSessions(op::ListSessions::new((*self.lists.list_query).clone())),
+                Intent::ListSessions((*self.lists.list_query).clone()),
             ),
             OperationKey::SaveFile { path } => {
                 ("保存を再試行", Intent::SaveFile(op::SaveFile { path }))
@@ -1205,7 +1205,7 @@ mod notice_tests {
             ),
             (
                 OperationKey::SessionList,
-                Intent::ListSessions(op::ListSessions::new((*snapshot.lists.list_query).clone())),
+                Intent::ListSessions((*snapshot.lists.list_query).clone()),
             ),
             (
                 OperationKey::SaveFile {

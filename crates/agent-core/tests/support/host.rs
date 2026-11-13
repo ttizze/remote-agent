@@ -97,14 +97,7 @@ impl Reader {
                 continue;
             }
             if matches!(&request.call, Call::MarkSessionRead(_)) {
-                let mut send = request.send.lock().await.take().unwrap();
-                agent_transport::framing::write(
-                    &mut send,
-                    protocol::Response::Success {
-                        result: agent_protocol::models::Empty {},
-                    },
-                )
-                .await?;
+                request.acknowledge().await?;
                 continue;
             }
             // Unrelated tests configure only Codex. Model concurrency tests

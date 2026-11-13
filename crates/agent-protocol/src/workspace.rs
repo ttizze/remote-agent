@@ -1,7 +1,7 @@
 //! Workspace selection and observed preparation, independent of provider admission.
 use serde::{Deserialize, Serialize};
 
-/// Identity of a checkout owned by one preparation, retained by its cleanup job.
+/// Identity of a checkout owned by one preparation, retained by its cancellation action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatedWorktree {
     pub path: String,

@@ -2898,15 +2898,11 @@ mod tests {
         // out of order after newer work has already been published.
         let older = apply(
             &publications,
-            Event::Intent(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            ))),
+            Event::Intent(Intent::ListSessions(Default::default())),
         );
         let newer = apply(
             &publications,
-            Event::Intent(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            ))),
+            Event::Intent(Intent::ListSessions(Default::default())),
         );
         let mut receipts = Vec::new();
         for effects in [newer, older] {

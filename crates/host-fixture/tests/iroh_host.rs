@@ -420,7 +420,7 @@ async fn simultaneous_clients_share_one_request_and_only_one_valid_answer_wins()
         );
         let session=serde_json::from_value(id.clone()).unwrap();
         let request_id=serde_json::from_value(a["id"].clone()).unwrap();
-        assert!(conversations::command(&first.peer,&session,agent_protocol::conversation::Command::Answer {
+        assert!(conversations::command(&first.peer,&session, uuid::Uuid::new_v4(),agent_protocol::conversation::Command::Answer {
             id:request_id,answer:agent_protocol::requests::Answer::Approval {choice_id:"invalid".into()},
         }).await.is_err());
         let answer=agent_protocol::conversation::Command::Answer {
@@ -428,8 +428,8 @@ async fn simultaneous_clients_share_one_request_and_only_one_valid_answer_wins()
             answer:agent_protocol::requests::Answer::Approval {choice_id:a["body"]["approval"]["choices"][0]["id"].as_str().unwrap().into()},
         };
         let (one,two)=tokio::join!(
-            conversations::command(&first.peer,&session,answer.clone()),
-            conversations::command(&second.peer,&session,answer),
+            conversations::command(&first.peer,&session, uuid::Uuid::new_v4(),answer.clone()),
+            conversations::command(&second.peer,&session, uuid::Uuid::new_v4(),answer),
         );
         assert_ne!(one.is_ok(), two.is_ok(), "one validated answer must win");
         for events in [&mut first_events, &mut second_events] {
@@ -1119,10 +1119,10 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
                 assert_eq!(snapshot.sessions.conversations[&id].cwd.as_deref(), root.join("bex-chats").to_str());
             }
             store.dispatch(Intent::ShowThreadList).await.unwrap();
-            store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+            store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
             if project {
                 store.dispatch(Intent::SetProjectExpanded { project_id: "default".into(), expanded: true }).await.unwrap();
-                store.dispatch(Intent::ListSessions(op::ListSessions::new((*store.snapshot().lists.list_query).clone()))).await.unwrap();
+                store.dispatch(Intent::ListSessions((*store.snapshot().lists.list_query).clone())).await.unwrap();
                 loop {
                     if updates.borrow_and_update().lists.project_threads.get("default").is_some_and(|page| page.data.iter().any(|thread| thread.id.as_ref() == Some(&id))) { break; }
                     updates.changed().await.unwrap();
@@ -1312,7 +1312,7 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
         let invitation: Invitation = local.peer.call(&op::CreateInvitation {}).await.unwrap();
         let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), Some(invitation.invitation), "Fixture device", None).await.unwrap();
-        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
         // A paired mobile client must resume without local management privileges.
         tokio::time::timeout(Duration::from_millis(500), store.resume(&endpoint, &fixture.ticket, "Fixture device")).await.unwrap().unwrap();
         store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider:Some(agent_protocol::session::ProviderKind::Codex),id:"selected".into()}.into(), text: "Unsent draft".into() }).await.unwrap();
@@ -1347,7 +1347,7 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
                 assert_eq!(item_text(&(thread.turns.as_ref().unwrap().last().unwrap().items.as_ref().unwrap()[0])), Some("History for Selected task"));
             }
             // List refresh shares the production transport but must not wait for history.
-            store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+            store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
             assert!(store.snapshot().lists.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("selected")));
             if !cached {
                 std::fs::remove_file(root.join("hold-history-reads")).unwrap();
@@ -1592,7 +1592,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
             ..Default::default()
         };
         let store = Store::new((local.peer, local.events), initial, None);
-        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
         let session = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "history".into()).unwrap();
         // The first open reads native history and imports it once.
         store.dispatch(Intent::ReadThread(op::ReadThread::new(session.clone()))).await.unwrap();
@@ -2374,17 +2374,13 @@ async fn upstream_exit_keeps_host_management_connected() {
         let local = fixture.local().await.unwrap();
         let store = Store::new((local.peer, local.events), Snapshot::default(), None);
         store
-            .dispatch(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            )))
+            .dispatch(Intent::ListSessions(Default::default()))
             .await
             .unwrap();
         assert!(store.snapshot().connection.connected);
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
         store
-            .dispatch(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            )))
+            .dispatch(Intent::ListSessions(Default::default()))
             .await
             .unwrap();
         let mut updates = store.subscribe();
@@ -2517,7 +2513,7 @@ async fn passive_approval_after(delay: Duration) {
             .unwrap();
         assert_eq!(request["id"], original["id"]);
         tokio::time::sleep(delay).await;
-        conversations::command(&passive.peer,&serde_json::from_value(id.clone()).unwrap(),agent_protocol::conversation::Command::Answer {
+        conversations::command(&passive.peer,&serde_json::from_value(id.clone()).unwrap(), uuid::Uuid::new_v4(),agent_protocol::conversation::Command::Answer {
             id:serde_json::from_value(request["id"].clone()).unwrap(),
             answer:agent_protocol::requests::Answer::Approval {choice_id:request["body"]["approval"]["choices"][0]["id"].as_str().unwrap().into()},
         }).await.unwrap();
@@ -3242,6 +3238,7 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
         conversations::command(
             &local.peer,
             active,
+            uuid::Uuid::new_v4(),
             agent_protocol::conversation::Command::Interrupt { turn: None },
         )
         .await
@@ -3588,9 +3585,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 _ => {}
             }
             store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(
-                    Default::default(),
-                )))
+                .dispatch(Intent::ListSessions(Default::default()))
                 .await
                 .unwrap();
             wait_decorations(&store).await;
@@ -3608,9 +3603,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
         }
         git(&repo, &["merge", "--no-ff", "-m", "merge task", "task"]);
         store
-            .dispatch(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            )))
+            .dispatch(Intent::ListSessions(Default::default()))
             .await
             .unwrap();
         wait_decorations(&store).await;
@@ -3627,15 +3620,13 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             Some(false)
         );
         std::fs::remove_dir(checkout.join("nested")).unwrap();
-        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
         wait_decorations(&store).await;
         assert_eq!(store.snapshot().thread_list().unwrap().threads.iter().find(|row| row.id == ids[1]).unwrap().has_changes, None);
         std::fs::create_dir(checkout.join("nested")).unwrap();
         git(&checkout, &["checkout", "--detach"]);
         store
-            .dispatch(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            )))
+            .dispatch(Intent::ListSessions(Default::default()))
             .await
             .unwrap();
         wait_decorations(&store).await;
@@ -3670,7 +3661,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 "deleted-branch" => { git(&repo, &["branch", "-d", "task"]); }
                 _ => {}
             }
-            store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+            store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
             wait_decorations(&store).await;
             let snapshot = store.snapshot();
             let list = snapshot.thread_list().unwrap();

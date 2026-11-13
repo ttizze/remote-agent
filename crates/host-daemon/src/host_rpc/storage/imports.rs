@@ -417,7 +417,7 @@ impl Storage {
                 transaction.commit().map_err(failure)?;
                 return Ok(Committed { step: Step { outcome, ..Default::default() }, cursor: sequence, rows: vec![], removed: vec![], reset: true });
             }
-            if state.active_turn().is_some_and(|turn| !turn.observed || state.attempts.contains_key(&turn.id) || response.thread.status==agent_protocol::models::SessionStatus::Running) || state.inputs.values().any(|input| !matches!(input.state, decision::InputState::Queued { .. } | decision::InputState::Failed(_))) { return Err("conversation is busy; native import will resume when it is idle".into()); }
+            if state.active_turn().is_some_and(|turn| !turn.observed || state.attempts.contains_key(&turn.id) || response.thread.status==agent_protocol::models::SessionStatus::Running) || state.inputs.values().any(|input| !matches!(input.state, decision::InputState::Queued { .. } | decision::InputState::Failed { .. })) { return Err("conversation is busy; native import will resume when it is idle".into()); }
             let caught_up = matches!(state.bindings.get(&state.thread.provider), Some(decision::Binding::Ready { covered, .. }) if *covered == state.history_end());
             let source_key = rows::source(&transaction, key, source.native_provider().map_err(failure)?, &source.id)?;
             let sequence = Self::advance(&transaction)?;

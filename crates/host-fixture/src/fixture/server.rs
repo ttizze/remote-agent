@@ -1027,7 +1027,6 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
             let Some(id) = message.get("id") else { continue };
             let method = message["method"].as_str().unwrap_or("");
             let params = &mut owned_params;
-            threads.refresh(&context.home)?;
             match method {
                 "initialize" => {
                     if params["capabilities"]["experimentalApi"] != true {
@@ -1103,8 +1102,14 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                 TURN_START => threads.start_turn(&context, id, params).await?,
                 "turn/interrupt" | "turn/steer" => threads.control_turn(&context, id, method, params)?,
                 "thread/backgroundTerminals/terminate" => threads.terminate(&context, id, params)?,
-                "thread/items/list" | "thread/turns/list" => threads.history_page(&context, id, method, params)?,
-                "thread/read" | "thread/resume" => threads.read(&context, id, method, params)?,
+                "thread/items/list" | "thread/turns/list" | "thread/read" | "thread/resume" => {
+                    threads.refresh(&context.home)?;
+                    if matches!(method, "thread/items/list" | "thread/turns/list") {
+                        threads.history_page(&context, id, method, params)?;
+                    } else {
+                        threads.read(&context, id, method, params)?;
+                    }
+                },
                 _ => context.error(id, -32601, "method not found")?,
             }
         }

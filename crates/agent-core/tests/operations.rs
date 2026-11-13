@@ -134,10 +134,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     .apply(1, message)
                     .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
             };
-            json!(ItemResponse {
-                item,
-                transfer: None
-            })
+            json!(item)
         }
         "sendTurn" => {
             let input = &command["input"];
@@ -354,7 +351,7 @@ async fn run_case(case: &Value) {
         let expected = match text(&case["command"], "type") {
             "searchList" => normalize::<agent_protocol::models::ThreadList>(expected),
             "readThread" => expected.clone(),
-            "readItem" => normalize::<ItemResponse>(expected),
+            "readItem" => normalize::<agent_protocol::models::Item>(expected),
             "models" => normalize::<Vec<agent_protocol::models::Model>>(expected),
             "accounts" => normalize::<Accounts>(expected),
             "selectAccount" => normalize::<AccountSelection>(expected),

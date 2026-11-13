@@ -5,5 +5,5 @@ mod runtime;
 pub(crate) mod service;
 pub(crate) mod storage;
 
-pub use routing::{HostReply, HostSession, HostSubscription, SessionId};
+pub use routing::{HostSession, HostSubscription, SessionId};
 pub use service::HostRpcService;

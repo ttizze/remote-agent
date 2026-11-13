@@ -66,7 +66,7 @@ pub(super) fn restart(state: &State, continue_running: bool, context: Context) -
                 status: UnknownState::Fenced,
                 ..
             }
-            | InputState::Failed(_) => {}
+            | InputState::Failed { .. } => {}
         }
     }
     for input in state.inputs.values() {

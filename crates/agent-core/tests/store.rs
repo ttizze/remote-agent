@@ -195,17 +195,15 @@ async fn opening_a_deferred_screenshot_loads_its_image_without_expanding_work() 
 #[tokio::test]
 async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navigation() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
-    let first = store.dispatch(Intent::ListSessions(op::ListSessions::new(
-        Default::default(),
-    )));
+    let first = store.dispatch(Intent::ListSessions(Default::default()));
     let first_request = read(&mut reader).await;
     assert_eq!(first_request["method"], "host/list/subscribe");
     let navigation_epoch = store.snapshot().connection.epoch;
     let mut receipts = Vec::new();
     for _ in 0..40 {
-        receipts.push(store.dispatch(Intent::ListSessions(op::ListSessions::new(
+        receipts.push(store.dispatch(Intent::ListSessions(
             (*store.snapshot().lists.list_query).clone(),
-        ))));
+        )));
     }
     assert_eq!(
         store.snapshot().connection.epoch,
@@ -229,9 +227,9 @@ async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navig
         open_request["method"], "host/conversation/subscribe",
         "refreshes must not fan out while the first list is pending"
     );
-    receipts.push(store.dispatch(Intent::ListSessions(op::ListSessions::new(
+    receipts.push(store.dispatch(Intent::ListSessions(
         (*store.snapshot().lists.list_query).clone(),
-    ))));
+    )));
     writer
         .reply(
             &open_request,
@@ -286,9 +284,9 @@ async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navig
     );
 
     // A list result remains useful after a navigation-only epoch change.
-    let refresh = store.dispatch(Intent::ListSessions(op::ListSessions::new(
+    let refresh = store.dispatch(Intent::ListSessions(
         (*store.snapshot().lists.list_query).clone(),
-    )));
+    ));
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/list/subscribe");
     store.dispatch(Intent::ShowThreadList).await.unwrap();
@@ -317,9 +315,7 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
             cwd: format!("/latest/{index}"),
         })));
     }
-    let listing = store.dispatch(Intent::ListSessions(op::ListSessions::new(
-        Default::default(),
-    )));
+    let listing = store.dispatch(Intent::ListSessions(Default::default()));
     let list_request = read(&mut reader).await;
     assert_eq!(
         list_request["method"], "host/list/subscribe",
@@ -460,11 +456,7 @@ async fn comparison_changes_discard_in_flight_reviews_and_refresh_the_selected_b
 #[tokio::test]
 async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_waiters() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
-    let refresh = || {
-        store.dispatch(Intent::ListSessions(op::ListSessions::new(
-            Default::default(),
-        )))
-    };
+    let refresh = || store.dispatch(Intent::ListSessions(Default::default()));
     let first = refresh();
     let request = read(&mut reader).await;
     let second = refresh();
@@ -2264,9 +2256,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
             initial = serde_json::from_slice(&serde_json::to_vec(&initial).unwrap()).unwrap();
         }
         let (store, mut reader, writer) = setup(initial).await;
-        let refresh = store.dispatch(Intent::ListSessions(op::ListSessions::new(
-            Default::default(),
-        )));
+        let refresh = store.dispatch(Intent::ListSessions(Default::default()));
         let list_request = read(&mut reader).await;
         let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(SessionRef {
             provider: Some(ProviderKind::Codex),
@@ -2555,15 +2545,15 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
     use agent_protocol::models::ListQuery;
     for failure in [false, true] {
         let (store, mut reader, writer) = setup(Snapshot::default()).await;
-        let old = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
+        let old = store.dispatch(Intent::ListSessions(ListQuery {
             search_term: "old".into(),
             ..Default::default()
-        })));
+        }));
         let old_request = read(&mut reader).await;
-        let new = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
+        let new = store.dispatch(Intent::ListSessions(ListQuery {
             search_term: "new".into(),
             ..Default::default()
-        })));
+        }));
         let requested = store.snapshot();
         let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,});
         writer
@@ -3998,7 +3988,7 @@ async fn initial_titles_wait_for_scope_verification_and_use_the_current_query() 
             assert!(store.snapshot().lists.threads.is_none());
             let titles = |id| json!({"result":{"data":[{"id":{"provider":"codex","id":id},"name":"title"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}});
             if mode == "changed-query" {
-                let _ = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery { search_term: "new query".into(), ..Default::default() }))).await;
+                let _ = store.dispatch(Intent::ListSessions(ListQuery { search_term: "new query".into(), ..Default::default() })).await;
             }
             writer.reply(&scope, json!({"result":{"storageScope":if mode == "rejected" { "" } else { "verified-storage" },"ticket":""}})).await.unwrap();
             let connected = connecting.await.unwrap();

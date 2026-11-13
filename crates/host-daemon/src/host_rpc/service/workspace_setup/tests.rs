@@ -511,7 +511,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         until(&mut updates, |thread| {
             thread.preparations.iter().any(|preparation| {
                 preparation.submission.client_user_message_id.as_str() == input.to_string()
-                    && matches!(preparation.status, PreparationStatus::Failed { .. })
+                    && preparation.status == PreparationStatus::Interrupted
             })
         })
         .await;
@@ -979,13 +979,14 @@ async fn stopped_checkout(retry_existing: bool) {
     .unwrap();
     stopped.accepted().unwrap();
     setup_until(&mut updates, |setup| setup.phase == SetupPhase::Cancelled).await;
-    until(&mut updates, |thread| {
+    let stopped = until(&mut updates, |thread| {
         thread
             .preparations
             .iter()
-            .any(|preparation| matches!(preparation.status, PreparationStatus::Failed { .. }))
+            .any(|preparation| preparation.status == PreparationStatus::Interrupted)
     })
     .await;
+    assert_eq!(stopped.preparations[0].stage, PreparationStage::SetupScript);
     setup_until(&mut updates, |setup| {
         setup.phase == SetupPhase::Cancelled
             && setup.worktree_path.is_none()

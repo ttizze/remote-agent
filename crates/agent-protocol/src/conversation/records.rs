@@ -145,8 +145,13 @@ pub enum Delivery {
     Preparing(crate::session::PreparationStage),
     Queued,
     Delivering,
-    Unknown { resolving: bool },
-    Failed(crate::execution::ExecutionError),
+    Unknown {
+        resolving: bool,
+    },
+    Failed {
+        stage: crate::session::PreparationStage,
+        error: Option<crate::execution::ExecutionError>,
+    },
 }
 
 impl From<decision::PendingInput> for Input {
@@ -158,7 +163,7 @@ impl From<decision::PendingInput> for Input {
             decision::InputState::Unknown { status, .. } => Delivery::Unknown {
                 resolving: matches!(status, decision::UnknownState::Resolving { .. }),
             },
-            decision::InputState::Failed(error) => Delivery::Failed(error),
+            decision::InputState::Failed { stage, error } => Delivery::Failed { stage, error },
         };
         Self {
             id: input.id,

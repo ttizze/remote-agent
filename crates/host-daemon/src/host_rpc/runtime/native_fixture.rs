@@ -47,6 +47,7 @@ pub(in crate::host_rpc) struct NativeAgent {
     pub(in crate::host_rpc) inputs: Arc<Mutex<Vec<op::Submission>>>,
     pub(in crate::host_rpc) injected: Arc<Mutex<Vec<(String, handoff::Context)>>>,
     pub(in crate::host_rpc) released: Arc<Mutex<Vec<String>>>,
+    pub(in crate::host_rpc) unload_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) next: Arc<AtomicUsize>,
     pub(in crate::host_rpc) fail_submit: AtomicUsize,
     pub(in crate::host_rpc) create_gate: tokio::sync::Semaphore,
@@ -84,6 +85,7 @@ impl NativeAgent {
             inputs: Default::default(),
             injected: Default::default(),
             released: Default::default(),
+            unload_gate: tokio::sync::Semaphore::new(1),
             next: Default::default(),
             fail_submit: AtomicUsize::new(0),
             create_gate: tokio::sync::Semaphore::new(1),
@@ -116,6 +118,7 @@ impl NativeAgent {
             inputs: self.inputs.clone(),
             injected: self.injected.clone(),
             released: self.released.clone(),
+            unload_gate: tokio::sync::Semaphore::new(1),
             next: self.next.clone(),
             fail_submit: AtomicUsize::new(0),
             create_gate: tokio::sync::Semaphore::new(1),
@@ -283,7 +286,10 @@ impl crate::providers::Discovery for NativeAgent {
             next_cursor: (start > 0).then(|| start.to_string()),
         })
     }
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure> {
+    async fn read_item(
+        &self,
+        params: &op::ReadItem,
+    ) -> Result<agent_protocol::models::Item, Failure> {
         if self
             .unreadable
             .lock()
@@ -301,10 +307,7 @@ impl crate::providers::Discovery for NativeAgent {
             agent_protocol::session::item_position(turns, &params.turn_id, &params.item_id)
                 .ok_or_else(unsupported)?;
         let item = turns[turn].items.as_ref().unwrap()[item].clone();
-        Ok(op::ItemResponse {
-            item: (*item).clone(),
-            transfer: None,
-        })
+        Ok((*item).clone())
     }
 }
 
@@ -408,6 +411,7 @@ impl Agent for NativeAgent {
     }
     async fn unload(&self, id: &str) -> Result<(), Failure> {
         self.released.lock().unwrap().push(id.into());
+        let _permit = self.unload_gate.acquire().await.unwrap();
         Ok(())
     }
     async fn submit(

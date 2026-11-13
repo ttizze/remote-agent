@@ -70,7 +70,7 @@ fn retry(
             || !matches!(
                 input,
                 Some(
-                    decision::InputState::Failed(_)
+                    decision::InputState::Failed { .. }
                         | decision::InputState::Preparing {
                             stage: crate::session::PreparationStage::Workspace
                                 | crate::session::PreparationStage::Worktree
@@ -105,7 +105,7 @@ fn retry(
         })
     });
     Ok(
-        (failed_script && matches!(input, Some(decision::InputState::Failed(_))))
+        (failed_script && matches!(input, Some(decision::InputState::Failed { .. })))
             .then(|| (None, cwd.unwrap_or(&saved.project_cwd).to_owned())),
     )
 }
@@ -156,7 +156,6 @@ mod tests {
 
     #[test]
     fn stop_observes_agent_start_through_the_public_decision() {
-        use crate::execution::ExecutionError;
         // Expected actions are specified per scenario, not recomputed from the
         // admission expression. A Stop may target the active turn independently.
         let cases = [
@@ -326,7 +325,7 @@ mod tests {
                         matches!(
                             state.apply(&result.changes).inputs[&ClientInputId::from("preparing")]
                                 .state,
-                            InputState::Failed(ExecutionError { .. })
+                            InputState::Failed { error: None, .. }
                         ),
                         "{name}"
                     );
@@ -368,7 +367,10 @@ mod tests {
                 }
             }
         }
-        let failed = decision::InputState::Failed(Default::default());
+        let failed = decision::InputState::Failed {
+            stage: PreparationStage::SetupScript,
+            error: Some(Default::default()),
+        };
         assert!(
             retry(Some(&saved), Some(&failed), Some("/checkout"), true, true)
                 .unwrap()
@@ -380,39 +382,38 @@ mod tests {
 
     #[test]
     fn working_locally_retries_in_the_project_root_through_the_public_decision() {
-        let saved = saved();
-        let input = PendingInput {
-            id: "failed".into(),
-            position: 1,
-            content: InputContent {
-                parts: vec![InputPart::Text {
-                    text: "work".into(),
-                }],
-                model: None,
-                effort: None,
-                service_tier: None,
-                follow_up: Default::default(),
-            },
-            state: InputState::Failed(Default::default()),
-        };
-        let mut state = State::new(Thread {
-            name: String::new(),
-            workspace: Workspace::Folder("/checkout".into()),
-            provider: crate::session::ProviderKind::Codex,
-            queue_held: false,
-        });
-        state.inputs.insert(input.id.clone(), input);
-        let result = decision::step(
-            &state,
-            Event::Command {
-                id: OperationId::Client(Uuid::from_u128(10)),
-                command: Command::RetryInput {
-                    id: "failed".into(),
-                    work_locally: true,
+        for phase in [SetupPhase::Failed, SetupPhase::Done, SetupPhase::Cancelled] {
+            let mut saved = saved();
+            saved.created_worktree = true;
+            let setup = saved.setup.as_mut().unwrap();
+            setup.phase = phase;
+            setup.worktree_path = Some("/checkout".into());
+            setup.branch = Some("worktree-branch".into());
+            let input = PendingInput {
+                id: "failed".into(),
+                position: 1,
+                content: InputContent {
+                    parts: vec![InputPart::Text {
+                        text: "work".into(),
+                    }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    follow_up: Default::default(),
                 },
-                receipt: None,
-            },
-            Context {
+                state: InputState::Failed {
+                    stage: PreparationStage::SetupScript,
+                    error: Some(Default::default()),
+                },
+            };
+            let mut state = State::new(Thread {
+                name: String::new(),
+                workspace: Workspace::Folder("/checkout".into()),
+                provider: crate::session::ProviderKind::Codex,
+                queue_held: false,
+            });
+            state.inputs.insert(input.id.clone(), input);
+            let context = Context {
                 preparation: Some(&saved),
                 rewind_binding: None,
                 imported_turns: &[],
@@ -421,22 +422,79 @@ mod tests {
                 seed: Uuid::from_u128(11),
                 steers: false,
                 steer_ready: true,
-            },
-        );
-        assert_eq!(result.outcome, Outcome::Accepted);
-        assert_eq!(
-            state.apply(&result.changes).thread.workspace,
-            Workspace::Folder("/project".into())
-        );
-        assert!(
-            matches!(&result.actions[..], [Action::Prepare { cwd: Some(cwd), .. }] if cwd == "/project")
-        );
+            };
+            let command = |seed| Event::Command {
+                id: OperationId::Client(Uuid::from_u128(seed)),
+                command: Command::RetryInput {
+                    id: "failed".into(),
+                    work_locally: true,
+                },
+                receipt: None,
+            };
+            let result = decision::step(&state, command(10), context);
+            assert_eq!(result.outcome, Outcome::Accepted);
+            assert_eq!(
+                state.apply(&result.changes).thread.workspace,
+                Workspace::Folder("/project".into())
+            );
+            assert!(result.actions.iter().any(|action| matches!(action,
+                Action::Prepare { cwd: Some(cwd), .. } if cwd == "/project")));
+            assert_eq!(
+                result.actions.iter().any(|action| matches!(
+                    action,
+                    Action::CancelPreparation {
+                        discard: Some(_),
+                        ..
+                    }
+                )),
+                phase == SetupPhase::Cancelled
+            );
+            assert_eq!(
+                result
+                    .changes
+                    .iter()
+                    .any(|change| matches!(change, Change::CancelSetup(_))),
+                phase == SetupPhase::Cancelled
+            );
+            let next = state.apply(&result.changes);
+            let repeated = decision::step(
+                &next,
+                command(12),
+                Context {
+                    seed: Uuid::from_u128(13),
+                    ..context
+                },
+            );
+            assert_eq!(repeated.outcome, Outcome::Accepted);
+            assert!(
+                !repeated
+                    .changes
+                    .iter()
+                    .any(|change| matches!(change, Change::CancelSetup(_)))
+            );
+            assert!(
+                repeated.actions.iter().any(|action| matches!(
+                    action,
+                    Action::CancelPreparation { discard: None, .. }
+                ))
+            );
+            assert!(!repeated.actions.iter().any(|action| matches!(
+                action,
+                Action::CancelPreparation {
+                    discard: Some(_),
+                    ..
+                }
+            )));
+        }
     }
 
     #[test]
     fn retry_reenters_only_a_failed_script_and_preserves_the_checkout() {
         let mut saved = saved();
-        let failed = decision::InputState::Failed(Default::default());
+        let failed = decision::InputState::Failed {
+            stage: PreparationStage::SetupScript,
+            error: Some(Default::default()),
+        };
         let queued = decision::InputState::Queued { steer: None };
         assert!(
             retry(Some(&saved), Some(&failed), Some("/checkout"), true, false)

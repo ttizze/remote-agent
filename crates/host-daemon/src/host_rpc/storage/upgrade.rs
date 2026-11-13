@@ -565,8 +565,8 @@ impl Previous {
             key,
             id,
             sequence,
-            at: now,
             process,
+            ..
         } = scope;
         if let Ok(operation) = Uuid::parse_str(input.client_user_message_id.as_str()) {
             let accepted = transaction.query_row("SELECT outcome FROM receipts WHERE operation_id=?1 AND provider IS ?2 AND thread_id=?3", params![operation.to_string(),id.provider.map(ProviderKind::key),id.id], |row| row.get::<_,Vec<u8>>(0)).optional().map_err(failure)?.map(|bytes| protocol::decode::<Outcome>(&bytes).map_err(failure)).transpose()?;
@@ -601,33 +601,9 @@ impl Previous {
             &mut Vec::new(),
             &mut Vec::new(),
         )?;
-        rows::write_header(
-            transaction,
-            &rows::WriteScope {
-                key,
-                id,
-                sequence,
-                at: now,
-                process: scope.process,
-            },
-            &state,
-            None,
-            None,
-            None,
-        )?;
+        rows::write_header(transaction, scope, &state, None, None, None)?;
         if let Ok(operation) = Uuid::parse_str(input.client_user_message_id.as_str()) {
-            transaction
-                .execute(
-                    "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
-                    params![
-                        operation.to_string(),
-                        id.provider.map(ProviderKind::key),
-                        id.id,
-                        integer(sequence)?,
-                        protocol::encode(Outcome::Accepted).map_err(failure)?
-                    ],
-                )
-                .map_err(failure)?;
+            receipt(transaction, id, operation, sequence, Outcome::Accepted)?;
         }
         Ok(())
     }
@@ -688,6 +664,13 @@ impl Conversation {
         now: i64,
     ) -> Result<(), String> {
         let key = thread_key(transaction, &self.id)?;
+        let scope = rows::WriteScope {
+            key,
+            id: &self.id,
+            sequence,
+            at: now,
+            process,
+        };
         for binding in &self.bindings {
             rows::source(
                 transaction,
@@ -713,13 +696,7 @@ impl Conversation {
             {
                 rows::write(
                     transaction,
-                    &rows::WriteScope {
-                        key,
-                        id: &self.id,
-                        sequence,
-                        at: now,
-                        process,
-                    },
+                    &scope,
                     &Change::Binding {
                         provider: binding.session.native_provider().map_err(failure)?,
                         value: Some(decision::Binding::Ready {
@@ -744,34 +721,24 @@ impl Conversation {
                 )
                 && let Ok(input) = Uuid::parse_str(handoff.input_id.as_str())
             {
-                transaction
-                    .execute(
-                        "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
-                        params![
-                            input.to_string(),
-                            self.id.provider.map(ProviderKind::key),
-                            self.id.id,
-                            integer(sequence)?,
-                            protocol::encode(Outcome::DeliveryUnknown).map_err(failure)?
-                        ],
-                    )
-                    .map_err(failure)?;
+                receipt(
+                    transaction,
+                    &self.id,
+                    input,
+                    sequence,
+                    Outcome::DeliveryUnknown,
+                )?;
             }
             if handoff.receipt.is_some()
                 && let Ok(operation) = Uuid::parse_str(handoff.input_id.as_str())
             {
-                transaction
-                    .execute(
-                        "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
-                        params![
-                            operation.to_string(),
-                            self.id.provider.map(ProviderKind::key),
-                            self.id.id,
-                            integer(sequence)?,
-                            protocol::encode(Outcome::Accepted).map_err(failure)?
-                        ],
-                    )
-                    .map_err(failure)?;
+                receipt(
+                    transaction,
+                    &self.id,
+                    operation,
+                    sequence,
+                    Outcome::Accepted,
+                )?;
             }
         }
         if let Some(startup) = &self.startup {
@@ -804,43 +771,42 @@ impl Conversation {
                         status: UnknownState::Fenced,
                     }
                 }
-                PreparationStatus::Failed { error } => InputState::Failed(error.clone()),
-                PreparationStatus::Interrupted => {
-                    InputState::Failed(agent_protocol::execution::ExecutionError {
-                        message: "準備を停止しました。".into(),
-                        ..Default::default()
-                    })
-                }
+                PreparationStatus::Failed { error } => InputState::Failed {
+                    stage: preparation.stage,
+                    error: Some(error.clone()),
+                },
+                PreparationStatus::Interrupted => InputState::Failed {
+                    stage: preparation.stage,
+                    error: None,
+                },
             };
-            rows::write_header(
-                transaction,
-                &rows::WriteScope {
-                    key,
-                    id: &self.id,
-                    sequence,
-                    at: now,
-                    process,
-                },
-                &state,
-                None,
-                None,
-                None,
-            )?;
-            Previous::input(
-                transaction,
-                &rows::WriteScope {
-                    key,
-                    id: &self.id,
-                    sequence,
-                    at: now,
-                    process,
-                },
-                input,
-                status,
-            )?;
+            rows::write_header(transaction, &scope, &state, None, None, None)?;
+            Previous::input(transaction, &scope, input, status)?;
         }
         Ok(())
     }
+}
+
+fn receipt(
+    transaction: &Transaction<'_>,
+    id: &SessionRef,
+    operation: Uuid,
+    sequence: u64,
+    outcome: Outcome,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
+            params![
+                operation.to_string(),
+                id.provider.map(ProviderKind::key),
+                id.id,
+                integer(sequence)?,
+                protocol::encode(outcome).map_err(failure)?
+            ],
+        )
+        .map(|_| ())
+        .map_err(failure)
 }
 
 fn restore_user_receipts(
@@ -864,18 +830,7 @@ fn restore_user_receipts(
             .as_ref()
             .and_then(|id| Uuid::parse_str(id.as_str()).ok())
         {
-            transaction
-                .execute(
-                    "INSERT OR IGNORE INTO receipts VALUES (?1,?2,?3,?4,?5)",
-                    params![
-                        input.to_string(),
-                        id.provider.map(ProviderKind::key),
-                        id.id,
-                        integer(sequence)?,
-                        protocol::encode(Outcome::Accepted).map_err(failure)?
-                    ],
-                )
-                .map_err(failure)?;
+            receipt(transaction, id, input, sequence, Outcome::Accepted)?;
         }
     }
 

@@ -208,10 +208,7 @@ impl Host {
     }
 
     fn deliver_all(&mut self, client: &mut Replica<String, String>) {
-        for _ in 0..=self.pending.len() {
-            if self.pending.is_empty() {
-                break;
-            }
+        while !self.pending.is_empty() {
             self.deliver_one(client);
         }
     }

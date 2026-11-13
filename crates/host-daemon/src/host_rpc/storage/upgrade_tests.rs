@@ -510,6 +510,19 @@ fn previous_workspace_scripts_and_interrupted_setup_are_retained_together() {
         }
         rows[0]["startup"]["project_cwd"] = serde_json::json!("/original");
         rows[0]["startup"]["workspace"] = serde_json::json!(strategy);
+        let status = if phase == SetupPhase::Failed {
+            PreparationStatus::Failed {
+                error: agent_protocol::execution::ExecutionError {
+                    message: "setup failed".into(),
+                    ..Default::default()
+                },
+            }
+        } else {
+            PreparationStatus::Interrupted
+        };
+        rows[0]["startup"]["preparation"]["status"] = serde_json::json!(status);
+        rows[0]["startup"]["preparation"]["stage"] =
+            serde_json::json!(PreparationStage::SetupScript);
         rows[0]["workspace_setup"] = serde_json::json!(setup);
         connection
             .execute(
@@ -554,9 +567,16 @@ fn previous_workspace_scripts_and_interrupted_setup_are_retained_together() {
         assert_eq!(recovered.script, setup.script);
         assert_eq!(recovered.worktree_path, setup.worktree_path);
         assert_eq!(recovered.branch, setup.branch);
+        let restored = storage.history(&address(), 0).unwrap().thread.preparations;
+        assert_eq!(restored[0].status, status);
+        assert_eq!(restored[0].stage, PreparationStage::SetupScript);
         drop(storage);
         let storage = Storage::open(&path);
         assert_eq!(storage.workspace_scripts(key).unwrap(), scripts);
+        assert_eq!(
+            storage.history(&address(), 0).unwrap().thread.preparations,
+            restored
+        );
         assert_eq!(
             storage.header(&address()).unwrap().details.workspace,
             Some(workspace)

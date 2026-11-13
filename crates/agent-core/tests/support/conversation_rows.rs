@@ -141,8 +141,14 @@ pub fn replica_at(response: ThreadResponse, generation: u64, sequence: u64) -> r
             PreparationStatus::Preparing => records::Delivery::Preparing(preparation.stage),
             PreparationStatus::Sending => records::Delivery::Delivering,
             PreparationStatus::Unknown => records::Delivery::Unknown { resolving: false },
-            PreparationStatus::Failed { error } => records::Delivery::Failed(error),
-            PreparationStatus::Interrupted => records::Delivery::Failed(Default::default()),
+            PreparationStatus::Failed { error } => records::Delivery::Failed {
+                stage: preparation.stage,
+                error: Some(error),
+            },
+            PreparationStatus::Interrupted => records::Delivery::Failed {
+                stage: preparation.stage,
+                error: None,
+            },
         };
         rows.push(input_row(
             &id,

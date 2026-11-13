@@ -155,7 +155,11 @@ pub enum InputState {
         delivery: PendingDelivery,
         status: UnknownState,
     },
-    Failed(ExecutionError),
+    Failed {
+        stage: PreparationStage,
+        /// A user stop retains the stage without an error.
+        error: Option<ExecutionError>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

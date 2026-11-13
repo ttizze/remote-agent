@@ -272,9 +272,7 @@ async fn listed(
     project_root: Option<&Path>,
 ) -> Arc<Snapshot> {
     store
-        .dispatch(Intent::ListSessions(op::ListSessions::new(
-            Default::default(),
-        )))
+        .dispatch(Intent::ListSessions(Default::default()))
         .await
         .unwrap();
     if let Some(project_root) = project_root {
@@ -830,6 +828,7 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
             conversations::command(
                 &local.peer,
                 &id,
+                uuid::Uuid::new_v4(),
                 agent_protocol::conversation::Command::Interrupt {
                     turn: Some(previous_turn.clone())
                 }
@@ -3064,6 +3063,7 @@ async fn claude_steers_a_running_turn_and_runs_queued_input_after_it() {
         conversations::command(
             &local.peer,
             &id,
+            uuid::Uuid::new_v4(),
             agent_protocol::conversation::Command::Interrupt {
                 turn: Some("stale".into())
             }

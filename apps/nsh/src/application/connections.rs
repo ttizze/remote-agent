@@ -254,9 +254,7 @@ impl Application {
                         self.client.reconnect(host.id.clone());
                         continue;
                     };
-                    Intent::ListSessions(agent_core::state::operations::ListSessions::new(
-                        (*value.snapshot.lists.list_query).clone(),
-                    ))
+                    Intent::ListSessions((*value.snapshot.lists.list_query).clone())
                 }
                 ListRequest::MoreChats => Intent::ExpandThreadList { project_id: None },
                 ListRequest::MoreProjects => Intent::ExpandProjects,
@@ -278,11 +276,8 @@ impl Application {
             }
             let mut query = (*value.snapshot.lists.list_query).clone();
             query.search_term = search_term.into();
-            self.client.dispatch(
-                host,
-                None,
-                Intent::ListSessions(agent_core::state::operations::ListSessions::new(query)),
-            );
+            self.client
+                .dispatch(host, None, Intent::ListSessions(query));
         }
     }
 }

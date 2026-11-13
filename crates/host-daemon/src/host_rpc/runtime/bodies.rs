@@ -60,16 +60,13 @@ impl Runtime {
             .discovery(provider)?
             .read_item(request)
             .await?;
-        if detail.item.id != request.item_id
-            || detail.item.is_deferred()
-            || detail.transfer.is_some()
-        {
+        if detail.id != request.item_id || detail.is_deferred() {
             return Err(Failure::new(
                 "incomplete_item",
                 "native item body is unavailable",
             ));
         }
-        Ok(detail.item)
+        Ok(detail)
     }
 
     pub(super) async fn hydrate_native(

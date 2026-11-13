@@ -206,12 +206,13 @@ impl Conversation {
 pub async fn command(
     client: &Client,
     session: &SessionRef,
+    operation: Uuid,
     command: Command,
 ) -> Result<records::Acknowledged, PeerError> {
     let result = client
         .call(&records::Change {
             session: session.clone(),
-            operation: Uuid::new_v4(),
+            operation,
             command,
         })
         .await?;
@@ -230,31 +231,22 @@ pub async fn submit(
     client: &Client,
     input: &op::Submission,
 ) -> Result<records::Acknowledged, PeerError> {
-    let result = client
-        .call(&records::Change {
-            session: input.thread_id.clone(),
-            operation: Uuid::parse_str(input.client_user_message_id.as_str()).unwrap(),
-            command: Command::Submit {
-                id: input.client_user_message_id.clone(),
-                content: InputContent {
-                    parts: input.input.clone(),
-                    model: input.model.clone(),
-                    effort: input.effort.clone(),
-                    service_tier: input.service_tier.clone(),
-                    follow_up: input.follow_up,
-                },
+    command(
+        client,
+        &input.thread_id,
+        Uuid::parse_str(input.client_user_message_id.as_str()).unwrap(),
+        Command::Submit {
+            id: input.client_user_message_id.clone(),
+            content: InputContent {
+                parts: input.input.clone(),
+                model: input.model.clone(),
+                effort: input.effort.clone(),
+                service_tier: input.service_tier.clone(),
+                follow_up: input.follow_up,
             },
-        })
-        .await?;
-    result
-        .clone()
-        .accepted()
-        .map_err(|error| PeerError::Remote {
-            error: error.message,
-            delivery: error.delivery,
-            sequence: None,
-        })?;
-    Ok(result)
+        },
+    )
+    .await
 }
 
 pub fn create_request(

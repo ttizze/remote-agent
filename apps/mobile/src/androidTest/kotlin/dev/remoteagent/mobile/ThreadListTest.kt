@@ -200,7 +200,7 @@ class ThreadListTest {
                         false,
                         { intent, _ ->
                             intents.add(intent)
-                            if (intent is Intent.ListSessions) query = intent.v1.query
+                            if (intent is Intent.ListSessions) query = intent.v1
                         },
                         {},
                     )
@@ -210,12 +210,12 @@ class ThreadListTest {
             compose.onNodeWithContentDescription("検索").performClick()
             compose.onNodeWithText("チャットを検索").performTextInput("BEX")
             compose.waitUntil(5_000) {
-                intents.filterIsInstance<Intent.ListSessions>().lastOrNull()?.v1?.query?.searchTerm == "BEX"
+                intents.filterIsInstance<Intent.ListSessions>().lastOrNull()?.v1?.searchTerm == "BEX"
             }
             compose.onNodeWithContentDescription("検索を閉じる").performClick()
             compose.onNodeWithText("チャットを検索").assertDoesNotExist()
             compose.waitUntil(5_000) {
-                intents.filterIsInstance<Intent.ListSessions>().lastOrNull()?.v1?.query?.searchTerm == ""
+                intents.filterIsInstance<Intent.ListSessions>().lastOrNull()?.v1?.searchTerm == ""
             }
             compose.onNodeWithContentDescription("検索").assertIsDisplayed()
         }

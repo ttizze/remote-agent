@@ -512,6 +512,7 @@ impl Runtime {
                     return Ok(());
                 };
                 source.cancel_background(attempt.id);
+                drop(_updates);
                 if unload {
                     let cleanup = async {
                         service
@@ -562,16 +563,23 @@ impl Runtime {
                 // The same lock covers the gap between preparation stages and
                 // prevents cleanup from racing checkout creation or setup I/O.
                 let _io = preparation.io.lock().await;
-                let workspace = runtime.storage.header(&target)?.details.workspace;
+                let workspace =
+                    runtime
+                        .storage
+                        .header(&target)?
+                        .details
+                        .workspace
+                        .filter(|workspace| {
+                            workspace.setup.as_ref().is_some_and(|setup| {
+                                setup.phase == agent_protocol::workspace::SetupPhase::Cancelled
+                            })
+                        });
                 let terminal = workspace
                     .as_ref()
                     .filter(|workspace| {
                         discard
                             .as_ref()
                             .is_none_or(|(generation, _)| workspace.generation == *generation)
-                            && workspace.setup.as_ref().is_some_and(|setup| {
-                                setup.phase == agent_protocol::workspace::SetupPhase::Cancelled
-                            })
                     })
                     .and_then(|workspace| workspace.setup.as_ref())
                     .and_then(|setup| setup.terminal_handle.as_deref());
@@ -592,22 +600,16 @@ impl Runtime {
                         )
                         .await
                         .map_err(|error| error.to_string())?;
-                } else if let Some(workspace) = workspace
-                    && workspace.setup.as_ref().is_some_and(|setup| {
-                        setup.phase == agent_protocol::workspace::SetupPhase::Cancelled
-                    })
-                {
-                    if let Some(handle) = workspace
-                        .setup
-                        .as_ref()
-                        .and_then(|setup| setup.terminal_handle.as_deref())
-                    {
+                } else {
+                    if let Some(handle) = terminal {
                         service
                             .cleanup_setup_resources(None, None, Some(handle))
                             .await
                             .map_err(|error| error.to_string())?;
                     }
-                    service.schedule_setup_expiry(target.clone(), *workspace);
+                    if let Some(workspace) = workspace {
+                        service.schedule_setup_expiry(target.clone(), *workspace);
+                    }
                 }
             }
         }

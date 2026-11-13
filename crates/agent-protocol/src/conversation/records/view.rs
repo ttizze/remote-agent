@@ -82,11 +82,15 @@ pub fn project(replica: &Replica) -> Option<models::ThreadResponse> {
                         session::PreparationStatus::Unknown,
                         session::PreparationStage::Provider,
                     ),
-                    Delivery::Failed(error) => (
-                        session::PreparationStatus::Failed {
-                            error: error.clone(),
-                        },
-                        session::PreparationStage::Provider,
+                    Delivery::Failed { stage, error } => (
+                        error
+                            .as_ref()
+                            .map_or(session::PreparationStatus::Interrupted, |error| {
+                                session::PreparationStatus::Failed {
+                                    error: error.clone(),
+                                }
+                            }),
+                        *stage,
                     ),
                     Delivery::Queued => unreachable!(),
                 };
@@ -97,7 +101,7 @@ pub fn project(replica: &Replica) -> Option<models::ThreadResponse> {
                 });
                 match state {
                     Delivery::Unknown { .. } => session::SubmissionDelivery::Unknown,
-                    Delivery::Failed(_) => session::SubmissionDelivery::Rejected,
+                    Delivery::Failed { .. } => session::SubmissionDelivery::Rejected,
                     _ => session::SubmissionDelivery::Sending,
                 }
             }
@@ -358,9 +362,24 @@ mod tests {
             content: Content::Full(Arc::new(Record::Thread(header))),
         }];
         for (name, position, state) in [
+            (
+                "stopped",
+                4,
+                Delivery::Failed {
+                    stage: session::PreparationStage::Worktree,
+                    error: None,
+                },
+            ),
             ("third", 3, Delivery::Queued),
             ("second", 2, Delivery::Unknown { resolving: false }),
-            ("first", 1, Delivery::Failed(Default::default())),
+            (
+                "first",
+                1,
+                Delivery::Failed {
+                    stage: session::PreparationStage::SetupScript,
+                    error: Some(Default::default()),
+                },
+            ),
         ] {
             rows.push(Row {
                 key: Key::Input {
@@ -403,7 +422,7 @@ mod tests {
                 .iter()
                 .map(|input| input.submission.client_user_message_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["first", "second"]
+            vec!["first", "second", "stopped"]
         );
         assert!(matches!(
             thread.preparations[0].status,
@@ -414,9 +433,21 @@ mod tests {
             session::PreparationStatus::Unknown
         );
         assert_eq!(
+            thread.preparations[0].stage,
+            session::PreparationStage::SetupScript
+        );
+        assert_eq!(
+            thread.preparations[2].stage,
+            session::PreparationStage::Worktree
+        );
+        assert_eq!(
+            thread.preparations[2].status,
+            session::PreparationStatus::Interrupted
+        );
+        assert_eq!(
             thread.queue.inputs[0].client_user_message_id.as_str(),
             "third"
         );
-        assert_eq!(thread.submissions.len(), 3);
+        assert_eq!(thread.submissions.len(), 4);
     }
 }

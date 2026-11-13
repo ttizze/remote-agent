@@ -1068,17 +1068,14 @@ impl crate::providers::Discovery for DeepSeek {
     ) -> Result<agent_protocol::session::HistoryPage, Failure> {
         Err(unsupported())
     }
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure> {
+    async fn read_item(&self, params: &op::ReadItem) -> Result<Item, Failure> {
         let record = self.open(&params.thread_id.id, usize::MAX, true).await?;
         let turns = record.thread.turns.as_deref().unwrap_or_default();
         let (turn, item) =
             agent_protocol::session::item_position(turns, &params.turn_id, &params.item_id)
                 .ok_or_else(|| failure("Item not found"))?;
         let item = &turns[turn].items.as_ref().unwrap()[item];
-        Ok(op::ItemResponse {
-            item: (**item).clone(),
-            transfer: None,
-        })
+        Ok((**item).clone())
     }
 }
 

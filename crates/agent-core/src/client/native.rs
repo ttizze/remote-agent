@@ -1216,9 +1216,7 @@ mod tests {
                     store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider: Some(agent_protocol::session::ProviderKind::Codex), id: "thread".into()}.into(), text: "preserved".into() }).unwrap().wait().await.unwrap();
                     let refresh = || async {
                         use crate::state::operations as op;
-                        let list = store.store.dispatch(Intent::ListSessions(op::ListSessions::new(
-                            (*store.snapshot().lists.list_query).clone(),
-                        )));
+                        let list = store.store.dispatch(Intent::ListSessions((*store.snapshot().lists.list_query).clone()));
                         let history = async {
                             if selected {
                                 store.store.dispatch(Intent::ReadThread(op::ReadThread::new(agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "thread".into() }))).await?;

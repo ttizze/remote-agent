@@ -674,16 +674,26 @@ async fn scenarios(provider: ProviderKind) {
             assert_eq!(opened.thread.queue.inputs, std::slice::from_ref(&follow_up));
         }
         if case == "stop" {
-            conversations::command(&local.peer, &session, Command::Interrupt { turn: None })
-                .await
-                .unwrap();
+            conversations::command(
+                &local.peer,
+                &session,
+                uuid::Uuid::new_v4(),
+                Command::Interrupt { turn: None },
+            )
+            .await
+            .unwrap();
             assert_eq!(finished(&mut events).await.status, TurnStatus::Interrupted);
             let (opened, _) = open(&local.peer, &session).await;
             assert!(opened.thread.queue.held);
             assert_eq!(opened.thread.queue.inputs, std::slice::from_ref(&follow_up));
-            conversations::command(&local.peer, &session, Command::ResumeQueue)
-                .await
-                .unwrap();
+            conversations::command(
+                &local.peer,
+                &session,
+                uuid::Uuid::new_v4(),
+                Command::ResumeQueue,
+            )
+            .await
+            .unwrap();
         } else {
             std::fs::write(root.join("release-inputs"), "").unwrap();
         }
@@ -751,6 +761,7 @@ async fn scenarios(provider: ProviderKind) {
         conversations::command(
             &local.peer,
             &session,
+            uuid::Uuid::new_v4(),
             Command::Answer {
                 id: request.id.clone(),
                 answer: answer.clone(),
@@ -763,6 +774,7 @@ async fn scenarios(provider: ProviderKind) {
             conversations::command(
                 &local.peer,
                 &session,
+                uuid::Uuid::new_v4(),
                 Command::Answer {
                     id: request.id.clone(),
                     answer

@@ -1464,71 +1464,73 @@ fn steering_waits_for_in_flight_delivery_but_keeps_its_original_attempt() {
 #[test]
 fn stopping_preparation_only_discards_an_unbound_running_workspace_setup() {
     use crate::workspace::{SetupPhase, WorkspaceSetup, WorkspaceStrategy};
-    for phase in [SetupPhase::Running, SetupPhase::Done] {
-        for bound in [false, true] {
-            let mut initial = state();
-            let bindings = std::mem::take(&mut initial.bindings);
-            let submitted = submit(&initial, 1, FollowUp::Queue);
-            let mut state = initial.apply(&submitted.changes);
-            if bound {
-                state.bindings = bindings;
-            }
-            let mut setup = WorkspaceSetup::new(Some("main".into()), 100);
-            setup.phase = phase;
-            setup.worktree_path = Some("/checkout".into());
-            setup.branch = Some("bex/checkout".into());
-            let saved = records::WorkspacePreparation {
-                project_cwd: "/project".into(),
-                strategy: Some(WorkspaceStrategy::Worktree {
-                    base_ref: "main".into(),
-                    start_from_origin: false,
-                }),
-                generation: Uuid::from_u128(10),
-                created_worktree: true,
-                visible: false,
-                setup: Some(setup),
-            };
-            let context = Context {
-                preparation: Some(&saved),
-                ..context(2)
-            };
-            let stopped = step(
-                &state,
-                Event::Command {
-                    id: OperationId::Client(Uuid::from_u128(2)),
-                    command: Command::Interrupt { turn: None },
-                    receipt: None,
+    for (phase, bound, cleanup) in [
+        (SetupPhase::Running, false, true),
+        (SetupPhase::Running, true, false),
+        (SetupPhase::Done, false, false),
+        (SetupPhase::Done, true, false),
+    ] {
+        let mut initial = state();
+        let bindings = std::mem::take(&mut initial.bindings);
+        let submitted = submit(&initial, 1, FollowUp::Queue);
+        let mut state = initial.apply(&submitted.changes);
+        if bound {
+            state.bindings = bindings;
+        }
+        let mut setup = WorkspaceSetup::new(Some("main".into()), 100);
+        setup.phase = phase;
+        setup.worktree_path = Some("/checkout".into());
+        setup.branch = Some("bex/checkout".into());
+        let saved = records::WorkspacePreparation {
+            project_cwd: "/project".into(),
+            strategy: Some(WorkspaceStrategy::Worktree {
+                base_ref: "main".into(),
+                start_from_origin: false,
+            }),
+            generation: Uuid::from_u128(10),
+            created_worktree: true,
+            visible: false,
+            setup: Some(setup),
+        };
+        let context = Context {
+            preparation: Some(&saved),
+            ..context(2)
+        };
+        let stopped = step(
+            &state,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(2)),
+                command: Command::Interrupt { turn: None },
+                receipt: None,
+            },
+            context,
+        );
+        assert_eq!(stopped.outcome, Outcome::Accepted);
+        assert!(
+            matches!(&stopped.actions[..], [Action::CancelPreparation { discard, .. }] if discard.is_some() == cleanup)
+        );
+        assert_eq!(
+            stopped
+                .changes
+                .iter()
+                .any(|change| matches!(change, Change::CancelSetup(_))),
+            cleanup
+        );
+        if !cleanup {
+            let restarted = step(
+                &state.apply(&stopped.changes),
+                Event::Restart {
+                    updating: false,
+                    continue_after_restart: false,
                 },
                 context,
             );
-            assert_eq!(stopped.outcome, Outcome::Accepted);
-            let cleanup = !bound && phase == SetupPhase::Running;
             assert!(
-                matches!(&stopped.actions[..], [Action::CancelPreparation { discard, .. }] if discard.is_some() == cleanup)
-            );
-            assert_eq!(
-                stopped
-                    .changes
+                !restarted
+                    .actions
                     .iter()
-                    .any(|change| matches!(change, Change::CancelSetup(_))),
-                cleanup
+                    .any(|action| matches!(action, Action::CancelPreparation { .. }))
             );
-            if !cleanup {
-                let restarted = step(
-                    &state.apply(&stopped.changes),
-                    Event::Restart {
-                        updating: false,
-                        continue_after_restart: false,
-                    },
-                    context,
-                );
-                assert!(
-                    !restarted
-                        .actions
-                        .iter()
-                        .any(|action| matches!(action, Action::CancelPreparation { .. }))
-                );
-            }
         }
     }
 }
@@ -1553,8 +1555,13 @@ fn cancelling_preparation_keeps_the_saved_stage_and_fences_its_late_completion()
         }]
     );
     let state = state.apply(&cancelled.changes);
-    assert!(matches!(&state.inputs[id].state, InputState::Failed(error)
-        if !error.message.trim().is_empty()));
+    assert!(matches!(
+        &state.inputs[id].state,
+        InputState::Failed {
+            stage: PreparationStage::Workspace,
+            error: None,
+        }
+    ));
     assert_eq!(
         step(
             &state,
@@ -2250,7 +2257,10 @@ fn invalid_preparation_results_leave_a_readable_error_and_cannot_start_a_turn() 
         assert_eq!(rejected.outcome, Outcome::Accepted);
         assert!(rejected.actions.is_empty());
         let state = state.apply(&rejected.changes);
-        let InputState::Failed(error) = &state.inputs[id].state else {
+        let InputState::Failed {
+            error: Some(error), ..
+        } = &state.inputs[id].state
+        else {
             panic!("failure")
         };
         assert!(!error.message.trim().is_empty());

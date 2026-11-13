@@ -940,7 +940,7 @@ impl crate::providers::Discovery for Codex {
     async fn read_item(
         &self,
         params: &op::ReadItem,
-    ) -> Result<agent_protocol::operations::ItemResponse, Failure> {
+    ) -> Result<agent_protocol::models::Item, Failure> {
         if [
             params.thread_id.id.as_str(),
             params.turn_id.as_str(),
@@ -964,10 +964,7 @@ impl crate::providers::Discovery for Codex {
                 entry.turn_id.as_deref() == Some(params.turn_id.as_str())
                     && entry.item.id == params.item_id
             }) {
-                return Ok(agent_protocol::operations::ItemResponse {
-                    item: Arc::unwrap_or_clone(entry.item),
-                    transfer: None,
-                });
+                return Ok(Arc::unwrap_or_clone(entry.item));
             }
             cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
             let Some(next) = &cursor else {

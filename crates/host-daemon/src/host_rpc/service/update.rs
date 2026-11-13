@@ -4,6 +4,14 @@ use super::*;
 use agent_local_host::update::{ContinuationDelivery, InterruptedTask, RECOVERY_FILE, Recovery};
 use agent_protocol::conversation::Outcome;
 
+fn read_report(path: &std::path::Path) -> anyhow::Result<Option<Recovery>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl HostRpcService {
     pub(crate) async fn prepare_update(&self) -> anyhow::Result<()> {
         let _workspace = self.inner.worktree_access.write().await;
@@ -107,10 +115,8 @@ impl HostRpcService {
             return Ok(());
         }
         let path = directory.join(RECOVERY_FILE);
-        let mut report: Recovery = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.to_string()),
+        let Some(mut report) = read_report(&path).map_err(|error| error.to_string())? else {
+            return Ok(());
         };
         let mut changed = false;
         for task in &mut report.tasks {
@@ -150,10 +156,8 @@ impl HostRpcService {
             return Ok(());
         }
         let path = directory.join(RECOVERY_FILE);
-        let mut report: Recovery = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.to_string()),
+        let Some(mut report) = read_report(&path).map_err(|error| error.to_string())? else {
+            return Ok(());
         };
         let pending = self.inner.conversation.storage.continuations(target)?;
         let mut changed = false;
@@ -203,7 +207,9 @@ impl HostRpcService {
                 if *_report {
                     return Ok(());
                 }
-                let mut report: Recovery = serde_json::from_slice(&std::fs::read(&path)?)?;
+                let Some(mut report) = read_report(&path)? else {
+                    return Ok(());
+                };
                 let previous = serde_json::to_vec(&report)?;
                 let mut pending = false;
                 for task in &mut report.tasks {
@@ -244,7 +250,7 @@ impl HostRpcService {
                                 .map_err(anyhow::Error::msg)?;
                             match input {
                                 Some(input) => match &input.state {
-                                    agent_protocol::conversation::InputState::Failed(error) => task.delivery = ContinuationDelivery::Failed(error.message.clone()),
+                                    agent_protocol::conversation::InputState::Failed { error, .. } => task.delivery = ContinuationDelivery::Failed(error.as_ref().map_or_else(|| "準備を停止しました。".into(), |error| error.message.clone())),
                                     agent_protocol::conversation::InputState::Unknown { .. } => task.delivery = ContinuationDelivery::Failed("継続の配送結果を確認できません。会話を開いて確認してください。".into()),
                                     _ => pending = true,
                                 },

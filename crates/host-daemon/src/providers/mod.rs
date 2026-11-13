@@ -17,7 +17,7 @@ use agent_protocol::session::ProviderKind;
 use agent_protocol::{
     composer::ComposerCatalog,
     ids::TurnId,
-    models::{Empty, Thread, ThreadResponse},
+    models::{Empty, Item, Thread, ThreadResponse},
     operations as op,
     permissions::{PermissionMode, PermissionSettings},
     requests::{Answer, RequestBody},
@@ -355,7 +355,7 @@ pub(crate) trait Discovery: Send + Sync {
         cursor: &str,
         include_activity: bool,
     ) -> Result<agent_protocol::session::HistoryPage, Failure>;
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure>;
+    async fn read_item(&self, params: &op::ReadItem) -> Result<Item, Failure>;
 }
 
 #[async_trait::async_trait]
@@ -429,8 +429,8 @@ pub(crate) trait Agent: Send + Sync {
     async fn shutdown(&self);
 }
 
-/// The registry retains each concrete provider once and exposes only the port
-/// required by its caller. Executing a conversation cannot manage credentials.
+/// The registry retains each concrete provider once; callers use the port for
+/// their responsibility.
 pub(crate) trait Provider: Agent + Identity + Configuration + Discovery {}
 impl<T: Agent + Identity + Configuration + Discovery> Provider for T {}
 

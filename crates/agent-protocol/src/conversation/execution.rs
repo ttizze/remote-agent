@@ -320,7 +320,9 @@ fn preparation_failed(
         return Step::default();
     };
     let InputState::Preparing {
-        action: expected, ..
+        action: expected,
+        stage,
+        ..
     } = input.state
     else {
         return Step::default();
@@ -331,7 +333,10 @@ fn preparation_failed(
     Step {
         changes: vec![
             Change::Input(PendingInput {
-                state: InputState::Failed(error),
+                state: InputState::Failed {
+                    stage,
+                    error: Some(error),
+                },
                 ..input.clone()
             }),
             Change::Thread(Thread {
@@ -595,7 +600,10 @@ fn delivery_failed(
                     status: UnknownState::Live,
                 }
             } else {
-                InputState::Failed(error)
+                InputState::Failed {
+                    stage: PreparationStage::Provider,
+                    error: Some(error),
+                }
             },
             ..input.clone()
         }),

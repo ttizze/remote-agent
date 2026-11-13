@@ -1064,7 +1064,7 @@ fn reduce_intent(
             }
         }
 
-        Intent::ListSessions(operation) => return list_sync::query(next, operation.query, true),
+        Intent::ListSessions(query) => return list_sync::query(next, query, true),
         Intent::SetWorkspaceComparison { cwd, base_ref } => {
             if cwd.is_empty() || next.selected_directory(next.panes.get(pane_id).expect("admitted pane exists")) != cwd {
                 return (next, Vec::new());

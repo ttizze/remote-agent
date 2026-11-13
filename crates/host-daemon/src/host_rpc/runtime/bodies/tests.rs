@@ -259,7 +259,7 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
             .unwrap()
             .inputs
             .values()
-            .any(|input| matches!(input.state, InputState::Failed(_)))
+            .any(|input| matches!(input.state, InputState::Failed { .. }))
         {
             changed.changed().await.unwrap();
         }

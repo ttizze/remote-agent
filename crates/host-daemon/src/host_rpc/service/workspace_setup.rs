@@ -92,6 +92,7 @@ impl HostRpcService {
         generation: Uuid,
         update: SetupChange,
     ) -> Result<(), Failure> {
+        let output = matches!(&update, SetupChange::Output(_));
         let (outcome, _) = self
             .inner
             .conversation
@@ -106,7 +107,7 @@ impl HostRpcService {
             )
             .await
             .map_err(super::super::runtime::storage_failure)?;
-        if outcome != agent_protocol::conversation::Outcome::Accepted {
+        if outcome != agent_protocol::conversation::Outcome::Accepted || output {
             return Ok(());
         }
         let workspace = self

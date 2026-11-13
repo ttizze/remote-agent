@@ -449,7 +449,7 @@ impl Claude {
         }
     }
 
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, OperationError> {
+    async fn read_item(&self, params: &op::ReadItem) -> Result<Item, OperationError> {
         let native = Uuid::parse_str(&params.thread_id.id).map_err(|_| "invalid Claude ID")?;
         let home = self.native_home.clone();
         let native_history = tokio::task::spawn_blocking(move || {
@@ -497,10 +497,7 @@ impl Claude {
                 });
             }
         }
-        Ok(op::ItemResponse {
-            item,
-            transfer: None,
-        })
+        Ok(item)
     }
 
     async fn discard_workspace_processes(&self, directory: &Path) -> anyhow::Result<()> {
@@ -2357,7 +2354,7 @@ impl crate::providers::Discovery for Claude {
         .map_err(|error| Failure::new("session_read_failed", error))?
         .map_err(|error| Failure::new("session_read_failed", error))
     }
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure> {
+    async fn read_item(&self, params: &op::ReadItem) -> Result<Item, Failure> {
         Claude::read_item(self, params).await.map_err(Into::into)
     }
 }
@@ -3318,21 +3315,12 @@ for (const row of rows) {
                 }
                 let frame = row["frame"].clone();
                 if frame["type"] == "permission.request" {
-                    // T3's query bridge exposes canUseTool directly; Bex's
-                    // bridge carries the same fields in its tagged Tool request.
-                    let request: SdkRequest = serde_json::from_value(json!({
-                        "type":"tool", "toolName":frame["toolName"], "input":frame["input"],
-                        "toolUseId":frame["options"]["toolUseID"], "description":frame["options"]["description"]
-                    })).unwrap();
-                    match request {
-                        SdkRequest::Tool { tool_name, .. } => assert!(!tool_name.is_empty()),
-                        _ => panic!("expected tool request"),
-                    }
-                } else {
-                    worker.message(frame).await.unwrap_or_else(|error| {
-                        panic!("{} frame {index}: {error}", recording["file"])
-                    });
+                    continue;
                 }
+                worker
+                    .message(frame)
+                    .await
+                    .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording["file"]));
             }
             if recording["scenario"] == "simple" {
                 let turn = observed.turn("turn").unwrap();

@@ -71,6 +71,9 @@ mod entries {
     }
 }
 impl Registry {
+    pub fn is_ready(&self) -> bool {
+        self.display.is_some()
+    }
     pub fn register(
         &mut self,
         owner: &str,

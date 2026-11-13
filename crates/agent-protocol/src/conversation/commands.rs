@@ -360,7 +360,7 @@ fn retry_input(state: &State, id: &ClientInputId, work_locally: bool, context: C
         return reject("input does not exist");
     };
     let cancel = match input.state {
-        InputState::Failed(_) => workspace::cancelled(context.preparation.filter(|saved| {
+        InputState::Failed { .. } => workspace::cancelled(context.preparation.filter(|saved| {
             saved
                 .setup
                 .as_ref()
@@ -380,8 +380,15 @@ fn retry_input(state: &State, id: &ClientInputId, work_locally: bool, context: C
         ..input.clone()
     })]);
     if let Some(action) = cancel {
-        let cleanup = workspace::cancelled(context.preparation);
-        if let Some(saved) = context.preparation {
+        let saved = context.preparation.filter(|saved| {
+            !matches!(input.state, InputState::Preparing { .. })
+                || saved
+                    .setup
+                    .as_ref()
+                    .is_some_and(|setup| setup.phase == crate::workspace::SetupPhase::Running)
+        });
+        let cleanup = workspace::cancelled(saved);
+        if let Some(saved) = saved {
             result.changes.push(Change::CancelSetup(saved.generation));
         }
         result.actions.push(Action::CancelPreparation {
@@ -461,7 +468,7 @@ fn submit(
             || state
                 .inputs
                 .values()
-                .any(|input| !matches!(input.state, InputState::Failed(_))))
+                .any(|input| !matches!(input.state, InputState::Failed { .. })))
     {
         return reject("conversation is busy; cannot switch provider");
     }
@@ -616,11 +623,11 @@ fn interrupt_input(
     });
     let cleanup = workspace::cancelled(setup);
     let (next, actions) = match &input.state {
-        InputState::Preparing { action, .. } => (
-            InputState::Failed(ExecutionError {
-                message: "preparation interrupted".into(),
-                ..ExecutionError::default()
-            }),
+        InputState::Preparing { action, stage, .. } => (
+            InputState::Failed {
+                stage: *stage,
+                error: None,
+            },
             vec![Action::CancelPreparation {
                 action: *action,
                 discard: cleanup

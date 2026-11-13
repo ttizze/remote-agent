@@ -61,7 +61,7 @@ extension AppViewModel {
             guard let owner = sessions.session(host: id),
                   owner.snapshot().connected(),
                   !owner.snapshot().operationRunning(key: .sessionList) else { continue }
-            perform(.listSessions(ListSessions(query: owner.snapshot().listQuery())), on: id)
+            perform(.listSessions(owner.snapshot().listQuery()), on: id)
         }
     }
 
@@ -76,7 +76,7 @@ extension AppViewModel {
             guard var query = sessions.session(host: id)?.snapshot().listQuery(),
                   query.searchTerm != term else { continue }
             query.searchTerm = term
-            perform(.listSessions(ListSessions(query: query)), on: id)
+            perform(.listSessions(query), on: id)
         }
     }
 

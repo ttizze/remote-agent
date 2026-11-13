@@ -1,5 +1,3 @@
-#[path = "support/conversation_change.rs"]
-mod changes;
 #[path = "support/conversation_open.rs"]
 mod opening;
 // The shared fixture also builds catalog rows used by the other test binaries.
@@ -15,24 +13,6 @@ use agent_protocol::{
 };
 use serde_json::json;
 use std::sync::Arc;
-
-fn canonical_update(
-    previous: &agent_core::state::Snapshot,
-    subscription: uuid::Uuid,
-    change: SessionChange,
-) -> (agent_core::state::Snapshot, Vec<agent_core::state::Effect>) {
-    let Some((snapshot, message)) = changes::changed(previous, subscription, change) else {
-        return (previous.clone(), Vec::new());
-    };
-    agent_core::state::reduce(
-        &snapshot,
-        "",
-        agent_core::state::Event::ConversationRows {
-            subscription_id: subscription,
-            message: Box::new(message),
-        },
-    )
-}
 
 fn conversation() -> Thread {
     serde_json::from_value(json!({"id":{"provider":"codex","id":"native"},"turns":[{"id":"run","status":"running","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"partial","phase":"unknown"}}}}}]}]})).unwrap()
@@ -621,11 +601,18 @@ proptest::proptest! {
             },
             ..Default::default()
         };
-        let (changed, _) = canonical_update(&original, claude_subscription, SessionChange::Text {
-            turn_id:"same-turn".into(), item_id:"same-item".into(), field:TextField::AssistantText, delta:delta.clone(),
+        let mut original = original;
+        let expected_text = format!("{claude_text}{delta}");
+        Arc::make_mut(&mut original.sessions.replicas).insert(claude.clone(), Arc::new(rows::replica(
+            agent_protocol::models::ThreadResponse { thread: make_thread(&claude, &claude_text).as_ref().clone(), ..Default::default() }, 1,
+        )));
+        let update = rows::replica_at(agent_protocol::models::ThreadResponse {
+            thread: make_thread(&claude, &expected_text).as_ref().clone(), ..Default::default()
+        }, 1, 8).snapshot().unwrap();
+        let (changed, _) = agent_core::state::reduce(&original, "", agent_core::state::Event::ConversationRows {
+            subscription_id: claude_subscription, message: Box::new(update),
         });
         proptest::prop_assert!(Arc::ptr_eq(&original.sessions.conversations[&codex], &changed.sessions.conversations[&codex]));
-        let expected_text = format!("{claude_text}{delta}");
         proptest::prop_assert_eq!(item_text(&(changed.sessions.conversations[&claude].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])), Some(expected_text.as_str()));
         proptest::prop_assert_eq!(&changed.input.drafts, &original.input.drafts);
         let restored = agent_core::persistence::decode(&agent_core::persistence::encode(&changed).unwrap()).unwrap();

@@ -159,7 +159,7 @@ extension LaunchUITests {
         app.activate()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitUntilExists(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)[identifier].waitUntilExists(timeout: 20),
-                      "Foreground return did not fetch the conversation created by another client")
+                      "Foreground return did not fetch the conversation discovered from the provider")
         XCTAssertFalse(app.staticTexts["notice"].exists)
         let project = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.project."))
             .firstMatch
@@ -183,7 +183,7 @@ extension LaunchUITests {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitUntilExists(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)[identifier].waitUntilExists(timeout: 20),
-                      "Returning to the list did not fetch the conversation created by another client")
+                      "Returning to the list did not fetch the conversation discovered from the provider")
         captureScreen(app, named: "New conversation fetched when returning to the list")
     }
 

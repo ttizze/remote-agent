@@ -864,7 +864,7 @@ pub(super) mod tests {
                     .unwrap()
                     .inputs
                     .values()
-                    .any(|input| matches!(input.state, InputState::Failed(_)))
+                    .any(|input| matches!(input.state, InputState::Failed { .. }))
                 {
                     break;
                 }
