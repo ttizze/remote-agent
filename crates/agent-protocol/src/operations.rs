@@ -132,11 +132,7 @@ pub enum Input {
 impl Input {
     /// T3's isCompactionCommandMessage: a standalone command without attachments.
     pub fn is_compaction(input: &[Self]) -> bool {
-        matches!(input, [Self::Text { text }] if Self::is_compaction_text(text))
-    }
-
-    pub fn is_compaction_text(text: &str) -> bool {
-        text.trim().eq_ignore_ascii_case("/compact")
+        matches!(input, [Self::Text { text }] if text.trim().eq_ignore_ascii_case("/compact"))
     }
 
     pub fn message_parts(input: &[Self]) -> Vec<crate::items::MessagePart> {

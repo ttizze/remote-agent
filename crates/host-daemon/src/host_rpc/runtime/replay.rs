@@ -653,7 +653,10 @@ async fn assert_fork_prefix(storage: &Storage, owners: &Arc<Owners>, recording: 
         .map(|item| serde_json::to_string(item.body()).unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(texts.contains("fork boundary alpha"));
+    assert!(turns[0].items.iter().flatten().any(|item| matches!(
+        item.body(), agent_protocol::items::ItemBody::AssistantText { text, .. }
+            if text.contains("fork boundary alpha")
+    )));
     assert!(!texts.contains("fork boundary beta"));
 }
 

@@ -319,7 +319,9 @@ fn backup(path: &Path, connection: Option<&Connection>) -> Result<tempfile::Temp
         }
     }
     for entry in fs::read_dir(backup.path()).map_err(failure)? {
-        fs::File::open(entry.map_err(failure)?.path())
+        fs::OpenOptions::new()
+            .write(true)
+            .open(entry.map_err(failure)?.path())
             .and_then(|file| file.sync_all())
             .map_err(failure)?;
     }

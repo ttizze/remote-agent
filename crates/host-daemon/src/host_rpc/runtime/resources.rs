@@ -733,45 +733,25 @@ impl Runtime {
             Ok(agent)
         }
         .await;
-        let agent = match preflight {
-            Ok(agent) => agent,
-            Err(error) => {
-                let mut error = original_error.unwrap_or_else(|| execution_error(error));
-                // The previous retry evidence prevents the capacity classifier
-                // from scheduling this unsafe resume again.
-                error.retry = Some(agent_protocol::execution::RetryEvidence {
-                    retrying: true,
-                    attempt: None,
-                    max_attempts: None,
-                });
-                Self::event(
-                    service,
-                    target,
-                    Event::Provider {
-                        native_items: vec![],
-                        native_turn: None,
-                        attempt: attempt.id,
-                        observation: Observation::Failed(Some(error)),
-                    },
-                )
-                .await?;
-                return Ok(());
+        let result = match preflight {
+            Ok(agent) => {
+                // Stop may have committed while the provider state was being read.
+                if !runtime.storage.state(target)?.permits(&action) {
+                    return Self::cancel_unstarted_resume(service, target, attempt).await;
+                }
+                agent
+                    .continue_turn(
+                        &attempt.source,
+                        selection.model.as_ref().map(|model| model.id.as_str()),
+                        selection.effort.as_deref(),
+                        selection.service_tier.as_deref(),
+                        attempt.id,
+                    )
+                    .await
             }
+            Err(error) => Err(error),
         };
-        // Stop may have committed while the provider state was being read.
-        if !runtime.storage.state(target)?.permits(&action) {
-            return Self::cancel_unstarted_resume(service, target, attempt).await;
-        }
-        match agent
-            .continue_turn(
-                &attempt.source,
-                selection.model.as_ref().map(|model| model.id.as_str()),
-                selection.effort.as_deref(),
-                selection.service_tier.as_deref(),
-                attempt.id,
-            )
-            .await
-        {
+        match result {
             Ok(receipt) => {
                 if let Some(turn) = receipt.turn_id {
                     Self::event(
@@ -792,6 +772,12 @@ impl Runtime {
                 }
             }
             Err(error) => {
+                let mut error = original_error.unwrap_or_else(|| execution_error(error));
+                error.retry = Some(agent_protocol::execution::RetryEvidence {
+                    retrying: true,
+                    attempt: None,
+                    max_attempts: None,
+                });
                 Self::event(
                     service,
                     target,
@@ -799,7 +785,7 @@ impl Runtime {
                         native_items: Vec::new(),
                         native_turn: None,
                         attempt: attempt.id,
-                        observation: Observation::Failed(Some(execution_error(error))),
+                        observation: Observation::Failed(Some(error)),
                     },
                 )
                 .await?;
@@ -1114,15 +1100,7 @@ mod tests {
                     panic!("unsafe resume must end without scheduling another retry")
                 };
                 assert!(error.retry.is_none());
-                assert_eq!(
-                    error.message,
-                    if case == "idle" {
-                        "Native continuation is unavailable"
-                    } else {
-                        "original overload"
-                    },
-                    "case {case}"
-                );
+                assert_eq!(error.message, "original overload", "case {case}");
             }
         }
     }

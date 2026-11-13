@@ -3288,6 +3288,27 @@ fn a_failed_import_finishes_and_a_new_source_supersedes_an_old_claim() {
             .retry(stale.id, stale.attempt, 6, "must not block replacement")
             .unwrap()
     );
+    let mut response = response;
+    response.thread.id = Some(replacement.clone());
+    let rejected = storage
+        .reimport(
+            &target,
+            &replacement,
+            current[0].id,
+            current[0].attempt,
+            &response,
+            7,
+        )
+        .unwrap();
+    assert!(matches!(rejected.step.outcome, Outcome::Rejected(_)));
+    assert!(
+        !rejected.reset,
+        "a rejected import must preserve expanded pages"
+    );
+    assert!(
+        rejected.rows.is_empty(),
+        "the existing Unavailable header has not changed"
+    );
 }
 
 #[test]

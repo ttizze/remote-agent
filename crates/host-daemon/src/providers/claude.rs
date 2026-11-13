@@ -872,8 +872,8 @@ async fn read_tool_output(path: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
-async fn read_tool_output_tail(path: &str) -> Result<agent_protocol::sync::Output, String> {
-    use agent_protocol::sync::{Output, TAIL_CHARS};
+async fn read_tool_output_tail(path: &str) -> Result<(String, bool), String> {
+    use agent_protocol::sync::TAIL_CHARS;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut file = tokio::fs::File::open(path)
         .await
@@ -900,10 +900,10 @@ async fn read_tool_output_tail(path: &str) -> Result<agent_protocol::sync::Outpu
             .position(|byte| byte & 0xc0 != 0x80)
             .unwrap_or(bytes.len())
     };
-    let text = String::from_utf8_lossy(&bytes[boundary..]);
-    let mut output = Output::persisted(&text);
-    output.truncated |= offset != 0;
-    Ok(output)
+    Ok((
+        String::from_utf8_lossy(&bytes[boundary..]).into_owned(),
+        offset != 0,
+    ))
 }
 
 impl Worker {
@@ -911,7 +911,7 @@ impl Worker {
         self.work.borrow().settled
     }
 
-    /// Publishes what the answered response waits on, as T3 Code's Waiting roster.
+    /// Publishes the live background roster, as T3 Code's Waiting roster.
     async fn publish_waiting(&mut self, response: &ResponseState) -> Result<(), String> {
         self.work
             .send_modify(|work| work.background = response.has_background());
@@ -1503,11 +1503,10 @@ impl Worker {
             return Ok(false);
         };
         if let Some(path) = outcome.output_path
-            && let Ok(output) = read_tool_output_tail(path).await
+            && let Ok((output, omitted)) = read_tool_output_tail(path).await
         {
-            let omitted = output.truncated;
             let mut body =
-                native::tool_result_body(item.body(), &Value::String(output.text), &Value::Null);
+                native::tool_result_body(item.body(), &Value::String(output), &Value::Null);
             if let ItemBody::CommandExecution { output_omitted, .. } = &mut body {
                 *output_omitted = omitted;
             }
@@ -3330,7 +3329,7 @@ for (const row of rows) {
     }
     #[tokio::test]
     async fn background_completion_marks_only_actually_truncated_output() {
-        for text in ["short 日".into(), "日".repeat(100_000)] {
+        for text in ["short 日".into(), "日".repeat(1_000_000)] {
             let (observed, _, mut worker) = routed_worker();
             let file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(file.path(), &text).unwrap();
@@ -3368,7 +3367,7 @@ for (const row of rows) {
                 .find(|item| item.id.as_str() == "command")
                 .unwrap();
             assert!(
-                matches!(item.body(), ItemBody::CommandExecution { output, output_omitted, .. } if text.ends_with(output) && *output_omitted == (text.encode_utf16().count() > agent_protocol::sync::TAIL_CHARS))
+                matches!(item.body(), ItemBody::CommandExecution { output, output_omitted, .. } if text.ends_with(output) && *output_omitted == (text.len() > agent_protocol::sync::TAIL_CHARS * 4 * 3))
             );
             assert_eq!(item.status, ItemStatus::Completed);
         }
@@ -4257,23 +4256,22 @@ async fn background_output_reads_only_a_bounded_utf8_tail_of_large_files() {
         .unwrap();
     let suffix = "日".repeat(30_000);
     file.write_all(suffix.as_bytes()).unwrap();
-    let output = read_tool_output_tail(file.path().to_str().unwrap())
+    let (output, truncated) = read_tool_output_tail(file.path().to_str().unwrap())
         .await
         .unwrap();
-    assert!(output.text.encode_utf16().count() <= agent_protocol::sync::TAIL_CHARS);
-    assert!(suffix.ends_with(&output.text));
-    assert_eq!(output.text, suffix);
-    assert!(output.truncated);
+    assert!(output.len() <= agent_protocol::sync::TAIL_CHARS * 4 * 3);
+    assert!(output.ends_with(&suffix));
+    assert!(truncated);
     std::fs::write(file.path(), "short 日").unwrap();
-    let small = read_tool_output_tail(file.path().to_str().unwrap())
+    let (small, truncated) = read_tool_output_tail(file.path().to_str().unwrap())
         .await
         .unwrap();
-    assert!(!small.truncated);
-    assert_eq!(small.text, "short 日");
+    assert!(!truncated);
+    assert_eq!(small, "short 日");
     std::fs::write(file.path(), b"before\xffafter").unwrap();
-    let binary = read_tool_output_tail(file.path().to_str().unwrap())
+    let (binary, truncated) = read_tool_output_tail(file.path().to_str().unwrap())
         .await
         .unwrap();
-    assert_eq!(binary.text, "before\u{fffd}after");
-    assert!(!binary.truncated);
+    assert_eq!(binary, "before\u{fffd}after");
+    assert!(!truncated);
 }

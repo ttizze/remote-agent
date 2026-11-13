@@ -268,6 +268,10 @@ impl Runtime {
         // Catalog-only rows have no authoritative history or provider
         // binding yet. An operation cannot start a second native session.
         if request.session.provider.is_some()
+            && !matches!(
+                request.command,
+                Command::ResolveUnknown { retry: false, .. }
+            )
             && !service
                 .inner
                 .conversation

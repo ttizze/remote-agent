@@ -65,17 +65,6 @@ impl Runtime {
                     Self::event(
                         service,
                         &source.target,
-                        Event::DeliveryFailed {
-                            id: id.clone(),
-                            action,
-                            unknown: true,
-                            error,
-                        },
-                    )
-                    .await?;
-                    Self::event(
-                        service,
-                        &source.target,
                         Event::DeliveryFenced { id, action },
                     )
                     .await?;
@@ -288,19 +277,9 @@ impl Runtime {
                             };
                             let mut header =
                                 super::super::storage::history::header(&response, now());
-                            header.details.preview = header
-                                .state
-                                .name
-                                .trim()
-                                .is_empty()
-                                .then(|| {
-                                    header
-                                        .details
-                                        .preview
-                                        .as_deref()
-                                        .map(|preview| preview.chars().take(120).collect())
-                                })
-                                .flatten();
+                            if !header.state.name.trim().is_empty() {
+                                header.details.preview = None;
+                            }
                             header.details.capabilities = records::capabilities(
                                 service.inner.providers.get(*provider).ok()?.capabilities(),
                             );

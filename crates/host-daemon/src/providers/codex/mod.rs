@@ -994,16 +994,15 @@ impl Agent for Codex {
         }
     }
     fn availability(&self) -> Result<(), Failure> {
-        self.server()?;
-        if let Some(error) = self.restoration_error.borrow().as_ref() {
-            return Err(Failure::new("account_unavailable", error));
-        }
-        Ok(())
+        self.server().map(|_| ())
     }
     fn requires_restart_snapshot(&self) -> bool {
         self.process.is_ok()
     }
     fn validate_create(&self) -> Result<(), Failure> {
+        if let Some(error) = self.restoration_error.borrow().as_ref() {
+            return Err(Failure::new("account_unavailable", error));
+        }
         self.availability()
     }
     async fn create(
@@ -1070,7 +1069,7 @@ impl Agent for Codex {
             .map_err(|error| Failure::unknown("provider_unload_failed", error))
     }
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
-        self.availability()?;
+        self.validate_create()?;
         let native: Value = self
             .request(
                 "thread/read",
@@ -1112,15 +1111,13 @@ impl Agent for Codex {
                 self.scopes
                     .bind(&input.thread_id.id, turn.into(), execution);
                 params["expectedTurnId"] = turn.into();
-                let result = self
-                    .request_execution::<agent_protocol::models::Empty>(
-                        "turn/steer",
-                        &params,
-                        &input.thread_id.id,
-                        execution,
-                    )
-                    .await;
-                result?;
+                self.request_execution::<agent_protocol::models::Empty>(
+                    "turn/steer",
+                    &params,
+                    &input.thread_id.id,
+                    execution,
+                )
+                .await?;
                 Some(turn.into())
             }
             SubmissionTarget::Start { cwd } => {
@@ -1141,10 +1138,9 @@ impl Agent for Codex {
                 } else {
                     ("turn/start", params)
                 };
-                let result = self
+                let reply = self
                     .request_execution::<Value>(method, &params, &input.thread_id.id, execution)
-                    .await;
-                let reply = result?;
+                    .await?;
                 if compact {
                     // This RPC returns Empty. The reserved execution adopts turn/started.
                     None
@@ -1168,10 +1164,9 @@ impl Agent for Codex {
         execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
         self.scopes.reserve(id, execution);
-        let result = self
+        let reply = self
             .request_execution::<Value>("turn/start", &serde_json::json!({"threadId":id,"input":[],"model":model,"effort":effort,"serviceTierForTurn":service_tier,"summary":REASONING_SUMMARY}), id, execution)
-            .await;
-        let reply = result?;
+            .await?;
         let turn = native_turn_id(reply["turn"]["id"].as_str())?;
         self.scopes.bind(id, turn.clone(), execution);
         Ok(op::SubmissionReceipt {
@@ -1490,7 +1485,26 @@ rl.on('line', line => {
             .await
             .unwrap(),
         );
-        let agent = Codex::new(Ok(server));
+        let agent = Arc::new(Codex::new(Ok(server)));
+        agent
+            .restoration_error
+            .send_replace(Some("ログインするアカウントを選択してください。".into()));
+        assert!(agent.availability().is_ok());
+        assert_eq!(
+            agent.validate_create().unwrap_err().code,
+            "account_unavailable"
+        );
+        assert_eq!(
+            agent.state("thread").await.err().unwrap().code,
+            "account_unavailable"
+        );
+        let (providers, _) = crate::providers::Registry::new([crate::providers::Backend {
+            provider: ProviderKind::Codex,
+            agent: Ok(agent.clone()),
+            dictation: None,
+        }]);
+        assert_eq!(providers.data_recipients(), ["OpenAI"]);
+        agent.restoration_error.send_replace(None);
         let mut events = agent.event_stream().unwrap();
         let rejected = uuid::Uuid::new_v4();
         agent.scopes.reserve("thread", rejected);

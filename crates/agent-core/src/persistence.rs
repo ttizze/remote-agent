@@ -281,12 +281,22 @@ fn assign_draft_addresses(
         if navigation.draft_key == old {
             Arc::make_mut(navigation).draft_key = key.clone();
         }
-        for input in Arc::make_mut(pending)
-            .values_mut()
-            .filter(|input| input.draft_key == old)
+        for (id, input) in Arc::make_mut(pending)
+            .iter_mut()
+            .filter(|(_, input)| input.draft_key == old)
         {
             let input = Arc::make_mut(input);
-            input.draft_key = key.clone();
+            // Main already admitted first sends under this address. Only
+            // unsent drafts receive a new providerless UUID at cutover.
+            input.draft_key = input.draft.model.as_ref().map_or_else(
+                || key.clone(),
+                |model| {
+                    DraftKey::from(crate::session::SessionRef {
+                        provider: Some(model.provider),
+                        id: format!("bex-task:{id}"),
+                    })
+                },
+            );
             input.new_draft_slot = Some(project.clone());
         }
     }

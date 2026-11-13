@@ -602,7 +602,6 @@ fn unsupported_destinations_are_rejected_without_rewriting_their_bytes() {
         let before = std::fs::read(&path).unwrap();
         let storage = Storage::open(&path);
         assert!(storage.check_ready().is_err());
-        assert!(storage.identity().is_err());
         drop(storage);
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
@@ -627,7 +626,6 @@ fn storage_uses_durable_wal_and_reports_an_invalid_path_to_every_consumer() {
         .unwrap();
     let invalid = Storage::open(directory.path());
     assert!(invalid.check_ready().is_err());
-    assert!(invalid.identity().is_err());
     assert!(invalid.headers(true).is_err());
     assert!(invalid.list(None).is_err());
     assert!(invalid.state(&address()).is_err());

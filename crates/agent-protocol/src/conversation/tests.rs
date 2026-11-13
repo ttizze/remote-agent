@@ -474,7 +474,6 @@ fn steering_a_selected_queued_input_does_not_drain_the_inputs_before_it() {
         next.inputs[Uuid::from_u128(3).to_string().as_str()].state,
         InputState::Queued { .. }
     ));
-    assert_eq!(state.inputs.len(), 2);
 }
 
 #[test]

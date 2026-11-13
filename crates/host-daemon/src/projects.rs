@@ -42,7 +42,7 @@ pub(crate) fn chat_directories(
 #[derive(Debug, Clone)]
 pub struct ProjectStore {
     path: PathBuf,
-    pub(crate) storage: Arc<crate::host_rpc::storage::Storage>,
+    storage: Arc<crate::host_rpc::storage::Storage>,
 }
 impl ProjectStore {
     #[cfg(feature = "test-support")]

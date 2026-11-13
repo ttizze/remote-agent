@@ -409,13 +409,15 @@ impl Storage {
                 let sequence = Self::advance(&transaction)?;
                 let outcome = Outcome::Rejected("native import source changed".into());
                 let (mut header, counters) = rows::header(&transaction, key)?;
+                let mut rows = Vec::new();
                 if header.details.history_read_state.as_ref().is_some_and(|read| read.kind == agent_protocol::session::HistoryReadKind::Loading) {
                     header.details.history_read_state = Some(agent_protocol::session::HistoryReadState::new(agent_protocol::session::HistoryReadKind::Unavailable, vec!["native import source changed".into()]));
                     transaction.execute("UPDATE threads SET seq=?1,body=?2 WHERE key=?3", params![integer(sequence.sequence)?, codec::header(&header, &counters)?, key]).map_err(failure)?;
+                    rows.push(Row { key: Key::Thread(target.clone()), version: sequence.sequence, position: Position::Unordered, content: Content::Full(Arc::new(Record::Thread(header))) });
                 }
                 settle(&transaction,target,operation,claim,sequence,&outcome)?;
                 transaction.commit().map_err(failure)?;
-                return Ok(Committed { step: Step { outcome, ..Default::default() }, cursor: sequence, rows: vec![], removed: vec![], reset: true });
+                return Ok(Committed { step: Step { outcome, ..Default::default() }, cursor: sequence, rows, removed: vec![], reset: false });
             }
             if state.active_turn().is_some_and(|turn| !turn.observed || state.attempts.contains_key(&turn.id) || response.thread.status==agent_protocol::models::SessionStatus::Running) || state.inputs.values().any(|input| !matches!(input.state, decision::InputState::Queued { .. } | decision::InputState::Failed { .. })) { return Err("conversation is busy; native import will resume when it is idle".into()); }
             let caught_up = matches!(state.bindings.get(&state.thread.provider), Some(decision::Binding::Ready { covered, .. }) if *covered == state.history_end());

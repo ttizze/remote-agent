@@ -325,7 +325,11 @@ impl Operation for ResolveLocalInput {
                     pending.accepted = true;
                     pending.delivery_unknown = false;
                 }
-                vec![Effect::execute(ReadThread::new(session))]
+                if snapshot.sessions.subscriptions.contains_key(&session) {
+                    Vec::new()
+                } else {
+                    vec![Effect::execute(ReadThread::new(session))]
+                }
             }
             agent_protocol::conversation::Outcome::DeliveryUnknown => Vec::new(),
         }
@@ -484,11 +488,16 @@ mod tests {
         #[values(true, false)] accepted: bool,
         #[values(true, false)] restore: bool,
         #[values(true, false)] welcome: bool,
+        #[values(true, false)] subscribed: bool,
     ) {
         let session = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
         let input: ClientInputId = uuid::Uuid::new_v4().to_string().into();
         let key = DraftKey::from(&session);
         let mut snapshot = Snapshot::default();
+        if subscribed {
+            Arc::make_mut(&mut snapshot.sessions.subscriptions)
+                .insert(session.clone(), uuid::Uuid::new_v4());
+        }
         Arc::make_mut(&mut snapshot.input.drafts).insert(
             key.clone(),
             Arc::new(Draft {
@@ -554,7 +563,7 @@ mod tests {
             snapshot.sessions.pending_submissions.contains_key(&input),
             accepted
         );
-        assert_eq!(effects.len(), usize::from(accepted));
+        assert_eq!(effects.len(), usize::from(accepted && !subscribed));
     }
 
     #[rstest::rstest]

@@ -118,16 +118,7 @@ impl HostRpcService {
 
     /// Clients compare this with cached state at the start of every connection.
     pub(crate) fn storage_scope(&self) -> anyhow::Result<String> {
-        let database = self
-            .inner
-            .conversation
-            .storage
-            .identity()
-            .map_err(anyhow::Error::msg)?;
-        Ok(format!(
-            "{}:{database}",
-            self.inner.providers.storage_scope()?
-        ))
+        Ok(self.inner.providers.storage_scope()?)
     }
 
     async fn account_request(&self, request: Call) -> Result<Body, Failure> {
@@ -1091,6 +1082,7 @@ mod tests {
         let service =
             super::HostRpcService::new([claude.into()], root.path().join("projects.json"));
         let before = service.storage_scope().unwrap();
+        assert_eq!(before, service.inner.providers.storage_scope().unwrap());
         let claude = crate::providers::claude::Claude::load(
             "claude".into(),
             root.path().join("accounts"),
@@ -1111,6 +1103,7 @@ mod tests {
             root.path().join("projects.json"),
         );
         let after = service.storage_scope().unwrap();
+        assert_eq!(after, service.inner.providers.storage_scope().unwrap());
         assert_eq!(
             before, after,
             "Adding Harness must not archive existing drafts or navigation"

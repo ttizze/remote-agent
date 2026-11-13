@@ -105,24 +105,29 @@ impl Runtime {
                 }
             }
             Err(error) => {
-                if let Some(generation) = setup_generation {
-                    let current = runtime.storage.input(target, &id)?.is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action: current, .. } if current == action));
-                    let phase = if current {
-                        agent_protocol::workspace::SetupPhase::Failed
-                    } else {
-                        agent_protocol::workspace::SetupPhase::Cancelled
-                    };
-                    service
-                        .setup_update(
+                let setup_result = async {
+                    if let Some(generation) = setup_generation {
+                        let current = runtime.storage.input(target, &id)?.is_some_and(|input| {
+                            matches!(input.state, decision::InputState::Preparing { action: current, .. } if current == action)
+                        });
+                        let phase = if current {
+                            agent_protocol::workspace::SetupPhase::Failed
+                        } else {
+                            agent_protocol::workspace::SetupPhase::Cancelled
+                        };
+                        service.setup_update(
                             target,
                             generation,
                             super::super::storage::workspace::SetupChange::Finish {
                                 phase,
                                 error: Some(error.message.clone()),
                             },
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
+                        ).await.map_err(|error| error.to_string())?;
+                    }
+                    Ok::<_, String>(())
+                }.await;
+                if let Err(error) = setup_result {
+                    tracing::warn!(target: "agent", operation="conversation.finish_failed_setup", %error);
                 }
                 Self::event(
                     service,

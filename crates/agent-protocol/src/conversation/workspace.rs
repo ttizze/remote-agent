@@ -104,10 +104,15 @@ fn retry(
                         && stage.started_at_ms.is_some())
         })
     });
-    Ok(
-        (failed_script && matches!(input, Some(decision::InputState::Failed { .. })))
-            .then(|| (None, cwd.unwrap_or(&saved.project_cwd).to_owned())),
-    )
+    Ok((failed_script
+        && matches!(
+            input,
+            Some(decision::InputState::Failed {
+                stage: PreparationStage::SetupScript,
+                ..
+            })
+        ))
+    .then(|| (None, cwd.unwrap_or(&saved.project_cwd).to_owned())))
 }
 
 // Only the fresh checkout owned by this cancelled attempt is discarded. Reused
@@ -516,5 +521,21 @@ mod tests {
             .unwrap();
         assert_eq!(workspace, None);
         assert_eq!(cwd, "/checkout");
+        let provider = decision::InputState::Failed {
+            stage: PreparationStage::Provider,
+            error: Some(Default::default()),
+        };
+        assert!(
+            retry(
+                Some(&saved),
+                Some(&provider),
+                Some("/checkout"),
+                true,
+                false
+            )
+            .unwrap()
+            .is_none(),
+            "a failed input does not re-run an earlier asynchronous setup script"
+        );
     }
 }

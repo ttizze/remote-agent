@@ -93,9 +93,6 @@ fn existing_key(connection: &Connection, id: &SessionRef) -> Result<Option<i64>,
 }
 
 impl Storage {
-    pub(super) fn identity(&self) -> Result<Uuid, String> {
-        self.with(|connection| cursor(connection).map(|cursor| cursor.store))
-    }
     pub(super) fn request_owner(
         &self,
         id: &agent_protocol::ids::RequestId,
