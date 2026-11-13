@@ -7,13 +7,14 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "cargo-huacnlee";
-  version = "0.102.0-9-pr10-pr11-unit-locks";
+  version = "0.102.0-9-pr10-pr11-unit-fingerprints";
   src = fetchurl {
     url = "https://github.com/huacnlee/cargo/archive/refs/tags/v0.102.0-9.tar.gz";
     sha256 = "49a63fc1e05890657c151034f67c2217a51aa65c7835ce423e1aa3bc2379547e";
   };
   # Protect queued units from GC, keep patched dependency types identical, and
   # stop concurrent builds deadlocking on units the other has already built.
+  # Completion records are invalidated only by the unit's active writer.
   patches = [ (fetchurl {
     # https://github.com/huacnlee/cargo/pull/10
     url = "https://github.com/huacnlee/cargo/compare/6ebb89197f5b3a88b637e28672e6d39d67343401...c8890c4515732718349ac350672e8ed900b77c51.diff";

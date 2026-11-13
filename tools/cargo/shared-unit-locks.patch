@@ -1,8 +1,183 @@
+diff --git a/src/compiler/custom_build.rs b/src/compiler/custom_build.rs
+--- a/src/compiler/custom_build.rs
++++ b/src/compiler/custom_build.rs
+@@ -288,7 +288,11 @@
+         .contains_key(metadata)
+     {
+         // The output is already set, thus the build script is overridden.
+-        fingerprint::prepare_target(build_runner, unit, false)
++        let mut job = fingerprint::prepare_target(build_runner, unit, false)?;
++        if job.freshness().is_dirty() {
++            job.before(fingerprint::invalidate(build_runner, unit));
++        }
++        Ok(job)
+     } else {
+         build_work(build_runner, unit)
+     }
+@@ -747,7 +751,7 @@
+
+     let mut job = fingerprint::prepare_target(build_runner, unit, false)?;
+     if job.freshness().is_dirty() {
+-        job.before(dirty);
++        job.before(fingerprint::invalidate(build_runner, unit).then(dirty));
+     } else {
+         job.before(fresh);
+     }
 diff --git a/src/compiler/fingerprint/mod.rs b/src/compiler/fingerprint/mod.rs
-index 66d19ab..e2caeeb 100644
 --- a/src/compiler/fingerprint/mod.rs
 +++ b/src/compiler/fingerprint/mod.rs
-@@ -2010,7 +2010,7 @@ fn local_fingerprints_deps(
+@@ -517,40 +517,6 @@
+         .ok_or_else(|| internal("missing package source"))?;
+     source.verify(unit.pkg.package_id())?;
+
+-    // Clear out the old fingerprint file if it exists. This protects when
+-    // compilation is interrupted leaving a corrupt file. For example, a
+-    // project with a lib.rs and integration test (two units):
+-    //
+-    // 1. Build the library and integration test.
+-    // 2. Make a change to lib.rs (NOT the integration test).
+-    // 3. Build the integration test, hit Ctrl-C while linking. With gcc, this
+-    //    will leave behind an incomplete executable (zero size, or partially
+-    //    written). NOTE: The library builds successfully, it is the linking
+-    //    of the integration test that we are interrupting.
+-    // 4. Build the integration test again.
+-    //
+-    // Without the following line, then step 3 will leave a valid fingerprint
+-    // on the disk. Then step 4 will think the integration test is "fresh"
+-    // because:
+-    //
+-    // - There is a valid fingerprint hash on disk (written in step 1).
+-    // - The mtime of the output file (the corrupt integration executable
+-    //   written in step 3) is newer than all of its dependencies.
+-    // - The mtime of the integration test fingerprint dep-info file (written
+-    //   in step 1) is newer than the integration test's source files, because
+-    //   we haven't modified any of its source files.
+-    //
+-    // But the executable is corrupt and needs to be rebuilt. Clearing the
+-    // fingerprint at step 3 ensures that Cargo never mistakes a partially
+-    // written output as up-to-date.
+-    if loc.exists() {
+-        // Truncate instead of delete so that compare_old_fingerprint will
+-        // still log the reason for the fingerprint failure instead of just
+-        // reporting "failed to read fingerprint" during the next build if
+-        // this build fails.
+-        paths::write(&loc, b"")?;
+-    }
+-
+     let write_fingerprint = if unit.mode.is_run_custom_build() {
+         // For build scripts the `local` field of the fingerprint may change
+         // while we're executing it. For example it could be in the legacy
+@@ -589,6 +555,23 @@
+     };
+
+     Ok(Job::new_dirty(write_fingerprint, dirty_reason))
++}
++
++/// Invalidates an output only immediately before rebuilding it. With unit
++/// locking this work must run after taking the exclusive lock, and must be
++/// skipped when another Cargo has already built the same inputs. Preparing a
++/// queued job may only hold a shared lock: clearing the fingerprint then makes
++/// active readers look incomplete and prevents other readers from reusing them.
++pub fn invalidate(build_runner: &BuildRunner<'_, '_>, unit: &Unit) -> Work {
++    let loc = build_runner.files().fingerprint_file_path(unit, "");
++    Work::new(move |_| {
++        if loc.exists() {
++            // A failed or interrupted compiler must not leave a valid completion
++            // record for a partially written output. Preserve the JSON diagnosis.
++            paths::write(&loc, b"")?;
++        }
++        Ok(())
++    })
+ }
+
+ /// Dependency edge information for fingerprints. This is generated for each
+@@ -940,14 +923,15 @@
+         &self,
+         mtime_cache: &mut HashMap<PathBuf, FileTime>,
+         checksum_cache: &mut HashMap<PathBuf, Checksum>,
+-        pkg: &Package,
++        pkg_root: &Path,
++        metadata: &crate::workspace::manifest::ManifestMetadata,
+         build_root: &Path,
+         ws_root: &Path,
+         cargo_exe: &Path,
+-        gctx: &GlobalContext,
++        env_config: &HashMap<String, OsString>,
++        get_env: impl Fn(&str) -> Option<String>,
+         shared_files: Option<&HashSet<PathBuf>>,
+     ) -> CargoResult<Option<StaleItem>> {
+-        let pkg_root = pkg.root();
+         match self {
+             // We need to parse `dep_info`, learn about the crate's dependencies.
+             //
+@@ -970,33 +954,36 @@
+                     info.files.retain(|file, _| !shared_files.contains(file));
+                 }
+                 for (key, previous) in info.env.iter() {
+-                    if let Some(value) = pkg.manifest().metadata().env_var(key.as_str()) {
++                    if let Some(value) = metadata.env_var(key.as_str()) {
+                         if Some(value.as_ref()) == previous.as_deref() {
+                             continue;
+                         }
+                     }
+
+                     let current = if key == CARGO_ENV {
+-                        Some(cargo_exe.to_str().ok_or_else(|| {
+-                            format_err!(
+-                                "cargo exe path {} must be valid UTF-8",
+-                                cargo_exe.display()
+-                            )
+-                        })?)
++                        Some(
++                            cargo_exe
++                                .to_str()
++                                .ok_or_else(|| {
++                                    format_err!(
++                                        "cargo exe path {} must be valid UTF-8",
++                                        cargo_exe.display()
++                                    )
++                                })?
++                                .to_owned(),
++                        )
++                    } else if let Some(value) = env_config.get(key) {
++                        value.to_str().map(ToOwned::to_owned)
+                     } else {
+-                        if let Some(value) = gctx.env_config()?.get(key) {
+-                            value.to_str()
+-                        } else {
+-                            gctx.get_env(key).ok()
+-                        }
++                        get_env(key)
+                     };
+-                    if current == previous.as_deref() {
++                    if current.as_deref() == previous.as_deref() {
+                         continue;
+                     }
+                     return Ok(Some(StaleItem::ChangedEnv {
+                         var: key.clone(),
+                         previous: previous.clone(),
+-                        current: current.map(Into::into),
++                        current,
+                     }));
+                 }
+                 match fingerprint {
+@@ -1376,11 +1363,13 @@
+             if let Some(item) = local.find_stale_item(
+                 mtime_cache,
+                 checksum_cache,
+-                pkg,
++                pkg.root(),
++                pkg.manifest().metadata(),
+                 build_root,
+                 ws_root,
+                 cargo_exe,
+-                gctx,
++                gctx.env_config()?,
++                |key| gctx.get_env(key).ok().map(ToOwned::to_owned),
+                 shared_files,
+             )? {
+                 item.log();
+@@ -2010,14 +1999,71 @@
  pub fn built_elsewhere(
      build_runner: &BuildRunner<'_, '_>,
      unit: &Unit,
@@ -10,15 +185,89 @@ index 66d19ab..e2caeeb 100644
 +) -> Option<impl Fn() -> bool + Clone + Send + 'static> {
      let loc = build_runner.files().fingerprint_file_path(unit, "");
      let fingerprint = Arc::clone(build_runner.fingerprints.get(unit)?);
++    let pkg_root = unit.pkg.root().to_path_buf();
++    let metadata = unit.pkg.manifest().metadata().clone();
++    let build_root = build_root(build_runner, unit);
++    let ws_root = build_runner.bcx.ws.root().to_path_buf();
++    let gctx = build_runner.bcx.gctx;
++    let cargo_exe = gctx.cargo_exe().ok()?.to_path_buf();
++    let env = Arc::new(gctx.env_snapshot());
++    let env_config = Arc::clone(gctx.env_config().ok()?);
      Some(move || {
+-        // Dependencies feed this fingerprint, so it is only final now.
+-        fs::read_to_string(&loc).is_ok_and(|on_disk| {
++        // Dependencies feed this fingerprint, so it is only final now. A matching
++        // hash alone says nothing about env! inputs, missing outputs or rebuilt
++        // dependencies: apply the same local checks as ordinary freshness.
++        if !fs::read_to_string(&loc).is_ok_and(|on_disk| {
+             !on_disk.is_empty() && on_disk == util::to_hex(fingerprint.hash_u64())
++        }) || !shared_outputs_are_current(&fingerprint)
++        {
++            return false;
++        }
++        let mut mtimes = HashMap::default();
++        let mut checksums = HashMap::default();
++        fingerprint.local.lock().unwrap().iter().all(|local| {
++            local
++                .find_stale_item(
++                    &mut mtimes,
++                    &mut checksums,
++                    &pkg_root,
++                    &metadata,
++                    &build_root,
++                    &ws_root,
++                    &cargo_exe,
++                    &env_config,
++                    |key| env.get_env(key).ok().map(ToOwned::to_owned),
++                    None,
++                )
++                .is_ok_and(|stale| stale.is_none())
+         })
++    })
++}
++
++/// A completed shared output must still exist and be at least as new as the
++/// dependency outputs it links. Cached fs_status values describe queue planning,
++/// before another Cargo may have finished those dependencies.
++fn shared_outputs_are_current(fingerprint: &Fingerprint) -> bool {
++    let Ok(outputs) = fingerprint
++        .outputs
++        .iter()
++        .map(|path| paths::mtime(path))
++        .collect::<CargoResult<Vec<_>>>()
++    else {
++        return false;
++    };
++    let Some(newest) = outputs.into_iter().max() else {
++        return false;
++    };
++    fingerprint.deps.iter().all(|dep| {
++        dep.fingerprint
++            .outputs
++            .iter()
++            .filter(|path| {
++                !dep.only_requires_rmeta || path.extension().is_some_and(|ext| ext == "rmeta")
++            })
++            .all(|path| paths::mtime(path).is_ok_and(|mtime| mtime <= newest))
+     })
+ }
+
+@@ -2129,7 +2175,7 @@
+     let old_fingerprint_json = paths::read(&old_hash_path.with_extension("json"))?;
+     let old_fingerprint: Fingerprint = serde_json::from_str(&old_fingerprint_json)
+         .with_context(|| internal("failed to deserialize json"))?;
+-    // Fingerprint can be empty after a failed rebuild (see comment in prepare_target).
++    // Fingerprint can be empty after a failed rebuild (see invalidate).
+     if !old_fingerprint_short.is_empty() {
+         debug_assert_eq!(
+             util::to_hex(old_fingerprint.hash_u64()),
 diff --git a/src/compiler/job_queue/job_state.rs b/src/compiler/job_queue/job_state.rs
-index de304a5..8ac4cc7 100644
 --- a/src/compiler/job_queue/job_state.rs
 +++ b/src/compiler/job_queue/job_state.rs
-@@ -159,6 +159,14 @@ impl<'a, 'gctx> JobState<'a, 'gctx> {
+@@ -159,6 +159,14 @@
          self.lock_manager.lock(lock)
      }
- 
+
 +    pub fn lock_exclusive_unless_built(
 +        &self,
 +        lock: &LockKey,
@@ -31,10 +280,9 @@ index de304a5..8ac4cc7 100644
          self.lock_manager.downgrade_to_shared(lock)
      }
 diff --git a/src/compiler/locking.rs b/src/compiler/locking.rs
-index 3c2a654..43ef02c 100644
 --- a/src/compiler/locking.rs
 +++ b/src/compiler/locking.rs
-@@ -12,8 +12,11 @@ use anyhow::bail;
+@@ -12,8 +12,11 @@
  use std::{
      collections::hash_map::Entry,
      fmt::{Display, Formatter},
@@ -45,11 +293,11 @@ index 3c2a654..43ef02c 100644
 +    time::Duration,
  };
  use tracing::instrument;
- 
-@@ -99,6 +102,21 @@ impl LockManager {
+
+@@ -99,6 +102,21 @@
          Ok(())
      }
- 
+
 +    /// Takes the exclusive lock of a unit other Cargos build too, or a shared
 +    /// lock once one of them has built it.
 +    ///
@@ -68,10 +316,10 @@ index 3c2a654..43ef02c 100644
      /// Upgrades an existing exclusive lock into a shared lock.
      #[instrument(skip(self))]
      pub fn downgrade_to_shared(&self, key: &LockKey) -> CargoResult<()> {
-@@ -121,6 +139,24 @@ impl LockManager {
+@@ -121,6 +139,24 @@
      }
  }
- 
+
 +fn lock_exclusive_unless_built(file: &File, built: impl Fn() -> bool) -> CargoResult<()> {
 +    loop {
 +        match flock::try_lock_exclusive(file) {
@@ -92,8 +340,8 @@ index 3c2a654..43ef02c 100644
 +
  #[derive(Debug, Clone, Hash, Eq, PartialEq)]
  pub struct LockKey(PathBuf);
- 
-@@ -135,3 +171,101 @@ impl Display for LockKey {
+
+@@ -135,3 +171,101 @@
          write!(f, "{}", self.0.display())
      }
  }
@@ -196,16 +444,16 @@ index 3c2a654..43ef02c 100644
 +    }
 +}
 diff --git a/src/compiler/mod.rs b/src/compiler/mod.rs
-index 54b0766..e9e17ee 100644
 --- a/src/compiler/mod.rs
 +++ b/src/compiler/mod.rs
-@@ -255,6 +255,13 @@ fn compile<'gctx>(
+@@ -255,19 +255,25 @@
                  // Need to link targets on both the dirty and fresh.
                  Ok(work.then(link_targets(build_runner, unit, true)?))
              };
 +            // Another Cargo may build a shared unit while this one waits
 +            // for the exclusive lock below; reuse its output then.
 +            let built_elsewhere = (job.freshness().is_dirty()
++                && !force
 +                && lock.is_some()
 +                && build_runner.files().is_shared_unit(unit))
 +            .then(|| fingerprint::built_elsewhere(build_runner, unit))
@@ -213,22 +461,25 @@ index 54b0766..e9e17ee 100644
              job.before(if job.freshness().is_dirty() {
                  let work = if unit.mode.is_doc() || unit.mode.is_doc_scrape() {
                      rustdoc(build_runner, unit)?
-@@ -262,12 +269,8 @@ fn compile<'gctx>(
+                 } else {
                      rustc(build_runner, unit, exec)?
                  };
-                 let work = work.then(link_targets(build_runner, unit, false)?);
+-                let work = work.then(link_targets(build_runner, unit, false)?);
 -                // Another Cargo may build a shared unit while this one waits
 -                // for the exclusive lock below; reuse its output then.
 -                match fingerprint::built_elsewhere(build_runner, unit) {
 -                    Some(built_elsewhere)
 -                        if lock.is_some() && build_runner.files().is_shared_unit(unit) =>
 -                    {
++                let work = fingerprint::invalidate(build_runner, unit)
++                    .then(work)
++                    .then(link_targets(build_runner, unit, false)?);
 +                match built_elsewhere.clone() {
 +                    Some(built_elsewhere) => {
                          let fresh = fresh_work(build_runner)?;
                          Work::new(move |state| {
                              if built_elsewhere() {
-@@ -277,7 +280,7 @@ fn compile<'gctx>(
+@@ -277,7 +283,7 @@
                              }
                          })
                      }
@@ -237,7 +488,7 @@ index 54b0766..e9e17ee 100644
                  }
              } else {
                  fresh_work(build_runner)?
-@@ -295,7 +298,7 @@ fn compile<'gctx>(
+@@ -295,7 +301,7 @@
                      // We will hold this shared lock for the remainder of compilation to prevent
                      // other cargo from re-compiling while we are still using the unit.
                      build_runner.lock_manager.unlock(&lock)?;
@@ -246,10 +497,10 @@ index 54b0766..e9e17ee 100644
                      job.after(downgrade_lock_to_shared(lock));
                  }
              }
-@@ -743,9 +746,15 @@ fn verbose_if_simple_exit_code(err: Error) -> Error {
+@@ -743,9 +749,15 @@
      }
  }
- 
+
 -fn prebuild_lock_exclusive(lock: LockKey) -> Work {
 +fn prebuild_lock_exclusive(
 +    lock: LockKey,
@@ -264,15 +515,303 @@ index 54b0766..e9e17ee 100644
          Ok(())
      })
  }
+diff --git a/src/context/environment.rs b/src/context/environment.rs
+--- a/src/context/environment.rs
++++ b/src/context/environment.rs
+@@ -20,7 +20,7 @@
+ /// This type contains the env var snapshot and helper methods for both APIs.
+ ///
+ /// [`GlobalContext`]: super::GlobalContext
+-#[derive(Debug)]
++#[derive(Clone, Debug)]
+ pub struct Env {
+     /// A snapshot of the process's environment variables.
+     env: HashMap<OsString, OsString>,
+diff --git a/src/context/mod.rs b/src/context/mod.rs
+--- a/src/context/mod.rs
++++ b/src/context/mod.rs
+@@ -974,6 +974,11 @@
+         }
+     }
+
++    /// An owned environment snapshot for work running on compiler threads.
++    pub(crate) fn env_snapshot(&self) -> Env {
++        self.env.clone()
++    }
++
+     /// Get the value of environment variable `key` through the snapshot in
+     /// [`GlobalContext`].
+     ///
 diff --git a/src/util/flock.rs b/src/util/flock.rs
-index 77d333c..06ce7ce 100644
 --- a/src/util/flock.rs
 +++ b/src/util/flock.rs
-@@ -22,7 +22,6 @@ use cargo_util::paths;
+@@ -22,7 +22,6 @@
  pub(crate) use self::imp::lock_exclusive;
  pub(crate) use self::imp::lock_shared;
  pub(crate) use self::imp::try_lock_exclusive;
 -#[expect(unused_imports, reason = "for non-blocking lock callers")]
  pub(crate) use self::imp::try_lock_shared;
  pub(crate) use self::imp::unlock;
- 
+
+diff --git a/tests/testsuite/fork_defaults.rs b/tests/testsuite/fork_defaults.rs
+--- a/tests/testsuite/fork_defaults.rs
++++ b/tests/testsuite/fork_defaults.rs
+@@ -4,12 +4,63 @@
+
+ use std::fs;
+ use std::path::PathBuf;
++use std::process::{Child, Command, Output, Stdio};
+
+ use crate::prelude::*;
+ use cargo_test_support::registry::Package;
+ use cargo_test_support::{
+     Execs, Project, basic_lib_manifest, basic_manifest, git, paths, project, str,
+ };
++
++struct Build {
++    child: Option<Child>,
++    stdout: PathBuf,
++    stderr: PathBuf,
++}
++
++impl Build {
++    fn spawn(mut command: Command, name: &str) -> Self {
++        let stdout = paths::root().join(format!("{name}.stdout"));
++        let stderr = paths::root().join(format!("{name}.stderr"));
++        command
++            .stdout(Stdio::from(fs::File::create(&stdout).unwrap()))
++            .stderr(Stdio::from(fs::File::create(&stderr).unwrap()));
++        #[cfg(unix)]
++        {
++            use std::os::unix::process::CommandExt;
++            command.process_group(0);
++        }
++        Self {
++            child: Some(command.spawn().unwrap()),
++            stdout,
++            stderr,
++        }
++    }
++
++    fn wait(mut self) -> Output {
++        let status =
++            cargo_test_support::retry(600, || self.child.as_mut().unwrap().try_wait().unwrap());
++        self.child.take();
++        Output {
++            status,
++            stdout: fs::read(&self.stdout).unwrap(),
++            stderr: fs::read(&self.stderr).unwrap(),
++        }
++    }
++}
++
++impl Drop for Build {
++    fn drop(&mut self) {
++        if let Some(child) = &mut self.child {
++            #[cfg(unix)]
++            unsafe {
++                libc::kill(-(child.id() as i32), libc::SIGKILL);
++            }
++            let _ = child.kill();
++            let _ = child.wait();
++        }
++    }
++}
+
+ fn fork_cargo(p: &Project, args: &str) -> Execs {
+     let mut execs = p.cargo(args);
+@@ -253,58 +304,6 @@
+
+ #[cargo_test]
+ fn gc_preserves_queued_units_in_another_worktree() {
+-    use std::process::{Child, Command, Output, Stdio};
+-
+-    struct Build {
+-        child: Option<Child>,
+-        stdout: PathBuf,
+-        stderr: PathBuf,
+-    }
+-
+-    impl Build {
+-        fn spawn(mut command: Command, name: &str) -> Self {
+-            let stdout = paths::root().join(format!("{name}.stdout"));
+-            let stderr = paths::root().join(format!("{name}.stderr"));
+-            command
+-                .stdout(Stdio::from(fs::File::create(&stdout).unwrap()))
+-                .stderr(Stdio::from(fs::File::create(&stderr).unwrap()));
+-            #[cfg(unix)]
+-            {
+-                use std::os::unix::process::CommandExt;
+-                command.process_group(0);
+-            }
+-            Self {
+-                child: Some(command.spawn().unwrap()),
+-                stdout,
+-                stderr,
+-            }
+-        }
+-
+-        fn wait(mut self) -> Output {
+-            let status =
+-                cargo_test_support::retry(600, || self.child.as_mut().unwrap().try_wait().unwrap());
+-            self.child.take();
+-            Output {
+-                status,
+-                stdout: fs::read(&self.stdout).unwrap(),
+-                stderr: fs::read(&self.stderr).unwrap(),
+-            }
+-        }
+-    }
+-
+-    impl Drop for Build {
+-        fn drop(&mut self) {
+-            if let Some(child) = &mut self.child {
+-                #[cfg(unix)]
+-                unsafe {
+-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+-                }
+-                let _ = child.kill();
+-                let _ = child.wait();
+-            }
+-        }
+-    }
+-
+     let (p, wt) = repo_with_worktree("fn main() { println!(\"{}\", bar::bar()); }");
+     let script = r#"
+         fn main() {
+@@ -507,3 +506,135 @@
+ "#]])
+         .run();
+ }
++
++/// A queued rebuild must not invalidate a dependency still used by readers.
++/// Otherwise later readers also queue a write and can deadlock other builds.
++#[cargo_test]
++fn queued_rebuild_keeps_shared_readers_running() {
++    let bar = git::new("bar", |p| {
++        p.file("Cargo.toml", &basic_lib_manifest("bar")).file(
++            "src/lib.rs",
++            "pub const VALUE: &str = env!(\"CACHE_TEST_VALUE\");",
++        )
++    });
++    let manifest = format!(
++        "{}\n[dependencies]\nbar = {{ git = '{}' }}\n[build-dependencies]\nbar = {{ git = '{}' }}\n",
++        basic_manifest("foo", "0.1.0"),
++        bar.url(),
++        bar.url(),
++    );
++    let make_project = |name| {
++        project()
++            .at(name)
++            .file("Cargo.toml", &manifest)
++            .file("src/main.rs", "fn main() { println!(\"{}\", bar::VALUE); }")
++            .file(
++                "build.rs",
++                r#"
++                fn main() {
++                    let _ = bar::VALUE;
++                    if let Some(dir) = std::env::var_os("CACHE_TEST_BARRIER") {
++                        let dir = std::path::PathBuf::from(dir);
++                        std::fs::write(dir.join("ready"), "").unwrap();
++                        let start = std::time::Instant::now();
++                        while !dir.join("release").exists() {
++                            assert!(start.elapsed().as_secs() < 60, "barrier timed out");
++                            std::thread::sleep(std::time::Duration::from_millis(10));
++                        }
++                    }
++                }
++            "#,
++            )
++            .build()
++    };
++    let first_project = make_project("first");
++    let second_project = make_project("second");
++    let third_project = make_project("third");
++    let barrier = paths::root().join("barrier");
++    fs::create_dir(&barrier).unwrap();
++    let mut first = Build::spawn(
++        fork_cargo(&first_project, "build -j1")
++            .env("CACHE_TEST_VALUE", "one")
++            .env("CACHE_TEST_BARRIER", &barrier)
++            .build_command(),
++        "reader",
++    );
++    cargo_test_support::retry(600, || {
++        assert!(first.child.as_mut().unwrap().try_wait().unwrap().is_none());
++        barrier.join("ready").exists().then_some(())
++    });
++    let fingerprints =
++        fs::read_dir(paths::cargo_home().join("targets/shared-deps/debug/build/bar"))
++            .unwrap()
++            .map(|e| e.unwrap().path().join("fingerprint/lib-bar"))
++            .filter(|p| p.is_file())
++            .collect::<Vec<_>>();
++    assert_eq!(fingerprints.len(), 1);
++    let fingerprint = &fingerprints[0];
++    let completed = fs::read(fingerprint).unwrap();
++    assert!(!completed.is_empty());
++    let mut second = Build::spawn(
++        fork_cargo(&second_project, "build -vv -j1")
++            .env("CACHE_TEST_VALUE", "two")
++            .build_command(),
++        "writer",
++    );
++    cargo_test_support::retry(600, || {
++        assert!(
++            second.child.as_mut().unwrap().try_wait().unwrap().is_none(),
++            "{}",
++            fs::read_to_string(&second.stderr).unwrap()
++        );
++        fs::read_to_string(&second.stderr)
++            .unwrap()
++            .contains("Dirty bar ")
++            .then_some(())
++    });
++    assert_eq!(
++        fs::read(fingerprint).unwrap(),
++        completed,
++        "queued writer erased an active reader's completion record"
++    );
++    // Same inputs reuse the completed unit and finish while the first reader
++    // is still alive and the incompatible writer is queued.
++    fork_cargo(&third_project, "build -j1")
++        .env("CACHE_TEST_VALUE", "one")
++        .run();
++    assert!(first.child.as_mut().unwrap().try_wait().unwrap().is_none());
++    assert!(
++        second.child.as_mut().unwrap().try_wait().unwrap().is_none(),
++        "{}",
++        fs::read_to_string(&second.stderr).unwrap()
++    );
++    fs::write(barrier.join("release"), "").unwrap();
++    cargo_test_support::execs().run_output(&first.wait());
++    cargo_test_support::execs().run_output(&second.wait());
++    assert!(!fs::read(fingerprint).unwrap().is_empty());
++    // A failed rebuild still invalidates its completion record; the next
++    // build must rebuild instead of trusting potentially incomplete outputs.
++    fork_cargo(&second_project, "build -j1")
++        .env_remove("CACHE_TEST_VALUE")
++        .with_status(101)
++        .with_stderr_contains(
++            "[ERROR] environment variable `CACHE_TEST_VALUE` not defined at compile time",
++        )
++        .run();
++    assert!(fs::read(fingerprint).unwrap().is_empty());
++    fork_cargo(&second_project, "run -j1")
++        .env("CACHE_TEST_VALUE", "one")
++        .with_stdout_data("one\n")
++        .run();
++    // A matching hash must not hide a missing output either.
++    let out = fingerprint.parent().unwrap().parent().unwrap().join("out");
++    let library = fs::read_dir(out)
++        .unwrap()
++        .map(|e| e.unwrap().path())
++        .find(|p| p.extension().is_some_and(|ext| ext == "rlib"))
++        .unwrap();
++    fs::remove_file(&library).unwrap();
++    fork_cargo(&second_project, "run -j1")
++        .env("CACHE_TEST_VALUE", "one")
++        .with_stdout_data("one\n")
++        .run();
++    assert!(library.is_file());
++}
