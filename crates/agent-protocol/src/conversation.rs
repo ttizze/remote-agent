@@ -589,6 +589,11 @@ pub enum Event {
         error: Option<ExecutionError>,
         background: Vec<BackgroundTask>,
     },
+    /// No write occurred because the active execution is not addressable yet.
+    DeliveryDeferred {
+        id: ClientInputId,
+        action: Uuid,
+    },
     DeliveryFailed {
         id: ClientInputId,
         action: Uuid,
@@ -747,6 +752,8 @@ pub struct Context {
     pub now: i64,
     pub seed: Uuid,
     pub steers: bool,
+    /// The resource owner can currently address the active execution.
+    pub steer_ready: bool,
 }
 
 /// Native metadata can only affect the currently bound execution provider.

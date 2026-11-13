@@ -484,11 +484,20 @@ impl Runtime {
             .storage
             .execution(target, attempt.id)?
             .and_then(|execution| execution.native_turn);
+        if steer && native_turn.is_none() {
+            Runtime::event(
+                service,
+                target,
+                Event::DeliveryDeferred { id, action: token },
+            )
+            .await?;
+            return Ok(());
+        }
         let route = if steer {
             SubmissionTarget::Steer(
                 native_turn
                     .as_ref()
-                    .ok_or("native steering target is missing")?
+                    .expect("checked steering target")
                     .as_str(),
             )
         } else {

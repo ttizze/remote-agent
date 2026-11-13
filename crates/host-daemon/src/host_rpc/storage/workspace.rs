@@ -163,7 +163,7 @@ fn apply(
     true
 }
 
-/// Only a failed script re-enters setup automatically. Working locally is an
+/// A failed or interrupted script re-enters setup automatically. Working locally is an
 /// explicit disposition of an early, unbound workspace preparation.
 pub(super) fn retry(
     saved: Option<&WorkspacePreparation>,
@@ -202,7 +202,11 @@ pub(super) fn retry(
     }
     let failed_script = saved.setup.as_ref().is_some_and(|setup| {
         setup.stages.iter().any(|stage| {
-            stage.id == SetupStageId::SetupScript && stage.status == SetupStageStatus::Failed
+            stage.id == SetupStageId::SetupScript
+                && (stage.status == SetupStageStatus::Failed
+                    || setup.phase == SetupPhase::Cancelled
+                        && stage.status == SetupStageStatus::Skipped
+                        && stage.started_at_ms.is_some())
         })
     });
     Ok(

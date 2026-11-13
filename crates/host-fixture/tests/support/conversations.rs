@@ -34,20 +34,11 @@ impl Conversation {
         let replica = records::Replica::new(Scope::Conversation(session.clone()), 1)
             .apply(1, opened.initial)
             .expect("valid initial rows");
-        let completed = records::project(&replica)
-            .unwrap()
-            .thread
-            .turns
-            .iter()
-            .flatten()
-            .filter(|turn| turn.status != agent_protocol::execution::TurnStatus::Running)
-            .map(|turn| turn.id.clone())
-            .collect();
         let mut conversation = Self {
             reader,
             subscription,
             replica,
-            completed,
+            completed: HashSet::new(),
         };
         while conversation
             .view()
@@ -79,7 +70,7 @@ impl Conversation {
         let message: records::Message =
             tokio::time::timeout(Duration::from_secs(15), self.reader.read())
                 .await
-                .expect("conversation event deadline")
+                .unwrap_or_else(|_| panic!("conversation event deadline: {:?}", self.view()))
                 .unwrap()
                 .expect("conversation stream closed");
         records::validate_message(&message).unwrap();
@@ -290,6 +281,7 @@ pub async fn created(
 pub struct Catalog {
     reader: Reader,
     pub replica: records::Replica,
+    pub max_wire_bytes: usize,
 }
 
 impl Catalog {
@@ -303,10 +295,17 @@ impl Catalog {
             .await
             .unwrap();
         records::validate_list(&opened.initial).unwrap();
+        let max_wire_bytes = agent_protocol::protocol::encode(&opened.initial)
+            .unwrap()
+            .len();
         let replica = records::Replica::new(Scope::List, 1)
             .apply(1, opened.initial)
             .unwrap();
-        Self { reader, replica }
+        Self {
+            reader,
+            replica,
+            max_wire_bytes,
+        }
     }
     pub async fn next(&mut self) {
         let message: records::Message =
@@ -316,6 +315,9 @@ impl Catalog {
                 .unwrap()
                 .expect("catalog closed");
         records::validate_list(&message).unwrap();
+        self.max_wire_bytes = self
+            .max_wire_bytes
+            .max(agent_protocol::protocol::encode(&message).unwrap().len());
         self.replica = self.replica.clone().apply(1, message).unwrap();
     }
     pub async fn wait_rows(&mut self, count: usize) {

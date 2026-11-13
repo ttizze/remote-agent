@@ -99,6 +99,28 @@ pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
                 ..Step::default()
             }
         }
+        Event::DeliveryDeferred { id, action } => {
+            let Some(input) = state.inputs.get(&id) else {
+                return Step::default();
+            };
+            let InputState::Delivering(delivery) = &input.state else {
+                return Step::default();
+            };
+            if delivery.action != action || !delivery.steer {
+                return Step::default();
+            }
+            let result = Step {
+                changes: vec![Change::Input(PendingInput {
+                    state: InputState::Queued {
+                        steer: Some(delivery.attempt.id),
+                    },
+                    ..input.clone()
+                })],
+                outcome: Outcome::Accepted,
+                ..Step::default()
+            };
+            commands::append_advance(state, result, context)
+        }
         Event::DeliveryFailed {
             id,
             action,

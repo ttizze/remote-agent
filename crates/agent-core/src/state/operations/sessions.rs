@@ -263,7 +263,8 @@ impl Operation for ReadThread {
             open_thread(
                 snapshot,
                 pane_id,
-                response.thread,
+                self.thread_id.clone(),
+                response.thread.cwd.unwrap_or_default(),
                 response.model,
                 response.effort,
                 response.service_tier,
@@ -337,83 +338,68 @@ fn select_thread(
 pub(super) fn open_thread(
     snapshot: &mut Snapshot,
     pane_id: &str,
-    thread: Thread,
+    id: crate::session::SessionRef,
+    cwd: String,
     model: Option<crate::models::ModelRef>,
     effort: Option<String>,
     service_tier: Option<String>,
 ) -> Vec<Effect> {
-    let id = thread.id.clone();
-    let cwd = thread.cwd.clone().unwrap_or_default();
-    refresh_thread(snapshot, pane_id, thread);
-    if let Some(id) = id {
-        let key = DraftKey::from(id.clone());
-        let previous = snapshot.input.drafts.get(&key).cloned().unwrap_or_default();
-        let same_model = model.is_none() || model == previous.model;
-        let (model, effort, tier) = if previous.model_settings_changed {
-            (
-                previous.model.as_ref().or(model.as_ref()),
-                previous.effort.as_deref(),
-                previous.service_tier.as_deref(),
-            )
-        } else {
-            (
-                model.as_ref().or(previous.model.as_ref()),
-                effort
-                    .as_deref()
-                    .or_else(|| previous.effort.as_deref().filter(|_| same_model)),
-                service_tier
-                    .as_deref()
-                    .or_else(|| previous.service_tier.as_deref().filter(|_| same_model)),
-            )
-        };
-        let (model, effort, tier) = supported_settings(
-            model,
-            effort,
-            tier,
-            snapshot
-                .thread_metadata(&id)
-                .and_then(|thread| thread.active_provider)
-                .or(id.provider),
-            &snapshot.catalog.models,
-            &snapshot.catalog.model_errors,
-            snapshot.allows_custom_codex_models(),
-        );
-        let (model, effort, tier) = (
-            model.cloned(),
-            effort.map(str::to_owned),
-            tier.map(str::to_owned),
-        );
-        let draft = Arc::make_mut(
-            Arc::make_mut(&mut snapshot.input.drafts)
-                .entry(key)
-                .or_default(),
-        );
-        draft.model = model;
-        draft.effort = effort;
-        draft.service_tier = tier;
-
-        navigate(
-            snapshot,
-            pane_id,
-            Navigation {
-                thread_id: Some(id.clone()),
-                draft_key: id.clone().into(),
-                cwd,
-            },
-        );
-    }
-    review_workspace(snapshot, pane_id).into_iter().collect()
-}
-
-pub(crate) fn refresh_thread(snapshot: &mut Snapshot, pane_id: &str, incoming: Thread) {
-    let Some(id) = incoming.id.clone().filter(|id| id.validate().is_ok()) else {
-        if let Some(pane) = snapshot.panes.get_mut(pane_id) {
-            Arc::make_mut(pane).error = Some("thread ID is missing".into());
-        }
-        return;
+    let key = DraftKey::from(id.clone());
+    let previous = snapshot.input.drafts.get(&key).cloned().unwrap_or_default();
+    let same_model = model.is_none() || model == previous.model;
+    let (model, effort, tier) = if previous.model_settings_changed {
+        (
+            previous.model.as_ref().or(model.as_ref()),
+            previous.effort.as_deref(),
+            previous.service_tier.as_deref(),
+        )
+    } else {
+        (
+            model.as_ref().or(previous.model.as_ref()),
+            effort
+                .as_deref()
+                .or_else(|| previous.effort.as_deref().filter(|_| same_model)),
+            service_tier
+                .as_deref()
+                .or_else(|| previous.service_tier.as_deref().filter(|_| same_model)),
+        )
     };
-    Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), Arc::new(incoming));
-    reconcile_pending(snapshot, &id);
+    let (model, effort, tier) = supported_settings(
+        model,
+        effort,
+        tier,
+        snapshot
+            .thread_metadata(&id)
+            .and_then(|thread| thread.active_provider)
+            .or(id.provider),
+        &snapshot.catalog.models,
+        &snapshot.catalog.model_errors,
+        snapshot.allows_custom_codex_models(),
+    );
+    let (model, effort, tier) = (
+        model.cloned(),
+        effort.map(str::to_owned),
+        tier.map(str::to_owned),
+    );
+    let draft = Arc::make_mut(
+        Arc::make_mut(&mut snapshot.input.drafts)
+            .entry(key)
+            .or_default(),
+    );
+    draft.model = model;
+    draft.effort = effort;
+    draft.service_tier = tier;
+
+    navigate(
+        snapshot,
+        pane_id,
+        Navigation {
+            thread_id: Some(id.clone()),
+            draft_key: id.clone().into(),
+            cwd,
+        },
+    );
+    review_workspace(snapshot, pane_id).into_iter().collect()
 }
 
 async fn command(
@@ -704,7 +690,8 @@ impl Operation for StartConversation {
         open_thread(
             snapshot,
             pane_id,
-            response.thread,
+            self.target.clone(),
+            response.thread.cwd.unwrap_or_default(),
             response.model,
             response.effort,
             response.service_tier,
@@ -818,6 +805,39 @@ impl Operation for OpenRequest {
 mod tests {
     use super::*;
     use crate::session::{ProviderKind, SessionRef};
+
+    fn open_thread(
+        snapshot: &mut Snapshot,
+        pane: &str,
+        thread: Thread,
+        model: Option<crate::models::ModelRef>,
+        effort: Option<String>,
+        service_tier: Option<String>,
+    ) -> Vec<Effect> {
+        let id = thread.id.clone().unwrap();
+        let output = crate::test_conversations::opened(
+            crate::models::ThreadResponse {
+                thread,
+                model,
+                effort,
+                service_tier,
+            },
+            snapshot,
+        );
+        ReadThread::open(id).apply(snapshot, pane, output)
+    }
+
+    fn refresh_thread(snapshot: &mut Snapshot, pane: &str, thread: Thread) {
+        let id = thread.id.clone().unwrap();
+        let output = crate::test_conversations::opened(
+            crate::models::ThreadResponse {
+                thread,
+                ..Default::default()
+            },
+            snapshot,
+        );
+        ReadThread::new(id).apply(snapshot, pane, output);
+    }
 
     #[test]
     fn item_reads_require_the_items_actual_turn() {
@@ -968,6 +988,7 @@ mod tests {
             .0;
         }
         if accepted {
+            let pending = snapshot.sessions.pending_submissions["input"].clone();
             SendSubmission {
                 thread_id: id.clone(),
                 client_user_message_id: "input".into(),
@@ -989,7 +1010,6 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let pending = snapshot.sessions.pending_submissions["input"].clone();
             response
                 .thread
                 .queue

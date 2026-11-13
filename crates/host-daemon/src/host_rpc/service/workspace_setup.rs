@@ -89,30 +89,69 @@ impl HostRpcService {
             .map_err(super::super::runtime::storage_failure)?
             .details
             .workspace;
-        if let Some(workspace) =
-            workspace.filter(|workspace| workspace.generation == generation && workspace.visible)
-            && let Some(ended_at) = workspace.setup.as_ref().and_then(|setup| setup.ended_at_ms)
-        {
-            let owner = Arc::downgrade(&self.inner);
-            let id = id.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                if let Some(inner) = owner.upgrade() {
-                    if let Err(error) = inner
-                        .conversation
-                        .owners
-                        .setup(&id, generation, SetupChange::Expire { ended_at }, now())
-                        .await
-                    {
-                        tracing::warn!(target:"agent",operation="workspace.expire",%error);
-                    }
-                    if let Some(handle) = workspace.setup.and_then(|setup| setup.terminal_handle) {
-                        inner.terminals.forget_setup(&inner.router, &handle);
-                    }
-                }
-            });
+        if let Some(workspace) = workspace.filter(|workspace| workspace.generation == generation) {
+            self.schedule_setup_expiry(id.clone(), *workspace);
         }
         Ok(())
+    }
+
+    fn schedule_setup_expiry(&self, id: SessionRef, workspace: WorkspacePreparation) {
+        let Some(ended_at) = workspace
+            .setup
+            .as_ref()
+            .filter(|_| workspace.visible)
+            .and_then(|setup| setup.ended_at_ms)
+        else {
+            return;
+        };
+        let remaining = ended_at
+            .saturating_add(30_000)
+            .saturating_sub(now().max(0) as u64);
+        let owner = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(remaining)).await;
+            if let Some(inner) = owner.upgrade() {
+                if let Err(error) = inner
+                    .conversation
+                    .owners
+                    .setup(
+                        &id,
+                        workspace.generation,
+                        SetupChange::Expire { ended_at },
+                        now(),
+                    )
+                    .await
+                {
+                    tracing::warn!(target:"agent",operation="workspace.expire",%error);
+                }
+                if let Some(handle) = workspace.setup.and_then(|setup| setup.terminal_handle) {
+                    inner.terminals.forget_setup(&inner.router, &handle);
+                }
+            }
+        });
+    }
+
+    pub(in crate::host_rpc) fn restore_setup_expiry(&self) {
+        let owner = Arc::downgrade(&self.inner);
+        let storage = self.inner.conversation.storage.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || storage.headers(true)).await;
+            match result {
+                Ok(Ok(headers)) => {
+                    if let Some(inner) = owner.upgrade() {
+                        let service = HostRpcService { inner };
+                        for (id, header, _) in headers {
+                            if let Some(workspace) = header.details.workspace {
+                                service.schedule_setup_expiry(id, *workspace);
+                            }
+                        }
+                    }
+                }
+                result => {
+                    tracing::warn!(target:"agent",operation="workspace.restore_expiry",?result)
+                }
+            }
+        });
     }
 
     pub(in crate::host_rpc) async fn prepare_task_workspace(
@@ -140,7 +179,10 @@ impl HostRpcService {
         let previous = workspace.setup.take();
         let retained = previous
             .as_ref()
-            .filter(|setup| setup.phase == SetupPhase::Failed)
+            .filter(|setup| {
+                !matches!(strategy, WorkspaceStrategy::Root)
+                    && matches!(setup.phase, SetupPhase::Failed | SetupPhase::Cancelled)
+            })
             .and_then(|setup| setup.worktree_path.clone());
         if matches!(strategy, WorkspaceStrategy::Root)
             && let Some(path) = previous

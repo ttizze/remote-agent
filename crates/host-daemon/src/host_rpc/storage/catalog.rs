@@ -78,6 +78,7 @@ impl Storage {
                         provider,
                         cursor: None,
                         seen: Vec::new(),
+                        listed: Default::default(),
                         progress: jobs::CatalogProgress::Scanning,
                     },
                 )?;
@@ -106,10 +107,18 @@ impl Storage {
         next: Option<String>,
         now: i64,
     ) -> Result<(), String> {
-        let jobs::Work::Catalog { provider, seen, .. } = &claim.work else {
+        let jobs::Work::Catalog {
+            provider,
+            seen,
+            listed,
+            ..
+        } = &claim.work
+        else {
             return Err("expected catalog job".into());
         };
         let mut seen = seen.clone();
+        let mut listed = listed.clone();
+        listed.extend(headers.iter().map(|(id, _)| id.id.clone()));
         if let Some(next) = &next {
             if seen.contains(next) {
                 return Err("provider repeated its catalog cursor".into());
@@ -134,8 +143,11 @@ impl Storage {
                 }
                 let key=existing_key(&transaction,id)?;
                 if let Some(key)=key {
-                    let loaded:bool=transaction.query_row("SELECT loaded=1 FROM threads WHERE key=?1",[key],|row|row.get(0)).map_err(failure)?;
-                    if loaded || rows::header(&transaction,key)?.0==header { continue; }
+                    let loaded:i64=transaction.query_row("SELECT loaded FROM threads WHERE key=?1",[key],|row|row.get(0)).map_err(failure)?;
+                    if loaded == 1 { continue; }
+                    let previous = rows::header(&transaction,key)?.0;
+                    header.details.history_read_state = previous.details.history_read_state.clone();
+                    if loaded == 0 && previous==header { continue; }
                 }
                 let sequence = match sequence { Some(sequence)=>sequence, None=>{let current=Self::advance(&transaction)?.sequence; sequence=Some(current); current} };
                 header.details.parent=None;
@@ -152,12 +164,54 @@ impl Storage {
             let sequence=match sequence {Some(sequence)=>sequence,None=>Self::advance(&transaction)?.sequence};
             transaction.execute("UPDATE jobs SET seq=?1 WHERE id=?2",params![integer(sequence)?,claim.id.to_string()]).map_err(failure)?;
             let complete=next.is_none();
+            if complete { prune_catalog(&transaction, *provider, &listed, sequence, now)?; }
             let body: Vec<u8> = transaction.query_row("SELECT body FROM jobs WHERE id=?1", [claim.id.to_string()], |row|row.get(0)).map_err(failure)?;
             let jobs::Work::Catalog {progress,..}=codec::enum_record("catalog",&body)? else {return Err("expected catalog job".into())};
-            let work=jobs::Work::Catalog {provider:*provider,cursor:next,seen:if complete {Vec::new()} else {seen},progress:if !complete {progress} else if progress==jobs::CatalogProgress::Refresh {jobs::CatalogProgress::Scanning} else {jobs::CatalogProgress::Ready}};
+            let work=jobs::Work::Catalog {provider:*provider,cursor:next,seen:if complete {Vec::new()} else {seen},listed:if complete {Default::default()} else {listed},progress:if !complete {progress} else if progress==jobs::CatalogProgress::Refresh {jobs::CatalogProgress::Scanning} else {jobs::CatalogProgress::Ready}};
             let (_,body)=codec::enum_parts(&work)?;
             transaction.execute("UPDATE jobs SET state='pending',run_after=?1,last_error=NULL,body=?2 WHERE id=?3 AND attempts=?4",params![if complete && progress!=jobs::CatalogProgress::Refresh {now.saturating_add(60_000)} else {now},body,claim.id.to_string(),integer(claim.attempt)?]).map_err(failure)?;
             transaction.commit().map_err(failure)
         })
     }
+}
+
+fn prune_catalog(
+    transaction: &Transaction<'_>,
+    provider: ProviderKind,
+    listed: &std::collections::BTreeSet<String>,
+    sequence: u64,
+    now: i64,
+) -> Result<(), String> {
+    let candidates = {
+        let mut statement = transaction.prepare("SELECT key,id FROM threads t WHERE provider=?1 AND loaded=0 AND NOT EXISTS(SELECT 1 FROM sources s WHERE s.provider=t.provider AND s.native_id=t.id)").map_err(failure)?;
+        statement
+            .query_map([provider.key()], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(failure)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failure)?
+    };
+    for (key, id) in candidates {
+        if listed.contains(&id) {
+            continue;
+        }
+        let session = SessionRef::new(provider, id.clone()).map_err(failure)?;
+        let retained: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM threads WHERE parent=?1) OR EXISTS(SELECT 1 FROM jobs WHERE lane=?2)", params![key, format!("import:{session}")], |row| row.get(0)).map_err(failure)?;
+        if retained {
+            // Keep identities needed by child links or an import already in flight.
+            transaction
+                .execute(
+                    "UPDATE threads SET loaded=-1,seq=?1 WHERE key=?2",
+                    params![integer(sequence)?, key],
+                )
+                .map_err(failure)?;
+        } else {
+            transaction
+                .execute("DELETE FROM threads WHERE key=?1", [key])
+                .map_err(failure)?;
+        }
+        transaction.execute("INSERT INTO removals(seq,kind,provider,id,thread,at) VALUES (?1,'thread',?2,?3,NULL,?4)", params![integer(sequence)?,provider.key(),id,now]).map_err(failure)?;
+    }
+    Ok(())
 }

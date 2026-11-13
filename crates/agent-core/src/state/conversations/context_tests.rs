@@ -512,3 +512,50 @@ fn running_subagents_refresh_only_the_observed_fleet_without_waiting_for_complet
         snapshot.panes.primary().navigation
     );
 }
+
+#[test]
+fn follow_up_delivery_in_an_established_checkout_keeps_the_review_available() {
+    use agent_protocol::session::{PreparationStage, PreparationStatus, SessionPreparation};
+    for status in [
+        PreparationStatus::Sending,
+        PreparationStatus::Unknown,
+        PreparationStatus::Interrupted,
+        PreparationStatus::Failed {
+            error: Default::default(),
+        },
+    ] {
+        let mut state = snapshot(ProviderKind::Codex);
+        let id = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut state.sessions.conversations)
+                .get_mut(&id)
+                .unwrap(),
+        );
+        thread.cwd = Some("/fixture".into());
+        thread.preparations.push(SessionPreparation {
+            submission: agent_protocol::operations::Submission {
+                thread_id: id.clone(),
+                client_user_message_id: "follow-up".into(),
+                input: Vec::new(),
+                model: None,
+                effort: None,
+                service_tier: None,
+                follow_up: Default::default(),
+            },
+            stage: PreparationStage::Provider,
+            status,
+        });
+        let pane = Arc::make_mut(state.panes.primary_mut());
+        pane.navigation = Arc::new(Navigation {
+            thread_id: Some(id.clone()),
+            draft_key: id.into(),
+            cwd: "/fixture".into(),
+        });
+        Arc::make_mut(&mut pane.workspace).review_cwd = Some("/fixture".into());
+        assert!(op::review_workspace(&mut state, "").is_some());
+        assert_eq!(
+            state.panes.primary().workspace.review_cwd.as_deref(),
+            Some("/fixture")
+        );
+    }
+}

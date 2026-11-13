@@ -10,6 +10,7 @@ pub(in crate::host_rpc) enum Work {
         provider: ProviderKind,
         cursor: Option<String>,
         seen: Vec<String>,
+        listed: std::collections::BTreeSet<String>,
         progress: CatalogProgress,
     },
     Continue {

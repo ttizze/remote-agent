@@ -82,12 +82,13 @@ CREATE INDEX requests_in_flight ON requests (state) WHERE state = 'sending';
 -- 同期のための表
 CREATE TABLE removals (
     seq INTEGER NOT NULL,
-    kind TEXT NOT NULL,             -- input | turn | item | request | project
+    kind TEXT NOT NULL,             -- input | turn | item | request | project | thread
+    provider TEXT,                  -- 一覧で消した会話の識別子の provider
     id TEXT NOT NULL,
     thread INTEGER,                 -- 会話の範囲の行なら、その会話の行のキー。一覧だけの行では空
     at INTEGER NOT NULL             -- 保持期間の判定に使う
 ) STRICT;
-CREATE UNIQUE INDEX removals_identity ON removals (seq, kind, id, ifnull(thread, 0));
+CREATE UNIQUE INDEX removals_identity ON removals (seq, kind, ifnull(provider, ''), id, ifnull(thread, 0));
 CREATE INDEX removals_changed ON removals (seq);
 CREATE INDEX removals_expiry ON removals (at);
 CREATE INDEX removals_thread ON removals (thread, seq) WHERE thread IS NOT NULL;
@@ -166,7 +167,7 @@ CREATE TABLE jobs (
     attempts INTEGER NOT NULL,
     last_error TEXT,
     seq INTEGER NOT NULL DEFAULT 0, -- catalog progress shares the list cursor
-    body BLOB NOT NULL              -- 対象の SessionRef、要求・試行、接続の世代など、種類ごとの値
+    body BLOB NOT NULL              -- 対象の SessionRef、要求・試行など、種類ごとの値
 ) STRICT;
 CREATE INDEX jobs_due ON jobs (run_after, position) WHERE state = 'pending';
 CREATE INDEX jobs_lane ON jobs (lane, position);

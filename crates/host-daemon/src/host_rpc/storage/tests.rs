@@ -19,6 +19,7 @@ fn context(seed: u128) -> Context {
         now: 100,
         seed: Uuid::from_u128(seed),
         steers: true,
+        steer_ready: true,
     }
 }
 fn header() -> Header {
@@ -1806,4 +1807,284 @@ fn repeated_catalog_native_parent_does_not_version_an_unchanged_public_child() {
     let message = storage.list(replica.cursor()).unwrap();
     let replica = replica.apply(1, message).unwrap();
     assert_eq!(replica.rows()[&key], before);
+}
+
+#[test]
+fn completed_catalog_scans_remove_missing_rows_once_and_preserve_pages_across_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let storage = Storage::open(&path);
+    let kept = address("kept");
+    let vanished = address("vanished");
+    let parent = address("parent");
+    let child = address("child");
+    let owned = address("owned");
+    storage.create(&owned, &header()).unwrap();
+    let mut child_header = header();
+    child_header.details.parent = Some(parent.clone());
+    storage.queue_catalog(ProviderKind::Claude, 0).unwrap();
+    let claim = storage.claim(0, 1).unwrap().remove(0);
+    storage
+        .catalog_page(
+            &claim,
+            &[
+                (kept.clone(), header()),
+                (vanished.clone(), header()),
+                (parent.clone(), header()),
+                (child.clone(), child_header.clone()),
+            ],
+            None,
+            0,
+        )
+        .unwrap();
+    let mut replica = decision::records::Replica::new(agent_protocol::sync::Scope::List, 1)
+        .apply(1, storage.list(None).unwrap())
+        .unwrap();
+    let before = replica.cursor();
+    let before_remove = replica.clone();
+    let claim = storage.claim(60_000, 1).unwrap().remove(0);
+    storage
+        .catalog_page(
+            &claim,
+            &[(kept.clone(), header())],
+            Some("page-2".into()),
+            60_000,
+        )
+        .unwrap();
+    assert!(
+        storage.lookup(&vanished).unwrap().is_some(),
+        "a partial scan cannot establish deletion"
+    );
+    drop(storage);
+    let storage = Storage::open(&path);
+    let claim = storage.claim(60_000, 1).unwrap().remove(0);
+    storage
+        .catalog_failed(&claim, ProviderKind::Claude)
+        .unwrap();
+    assert!(storage.lookup(&vanished).unwrap().is_some());
+    storage
+        .catalog_page(&claim, &[(child.clone(), child_header)], None, 60_000)
+        .unwrap();
+    replica = replica.apply(1, storage.list(before).unwrap()).unwrap();
+    for id in [&kept, &child, &owned] {
+        assert!(
+            replica.rows().contains_key(&Key::Thread(id.clone())),
+            "{id}"
+        );
+    }
+    for id in [&vanished, &parent] {
+        assert!(
+            !replica.rows().contains_key(&Key::Thread(id.clone())),
+            "{id}"
+        );
+    }
+    assert!(storage.lookup(&vanished).unwrap().is_none());
+    assert_eq!(
+        storage.header(&child).unwrap().details.parent,
+        Some(parent.clone())
+    );
+    // Reappearing identical metadata becomes visible again, even when the
+    // parent identity was retained only for a child relationship.
+    let claim = storage.claim(120_000, 1).unwrap().remove(0);
+    storage
+        .catalog_page(
+            &claim,
+            &[
+                (kept.clone(), header()),
+                (parent.clone(), header()),
+                (vanished.clone(), header()),
+            ],
+            None,
+            120_000,
+        )
+        .unwrap();
+    let next = before_remove
+        .apply(1, storage.list(before).unwrap())
+        .unwrap();
+    assert!(next.rows().contains_key(&Key::Thread(parent)));
+    assert!(next.rows().contains_key(&Key::Thread(vanished)));
+}
+
+#[test]
+fn steering_waits_for_the_first_native_turn_and_dispatches_once_after_it_is_bound() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    storage.create(&target, &header()).unwrap();
+    ready(&storage, &target);
+    let admitted = storage
+        .decide(&target, submit(100), context(100), None)
+        .unwrap();
+    let decision::Action::Deliver {
+        id,
+        action,
+        attempt,
+        ..
+    } = admitted.step.actions[0].clone()
+    else {
+        panic!("delivery")
+    };
+    storage
+        .decide(
+            &target,
+            Event::Delivered {
+                id,
+                action,
+                native_turn: None,
+            },
+            context(101),
+            None,
+        )
+        .unwrap();
+    let mut steer = submit(102);
+    if let Event::Command {
+        command: Command::Submit { content, .. },
+        ..
+    } = &mut steer
+    {
+        content.follow_up = FollowUp::Steer;
+    }
+    let waiting = storage.decide(&target, steer, context(102), None).unwrap();
+    assert_eq!(waiting.step.outcome, Outcome::Accepted);
+    assert!(waiting.step.actions.is_empty());
+    assert!(
+        matches!(waiting.state.unwrap().inputs[Uuid::from_u128(102).to_string().as_str()].state, InputState::Queued { steer: Some(current) } if current == attempt.id)
+    );
+    assert!(
+        storage
+            .decide(&target, Event::Wake, context(103), None)
+            .unwrap()
+            .step
+            .actions
+            .is_empty()
+    );
+    storage
+        .decide(
+            &target,
+            Event::Provider {
+                attempt: attempt.id,
+                native_turn: Some("native-turn".into()),
+                native_items: vec![],
+                observation: Observation::Timing {
+                    started_at: Some(100),
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            },
+            context(104),
+            None,
+        )
+        .unwrap();
+    let ready = storage
+        .decide(&target, Event::Wake, context(105), None)
+        .unwrap();
+    assert!(
+        matches!(ready.step.actions.as_slice(), [decision::Action::Deliver { steer: true, attempt: current, .. }] if current == &attempt)
+    );
+    assert!(
+        storage
+            .decide(&target, Event::Wake, context(106), None)
+            .unwrap()
+            .step
+            .actions
+            .is_empty()
+    );
+}
+
+#[test]
+fn rewind_resets_old_cursors_retains_the_prefix_and_reimport_cannot_resurrect_removed_turns() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = address("rewind");
+    let response = agent_protocol::models::ThreadResponse {
+        thread: agent_protocol::models::Thread {
+            id: Some(target.clone()),
+            status: agent_protocol::models::SessionStatus::Idle,
+            turns: Some(
+                (1..=2)
+                    .map(|index| {
+                        Arc::new(agent_protocol::models::Turn {
+                            id: format!("native-{index}").into(),
+                            status: agent_protocol::models::TurnStatus::Completed,
+                            items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                                format!("answer-{index}").into(),
+                                ItemStatus::Completed,
+                                ItemBody::AssistantText {
+                                    text: format!("answer {index}"),
+                                    phase: Default::default(),
+                                },
+                            ))]),
+                            ..Default::default()
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    storage
+        .import(&target, &response, Some(&target), 100)
+        .unwrap();
+    let before = storage.snapshot(&target, None, None).unwrap();
+    let replica = decision::records::Replica::new(
+        agent_protocol::sync::Scope::Conversation(target.clone()),
+        1,
+    )
+    .apply(1, before)
+    .unwrap();
+    let turns = storage.history(&target, 0).unwrap().thread.turns.unwrap();
+    let rewind = storage
+        .decide(
+            &target,
+            Event::Command {
+                id: OperationId::Client(Uuid::new_v4()),
+                receipt: None,
+                command: Command::Rewind(turns[1].id.clone()),
+            },
+            context(200),
+            None,
+        )
+        .unwrap();
+    assert_eq!(rewind.step.outcome, Outcome::Accepted);
+    let snapshot = storage.snapshot(&target, replica.cursor(), None).unwrap();
+    assert!(matches!(snapshot, Message::Snapshot { .. }));
+    let after = decision::records::Replica::new(
+        agent_protocol::sync::Scope::Conversation(target.clone()),
+        1,
+    )
+    .apply(1, snapshot)
+    .unwrap();
+    assert_eq!(
+        decision::records::project(&after)
+            .unwrap()
+            .thread
+            .turns
+            .unwrap()
+            .len(),
+        1
+    );
+    let state = storage.state(&target).unwrap();
+    assert!(
+        matches!(&state.bindings[&ProviderKind::Claude], Binding::Fork { source, through } if source == &target.id && through.as_str() == "native-1")
+    );
+    // Even a subsequent explicit import from this native source must respect
+    // the saved rollback tombstone, rather than recreating the removed suffix.
+    storage
+        .save_source(
+            &target,
+            ProviderKind::Claude,
+            &target.id,
+            None,
+            &Default::default(),
+        )
+        .unwrap();
+    storage.queue_import(&target, &target, 300).unwrap();
+    let claim = storage.claim(300, 1).unwrap().remove(0);
+    storage
+        .reimport(&target, &target, claim.id, claim.attempt, &response, 300)
+        .unwrap();
+    let retained = storage.history(&target, 0).unwrap().thread.turns.unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].id, turns[0].id);
 }

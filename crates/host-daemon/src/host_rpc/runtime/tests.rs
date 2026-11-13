@@ -291,14 +291,22 @@ async fn missing_providerless_conversations_keep_durable_rejections_without_a_pr
 
 #[tokio::test]
 async fn expanded_commands_stream_bounded_tails_until_completion() {
-    command_output_case(false).await;
+    command_output_case("completed").await;
 }
 #[tokio::test]
 async fn expanded_commands_stream_bounded_tails_until_provider_stop() {
-    command_output_case(true).await;
+    command_output_case("stopped").await;
 }
 
-async fn command_output_case(stopped: bool) {
+#[tokio::test]
+async fn background_command_completion_and_completion_while_stop_is_pending_save_the_tail() {
+    for case in ["background", "background-stop"] {
+        command_output_case(case).await;
+    }
+}
+
+async fn command_output_case(case: &str) {
+    let stopped = case == "stopped";
     use agent_protocol::{
         execution::{ItemStatus, TurnStatus},
         items::{Item, ItemBody},
@@ -449,7 +457,50 @@ async fn command_output_case(stopped: bool) {
     .await
     .unwrap();
     assert_eq!(late.initial, tail);
-    if stopped {
+    if case.starts_with("background") {
+        send(SessionChange::Background {
+            tasks: vec![agent_protocol::execution::BackgroundTask {
+                id: "background-command".into(),
+                kind: agent_protocol::execution::BackgroundTaskKind::Command,
+                description: Some("echo output".into()),
+            }],
+        })
+        .await
+        .unwrap();
+        send(SessionChange::Turn {
+            turn: agent_protocol::models::Turn {
+                id: "tools".into(),
+                status: TurnStatus::Completed,
+                ..Default::default()
+            },
+            completed: true,
+        })
+        .await
+        .unwrap();
+        if case == "background-stop" {
+            let state = service.inner.conversation.storage.state(&target).unwrap();
+            service
+                .inner
+                .conversation
+                .storage
+                .decide(
+                    &target,
+                    Event::Command {
+                        id: decision::OperationId::Client(Uuid::new_v4()),
+                        receipt: None,
+                        command: decision::Command::Interrupt {
+                            turn: state.active_turn().map(|turn| turn.id.clone()),
+                        },
+                    },
+                    Runtime::context(&service, Some(ProviderKind::Codex)),
+                    None,
+                )
+                .unwrap();
+        }
+        send(SessionChange::Background { tasks: Vec::new() })
+            .await
+            .unwrap();
+    } else if stopped {
         Runtime::observe(
             &service,
             AgentChange::Stopped {
@@ -508,6 +559,7 @@ async fn command_output_case(stopped: bool) {
         }
     );
     assert!(updates.recv().await.is_none());
+    tokio::time::resume();
 }
 
 #[tokio::test]
@@ -1736,7 +1788,7 @@ async fn unavailable_project_does_not_block_listing_or_opening_saved_conversatio
             session: target.clone(),
             subscription: Uuid::new_v4(),
             cached: None,
-            window: 10,
+            window: None,
         }),
     )
     .await
@@ -1746,5 +1798,8 @@ async fn unavailable_project_does_not_block_listing_or_opening_saved_conversatio
         .unwrap();
     let history = records::project(&replica).unwrap();
     assert_eq!(history.thread.id.as_ref(), Some(&target));
-    assert!(history.thread.turns.as_ref().unwrap().iter().flat_map(|turn|turn.items.iter().flatten()).any(|item|matches!(item.body(),agent_protocol::items::ItemBody::UserMessage {text:Some(text),..} if text=="run once")));
+    assert!(history.thread.turns.as_ref().unwrap().iter().flat_map(|turn| turn.items.iter().flatten()).any(|item| {
+        matches!(item.body(), agent_protocol::items::ItemBody::UserMessage { content, .. }
+            if content.iter().any(|part| matches!(part, agent_protocol::items::MessagePart::Text { text } if text == "run once")))
+    }));
 }

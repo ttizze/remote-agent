@@ -1,8 +1,5 @@
 mod recovery;
-use super::{
-    sessions::{open_thread, refresh_thread},
-    *,
-};
+use super::{sessions::open_thread, *};
 use crate::client::ClientExt;
 pub(crate) use recovery::{reconnect_input_recovery, resolve_local_input, resolve_saved_input};
 
@@ -178,11 +175,9 @@ impl Operation for StartSubmission {
         Some(&self.client_user_message_id)
     }
     type Output = super::super::conversations::Opened;
-    fn stale(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
-        let Some(response) = super::super::conversations::install(snapshot, output) else {
-            return Vec::new();
-        };
-        self.complete(snapshot, pane_id, response.thread, false)
+    fn stale(self, snapshot: &mut Snapshot, _pane_id: &str, output: Self::Output) -> Vec<Effect> {
+        super::super::conversations::install(snapshot, output);
+        Vec::new()
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::StartedThread {
@@ -232,36 +227,18 @@ impl Operation for StartSubmission {
         let Some(response) = super::super::conversations::install(snapshot, output) else {
             return Vec::new();
         };
-        self.complete(snapshot, pane_id, response.thread, true)
+        open_thread(
+            snapshot,
+            pane_id,
+            self.thread_id,
+            response.thread.cwd.unwrap_or_default(),
+            None,
+            None,
+            None,
+        )
     }
 }
 
-impl StartSubmission {
-    fn complete(
-        self,
-        snapshot: &mut Snapshot,
-        pane_id: &str,
-        thread: Thread,
-        current_view: bool,
-    ) -> Vec<Effect> {
-        let Some(id) = thread.id.clone() else {
-            if let Some(pane) = snapshot.panes.get_mut(pane_id) {
-                Arc::make_mut(pane).error = Some("thread ID is missing".into());
-            }
-            return Vec::new();
-        };
-        debug_assert_eq!(self.thread_id, id);
-        Arc::make_mut(&mut snapshot.input.new_drafts).retain(|_, target| target != &id);
-        let effects = if current_view {
-            open_thread(snapshot, pane_id, thread, None, None, None)
-        } else {
-            refresh_thread(snapshot, pane_id, thread);
-            Vec::new()
-        };
-        reconcile_pending(snapshot, &id);
-        effects
-    }
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendSubmission {
     pub thread_id: crate::session::SessionRef,
@@ -437,16 +414,44 @@ mod startup_identity_tests {
                 DraftKey::from("other")
             };
         let navigation = snapshot.panes.primary().navigation.clone();
-        let thread: Thread =
-            serde_json::from_value(serde_json::json!({"id":session, "cwd":"/project"})).unwrap();
-        let effects = StartSubmission {
+        let input = uuid::Uuid::from_u128(1).to_string();
+        Arc::make_mut(&mut snapshot.input.new_drafts).insert("0:/project".into(), session.clone());
+        Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
+            input.clone().into(),
+            Arc::new(PendingSubmission {
+                cursor: None,
+                sequence: 1,
+                submitted_at_ms: None,
+                draft_key: draft_key.clone(),
+                draft: Arc::default(),
+                turn_id: None,
+                after_item_id: None,
+                accepted: false,
+                delivery_unknown: false,
+                queued: false,
+            }),
+        );
+        let thread: Thread = serde_json::from_value(serde_json::json!({"id":session, "activeProvider":"codex", "cwd":"/project", "turns":[{"id":"first", "status":"completed", "items":[{"id":input,"status":"completed","clientInputId":input,"body":{"inline":{"body":{"userMessage":{"text":"first","content":[]}}}}}]}]})).unwrap();
+        let output = crate::test_conversations::opened(
+            crate::models::ThreadResponse {
+                thread,
+                ..Default::default()
+            },
+            &mut snapshot,
+        );
+        let operation = StartSubmission {
             thread_id: session.clone(),
             provider: crate::session::ProviderKind::Codex,
             cwd: Some("/project".into()),
-            client_user_message_id: "submitted".into(),
+            client_user_message_id: input.into(),
             draft: Arc::default(),
-        }
-        .complete(&mut snapshot, "", thread, current_view);
+        };
+        let effects = if current_view {
+            operation.apply(&mut snapshot, "", output)
+        } else {
+            operation.stale(&mut snapshot, "", output)
+        };
+        assert!(!snapshot.input.new_drafts.values().any(|id| id == &session));
         assert!(effects.is_empty(), "the Host owns the admitted first input");
         assert!(snapshot.sessions.pending_submissions.is_empty());
         assert_eq!(

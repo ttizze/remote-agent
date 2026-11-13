@@ -340,8 +340,11 @@ impl Runtime {
             }
             return Ok(());
         }
+        let _workspace = service.inner.worktree_access.read().await;
+        service.require_not_updating()?;
         let agent = service.creation_agent(request.provider, request.selection.model.as_ref())?;
-        let project_cwd = request.cwd.clone().unwrap_or_else(|| {
+        let cwd = request.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty());
+        let project_cwd = cwd.map(str::to_owned).unwrap_or_else(|| {
             service
                 .inner
                 .projects
@@ -350,9 +353,7 @@ impl Runtime {
                 .into_owned()
         });
         let strategy = request.workspace.clone().or_else(|| {
-            request
-                .cwd
-                .is_none()
+            cwd.is_none()
                 .then_some(agent_protocol::workspace::WorkspaceStrategy::Root)
         });
         let mut workspace = service.workspace_preparation(project_cwd, strategy).await?;
@@ -360,9 +361,8 @@ impl Runtime {
         let header = records::Header {
             state: decision::Thread {
                 name: String::new(),
-                workspace: request
-                    .cwd
-                    .clone()
+                workspace: cwd
+                    .map(str::to_owned)
                     .map(decision::Workspace::Folder)
                     .unwrap_or(decision::Workspace::Missing),
                 provider: request.provider,
@@ -373,10 +373,7 @@ impl Runtime {
                 selection: request.selection.clone(),
                 capabilities: records::capabilities(agent.capabilities()),
                 updated_at: now(),
-                project: service
-                    .project_snapshot()
-                    .await?
-                    .project_membership(request.cwd.as_deref()),
+                project: service.project_snapshot().await?.project_membership(cwd),
                 ..Default::default()
             },
         };

@@ -865,16 +865,13 @@ impl State {
         response.thread.turns = Some(joined);
         response.thread.history_cursor = more.then(|| "older".into());
         response.thread.history_has_more = Some(more);
-        let current = self.replicas[&id].cursor();
-        if current != Some(cached) {
-            let mut message = rows::replica(response, 1).snapshot().unwrap();
-            if let agent_protocol::sync::Message::Snapshot { cursor, .. } = &mut message {
-                *cursor = cached;
-            }
-            value["result"] = json!(vec![message]);
-        } else {
-            value["result"] = json!(vec![self.rows(response, Some(cached), true)?]);
+        let current = self.replicas[&id].cursor().unwrap();
+        let mut messages = Vec::new();
+        if current != cached {
+            messages.push(self.replicas[&id].snapshot().unwrap());
         }
+        messages.push(self.rows(response, Some(current), true)?);
+        value["result"] = json!(messages);
         Ok(())
     }
 }

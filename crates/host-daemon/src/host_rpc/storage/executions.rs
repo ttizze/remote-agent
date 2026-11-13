@@ -167,3 +167,27 @@ impl Storage {
         })
     }
 }
+
+/// Capability and readiness are separate: an input can request steering before
+/// the provider has returned the native turn needed to address its first write.
+pub(super) fn steering_ready(
+    connection: &Connection,
+    thread: i64,
+    process: Uuid,
+    attempt: Option<Uuid>,
+    incoming: Option<Uuid>,
+) -> Result<bool, String> {
+    let Some(attempt) = attempt else {
+        return Ok(true);
+    };
+    if incoming == Some(attempt) {
+        return Ok(true);
+    }
+    Ok(read(
+        connection,
+        "e.thread=?2 AND e.attempt=?3",
+        params![process.to_string(), thread, attempt.to_string()],
+    )?
+    .first()
+    .is_some_and(|execution| execution.native_turn.is_some()))
+}

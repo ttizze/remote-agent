@@ -392,7 +392,9 @@ impl Previous {
                             .as_ref()
                             .and_then(|startup| startup.workspace.clone()),
                         generation: Uuid::new_v4(),
-                        visible: setup.is_some(),
+                        visible: setup
+                            .as_ref()
+                            .is_some_and(|setup| setup.visible_at(now.max(0) as u64)),
                         setup,
                     }));
             }

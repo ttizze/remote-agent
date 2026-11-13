@@ -50,7 +50,7 @@ mod tests {
             for _ in 0..3 {
                 let request = reader.read_request().await.unwrap().unwrap();
                 let result = match request["method"].as_str().unwrap() {
-                    "host/list/subscribe" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}),
+                    "host/list/subscribe" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}),
                     "host/model/list" => json!({"data":[],"nextCursor":null}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
                     method => panic!("unexpected bootstrap: {method}"),

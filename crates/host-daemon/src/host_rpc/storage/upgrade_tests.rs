@@ -365,6 +365,18 @@ fn a_corrupt_previous_transcript_fails_without_creating_an_empty_successful_dest
         )
         .unwrap();
     assert_eq!(count, 0);
+    drop(connection);
+    let repaired = protocol::encode(&Turn {
+        id: "original-turn".into(),
+        status: TurnStatus::Completed,
+        ..Default::default()
+    })
+    .unwrap();
+    Connection::open(&old)
+        .unwrap()
+        .execute("UPDATE turns SET body=?1", [repaired])
+        .unwrap();
+    Storage::open(&destination).check_ready().unwrap();
 }
 
 #[test]
@@ -452,73 +464,135 @@ fn json_only_upgrade_resolves_native_parent_links_after_restoring_all_bindings()
 #[test]
 fn previous_workspace_scripts_and_interrupted_setup_are_retained_together() {
     use agent_protocol::workspace::{SetupPhase, SetupScript, WorkspaceSetup, WorkspaceStrategy};
+    for phase in [SetupPhase::Running, SetupPhase::Done, SetupPhase::Failed] {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("bex-transcripts.sqlite");
+        previous(&old, false);
+        let connection = Connection::open(&old).unwrap();
+        let body: Vec<u8> = connection
+            .query_row(
+                "SELECT body FROM host_state WHERE name='bindings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let strategy = WorkspaceStrategy::Worktree {
+            base_ref: "origin/main".into(),
+            start_from_origin: true,
+        };
+        let mut setup = WorkspaceSetup::new(Some("origin/main".into()), 10);
+        setup.script = Some(SetupScript {
+            name: "Setup".into(),
+            command: "echo preparing".into(),
+            asynchronous: false,
+        });
+        setup.worktree_path = Some("/kept/workspace".into());
+        setup.branch = Some("bex/session-kept".into());
+        if phase != SetupPhase::Running {
+            setup.finish(phase, None, 20);
+        }
+        rows[0]["startup"]["project_cwd"] = serde_json::json!("/original");
+        rows[0]["startup"]["workspace"] = serde_json::json!(strategy);
+        rows[0]["workspace_setup"] = serde_json::json!(setup);
+        connection
+            .execute(
+                "UPDATE host_state SET body=?1 WHERE name='bindings'",
+                [serde_json::to_vec(&rows).unwrap()],
+            )
+            .unwrap();
+        let scripts = vec![agent_protocol::models::ProjectScript {
+            name: "Build".into(),
+            command: "echo build".into(),
+        }];
+        let key = "project-scripts:/original/.git";
+        connection
+            .execute(
+                "INSERT INTO host_state VALUES (?1,?2)",
+                params![key, serde_json::to_vec(&scripts).unwrap()],
+            )
+            .unwrap();
+        drop(connection);
+        let path = directory.path().join("bex-conversations.sqlite");
+        let storage = Storage::open(&path);
+        storage.check_ready().unwrap();
+        assert_eq!(storage.workspace_scripts(key).unwrap(), scripts);
+        let workspace = storage
+            .header(&address())
+            .unwrap()
+            .details
+            .workspace
+            .unwrap();
+        assert_eq!(workspace.project_cwd, "/original");
+        assert_eq!(workspace.strategy, Some(strategy));
+        let recovered = workspace.setup.as_ref().unwrap();
+        assert_eq!(
+            recovered.phase,
+            if phase == SetupPhase::Running {
+                SetupPhase::Cancelled
+            } else {
+                phase
+            }
+        );
+        assert_eq!(workspace.visible, phase == SetupPhase::Running);
+        assert_eq!(recovered.script, setup.script);
+        assert_eq!(recovered.worktree_path, setup.worktree_path);
+        assert_eq!(recovered.branch, setup.branch);
+        drop(storage);
+        let storage = Storage::open(&path);
+        assert_eq!(storage.workspace_scripts(key).unwrap(), scripts);
+        assert_eq!(
+            storage.header(&address()).unwrap().details.workspace,
+            Some(workspace)
+        );
+    }
+}
+
+#[test]
+fn unsupported_destinations_are_rejected_without_rewriting_their_bytes() {
+    for version in [0, 3] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE future(data TEXT); INSERT INTO future VALUES ('preserve');",
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let storage = Storage::open(&path);
+        assert!(storage.check_ready().is_err());
+        assert!(storage.identity().is_err());
+        drop(storage);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn storage_uses_durable_wal_and_reports_an_invalid_path_to_every_consumer() {
     let directory = tempfile::tempdir().unwrap();
-    let old = directory.path().join("bex-transcripts.sqlite");
-    previous(&old, false);
-    let connection = Connection::open(&old).unwrap();
-    let body: Vec<u8> = connection
-        .query_row(
-            "SELECT body FROM host_state WHERE name='bindings'",
-            [],
-            |row| row.get(0),
-        )
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    storage
+        .with(|connection| {
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            let synchronous: i64 = connection
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+            assert_eq!(synchronous, 2);
+            Ok(())
+        })
         .unwrap();
-    let mut rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let strategy = WorkspaceStrategy::Worktree {
-        base_ref: "origin/main".into(),
-        start_from_origin: true,
-    };
-    let mut setup = WorkspaceSetup::new(Some("origin/main".into()), 10);
-    setup.script = Some(SetupScript {
-        name: "Setup".into(),
-        command: "echo preparing".into(),
-        asynchronous: false,
-    });
-    setup.worktree_path = Some("/kept/workspace".into());
-    setup.branch = Some("bex/session-kept".into());
-    rows[0]["startup"]["project_cwd"] = serde_json::json!("/original");
-    rows[0]["startup"]["workspace"] = serde_json::json!(strategy);
-    rows[0]["workspace_setup"] = serde_json::json!(setup);
-    connection
-        .execute(
-            "UPDATE host_state SET body=?1 WHERE name='bindings'",
-            [serde_json::to_vec(&rows).unwrap()],
-        )
-        .unwrap();
-    let scripts = vec![agent_protocol::models::ProjectScript {
-        name: "Build".into(),
-        command: "echo build".into(),
-    }];
-    let key = "project-scripts:/original/.git";
-    connection
-        .execute(
-            "INSERT INTO host_state VALUES (?1,?2)",
-            params![key, serde_json::to_vec(&scripts).unwrap()],
-        )
-        .unwrap();
-    drop(connection);
-    let path = directory.path().join("bex-conversations.sqlite");
-    let storage = Storage::open(&path);
-    storage.check_ready().unwrap();
-    assert_eq!(storage.workspace_scripts(key).unwrap(), scripts);
-    let workspace = storage
-        .header(&address())
-        .unwrap()
-        .details
-        .workspace
-        .unwrap();
-    assert_eq!(workspace.project_cwd, "/original");
-    assert_eq!(workspace.strategy, Some(strategy));
-    let recovered = workspace.setup.as_ref().unwrap();
-    assert_eq!(recovered.phase, SetupPhase::Cancelled);
-    assert_eq!(recovered.script, setup.script);
-    assert_eq!(recovered.worktree_path, setup.worktree_path);
-    assert_eq!(recovered.branch, setup.branch);
-    drop(storage);
-    let storage = Storage::open(&path);
-    assert_eq!(storage.workspace_scripts(key).unwrap(), scripts);
-    assert_eq!(
-        storage.header(&address()).unwrap().details.workspace,
-        Some(workspace)
-    );
+    let invalid = Storage::open(directory.path());
+    assert!(invalid.check_ready().is_err());
+    assert!(invalid.identity().is_err());
+    assert!(invalid.headers(true).is_err());
+    assert!(invalid.list(None).is_err());
+    assert!(invalid.state(&address()).is_err());
 }

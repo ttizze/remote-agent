@@ -1171,8 +1171,8 @@ impl HistoryReadState {
     }
 }
 
-/// Apply one native text fragment to its typed body. Owners decide where the
-/// returned body is saved; this function has no state or I/O dependencies.
+/// Append one native text fragment in place. Owners choose the body and persist
+/// the result; this function has no state or I/O dependencies.
 pub fn text_delta(body: &mut ItemBody, field: TextField, delta: &str) -> Result<(), UpdateError> {
     match (field, body) {
         (TextField::AssistantText, ItemBody::AssistantText { text, .. }) => text.push_str(delta),

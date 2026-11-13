@@ -1951,11 +1951,19 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let query = models::ListQuery { limit:5, project_limit:5, ..Default::default() };
         let mut catalog = conversations::Catalog::open(&mobile.peer).await;
         catalog.wait_rows(threads.len()).await;
-        let initial = catalog.page(query.clone());
+        let mut initial = catalog.page(query.clone());
+        assert_eq!(initial.thread_list().unwrap().threads.len(), 5);
+        let projects = initial.lists.threads.as_ref().unwrap().projects.iter().map(|project|project.id.clone()).collect::<Vec<_>>();
+        for project_id in projects {
+            initial = reduce(&initial, "", Event::Intent(Intent::SetProjectExpanded { project_id, expanded: true })).0;
+        }
         let first = initial.lists.threads.as_ref().unwrap();
         let displayed = initial.thread_list().unwrap();
         assert_eq!(displayed.threads.len() + displayed.projects.iter().map(|project| project.threads.len()).sum::<usize>(), 30);
-        assert!(agent_protocol::protocol::encode(first).unwrap().len() < 16 * 1024);
+        // The shared catalog carries one small header per native row; bodies
+        // remain behind the conversation subscription/hydration boundary.
+        assert!(catalog.max_wire_bytes < threads.len() * 1024 + 16 * 1024);
+        assert!(catalog.replica.rows().values().all(|row| agent_protocol::protocol::encode(row).unwrap().len() < 1024));
         assert_eq!(first.projects.len(), 5);
         assert!(first.has_more && first.has_more_projects);
         assert_eq!(first.data.iter().map(|thread| thread.id.as_ref().unwrap().id.as_str()).collect::<Vec<_>>(), ["projectless", "chat-18", "chat-17", "chat-16", "chat-15"]);
@@ -4049,6 +4057,19 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
         assert_eq!(steered.id, first_turn.id, "steer joins the live turn");
         std::fs::write(directory.path().join("release-inputs"), "").unwrap();
         events.input_turn(&input.client_user_message_id, true).await;
+        // Final-turn completion and the native steer echo use separate tasks.
+        while !events
+            .view()
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .flat_map(|turn| turn.items.iter().flatten())
+            .any(|item| item_text(item) == Some("Additional input recorded"))
+        {
+            events.next().await;
+        }
+
         let reopened = conversations::Conversation::open(&second.peer, &thread)
             .await
             .unwrap();

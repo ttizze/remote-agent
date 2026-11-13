@@ -229,8 +229,7 @@ impl HostRpcService {
         self.inner.router.ensure_session(session)?;
         let _workspace = if matches!(
             message,
-            Call::CreateConversation(_)
-                | Call::StartTerminal(_)
+            Call::StartTerminal(_)
                 | Call::StartAccountTerminal(_)
                 | Call::WriteFile(_)
                 | Call::WriteWorkspaceFile(_)

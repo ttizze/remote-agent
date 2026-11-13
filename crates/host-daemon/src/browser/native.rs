@@ -3,12 +3,10 @@ use agent_protocol::{
     browser::{BrowserAction, BrowserFrame, BrowserRequest, validate_displayed_page},
     browser_native::{Capture, DisplayedPage, NativeAction, NativeRequest},
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
-use tokio::sync::Mutex;
+use std::{path::PathBuf, sync::Arc};
 
 pub struct Browser {
     state_directory: PathBuf,
-    aliases: Mutex<HashMap<String, String>>,
     pub(super) stop: tokio_util::sync::CancellationToken,
     pub(super) bridge_directory: tempfile::TempDir,
 }
@@ -27,7 +25,6 @@ impl Browser {
             .map_err(|e| e.to_string())?;
         let browser = Arc::new(Self {
             state_directory,
-            aliases: Default::default(),
             stop: Default::default(),
             bridge_directory,
         });
@@ -35,9 +32,6 @@ impl Browser {
         Ok(browser)
     }
 
-    pub async fn bind_scope(&self, scope: String, thread: String) {
-        self.aliases.lock().await.insert(scope, thread);
-    }
     pub async fn shutdown(&self) {
         self.stop.cancel();
     }
@@ -137,15 +131,8 @@ impl Browser {
         action: BrowserAction,
     ) -> Result<BrowserFrame, String> {
         super::validate_agent_action(&action)?;
-        let scope = self
-            .aliases
-            .lock()
-            .await
-            .get(thread)
-            .cloned()
-            .unwrap_or_else(|| thread.into());
         self.send(&NativeRequest {
-            scope,
+            scope: thread.into(),
             displayed: None,
             image_id: String::new(),
             renderer_id: String::new(),
@@ -198,10 +185,9 @@ mod tests {
             }
         });
         let browser = Browser::start(root.path().join("browser")).await.unwrap();
-        browser.bind_scope("startup".into(), scope).await;
         assert_eq!(
             browser
-                .agent("startup", BrowserAction::Read)
+                .agent(&scope, BrowserAction::Read)
                 .await
                 .unwrap()
                 .tab_id,

@@ -384,3 +384,51 @@ fn hydration_finishes_after_unrelated_live_updates_without_restarting_the_read()
     assert_eq!(snapshot.sessions.replicas[&id].rows()[&full.key], full);
     assert_eq!(snapshot.sessions.replicas[&id].cursor(), Some(latest));
 }
+
+#[test]
+fn new_chat_after_admitting_the_first_input_allocates_an_independent_draft() {
+    use crate::state::{Event, Intent, reduce};
+    let first = reduce(
+        &Snapshot::default(),
+        "",
+        Event::Intent(Intent::NewChat {
+            cwd: "/project".into(),
+        }),
+    )
+    .0;
+    let key = first.panes.primary().navigation.draft_key.clone();
+    let draft = Arc::new(Draft {
+        text: "first".into(),
+        model: Some(crate::models::ModelRef {
+            provider: crate::session::ProviderKind::Codex,
+            id: "model".into(),
+        }),
+        ..Default::default()
+    });
+    let destination = super::super::Destination {
+        thread_id: None,
+        cwd: Some("/project".into()),
+        draft_key: key.clone(),
+    };
+    let (submitted, effects) = super::super::submission(
+        &first,
+        destination,
+        draft,
+        uuid::Uuid::new_v4().to_string().into(),
+        None,
+        Default::default(),
+    );
+    assert_eq!(effects.len(), 1);
+    assert_eq!(submitted.sessions.pending_submissions.len(), 1);
+    let next = reduce(
+        &submitted,
+        "",
+        Event::Intent(Intent::NewChat {
+            cwd: "/project".into(),
+        }),
+    )
+    .0;
+    assert_ne!(next.panes.primary().navigation.draft_key, key);
+    assert!(next.panes.primary().navigation.thread_id.is_none());
+    assert_eq!(next.sessions.pending_submissions.len(), 1);
+}

@@ -244,7 +244,7 @@ async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navig
         store.snapshot().sessions.subscriptions.contains_key(&id),
         "expanding projects must retain the in-flight conversation subscription"
     );
-    writer.reply(&first_request, json!({"result":{"data":[],"projects":[{"id":"obsolete","name":"Old project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}})).await.unwrap();
+    writer.reply(&first_request, json!({"result":{"data":[],"projects":[{"id":"obsolete","name":"Old project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"limit":5}})).await.unwrap();
     first.await.unwrap();
     assert!(
         store
@@ -266,7 +266,7 @@ async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navig
             .await
             .is_err()
     );
-    writer.reply(&latest, json!({"result":{"data":[],"projects":[{"id":"latest","name":"Expanded project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}})).await.unwrap();
+    writer.reply(&latest, json!({"result":{"data":[],"projects":[{"id":"latest","name":"Expanded project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"limit":5}})).await.unwrap();
     for receipt in receipts {
         receipt.await.unwrap();
     }
@@ -292,7 +292,7 @@ async fn list_refresh_bursts_keep_only_the_latest_refresh_without_blocking_navig
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/list/subscribe");
     store.dispatch(Intent::ShowThreadList).await.unwrap();
-    writer.reply(&request, json!({"result":{"data":[],"projects":[{"id":"after-navigation","name":"Current project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"data":[],"projects":[{"id":"after-navigation","name":"Current project","roots":[]}],"hasMore":false,"hasMoreProjects":false,"limit":5}})).await.unwrap();
     refresh.await.unwrap();
     assert_eq!(
         store.snapshot().lists.threads.as_ref().unwrap().projects[0].id,
@@ -328,7 +328,7 @@ async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_avai
     writer
         .reply(
             &list_request,
-            json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}}),
+            json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}}),
         )
         .await
         .unwrap();
@@ -794,9 +794,9 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
                 .as_ref()
                 .map(|threads| json!(threads))
                 .unwrap_or_else(
-                    || json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
+                    || json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}),
                 ),
-            "host/list/search"=>json!({"data":[],"projects":[],"limit":10000,"hasMore":false,"hasMoreProjects":false,"projectPages":{}}),
+            "host/list/search"=>json!({"data":[],"projects":[],"limit":10000,"hasMore":false,"hasMoreProjects":false}),
             "host/account/list" => snapshot
                 .catalog.account
                 .accounts
@@ -887,7 +887,7 @@ async fn read_after_reviews(
             writer
                 .reply(
                     &request,
-                    json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}}),
+                    json!({"result":{"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}}),
                 )
                 .await
                 .unwrap();
@@ -2245,7 +2245,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
         initial.lists.threads = Some(Arc::new(
             serde_json::from_value(json!({
                 "data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/listed","name":"Selected task"}],
-                "projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}))
+                "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}))
             .unwrap(),
         ));
         Arc::make_mut(&mut initial.input.drafts).insert(
@@ -2316,7 +2316,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
             .reply(
                 &list_request,
                 json!({"result":{
-                "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}}),
+                "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}}),
             )
             .await
             .unwrap();
@@ -2446,6 +2446,13 @@ async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
     });
     let request = read(&mut reader).await;
     new_chat(&store, &mut reader, &mut writer, "/new-project").await;
+    let new_draft = store
+        .snapshot()
+        .panes
+        .primary()
+        .navigation
+        .draft_key
+        .clone();
     writer
         .reply(&request, json!({"result":{"thread":thread("loaded")}}))
         .await
@@ -2454,10 +2461,11 @@ async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
     let snapshot = store.snapshot();
     assert!(snapshot.panes.primary().navigation.thread_id.is_none());
     assert_eq!(snapshot.panes.primary().navigation.cwd, "/new-project");
-    assert!(matches!(
-        snapshot.panes.primary().navigation.draft_key,
-        DraftKey::Session { .. }
-    ));
+    assert_eq!(snapshot.panes.primary().navigation.draft_key, new_draft);
+    assert_ne!(
+        new_draft,
+        DraftKey::from(SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap())
+    );
     assert_eq!(loaded_text(&snapshot), Some("loaded"));
 }
 
@@ -2473,7 +2481,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
             .unwrap(),
         ),
     );
-    initial.lists.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"running"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})).unwrap()));
+    initial.lists.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"running"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,})).unwrap()));
     let (store, mut reader, mut writer) = setup(initial).await;
     reader.script_decorations();
     writer.notify(json!({"method":"fixture/session/change","session":{"provider":"codex","id":"thread"},"change":{"type":"turn","turn":{"id":"completed","status":"completed"},"completed":true}})).await.unwrap();
@@ -2537,7 +2545,7 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
             ..Default::default()
         })));
         let requested = store.snapshot();
-        let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,});
+        let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,});
         writer
         .reply(&old_request, if failure {
             json!({"error":{"code":"provider_failed","message":"old search failed","delivery":"notSent"}})
@@ -2760,7 +2768,7 @@ async fn creating_a_chat_updates_matching_search_results_without_reading_the_lis
         lists: agent_core::state::Lists {
         threads: Some(Arc::new(
             serde_json::from_value(
-                json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
+                json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}),
             )
             .unwrap(),
         )),
@@ -3042,16 +3050,14 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
                 let result = if opening["method"] == "host/workspace/review" {
                     review()
                 } else {
-                    json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})
+                    json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,})
                 };
                 writer
                     .reply(&opening, json!({"result":result}))
                     .await
                     .unwrap();
             }
-            if !navigate {
-                writer.notify(json!({"method":"fixture/session/change","session":target,"change":{"type":"text","turnId":"copy","itemId":"reply","delta":" later","field":"assistantText"}})).await.unwrap();
-            }
+            writer.notify(json!({"method":"fixture/session/change","session":target,"change":{"type":"text","turnId":"copy","itemId":"reply","delta":" later","field":"assistantText"}})).await.unwrap();
         }
         assert_eq!(
             fork.await.unwrap(),
@@ -3757,7 +3763,7 @@ async fn initial_titles_wait_for_scope_verification_and_use_the_current_query() 
                 "an unverified candidate must not load titles");
             assert!(!store.snapshot().connection.connected);
             assert!(store.snapshot().lists.threads.is_none());
-            let titles = |id| json!({"result":{"data":[{"id":{"provider":"codex","id":id},"name":"title"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}});
+            let titles = |id| json!({"result":{"data":[{"id":{"provider":"codex","id":id},"name":"title"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}});
             if mode == "changed-query" {
                 let _ = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery { search_term: "new query".into(), ..Default::default() }))).await;
             }
@@ -3772,7 +3778,8 @@ async fn initial_titles_wait_for_scope_verification_and_use_the_current_query() 
                 connected.unwrap();
                 assert!(store.snapshot().connection.connected);
                 assert!(store.snapshot().lists.threads.is_none());
-                for _ in 0..if mode=="changed-query" {4} else {3} {
+                let requests = if mode == "changed-query" { 4 } else { 3 };
+                for _ in 0..requests {
                     let request = read(&mut reader).await;
                     let result = match request["method"].as_str().unwrap() {
                         "host/list/subscribe" => {
@@ -3992,7 +3999,7 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 for _ in 0..2 {
                     let request = reader.read_request().await.unwrap().unwrap();
                     let result = match request["method"].as_str().unwrap() {
-                        "host/list/subscribe" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
+                        "host/list/subscribe" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         other => panic!("unexpected bootstrap: {other}"),
@@ -4179,7 +4186,7 @@ async fn close_keeps_the_last_enqueued_draft_and_unconfirmed_send() {
                 id: "thread".into(),
             }
             .into(),
-            text: "ba739aed-7c1b-5223-83c6-26f68997d8bf".into(),
+            text: "unsent".into(),
         })
         .await
         .unwrap();
@@ -4213,7 +4220,7 @@ async fn close_keeps_the_last_enqueued_draft_and_unconfirmed_send() {
         current.sessions.pending_submissions["ba739aed-7c1b-5223-83c6-26f68997d8bf"]
             .draft
             .text,
-        "ba739aed-7c1b-5223-83c6-26f68997d8bf"
+        "unsent"
     );
     assert_eq!(
         current.input.drafts[&DraftKey::from(SessionRef {
@@ -4414,7 +4421,7 @@ async fn host_catalogs_read_during_navigation_apply_without_another_request() {
         .reply(
             &pending["host/list/subscribe"],
             json!({"result":{
-        "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}}),
+        "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}}),
         )
         .await
         .unwrap();
@@ -4525,7 +4532,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         ),
         (
             "host/list/subscribe",
-            json!({"data":[{"id":{"provider":"codex","id":"listed"}}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
+            json!({"data":[{"id":{"provider":"codex","id":"listed"}}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}),
         ),
     ] {
         writer
@@ -4617,7 +4624,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             async move {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
-                        "host/list/subscribe" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}),
+                        "host/list/subscribe" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         "host/conversation/subscribe" => {
@@ -4767,7 +4774,6 @@ async fn session_update_gap_preserves_history_and_only_reports_failed_recovery(
     let id = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
     let mut conversation = thread("cached");
     conversation.cwd = None;
-    conversation.history_limit = Some(24);
     let mut initial = Snapshot::default();
     Arc::make_mut(&mut initial.sessions.conversations)
         .insert(id.clone(), Arc::new(conversation.clone()));
@@ -4813,7 +4819,6 @@ async fn session_update_gap_preserves_history_and_only_reports_failed_recovery(
     if restored {
         let mut recovered = thread("authoritative");
         recovered.cwd = None;
-        recovered.history_limit = Some(24);
         writer
             .reply(&recovery, json!({"result":{"thread":recovered}}))
             .await

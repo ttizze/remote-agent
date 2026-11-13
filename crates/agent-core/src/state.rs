@@ -481,6 +481,12 @@ group! {
 }
 
 impl Input {
+    fn retire_new_chat(&mut self, id: &crate::session::SessionRef) {
+        if self.new_drafts.values().any(|draft| draft == id) {
+            Arc::make_mut(&mut self.new_drafts).retain(|_, draft| draft != id);
+        }
+    }
+
     fn new_chat(&mut self, cwd: &str, slot: u64) -> DraftKey {
         Arc::make_mut(&mut self.new_drafts)
             .entry(format!("{slot}:{cwd}"))
@@ -1984,16 +1990,20 @@ fn submission(
             draft,
             follow_up: requested,
         }),
-        None => Effect::execute(op::StartSubmission {
-            thread_id: match draft_key {
+        None => {
+            let thread_id = match draft_key {
                 DraftKey::Session { session } => session,
                 DraftKey::Local { .. } => unreachable!("new conversation draft was validated"),
-            },
-            provider: provider.expect("new submission has a provider"),
-            cwd,
-            client_user_message_id,
-            draft,
-        }),
+            };
+            next.input.retire_new_chat(&thread_id);
+            Effect::execute(op::StartSubmission {
+                thread_id,
+                provider: provider.expect("new submission has a provider"),
+                cwd,
+                client_user_message_id,
+                draft,
+            })
+        }
     };
     (next, vec![effect])
 }

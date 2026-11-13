@@ -730,6 +730,7 @@ mod tests {
     #[case(false, "slow")]
     #[case(true, "slow")]
     #[case(true, "silent")]
+    #[case(false, "silent")]
     #[case(true, "replacement-error")]
     #[case(true, "error")]
     #[tokio::test]
@@ -832,8 +833,11 @@ mod tests {
                         if mode != "error" { loop {
                             let ready = {
                                 let snapshot = updates.borrow_and_update();
-                                snapshot.lists.task_activity.is_some()
-                                    && (!silent || !selected || item_text(&(snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])) == Some("after"))
+                                !silent || if selected {
+                                    item_text(&(snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])) == Some("after")
+                                } else {
+                                    snapshot.lists.threads.as_ref().is_some_and(|list| list.data.iter().any(|thread| thread.name.as_deref() == Some("after")))
+                                }
                             };
                             if ready { break; }
                             updates.changed().await.unwrap();

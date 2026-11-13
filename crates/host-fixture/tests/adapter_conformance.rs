@@ -635,7 +635,7 @@ async fn scenarios(provider: ProviderKind) {
                     .filter(|event| event["method"] == method)
                     .count(),
                 expected,
-                "submission uses the saved conversation and resumes the same native source"
+                "submission uses the saved conversation and resumes the same native source: {operations:?}"
             );
         }
     }
@@ -856,6 +856,8 @@ async fn search_preserves_cached_catalog_rows_when_native_pagination_fails() {
         .await
         .unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
+    let mut catalog = conversations::Catalog::open(&local.peer).await;
+    catalog.wait_rows(102).await;
     let query = agent_protocol::conversation::records::SearchList {
         term: String::new(),
         limit: Some(200),
@@ -1149,7 +1151,28 @@ async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_r
     let local = host.local().await.unwrap();
     let mut catalog = conversations::Catalog::open(&local.peer).await;
     catalog.wait_rows(2000).await;
-    let initial = catalog.page(ListQuery::default());
+    let mut initial = catalog.page(ListQuery::default());
+    assert_eq!(initial.thread_list().unwrap().threads.len(), 5);
+    let projects = initial
+        .lists
+        .threads
+        .as_ref()
+        .unwrap()
+        .projects
+        .iter()
+        .map(|project| project.id.clone())
+        .collect::<Vec<_>>();
+    for project_id in projects {
+        initial = reduce(
+            &initial,
+            "",
+            Event::Intent(Intent::SetProjectExpanded {
+                project_id,
+                expanded: true,
+            }),
+        )
+        .0;
+    }
     let listing = initial.lists.threads.as_ref().unwrap();
     assert_eq!(
         listing

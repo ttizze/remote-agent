@@ -120,6 +120,7 @@ impl Runtime {
             return;
         };
         let owner = Arc::downgrade(&service.inner);
+        service.restore_setup_expiry();
         Self::start_list_updates(service);
         Self::start_recovery(service);
         tokio::spawn(async move {
@@ -153,20 +154,25 @@ impl Runtime {
                 let Some(inner) = owner.upgrade() else { break };
                 let storage = inner.conversation.storage.clone();
                 let cached = replica.cursor();
-                match tokio::task::spawn_blocking(move || storage.list(cached)).await {
-                    Ok(Ok(message)) => match replica.apply(0, message) {
-                        Ok(next) => replica = next,
-                        Err(error) => {
-                            tracing::error!(target:"agent",operation="list.activity",%error);
-                            break;
-                        }
-                    },
-                    result => {
-                        tracing::error!(target:"agent",operation="list.activity",?result);
-                        break;
+                let next = tokio::task::spawn_blocking(move || storage.list(cached))
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result)
+                    .and_then(|message| {
+                        replica.apply(0, message).map_err(|error| error.to_string())
+                    });
+                let published = match next {
+                    Ok(next) => {
+                        replica = next;
+                        true
                     }
-                }
-                if let Some(apns) = inner.router.apns() {
+                    Err(error) => {
+                        tracing::error!(target:"agent",operation="list.activity",%error);
+                        replica = records::Replica::new(agent_protocol::sync::Scope::List, 0);
+                        false
+                    }
+                };
+                if published && let Some(apns) = inner.router.apns() {
                     let headers = replica.rows().values().filter_map(|row| {
                         let record = match &row.content {
                             agent_protocol::sync::Content::Full(record)
@@ -206,6 +212,7 @@ impl Runtime {
             external_busy: false,
             now: now(),
             seed: Uuid::new_v4(),
+            steer_ready: true,
             steers: provider
                 .and_then(|provider| service.inner.providers.get(provider).ok())
                 .is_some_and(|agent| agent.capabilities().steer),
@@ -471,13 +478,19 @@ impl Runtime {
                 }
                 .await;
                 if background || result.is_err() {
+                    let _updates = source.updates.lock().await;
+                    let tasks = source.background(attempt.id);
+                    if background && result.is_ok() && tasks.is_empty() {
+                        Self::complete_command_outputs(service, &target, attempt.id, Some(native))
+                            .await?;
+                    }
                     Self::event(
                         service,
                         &target,
                         Event::InterruptResult {
                             attempt: attempt.id,
                             action: token,
-                            background: source.background(attempt.id),
+                            background: tasks,
                             error: result.err().map(execution_error),
                         },
                     )

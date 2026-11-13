@@ -264,15 +264,16 @@ pub(crate) fn finish_read(
 }
 
 pub(super) fn promote_draft(snapshot: &mut Snapshot, id: &SessionRef, cwd: Option<&str>) {
-    let removed = snapshot
-        .input
-        .new_drafts
+    snapshot.input.retire_new_chat(id);
+    let draft = DraftKey::from(id);
+    if !snapshot
+        .panes
+        .0
         .values()
-        .any(|target| target == id);
-    if !removed {
+        .any(|pane| pane.navigation.thread_id.is_none() && pane.navigation.draft_key == draft)
+    {
         return;
     }
-    Arc::make_mut(&mut snapshot.input.new_drafts).retain(|_, target| target != id);
     for pane in Arc::make_mut(&mut snapshot.panes.0).values_mut() {
         if pane.navigation.thread_id.is_none() && pane.navigation.draft_key == DraftKey::from(id) {
             let navigation = Arc::make_mut(&mut Arc::make_mut(pane).navigation);
@@ -307,7 +308,8 @@ pub(crate) fn install(
         }
         _ => output.replica,
     };
-    let projected = records::project(&replica)?;
+    let mut projected = records::project(&replica)?;
+    projected.thread = super::outputs::overlay(projected.thread, &snapshot.sessions.live_outputs);
     promote_draft(snapshot, &id, projected.thread.cwd.as_deref());
     Arc::make_mut(&mut snapshot.sessions.replicas).insert(id.clone(), Arc::new(replica));
     Arc::make_mut(&mut snapshot.sessions.conversations)
@@ -442,12 +444,8 @@ pub(crate) fn apply(
             before.cwd.as_deref(),
             thread.cwd.as_deref(),
             completed
-                || before.preparations.iter().any(|previous| {
-                    !thread.preparations.iter().any(|current| {
-                        current.submission.client_user_message_id
-                            == previous.submission.client_user_message_id
-                    })
-                })
+                || op::preparing_workspace(&before.preparations)
+                    && !op::preparing_workspace(&thread.preparations)
                 || work_finished,
             discovered_agents,
         ));

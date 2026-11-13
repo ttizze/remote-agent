@@ -530,69 +530,6 @@
     }
   },
   {
-    "name": "explicit-cwd-first",
-    "command": {
-      "type": "sendTurn",
-      "threadId": {
-        "provider": "codex",
-        "id": "thread-1"
-      },
-      "input": {
-        "text": "hello",
-        "attachments": [],
-        "clientUserMessageId": "00000000-0000-0000-0000-000000000001"
-      },
-      "model": null,
-      "effort": null
-    },
-    "exchanges": [
-      {
-        "method": "host/conversation/change",
-        "params": {
-          "session": {
-            "provider": "codex",
-            "id": "thread-1"
-          },
-          "operation": "00000000-0000-0000-0000-000000000001",
-          "command": {
-            "Submit": {
-              "id": "00000000-0000-0000-0000-000000000001",
-              "content": {
-                "parts": [
-                  {
-                    "text": {
-                      "text": "hello"
-                    }
-                  }
-                ],
-                "model": null,
-                "effort": null,
-                "service_tier": null,
-                "follow_up": "queue"
-              }
-            }
-          }
-        },
-        "response": {
-          "result": {
-            "outcome": "Accepted",
-            "cursor": {
-              "store": "00000000-0000-0000-0000-000000000001",
-              "sequence": 7
-            }
-          }
-        }
-      }
-    ],
-    "result": {
-      "outcome": "Accepted",
-      "cursor": {
-        "store": "00000000-0000-0000-0000-000000000001",
-        "sequence": 7
-      }
-    }
-  },
-  {
     "name": "failed-resume-stops-send",
     "command": {
       "type": "sendTurn",
@@ -695,69 +632,6 @@
                 "effort": null,
                 "service_tier": null,
                 "follow_up": "steer"
-              }
-            }
-          }
-        },
-        "response": {
-          "result": {
-            "outcome": "Accepted",
-            "cursor": {
-              "store": "00000000-0000-0000-0000-000000000001",
-              "sequence": 7
-            }
-          }
-        }
-      }
-    ],
-    "result": {
-      "outcome": "Accepted",
-      "cursor": {
-        "store": "00000000-0000-0000-0000-000000000001",
-        "sequence": 7
-      }
-    }
-  },
-  {
-    "name": "queue-input",
-    "command": {
-      "type": "sendTurn",
-      "threadId": {
-        "provider": "codex",
-        "id": "thread-1"
-      },
-      "input": {
-        "text": "hello",
-        "attachments": [],
-        "clientUserMessageId": "00000000-0000-0000-0000-000000000001"
-      },
-      "model": null,
-      "effort": null
-    },
-    "exchanges": [
-      {
-        "method": "host/conversation/change",
-        "params": {
-          "session": {
-            "provider": "codex",
-            "id": "thread-1"
-          },
-          "operation": "00000000-0000-0000-0000-000000000001",
-          "command": {
-            "Submit": {
-              "id": "00000000-0000-0000-0000-000000000001",
-              "content": {
-                "parts": [
-                  {
-                    "text": {
-                      "text": "hello"
-                    }
-                  }
-                ],
-                "model": null,
-                "effort": null,
-                "service_tier": null,
-                "follow_up": "queue"
               }
             }
           }

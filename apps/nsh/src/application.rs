@@ -1145,10 +1145,11 @@ mod tests {
             serde_json::from_value(serde_json::json!({
             "projects": [{"id":"repo", "name":"Repo", "roots":[{"path":"/repo"}]},
                          {"id":"other", "name":"Other", "roots":[{"path":"/other"}]}],
-                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":false, "projectPages":{}
+                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":false
             }))
             .unwrap(),
         ));
+        crate::seed_catalog(&mut snapshot);
         snapshot = reduce(
             &snapshot,
             "",
@@ -1278,6 +1279,7 @@ mod tests {
         Arc::make_mut(snapshot.lists.threads.as_mut().unwrap())
             .projects
             .retain(|project| project.id != "repo");
+        crate::seed_catalog(&mut snapshot);
         snapshot = reduce(
             &snapshot,
             "",
@@ -1293,6 +1295,7 @@ mod tests {
                 .unwrap();
         assert_eq!(saved, in_project);
         Arc::make_mut(snapshot.lists.threads.as_mut().unwrap()).projects = projects;
+        crate::seed_catalog(&mut snapshot);
         publish(&snapshot);
         assert_eq!(application.snapshot().sidebar_projects, in_project);
         snapshot = reduce(
@@ -1345,7 +1348,7 @@ mod tests {
                          {"id":"other", "name":"Other", "roots":[{"path":"/other"}]}],
             "data": [{"id":{"provider":"codex", "id":"repo-chat"}, "projectId":"repo", "cwd":"/repo"},
                      {"id":{"provider":"codex", "id":"old-chat"}, "projectId":"other", "cwd":"/other"}],
-            "limit":60, "hasMore":false, "hasMoreProjects":false, "projectPages":{}
+            "limit":60, "hasMore":false, "hasMoreProjects":false
         })).unwrap()));
         let target = SessionRef {
             provider: Some(ProviderKind::Codex),

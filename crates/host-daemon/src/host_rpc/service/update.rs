@@ -60,6 +60,7 @@ impl HostRpcService {
                 delivery: ContinuationDelivery::Pending,
             });
         }
+        let _report = self.inner.conversation.update_report.lock().await;
         agent_local_host::save_private_json(&directory.join(RECOVERY_FILE), &Recovery { tasks })?;
         self.inner
             .conversation
@@ -81,6 +82,13 @@ impl HostRpcService {
             return Ok(());
         };
         let _report = self.inner.conversation.update_report.lock().await;
+        if self
+            .inner
+            .updating
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
         let path = directory.join(RECOVERY_FILE);
         let mut report: Recovery = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
@@ -121,6 +129,13 @@ impl HostRpcService {
             return Ok(());
         };
         let _report = self.inner.conversation.update_report.lock().await;
+        if self
+            .inner
+            .updating
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
         let path = directory.join(RECOVERY_FILE);
         let mut report: Recovery = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string())?,
@@ -173,6 +188,13 @@ impl HostRpcService {
         loop {
             let pending = {
                 let _report = self.inner.conversation.update_report.lock().await;
+                if self
+                    .inner
+                    .updating
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return Ok(());
+                }
                 let mut report: Recovery = serde_json::from_slice(&std::fs::read(&path)?)?;
                 let previous = serde_json::to_vec(&report)?;
                 let mut pending = false;
@@ -282,6 +304,7 @@ mod tests {
                 now: 100,
                 seed: uuid::Uuid::new_v4(),
                 steers: true,
+                steer_ready: true,
                 external_busy: false,
             };
             let input = uuid::Uuid::new_v4();
@@ -508,6 +531,7 @@ mod tests {
             now: 200,
             seed: uuid::Uuid::new_v4(),
             steers: true,
+            steer_ready: true,
             external_busy: false,
         };
         let admitted = storage
@@ -570,5 +594,40 @@ mod tests {
                 .len(),
             2
         );
+    }
+    #[tokio::test]
+    async fn a_new_update_serializes_its_report_and_stops_an_older_resume_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            [],
+            crate::ProjectStore::new(directory.path().join("projects.json")),
+        );
+        service.set_history_scope(directory.path().into(), true);
+        let path = directory.path().join(RECOVERY_FILE);
+        agent_local_host::save_private_json(
+            &path,
+            &Recovery {
+                tasks: vec![InterruptedTask {
+                    session: SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap(),
+                    input: uuid::Uuid::new_v4().to_string().into(),
+                    last_turn: None,
+                    delivery: ContinuationDelivery::Pending,
+                }],
+            },
+        )
+        .unwrap();
+        let previous = std::fs::read(&path).unwrap();
+        let report = service.inner.conversation.update_report.lock().await;
+        let mut resumed = Box::pin(service.resume_after_update(directory.path()));
+        assert!(futures_util::poll!(&mut resumed).is_pending());
+        let mut preparing = Box::pin(service.prepare_update());
+        assert!(futures_util::poll!(&mut preparing).is_pending());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        drop(report);
+        let (resumed, prepared) = tokio::join!(resumed, preparing);
+        resumed.unwrap();
+        prepared.unwrap();
+        let report: Recovery = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(report.tasks.is_empty());
     }
 }

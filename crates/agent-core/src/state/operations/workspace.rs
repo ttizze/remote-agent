@@ -235,6 +235,19 @@ rpc::rpc_method!(ReviewWorkspace, ReviewWorkspace, |self| {
     }
 });
 
+pub(in crate::state) fn preparing_workspace(
+    preparations: &[crate::session::SessionPreparation],
+) -> bool {
+    preparations.iter().any(|preparation| {
+        preparation.status == crate::session::PreparationStatus::Preparing
+            || matches!(
+                preparation.stage,
+                crate::session::PreparationStage::Workspace
+                    | crate::session::PreparationStage::Worktree
+            )
+    })
+}
+
 /// Navigation and notifications already belong to an epoch. Their review read
 /// shares it instead of dispatching a second intent that invalidates siblings.
 pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot, pane_id: &str) -> Option<Effect> {
@@ -245,7 +258,7 @@ pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot, pane_id: &str)
         .thread_id
         .as_ref()
         .and_then(|id| snapshot.sessions.conversations.get(id))
-        .is_some_and(|thread| !thread.preparations.is_empty());
+        .is_some_and(|thread| preparing_workspace(&thread.preparations));
     if preparing || snapshot.selected_directory(&pane).is_empty() {
         if pane.workspace.review.is_some() || pane.workspace.review_cwd.is_some() {
             let pane = Arc::make_mut(snapshot.panes.get_mut(pane_id)?);

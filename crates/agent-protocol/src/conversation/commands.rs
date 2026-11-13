@@ -571,6 +571,7 @@ pub(super) fn advance(state: &State, context: Context) -> Step {
         .filter(|input| matches!(input.state, InputState::Queued { .. }))
         .min_by_key(|input| {
             let steering = context.steers
+                && context.steer_ready
                 && matches!(input.state, InputState::Queued { steer: Some(id) }
                 if active.is_some_and(|attempt| attempt.id == id));
             (!steering, input.position)
@@ -610,6 +611,7 @@ pub(super) fn dispatch(
         .active_turn()
         .filter(|turn| !matches!(turn.state, TurnState::Waiting(Wait::Background { .. })));
     let steer = context.steers
+        && context.steer_ready
         && matches!(input.state, InputState::Queued { steer: Some(id) }
             if state.steerable_attempt().is_some_and(|attempt| attempt.id == id));
     if active.is_some() && !steer {

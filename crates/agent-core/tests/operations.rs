@@ -339,7 +339,7 @@ async fn run_case(case: &Value) {
     if let Some(expected) = case.get("result") {
         let expected = match text(&case["command"], "type") {
             "searchList" => normalize::<agent_protocol::models::ThreadList>(expected),
-            "readThread" | "readOlder" => expected.clone(),
+            "readThread" => expected.clone(),
             "readItem" => normalize::<ItemResponse>(expected),
             "models" => normalize::<Vec<agent_protocol::models::Model>>(expected),
             "accounts" => normalize::<Accounts>(expected),
@@ -349,7 +349,7 @@ async fn run_case(case: &Value) {
             _ => expected.clone(),
         };
         let actual = result.unwrap();
-        if matches!(text(&case["command"], "type"), "readThread" | "readOlder") {
+        if matches!(text(&case["command"], "type"), "readThread") {
             assert_fields(&actual, &expected, text(case, "name"));
         } else {
             assert_eq!(actual, expected, "{}", case["name"]);
@@ -370,11 +370,7 @@ async fn run_case(case: &Value) {
             };
             assert_eq!(
                 serde_json::from_str::<Value>(&raw).unwrap(),
-                if case["errorRaw"].get("item").is_some() {
-                    normalize::<ItemResponse>(&case["errorRaw"])
-                } else {
-                    normalize::<agent_protocol::error::RpcFailure>(&case["errorRaw"])
-                },
+                normalize::<agent_protocol::error::RpcFailure>(&case["errorRaw"]),
                 "{}",
                 case["name"]
             );

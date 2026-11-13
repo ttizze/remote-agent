@@ -2,7 +2,7 @@
 //! A gap asks the owner for a new tail; it never changes the saved row cursor.
 use serde::{Deserialize, Serialize};
 
-const TAIL_BYTES: usize = 64 * 1024;
+pub const TAIL_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {

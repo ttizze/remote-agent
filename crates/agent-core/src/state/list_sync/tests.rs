@@ -383,3 +383,23 @@ fn unavailable_providers_keep_saved_project_membership_and_host_owned_operations
     assert!(capabilities.rename && capabilities.fork);
     assert!(!capabilities.steer && !capabilities.model_change);
 }
+
+#[test]
+fn paging_during_initial_subscription_keeps_its_in_flight_operation() {
+    let mut state = Snapshot::default();
+    Arc::make_mut(&mut state.operations).insert(
+        op::OperationKey::SessionList,
+        op::OperationState {
+            generation: 1,
+            phase: op::OperationPhase::Running,
+        },
+    );
+    let (next, effects) = reduce_intent(&state, "", Intent::ExpandProjects);
+    assert!(effects.is_empty());
+    assert_eq!(next.operations, state.operations);
+    assert!(next.lists.list_query.project_limit > state.lists.list_query.project_limit);
+    let (next, effects) = reduce_intent(&next, "", Intent::ExpandThreadList { project_id: None });
+    assert!(effects.is_empty());
+    assert_eq!(next.operations, state.operations);
+    assert!(next.lists.list_query.limit > state.lists.list_query.limit);
+}

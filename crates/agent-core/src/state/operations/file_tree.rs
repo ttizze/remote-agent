@@ -372,7 +372,7 @@ mod tests {
                 let reply = match method {
                     "host/file/openCapabilities" => json!({"editors":["zed"],"reveal":null}),
                     "host/file/tree" => json!({"entries":[{"path":"new.rs","kind":"file","ignored":false}],"truncated":false}),
-                    "host/list/subscribe" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}),
+                    "host/list/subscribe" => json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}),
                     "host/model/list" => json!({"data":[],"nextCursor":null}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
                     other => panic!("unexpected reconnect request: {other}"),

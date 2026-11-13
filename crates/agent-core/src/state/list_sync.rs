@@ -117,7 +117,10 @@ pub(crate) fn query(
     snapshot.lists.list_query = Arc::new(query);
     let mut effects = project(&mut snapshot, refresh);
     if snapshot.connection.connected {
-        if snapshot.lists.subscription.is_none() || refresh && !searching {
+        if snapshot.lists.subscription.is_none()
+            && !snapshot.operation_running(op::OperationKey::SessionList)
+            || refresh && !searching
+        {
             effects.push(Effect::execute(SubscribeCatalog { refresh }));
         }
         if searching && (changed || refresh || snapshot.lists.search_results.is_none()) {

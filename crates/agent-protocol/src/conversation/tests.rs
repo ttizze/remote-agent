@@ -7,6 +7,7 @@ fn context(seed: u128) -> Context {
         now: 100,
         seed: Uuid::from_u128(seed),
         steers: true,
+        steer_ready: true,
     }
 }
 

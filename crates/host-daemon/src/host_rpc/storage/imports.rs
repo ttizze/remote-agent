@@ -281,6 +281,7 @@ impl Storage {
                 return Ok(Committed { state: Some(state), step: Step { outcome, ..Default::default() }, cursor: sequence, rows: vec![], removed: vec![], reset: false });
             }
             if state.active_turn().is_some_and(|turn| !turn.observed || state.attempts.contains_key(&turn.id) || response.thread.status==agent_protocol::models::SessionStatus::Running) || state.inputs.values().any(|input| !matches!(input.state, decision::InputState::Queued { .. } | decision::InputState::Failed(_))) { return Err("conversation is busy; native import will resume when it is idle".into()); }
+            let caught_up = matches!(state.bindings.get(&state.thread.provider), Some(decision::Binding::Ready { covered, .. }) if *covered == state.history_end());
             let source_key = rows::source(&transaction, key, source.native_provider().map_err(failure)?, &source.id)?;
             let sequence = Self::advance(&transaction)?;
             let namespace = Uuid::new_v5(&Uuid::NAMESPACE_URL, source.to_string().as_bytes());
@@ -290,6 +291,13 @@ impl Storage {
                 let occurrence = occurrences.entry(native.id.clone()).or_insert(0);
                 import_turn(&transaction, &import, native, *occurrence, &mut state)?;
                 *occurrence += 1;
+            }
+            if caught_up {
+                let binding = Change::Binding { provider: state.thread.provider, value: Some(decision::Binding::Ready {
+                    source: source.id.clone(), covered: state.history_end(),
+                }) };
+                state = state.apply(std::slice::from_ref(&binding));
+                rows::write(&transaction, &import.write, &binding, &state, &mut Vec::new(), &mut Vec::new())?;
             }
             let previous=rows::header(&transaction,key)?.0.details.selection;
             let selection=decision::records::Selection {model:previous.model.or(response.model.clone()),effort:previous.effort.or(response.effort.clone()),service_tier:previous.service_tier.or(response.service_tier.clone())};

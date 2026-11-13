@@ -676,3 +676,172 @@ async fn automatic_workspace_preference_selects_the_initial_checkout() {
         );
     }
 }
+
+#[tokio::test]
+async fn stopping_a_running_setup_then_retrying_reruns_the_script_in_the_same_checkout() {
+    let fixture = Fixture::new(script("if [ ! -f .attempted ]; then touch .attempted; printf 'waiting\\n'; sleep 120; fi; printf 'retried\\n'", false)).await;
+    let client = fixture.host.open_session();
+    let (id, mut updates) =
+        admit(&fixture.host, client.id(), &fixture.request("main", false)).await;
+    let running = setup_until(&mut updates, |setup| {
+        setup.stages[2]
+            .tail
+            .iter()
+            .any(|line| line.contains("waiting"))
+    })
+    .await;
+    let stopped: records::Acknowledged = call(
+        &fixture.host,
+        client.id(),
+        Call::ChangeConversation(records::Change {
+            session: id.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::Interrupt { turn: None },
+        }),
+    )
+    .await
+    .unwrap();
+    stopped.accepted().unwrap();
+    setup_until(&mut updates, |setup| setup.phase == SetupPhase::Cancelled).await;
+    until(&mut updates, |thread| {
+        thread
+            .preparations
+            .iter()
+            .any(|preparation| matches!(preparation.status, PreparationStatus::Failed { .. }))
+    })
+    .await;
+    let retried: records::Acknowledged = call(&fixture.host, client.id(), retry(id, false))
+        .await
+        .unwrap();
+    retried.accepted().unwrap();
+    let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
+    assert_eq!(done.worktree_path, running.worktree_path);
+    assert_eq!(done.branch, running.branch);
+    assert_eq!(done.stages[2].exit_code, Some(0));
+    assert!(
+        done.stages[2]
+            .tail
+            .iter()
+            .any(|line| line.contains("retried"))
+    );
+    assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn restarted_host_restores_the_remaining_setup_card_lifetime() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let generation = Uuid::new_v4();
+    let host = HostRpcService::new(
+        [],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let ended = now().max(20_000) as u64 - 20_000;
+    let mut setup = WorkspaceSetup::new(None, ended - 1);
+    setup.finish(SetupPhase::Done, None, ended);
+    host.inner
+        .conversation
+        .storage
+        .create(
+            &id,
+            &records::Header {
+                state: agent_protocol::conversation::Thread {
+                    name: "Finished setup".into(),
+                    provider: ProviderKind::Codex,
+                    workspace: agent_protocol::conversation::Workspace::Ready("/project".into()),
+                    queue_held: false,
+                },
+                details: records::Details {
+                    workspace: Some(Box::new(WorkspacePreparation {
+                        project_cwd: "/project".into(),
+                        strategy: None,
+                        generation,
+                        setup: Some(setup),
+                        visible: true,
+                    })),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    let mut changes = host.inner.conversation.storage.changes();
+    changes.borrow_and_update();
+    let started = tokio::time::Instant::now();
+    host.start().unwrap();
+    tokio::time::timeout(Duration::from_secs(11), async {
+        while host
+            .inner
+            .conversation
+            .storage
+            .header(&id)
+            .unwrap()
+            .details
+            .workspace
+            .as_ref()
+            .unwrap()
+            .visible
+        {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("restart keeps the original expiry deadline");
+    assert!(started.elapsed() <= Duration::from_secs(11));
+    assert!(
+        host.inner
+            .conversation
+            .storage
+            .header(&id)
+            .unwrap()
+            .details
+            .workspace
+            .unwrap()
+            .setup
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn retry_after_restart_restores_a_deleted_checkout_before_the_first_provider_is_created() {
+    let fixture = Fixture::new(None).await;
+    fixture.agent.create_gate.close();
+    let creation = fixture.request("main", false);
+    let client = fixture.host.open_session();
+    let (id, mut updates) = admit(&fixture.host, client.id(), &creation).await;
+    let failed = until(&mut updates, |thread| {
+        thread
+            .preparations
+            .iter()
+            .any(|preparation| matches!(preparation.status, PreparationStatus::Failed { .. }))
+    })
+    .await;
+    let checkout = failed.cwd.unwrap();
+    assert_ne!(Path::new(&checkout), fixture.repository);
+    assert_eq!(fixture.agent.next.load(Ordering::SeqCst), 0);
+    fixture.host.shutdown_owned_processes().await;
+    let agent = fixture.agent.restarted();
+    let directory = fixture.directory;
+    drop(updates);
+    drop(client);
+    drop(fixture.host);
+    std::fs::remove_dir_all(&checkout).unwrap();
+    let host = HostRpcService::new(
+        [agent.backend()],
+        ProjectStore::new(directory.path().join("projects.json")),
+    );
+    let client = host.open_session();
+    let (reopened, mut updates) = admit(&host, client.id(), &creation).await;
+    assert_eq!(reopened, id);
+    let result: records::Acknowledged = call(&host, client.id(), retry(id.clone(), false))
+        .await
+        .unwrap();
+    result.accepted().unwrap();
+    let done = until(&mut updates, |thread| {
+        thread.preparations.is_empty() && !thread.turns.as_ref().is_none_or(Vec::is_empty)
+    })
+    .await;
+    assert_eq!(done.cwd.as_deref(), Some(checkout.as_str()));
+    assert!(Path::new(&checkout).join(".git").exists());
+    assert_eq!(agent.inputs.lock().unwrap().len(), 1);
+    assert_eq!(done.id, Some(id));
+}

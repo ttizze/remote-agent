@@ -37,19 +37,9 @@ async fn exercise(command: &[&str], expected: Value) {
             let request = match reader.read_request().await {
                 Ok(Some(request)) => request,
                 Ok(None) => break,
-                Err(error)
-                    if handled
-                        && matches!(
-                            error.kind(),
-                            std::io::ErrorKind::BrokenPipe
-                                | std::io::ErrorKind::ConnectionAborted
-                                | std::io::ErrorKind::ConnectionReset
-                                | std::io::ErrorKind::NotConnected
-                                | std::io::ErrorKind::UnexpectedEof
-                        ) =>
-                {
-                    break;
-                }
+                // Once the command has its answer, the process closes QUIC.
+                // The child exit status and stdout below verify that it consumed it.
+                Err(_) if handled => break,
                 Err(error) => panic!("CLI request framing: {error}"),
             };
             let result = match request["method"].as_str() {

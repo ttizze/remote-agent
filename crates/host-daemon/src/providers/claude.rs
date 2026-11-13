@@ -875,6 +875,43 @@ async fn read_tool_output(path: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
+async fn read_tool_output_tail(path: &str) -> Result<agent_protocol::sync::Output, String> {
+    use agent_protocol::sync::{Output, TAIL_BYTES};
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let length = file
+        .metadata()
+        .await
+        .map_err(|error| error.to_string())?
+        .len();
+    let offset = length.saturating_sub(TAIL_BYTES as u64);
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(length - offset)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    let boundary = if offset == 0 {
+        0
+    } else {
+        bytes
+            .iter()
+            .position(|byte| byte & 0xc0 != 0x80)
+            .unwrap_or(bytes.len())
+    };
+    let text = std::str::from_utf8(&bytes[boundary..])
+        .map_err(|error| error.to_string())?
+        .to_owned();
+    Ok(Output {
+        offset: offset + boundary as u64,
+        text,
+    })
+}
+
 impl Worker {
     fn settled(&self) -> bool {
         self.work.borrow().settled
@@ -1474,15 +1511,16 @@ impl Worker {
             return Ok(false);
         };
         if let Some(path) = outcome.output_path
-            && let Ok(output) = read_tool_output(path).await
+            && let Ok(output) = read_tool_output_tail(path).await
         {
-            let content = Value::String(output);
+            let omitted = output.offset != 0;
+            let mut body =
+                native::tool_result_body(item.body(), &Value::String(output.text), &Value::Null);
+            if let ItemBody::CommandExecution { output_omitted, .. } = &mut body {
+                *output_omitted = omitted;
+            }
             item.body = ItemContent::Inline {
-                body: Box::new(native::tool_result_body(
-                    item.body(),
-                    &content,
-                    &Value::Null,
-                )),
+                body: Box::new(body),
             };
         }
         self.change(SessionChange::Item {
@@ -4061,4 +4099,32 @@ for await (const line of createInterface({input: process.stdin})) {
             ErrorCategory::Provider(future)
         );
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn background_output_reads_only_a_bounded_utf8_tail_of_large_files() {
+    use std::io::{Seek, Write};
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.as_file_mut()
+        .seek(std::io::SeekFrom::Start(history::MAX_FILE_BYTES + 1))
+        .unwrap();
+    let suffix = "日".repeat(30_000);
+    file.write_all(suffix.as_bytes()).unwrap();
+    let output = read_tool_output_tail(file.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert!(output.text.len() <= agent_protocol::sync::TAIL_BYTES);
+    assert!(suffix.ends_with(&output.text));
+    assert_eq!(
+        output.offset + output.text.len() as u64,
+        history::MAX_FILE_BYTES + 1 + suffix.len() as u64
+    );
+    assert!(output.offset > 0);
+    std::fs::write(file.path(), "short 日").unwrap();
+    let small = read_tool_output_tail(file.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(small.offset, 0);
+    assert_eq!(small.text, "short 日");
 }

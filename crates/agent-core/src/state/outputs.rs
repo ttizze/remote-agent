@@ -299,6 +299,18 @@ mod tests {
                 .unwrap()
                 .contains("live command bytes")
         );
+        let reopened = crate::test_conversations::opened(
+            crate::models::ThreadResponse {
+                thread: state.sessions.conversations[&session].as_ref().clone(),
+                ..Default::default()
+            },
+            &mut live,
+        );
+        super::super::conversations::install(&mut live, reopened);
+        assert!(
+            matches!(live.sessions.conversations[&session].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), ItemBody::CommandExecution { output, .. } if output == "live command bytes")
+        );
+        let replica = live.sessions.replicas[&session].clone();
         let (unchanged, _) = received(
             &live,
             uuid::Uuid::new_v4(),

@@ -317,6 +317,7 @@ impl Runtime {
             return Ok(());
         };
         let attempt = info.attempt;
+        let became_addressable = info.native_turn.is_none() && change.turn_id().is_some();
         let native_turn = change.turn_id().cloned().or(info.native_turn);
         let items: Vec<_> = match &change {
             SessionChange::Turn { turn, .. } => turn.items.iter().flatten().collect(),
@@ -475,20 +476,31 @@ impl Runtime {
                         matches!(
                             turn.state,
                             decision::TurnState::Waiting(decision::Wait::Background { .. })
+                                | decision::TurnState::Running { interrupt: Some(_) }
                         )
                     }) {
+                        let native_turn = service
+                            .inner
+                            .conversation
+                            .storage
+                            .execution(&source.target, owner.id)?
+                            .and_then(|execution| execution.native_turn);
+                        if tasks.is_empty() {
+                            Self::complete_command_outputs(
+                                service,
+                                &source.target,
+                                owner.id,
+                                native_turn.clone(),
+                            )
+                            .await?;
+                        }
                         Self::event(
                             service,
                             &source.target,
                             Event::Provider {
                                 native_items: Vec::new(),
                                 attempt: owner.id,
-                                native_turn: service
-                                    .inner
-                                    .conversation
-                                    .storage
-                                    .execution(&source.target, owner.id)?
-                                    .and_then(|execution| execution.native_turn),
+                                native_turn,
                                 observation: Observation::Background { tasks },
                             },
                         )
@@ -507,7 +519,7 @@ impl Runtime {
             | SessionChange::RequestDelivery { .. }
             | SessionChange::ResolveRequest { .. } => {}
         }
-        if observations.is_empty() && (!mappings.is_empty() || user_echo) {
+        if observations.is_empty() && (!mappings.is_empty() || user_echo || became_addressable) {
             observations.push(Observation::Timing {
                 started_at: None,
                 completed_at: None,
@@ -530,6 +542,38 @@ impl Runtime {
                     native_items,
                     native_turn: native_turn.clone(),
                     attempt: attempt.id,
+                    observation,
+                },
+            )
+            .await?;
+        }
+        if became_addressable {
+            Self::event(service, &source.target, Event::Wake).await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn complete_command_outputs(
+        service: &HostRpcService,
+        target: &SessionRef,
+        execution: Uuid,
+        native_turn: Option<agent_protocol::ids::TurnId>,
+    ) -> Result<(), String> {
+        let mut observations = Vec::new();
+        service.inner.conversation.finish_outputs(
+            target,
+            execution,
+            TurnStatus::Completed,
+            &mut observations,
+        )?;
+        for observation in observations {
+            Self::event(
+                service,
+                target,
+                Event::Provider {
+                    native_items: Vec::new(),
+                    attempt: execution,
+                    native_turn: native_turn.clone(),
                     observation,
                 },
             )

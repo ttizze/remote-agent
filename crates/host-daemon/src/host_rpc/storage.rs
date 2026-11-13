@@ -282,9 +282,7 @@ impl Storage {
                 .busy_timeout(std::time::Duration::from_secs(10))
                 .map_err(failure)?;
             connection
-                .execute_batch(
-                    "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
-                )
+                .pragma_update(None, "foreign_keys", true)
                 .map_err(failure)?;
             let version: u32 = connection
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -294,6 +292,9 @@ impl Storage {
                 2 => {}
                 _ => return Err(format!("conversation storage needs upgrade from {version}")),
             }
+            connection
+                .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+                .map_err(failure)?;
             cursor(&connection)?;
             // The Host lease is already held. Running work belonged to the
             // previous process; a live process never reclaims its own claims.
@@ -461,7 +462,10 @@ impl Storage {
                 }
             } else { None };
             if let Some((_, cwd)) = &retry { state.thread.workspace = decision::Workspace::Folder(cwd.clone()); }
-            let context=Context {external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
+            let steer_ready = executions::steering_ready(&transaction, key, self.process,
+                state.active_turn().and_then(|turn| state.attempts.get(&turn.id)).map(|attempt| attempt.id),
+                native_turn.as_ref().map(|(attempt, _)| *attempt))?;
+            let context=Context {steer_ready, external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
             let mut step = decision::step(&state, event, context);
             if let Some((workspace, _)) = retry.filter(|_| step.outcome == Outcome::Accepted) {
                 header.details.workspace = Some(Box::new(workspace));

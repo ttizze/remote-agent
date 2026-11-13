@@ -82,20 +82,12 @@ impl HostRpcService {
         let mut headers = std::collections::BTreeMap::new();
         let mut inspected = std::collections::HashSet::new();
         for (provider, result) in listings {
-            let pages = result.map_err(|_| {
-                Failure::new(
-                    "task_activity_incomplete",
-                    "実行中のタスクをすべて確認できません。",
-                )
-            })??;
+            let pages = result.ok().and_then(Result::ok).ok_or_else(incomplete)?;
             inspected.insert(provider);
             for summary in pages.into_iter().flatten() {
                 let native_status = summary.thread.status;
                 if summary.thread.list_stale == Some(true) {
-                    return Err(Failure::new(
-                        "task_activity_incomplete",
-                        "実行中のタスクをすべて確認できません。",
-                    ));
+                    return Err(incomplete());
                 }
                 let Some(thread) = self
                     .inner
@@ -125,6 +117,7 @@ impl HostRpcService {
                         )
                     });
                 header.details.activity.status = native_status;
+                header.details.activity.stale = false;
                 headers.insert(id, header);
             }
         }
@@ -138,22 +131,19 @@ impl HostRpcService {
             // A complete native loaded-list is also evidence about absent
             // sources: they have no live provider-owned work. Keep this fact
             // local to restart admission; it never rewrites the saved header.
-            if header.details.activity.status == agent_protocol::models::SessionStatus::Unknown
+            if let Some(native) = headers.get(&id) {
+                header.details.activity.stale = false;
+                if header.details.activity.latest
+                    != Some(agent_protocol::models::TurnStatus::Running)
+                {
+                    header.details.activity.status = native.details.activity.status;
+                }
+            } else if inspected.contains(&header.state.provider)
                 && header.details.activity.latest
                     != Some(agent_protocol::models::TurnStatus::Running)
             {
-                let status = headers
-                    .get(&id)
-                    .map(|native| native.details.activity.status)
-                    .or_else(|| {
-                        inspected
-                            .contains(&header.state.provider)
-                            .then_some(agent_protocol::models::SessionStatus::Idle)
-                    });
-                if let Some(status) = status {
-                    header.details.activity.status = status;
-                    header.details.activity.stale = false;
-                }
+                header.details.activity.status = agent_protocol::models::SessionStatus::Idle;
+                header.details.activity.stale = false;
             }
             headers.insert(id, header);
         }
@@ -173,6 +163,13 @@ impl HostRpcService {
             .set_apns(crate::apns::Apns::load(path, host_name, host_id).await?);
         Ok(())
     }
+}
+
+fn incomplete() -> Failure {
+    Failure::new(
+        "task_activity_incomplete",
+        "実行中のタスクをすべて確認できません。時間をおいて再試行してください。",
+    )
 }
 
 #[cfg(test)]
@@ -301,6 +298,29 @@ rl.on('line', line => {
             [crate::providers::codex::Codex::new(Ok(server.clone())).into()],
             ProjectStore::new(directory.path().join("projects.json")),
         );
+        let storage = &service.inner.conversation.storage;
+        storage.queue_catalog(ProviderKind::Codex, 0).unwrap();
+        let claim = storage.claim(0, 1).unwrap().remove(0);
+        let mut stale = super::super::super::storage::history::header(
+            &agent_protocol::models::ThreadResponse {
+                thread: Thread {
+                    id: Some(session("running")),
+                    status: agent_protocol::models::SessionStatus::Running,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        );
+        stale.details.activity.stale = true;
+        storage
+            .catalog_page(
+                &claim,
+                &[(session("running"), stale)],
+                None,
+                i64::MAX - 60_000,
+            )
+            .unwrap();
         service.start().unwrap();
 
         let bootstrap = service.update_task_snapshot().await.unwrap();
@@ -496,5 +516,96 @@ rl.on('line', line => {
             .unwrap(),
             Response::Failure { .. }
         ));
+    }
+    #[tokio::test]
+    async fn live_activity_tracks_committed_work_after_disconnect_and_revocation_prevents_reregistration()
+     {
+        use crate::host_rpc::runtime::native_fixture::call;
+        use agent_protocol::live_activity::{
+            LiveActivityRegistration, PushEnvironment, RegisterLiveActivity,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            [],
+            ProjectStore::new(directory.path().join("projects.json")),
+        );
+        let apns = crate::apns::Apns::testing();
+        service.inner.router.set_apns(Some(apns.clone()));
+        let id = SessionRef::new(ProviderKind::Codex, "running-native".into()).unwrap();
+        service
+            .inner
+            .conversation
+            .storage
+            .import(
+                &id,
+                &agent_protocol::models::ThreadResponse {
+                    thread: Thread {
+                        id: Some(id.clone()),
+                        status: agent_protocol::models::SessionStatus::Running,
+                        turns: Some(Vec::new()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Some(&id),
+                super::super::super::runtime::now(),
+            )
+            .unwrap();
+        let phone = service.open_authenticated_session("phone".into());
+        let params = RegisterLiveActivity {
+            activity_id: Some("activity".into()),
+            allow_start: false,
+            token: vec![1; 32],
+            environment: PushEnvironment::Sandbox,
+        };
+        let registration: LiveActivityRegistration = call(
+            &service,
+            phone.id(),
+            Call::RegisterLiveActivity(params.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(registration.enabled);
+        let payload = apns.test_payloads(crate::apns::now()).pop().unwrap();
+        assert_eq!(
+            payload["aps"]["content-state"]["display"]["current"]["label"],
+            "実行中 1件"
+        );
+        service.close_session(phone.id());
+        assert_eq!(apns.test_payloads(crate::apns::now()).len(), 1);
+        super::super::super::runtime::Runtime::event(
+            &service,
+            &id,
+            agent_protocol::conversation::Event::NativeStatus {
+                provider: ProviderKind::Codex,
+                source: id.id.clone(),
+                status: agent_protocol::models::SessionStatus::Idle,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if apns
+                    .test_payloads(crate::apns::now())
+                    .iter()
+                    .any(|payload| payload["aps"]["event"] == "end")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("committed completion reaches APNs without a connected phone");
+        let reconnected = service.open_authenticated_session("phone".into());
+        service.revoke_device("phone");
+        assert!(apns.test_payloads(crate::apns::now()).is_empty());
+        assert!(
+            service
+                .register_live_activity(reconnected.id(), &params)
+                .is_err()
+        );
+        assert!(apns.test_payloads(crate::apns::now()).is_empty());
     }
 }

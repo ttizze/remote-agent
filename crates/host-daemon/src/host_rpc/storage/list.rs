@@ -59,12 +59,22 @@ impl Storage {
             rows.extend(catalogs(&transaction,after)?);
             let mut removed = Vec::new();
             if resume {
-                let mut statement = transaction.prepare("SELECT id,max(seq) FROM removals WHERE thread IS NULL AND kind='project' AND seq>?1 GROUP BY id").map_err(failure)?;
+                let present: std::collections::BTreeSet<_> = rows.iter().map(|row| &row.key).collect();
+                let mut statement = transaction.prepare("SELECT kind,provider,id,max(seq) FROM removals WHERE thread IS NULL AND seq>?1 GROUP BY kind,provider,id").map_err(failure)?;
                 let mut entries = statement.query([integer(after)?]).map_err(failure)?;
                 while let Some(entry) = entries.next().map_err(failure)? {
-                    let id: String = entry.get(0).map_err(failure)?;
-                    let version: i64 = entry.get(1).map_err(failure)?;
-                    removed.push(Removal { key: Key::Project(id), version: version.try_into().map_err(failure)? });
+                    let kind: String = entry.get(0).map_err(failure)?;
+                    let provider_key: Option<String> = entry.get(1).map_err(failure)?;
+                    let id: String = entry.get(2).map_err(failure)?;
+                    let version: i64 = entry.get(3).map_err(failure)?;
+                    let key = match kind.as_str() {
+                        "project" => Key::Project(id),
+                        "thread" => Key::Thread(SessionRef::new(provider_key.as_deref().map(provider).transpose()?,id).map_err(failure)?),
+                        _ => return Err("invalid list removal".into()),
+                    };
+                    if !present.contains(&key) {
+                        removed.push(Removal { key, version: version.try_into().map_err(failure)? });
+                    }
                 }
             }
             if resume && rows.len()+removed.len() <= 1000 {

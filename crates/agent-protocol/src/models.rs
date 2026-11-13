@@ -199,14 +199,14 @@ impl Thread {
             .rev()
             .find(|turn| turn.status == TurnStatus::Running)
             .map(|turn| turn.id.clone())
+            // A foreground input being delivered takes priority over the
+            // background work an older answered turn left running.
             .or_else(|| {
                 self.preparations
                     .iter()
                     .find(|input| input.status == crate::session::PreparationStatus::Sending)
                     .map(|input| input.submission.client_user_message_id.to_string().into())
             })
-            // A foreground input being delivered takes priority over the
-            // background work an older answered turn left running.
             .or_else(|| {
                 turns
                     .last()
