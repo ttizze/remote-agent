@@ -100,7 +100,7 @@ async fn pre_cutover_unknown_first_send_resolves_against_the_original_host_addre
                         "id":session,"active":{"provider":"codex","id":"prior-native"},"cwd":cwd,
                         "bindings":[],"handoffs":[],"startup":{"project_cwd":cwd,"preparation":{
                             "submission":{"threadId":session,"clientUserMessageId":input,
-                                "input":[{"type":"text","text":"uncertain"}],"model":model},
+                                "input":[rpc::Input::Text { text: "uncertain".into() }],"model":model},
                             "stage":"setupScript","status":"interrupted"
                         }}
                     }]))
@@ -134,8 +134,7 @@ async fn pre_cutover_unknown_first_send_resolves_against_the_original_host_addre
                 initial.sessions.pending_submissions[&input].draft_key,
                 DraftKey::from(&session)
             );
-            let mut config = codex_fixture::config(directory.path());
-            config.program = host_fixture::fixture::Config {
+            let program = host_fixture::fixture::Config {
                 trace: true,
                 stream_delay_ms: 5,
                 ..Default::default()
@@ -148,7 +147,10 @@ async fn pre_cutover_unknown_first_send_resolves_against_the_original_host_addre
             std::fs::write(directory.path().join("rpc-trace.jsonl"), "").unwrap();
             let fixture = HostFixture::start(
                 directory.path(),
-                config,
+                AppServerConfig {
+                    program,
+                    ..Default::default()
+                },
                 Arc::new(Memory::default()),
                 "isolated Host",
                 false,
