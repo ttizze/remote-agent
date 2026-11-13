@@ -64,18 +64,15 @@ extension ConversationModel {
     }
 }
 
-#if !BEX_NSH_CONVERSATION
-    extension ThreadScreen {
-        var selectionActions: ConversationSelectionActions {
-            let ask: ((String) -> Void)? = isSideChat ? nil : { text in
-                model.askSelectionInSideChat(text)
-                openTools?(.sideChat)
-            }
-            return ConversationSelectionActions(addToChat: model.addSelectionToChat, askInSideChat: ask)
+extension ThreadScreen {
+    var selectionActions: ConversationSelectionActions {
+        let ask: ((String) -> Void)? = isSideChat ? nil : { text in
+            model.askSelectionInSideChat(text)
+            openTools?(.sideChat)
         }
+        return ConversationSelectionActions(addToChat: model.addSelectionToChat, askInSideChat: ask)
     }
-
-#endif
+}
 
 struct ConversationSideChat: View {
     let request: SideChatRequest

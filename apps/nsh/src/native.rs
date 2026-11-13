@@ -4,6 +4,9 @@ use crate::l10n::{localized, tr};
 use nsh_core::{element::NativeView, prelude::*};
 use serde_json::{Value, json};
 
+#[cfg(any(windows, test))]
+mod rich_document;
+
 /// The embedding screen owns the presentation of selected text and links.
 #[derive(Clone, Copy)]
 pub(crate) struct ExternalActions(pub Stored<std::sync::Arc<dyn Fn(Value) + Send + Sync>>);
@@ -72,6 +75,8 @@ pub fn choices(titles: &[&str]) -> Value {
 
 #[cfg(target_os = "macos")]
 pub(crate) mod browser_macos;
+#[cfg(target_os = "macos")]
+mod conversation_macos;
 #[cfg(target_os = "ios")]
 mod document_picker;
 #[cfg(target_os = "ios")]

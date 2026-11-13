@@ -25,14 +25,11 @@ final class ConversationModel {
     private(set) var composerReview: ComposerReview?
     private(set) var files: AgentCore.Files
     private(set) var terminals = Terminals.empty()
-    #if BEX_NSH_CONVERSATION
-        private(set) var hasConversation = false
-    #else
-        private(set) var conversation: ConversationPresentation?
-        var hasConversation: Bool {
-            conversation != nil
-        }
-    #endif
+    private(set) var conversation: ConversationPresentation?
+    var hasConversation: Bool {
+        conversation != nil
+    }
+
     private(set) var agents: [AgentSummary] = []
     var notice: String?
     var sideChatRequest: SideChatRequest?
@@ -43,12 +40,10 @@ final class ConversationModel {
     let workbenchInstance = UUID()
     var workbenchSideChats: [UInt64: SideChatRequest] = [:]
     @ObservationIgnored private var observation: Task<Void, Never>?
-    #if !BEX_NSH_CONVERSATION
-        @ObservationIgnored private var presentationTask: Task<Void, Never>?
-        @ObservationIgnored private var pendingPresentation: ProjectionInput?
-        @ObservationIgnored private var recentConversations: [ConversationPresentation] = []
-        @ObservationIgnored private var activityExpansionOverrides = [String: String]()
-    #endif
+    @ObservationIgnored private var presentationTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingPresentation: ProjectionInput?
+    @ObservationIgnored private var recentConversations: [ConversationPresentation] = []
+    @ObservationIgnored private var activityExpansionOverrides = [String: String]()
 
     var store: AgentStore? {
         session.store()
@@ -150,11 +145,7 @@ final class ConversationModel {
             isConnected = next.connected()
         }
         if changes.conversation {
-            #if BEX_NSH_CONVERSATION
-                hasConversation = value.conversation() != nil
-            #else
-                projectConversation(value.conversation())
-            #endif
+            projectConversation(value.conversation())
         }
     }
 
@@ -238,14 +229,11 @@ extension ConversationModel {
         set { perform(.setDraftText(threadId: coreDraftKey, text: newValue)) }
     }
 
-    #if !BEX_NSH_CONVERSATION
-        func loadOlderHistory(_ id: SessionRef) {
-            guard selectedThreadId == id else { return }
-            notice = nil
-            perform(.readOlder(threadId: id))
-        }
-
-    #endif
+    func loadOlderHistory(_ id: SessionRef) {
+        guard selectedThreadId == id else { return }
+        notice = nil
+        perform(.readOlder(threadId: id))
+    }
 
     func send() {
         perform(.submit(
@@ -297,97 +285,89 @@ extension ConversationModel {
         perform(.answerQuestion(requestId: requestId, action: action))
     }
 
-    #if !BEX_NSH_CONVERSATION
-        func readItemDetails(threadId: SessionRef, turnId: String, itemId: String) async -> String? {
-            do {
-                _ = try await outcome(for: .readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId)))
-                return nil
-            } catch { return error.localizedDescription }
-        }
+    func readItemDetails(threadId: SessionRef, turnId: String, itemId: String) async -> String? {
+        do {
+            _ = try await outcome(for: .readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId)))
+            return nil
+        } catch { return error.localizedDescription }
+    }
 
-    #endif
-
-    #if !BEX_NSH_CONVERSATION
-        func forkAndOpen(through turnId: String, completion: @escaping (String?) -> Void) {
-            guard let threadId = selectedThreadId else { completion(nil); return }
-            perform(.forkSession(ForkSession(threadId: threadId, lastTurnId: turnId))) { [self] result in
-                guard selectedThreadId == threadId else { completion(nil); return }
-                switch result {
-                case let .success(.startedThread(id)):
-                    openThread(id)
-                    completion(nil)
-                case let .failure(error): completion(error.localizedDescription)
-                default: completion("会話を分岐できませんでした。")
-                }
+    func forkAndOpen(through turnId: String, completion: @escaping (String?) -> Void) {
+        guard let threadId = selectedThreadId else { completion(nil); return }
+        perform(.forkSession(ForkSession(threadId: threadId, lastTurnId: turnId))) { [self] result in
+            guard selectedThreadId == threadId else { completion(nil); return }
+            switch result {
+            case let .success(.startedThread(id)):
+                openThread(id)
+                completion(nil)
+            case let .failure(error): completion(error.localizedDescription)
+            default: completion("会話を分岐できませんでした。")
             }
         }
+    }
 
-        func toggleActivity(_ id: String) {
-            guard let conversation,
-                  conversation.scope == snapshot.panelScope(host: host, draft: coreDraftKey),
-                  let change = conversation.projection.toggleActivity(id: id, expansion: activityExpansionOverrides)
-            else { return }
-            activityExpansionOverrides = change.expansion
-            projectConversation(publication.conversation())
-            if let params = change.loadItems {
-                perform(.loadTurnItems(params))
-            }
+    func toggleActivity(_ id: String) {
+        guard let conversation,
+              conversation.scope == snapshot.panelScope(host: host, draft: coreDraftKey),
+              let change = conversation.projection.toggleActivity(id: id, expansion: activityExpansionOverrides)
+        else { return }
+        activityExpansionOverrides = change.expansion
+        projectConversation(publication.conversation())
+        if let params = change.loadItems {
+            perform(.loadTurnItems(params))
         }
+    }
 
-        private func projectConversation(_ rendered: RenderedConversation?) {
-            guard let rendered else {
-                conversation = nil
+    private func projectConversation(_ rendered: RenderedConversation?) {
+        guard let rendered else {
+            conversation = nil
+            pendingPresentation = nil
+            activityExpansionOverrides.removeAll()
+            return
+        }
+        let scope = snapshot.panelScope(host: host, draft: coreDraftKey)
+        if conversation?.scope != scope {
+            activityExpansionOverrides.removeAll()
+            conversation = recentConversations.first { $0.scope == scope }
+        }
+        pendingPresentation = ProjectionInput(
+            rendered: rendered,
+            scope: scope,
+            connection: snapshot.connectionGeneration(),
+            expansion: activityExpansionOverrides
+        )
+        guard presentationTask == nil else { return }
+        presentationTask = Task { [weak self] in
+            while let self, let input = pendingPresentation {
                 pendingPresentation = nil
-                activityExpansionOverrides.removeAll()
-                return
-            }
-            let scope = snapshot.panelScope(host: host, draft: coreDraftKey)
-            if conversation?.scope != scope {
-                activityExpansionOverrides.removeAll()
-                conversation = recentConversations.first { $0.scope == scope }
-            }
-            pendingPresentation = ProjectionInput(
-                rendered: rendered,
-                scope: scope,
-                connection: snapshot.connectionGeneration(),
-                expansion: activityExpansionOverrides
-            )
-            guard presentationTask == nil else { return }
-            presentationTask = Task { [weak self] in
-                while let self, let input = pendingPresentation {
-                    pendingPresentation = nil
-                    let rendered = await Task.detached(priority: .userInitiated) { [previous = conversation] in
-                        ConversationPresentation.project(input.rendered, scope: input.scope,
-                                                         expansion: input.expansion, previous: previous)
-                    }.value
-                    if snapshot.panelScope(host: host, draft: coreDraftKey) == input.scope,
-                       snapshot.connectionGeneration() == input.connection,
-                       snapshot.uiLanguage() == input.rendered.language(),
-                       activityExpansionOverrides == input.expansion,
-                       publication.conversation() != nil {
-                        conversation = rendered
-                        // Expansion resets with the scope, so only collapsed rows can be shown on reopen.
-                        if rendered.id != nil, input.expansion.isEmpty {
-                            recentConversations.removeAll { $0.scope == rendered.scope }
-                            recentConversations.insert(rendered, at: 0)
-                            if recentConversations.count > 3 {
-                                recentConversations.removeLast()
-                            }
+                let rendered = await Task.detached(priority: .userInitiated) { [previous = conversation] in
+                    ConversationPresentation.project(input.rendered, scope: input.scope,
+                                                     expansion: input.expansion, previous: previous)
+                }.value
+                if snapshot.panelScope(host: host, draft: coreDraftKey) == input.scope,
+                   snapshot.connectionGeneration() == input.connection,
+                   snapshot.uiLanguage() == input.rendered.language(),
+                   activityExpansionOverrides == input.expansion,
+                   publication.conversation() != nil {
+                    conversation = rendered
+                    // Expansion resets with the scope, so only collapsed rows can be shown on reopen.
+                    if rendered.id != nil, input.expansion.isEmpty {
+                        recentConversations.removeAll { $0.scope == rendered.scope }
+                        recentConversations.insert(rendered, at: 0)
+                        if recentConversations.count > 3 {
+                            recentConversations.removeLast()
                         }
                     }
                 }
-                self?.presentationTask = nil
             }
+            self?.presentationTask = nil
         }
-    #endif
+    }
 }
 
-#if !BEX_NSH_CONVERSATION
-    private struct ProjectionInput {
-        let rendered: RenderedConversation
-        let scope: PanelScope
-        let connection: UInt64
-        let expansion: [String: String]
-    }
-
-#endif
+private struct ProjectionInput {
+    let rendered: RenderedConversation
+    let scope: PanelScope
+    let connection: UInt64
+    let expansion: [String: String]
+}

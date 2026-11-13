@@ -81,13 +81,6 @@ struct ConversationComposer: View {
                 .buttonBorderShape(.capsule)
                 .accessibilityIdentifier("task.diff")
             }
-            #if BEX_NSH_CONVERSATION
-                ConversationQueue(
-                    followUp: controls.followUp,
-                    threadId: model.navigation.threadId,
-                    perform: { model.perform($0) }
-                )
-            #endif
             if let error = model.transferError {
                 AppNotice(text: error)
             }

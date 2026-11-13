@@ -422,13 +422,6 @@ jobs:
           just quality swift
           just ios-markdown
           just conversation-ui --build-only
-          AGENT_IOS_NSH=1 scripts/build-agent-ios.sh simulator
-          xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj -scheme Bex \
-            -configuration Debug -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath target/qa/ios-nsh-preview \
-            -xcconfig apps/mobile/iosApp/Config/NshPreview.xcconfig \
-            -onlyUsePackageVersionsFromResolvedFile -skipPackagePluginValidation \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO AGENT_CARGO_TARGET_DIR="$PWD/target" build
           CHECKS
           fi
       - name: Share the iPhone app, Host fixtures and test runner
@@ -466,7 +459,7 @@ jobs:
             target/qa/Bex-*
           retention-days: 7
   nsh-apple:
-    name: NSH Mac app and iPhone preview
+    name: Mac app
     needs: changes
     if: (needs.changes.outputs.mac == 'true' || needs.changes.outputs.iphone == 'true') && !inputs.ios-tests
     concurrency:
@@ -519,8 +512,6 @@ jobs:
             target/nsh-acceptance/run-*/composer/*.txt
             target/nsh-acceptance/run-*/composer/*.png
           retention-days: 7
-      - name: Build and package the native NSH iPhone app
-        run: nix develop .#ios-build --command just nsh-ios-simulator
   iphone-tests:
     # A cold shared build can outlast the artifact receiver's deadline.
     # Start consumers only after publication, outside the producer's Apple slot.

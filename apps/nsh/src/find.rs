@@ -23,9 +23,6 @@ pub(crate) struct Find {
     /// Index and navigation serial: Next must also re-reveal a sole match.
     current: Signal<(usize, u64)>,
     selected: Signal<Option<(u64, Match)>>,
-    timeline: Stored<Option<Timeline>>,
-    // Rendering the same hit again must not undo a reader's manual scroll.
-    last_anchor: Stored<Option<String>>,
 }
 
 impl Find {
@@ -35,8 +32,6 @@ impl Find {
             query: signal(String::new()),
             current: signal((0, 0)),
             selected: signal(None),
-            timeline: stored(None),
-            last_anchor: stored(None),
         }
     }
     pub(crate) fn highlighted(self) -> String {
@@ -83,47 +78,6 @@ impl Find {
             .expect("search identity serializes"),
         )
     }
-    async fn reveal_at(self, view: ElementRef, key: &str) -> bool {
-        if self.key().as_deref() != Some(key) {
-            return false;
-        }
-        let Some(timeline) = self.timeline.with(|timeline| *timeline) else {
-            return false;
-        };
-        let Some(bounds) = view.measure().await else {
-            return false;
-        };
-        if self.key().as_deref() != Some(key) {
-            return false;
-        }
-        timeline.reveal_text(bounds.page.y.0).await;
-        self.key().as_deref() == Some(key)
-    }
-
-    pub(crate) fn reset_anchor(self) {
-        self.last_anchor.replace(None);
-    }
-
-    /// The standard TextView's inline match is revealed by NSH. Remember it
-    /// only after measuring succeeds, so a culled attempt cannot suppress it.
-    pub(crate) fn reveal_anchor(self, view: ElementRef, key: String) {
-        if self.key().as_ref() != Some(&key)
-            || self.last_anchor.with(|last| last.as_ref() == Some(&key))
-        {
-            return;
-        }
-        view.reveal(
-            nsh_core::RevealOptions::default()
-                .horizontal(nsh_core::ScrollAlignment::Start)
-                .vertical(nsh_core::ScrollAlignment::Nearest)
-                .animated(false),
-        );
-        spawn(async move {
-            if self.reveal_at(view, &key).await {
-                self.last_anchor.replace(Some(key));
-            }
-        });
-    }
 }
 
 fn occurrences(
@@ -158,7 +112,6 @@ fn occurrences(
 }
 
 pub(crate) fn bar(find: Find, timeline: Timeline) -> impl IntoElement {
-    find.timeline.replace(Some(timeline));
     let terminal = use_context::<crate::terminal::Focus>().unwrap();
     view()
         .absolute()

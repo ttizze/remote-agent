@@ -717,7 +717,6 @@ impl Application {
     }
 
     /// Asks side chat `id` to explain `text` in a conversation of its own.
-    #[cfg(any(desktop, target_os = "ios"))]
     pub fn explain_in_side_chat(&self, id: u64, text: String) {
         self.state.send_modify(|state| {
             if let Some(chat) = Arc::make_mut(state).side_chats.get_mut(&id) {

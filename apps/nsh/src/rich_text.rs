@@ -1,9 +1,5 @@
-//! Core supplies Markdown semantics; NSH TextView owns message layout and selection.
+//! Shared transcript parts, link metadata and actions for native conversation views.
 use crate::Connection;
-use crate::conversation::Kind;
-#[cfg(desktop)]
-use crate::l10n::tr;
-#[cfg(desktop)]
 use agent_core::{panels::PanelScope, state::Intent, store::SideChatStart};
 use agent_core::{
     presentation::markdown::{
@@ -16,12 +12,10 @@ use nsh_core::prelude::*;
 use serde_json::{Value, json};
 
 mod search;
-mod view;
 pub(crate) use search::documents as search_documents;
-pub(crate) use view::{content, message};
 
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Part {
+pub(crate) enum Part {
     Text(Vec<Value>),
     Image {
         source: String,
@@ -55,8 +49,9 @@ enum Part {
 
 /// A Mermaid block as Core draws it.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-struct Diagram {
+pub(crate) struct Diagram {
     svg: String,
+    png: String,
     width: f32,
     height: f32,
 }
@@ -74,7 +69,7 @@ thread_local! {
 type Diagrams = std::collections::HashMap<String, Option<(String, Diagram)>>;
 
 /// The drawings of `source`'s complete Mermaid blocks, by their code.
-fn diagrams(source: &str) -> Vec<(String, Diagram)> {
+pub(crate) fn diagrams(source: &str) -> Vec<(String, Diagram)> {
     use agent_core::presentation::markdown::{markdown_diagram, markdown_mermaid_fences};
     let fences = markdown_mermaid_fences(source);
     if fences.is_empty() {
@@ -92,6 +87,7 @@ fn diagrams(source: &str) -> Vec<(String, Diagram)> {
                     .or_insert_with_key(|fence| {
                         markdown_diagram(fence).map(|diagram| {
                             let drawing = Diagram {
+                                png: diagram_png(&diagram.svg).unwrap_or_default(),
                                 svg: diagram.svg,
                                 width: diagram.width,
                                 height: diagram.height,
@@ -105,6 +101,52 @@ fn diagrams(source: &str) -> Vec<(String, Diagram)> {
     })
 }
 
+fn diagram_png(svg: &str) -> Option<String> {
+    use base64::Engine;
+    use resvg::{tiny_skia, usvg};
+    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
+    let scale = (1600.0 / tree.size().width().max(tree.size().height())).min(2.0);
+    let size = tree.size().to_int_size().scale_by(scale)?;
+    let mut pixels = tiny_skia::Pixmap::new(size.width(), size.height())?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixels.as_mut(),
+    );
+    Some(base64::engine::general_purpose::STANDARD.encode(pixels.encode_png().ok()?))
+}
+
+pub(crate) fn highlight(
+    parts: &mut [Part],
+    query: &str,
+    active: Option<(usize, agent_core::presentation::conversation::TextMatch)>,
+) {
+    for part in parts {
+        match part {
+            Part::Text(blocks) | Part::Code { blocks, .. } => {
+                let index = search::document(blocks);
+                *blocks = search::decorate(
+                    std::mem::take(blocks),
+                    query,
+                    active
+                        .filter(|(document, _)| *document == index)
+                        .map(|(_, range)| range),
+                );
+            }
+            Part::Table { rows, .. } => {
+                for cell in rows.iter_mut().flatten() {
+                    highlight(cell, query, active);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn indexed(parts: Vec<Part>) -> Vec<Part> {
+    search::indexed(parts)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Target {
     host: String,
@@ -116,14 +158,6 @@ struct Target {
     provider: Option<agent_protocol::session::ProviderKind>,
 }
 
-/// Preserve both appearances when Core supplies an annotated run's colors.
-fn run_color(run: &Value) -> Option<AdaptiveColor> {
-    let color = |key: &str| run[key].as_u64().and_then(|c| u32::try_from(c).ok());
-    let light = color("lightColor");
-    let dark = color("darkColor");
-    Some(AdaptiveColor::rgb(light.or(dark)?, dark.or(light)?))
-}
-
 /// What message content reaches. List rows are made outside the context
 /// their list was made in, so they receive these rather than look them up.
 #[derive(Clone, Copy)]
@@ -132,13 +166,8 @@ pub(crate) struct Surroundings {
     pub files: crate::files::Browser,
     pub preview: crate::media::Preview,
     pub workspace: crate::workbench::Workbench,
-    #[cfg(any(desktop, target_os = "ios"))]
     pub external_actions: Option<crate::native::ExternalActions>,
     pub find: crate::find::Find,
-    pub find_row: Option<Memo<String>>,
-    /// The bar of actions on the text selected in the list's messages.
-    #[cfg(desktop)]
-    pub selection: crate::selection_bar::SelectionBar,
 }
 
 impl Surroundings {
@@ -149,24 +178,9 @@ impl Surroundings {
             files: use_context::<crate::files::Browser>().unwrap(),
             preview: use_context::<crate::media::Preview>().unwrap(),
             workspace: use_context::<crate::workbench::Workbench>().unwrap(),
-            #[cfg(any(desktop, target_os = "ios"))]
             external_actions: use_context::<crate::native::ExternalActions>(),
             find: use_context::<crate::find::Find>().unwrap(),
-            find_row: None,
-            #[cfg(desktop)]
-            selection: crate::selection_bar::SelectionBar::new(),
         }
-    }
-
-    /// The selection bar's view: its actions act as the text's own do.
-    #[cfg(desktop)]
-    pub(crate) fn selection_bar(self) -> impl IntoElement {
-        self.selection.view(move |name, selected| {
-            action(
-                self,
-                &json!({"action": name, "text": selected.text, "target": selected.target}),
-            )
-        })
     }
 
     /// Web pages follow this device's preference; ⌘/Ctrl opens them externally.
@@ -212,42 +226,8 @@ impl Surroundings {
     }
 }
 
-/// Shared document semantics and metadata for NSH TextView.
-fn message_parts(
-    surroundings: Surroundings,
-    source: impl Fn() -> Option<String> + 'static,
-) -> Memo<Vec<Part>> {
-    let connection = surroundings.connection;
-    let document = computed(move || {
-        let Some(source) = source() else {
-            return (Vec::new(), Vec::new());
-        };
-        let diagrams = diagrams(&source);
-        let blocks = agent_core::presentation::markdown::workspace_markdown_blocks(
-            source,
-            connection
-                .composer
-                .with(|c| c.controls.navigation.cwd.clone()),
-            connection.context.with(|c| c.home()),
-        );
-        (blocks, diagrams)
-    });
-    let chips = computed(move || crate::file_actions::Chips::read(connection));
-    let paths = computed(move || document.with(|(blocks, _)| file_paths(blocks)));
-    effect(move || crate::file_actions::read_metadata(connection, paths.get()));
-    computed(move || {
-        chips.with(|chips| {
-            document.with(|(blocks, diagrams)| {
-                search::indexed(parts(blocks.clone(), diagrams, &|file| {
-                    Some(chips.chip(file))
-                }))
-            })
-        })
-    })
-}
-
 /// Host paths for the document's file metadata, including files in tables.
-fn file_paths(blocks: &[MarkdownBlock]) -> Vec<String> {
+pub(crate) fn file_paths(blocks: &[MarkdownBlock]) -> Vec<String> {
     blocks
         .iter()
         .flat_map(|block| {
@@ -285,7 +265,6 @@ pub(crate) fn target(connection: Connection) -> Memo<String> {
 
 /// What message text asks for: a selection quoted, explained or asked about
 /// in a side chat, a link pressed, or an item of a file chip's menu chosen.
-#[cfg(desktop)]
 pub(crate) fn action(surroundings: Surroundings, data: &Value) {
     if let Some(actions) = surroundings.external_actions
         && matches!(
@@ -347,6 +326,14 @@ pub(crate) fn action(surroundings: Surroundings, data: &Value) {
                 },
             );
         }),
+        Some("link") => surroundings.open_link(
+            text.into(),
+            target,
+            data["command"].as_bool().unwrap_or(false),
+        ),
+        Some("file" | "webLink") => {
+            surroundings.choose_link(text.into(), target, data["id"].as_str().unwrap_or_default())
+        }
         _ => {}
     }
 }
@@ -359,187 +346,6 @@ impl Target {
             home: self.home,
             host: self.host,
         }
-    }
-}
-
-/// The selection's actions, as the Mac's text has them: the bar above the
-/// selection, and a right click's menu with them beside Copy and Select
-/// All, which act on the selection.
-#[cfg(desktop)]
-fn selection_actions(message: View, target: Memo<String>, surroundings: Surroundings) -> View {
-    use nsh_core::{
-        desktop::MenuRole,
-        element::desktop::{MenuItem, popup_menu_at},
-    };
-    let side_chat = surroundings.connection.pane.is_none();
-    let selected = stored(String::new());
-    message
-        .on_text_selection_change(move |event: &TextSelectionEvent| {
-            selected.replace(event.text.clone());
-            surroundings.selection.select(
-                event
-                    .page_bounds
-                    .filter(|_| !event.text.is_empty())
-                    .map(|bounds| crate::selection_bar::Selected {
-                        text: event.text.clone(),
-                        target: target.get_untracked(),
-                        bounds,
-                        side_chat,
-                    }),
-            );
-        })
-        .on_context_menu(move |event: &ContextMenuEvent| {
-            let text = selected.get();
-            let act = |name: &'static str| {
-                let text = text.clone();
-                move || {
-                    action(
-                        surroundings,
-                        &serde_json::json!({
-                            "action": name, "text": text, "target": target.get_untracked(),
-                        }),
-                    )
-                }
-            };
-            let mut items = Vec::new();
-            if !text.is_empty() {
-                items.push(MenuItem::new(tr("チャットに追加")).on_select(act("quote")));
-                items.push(MenuItem::new(tr("詳細を表示")).on_select(act("explain")));
-                if side_chat {
-                    items
-                        .push(MenuItem::new(tr("サイドチャットで質問")).on_select(act("sideChat")));
-                }
-                items.push(MenuItem::separator());
-            }
-            items.push(MenuItem::role(MenuRole::Copy).disabled(text.is_empty()));
-            items.push(MenuItem::role(MenuRole::SelectAll));
-            surroundings.selection.dismiss();
-            drop(popup_menu_at(items, event.page_position));
-        })
-}
-
-/// Application-specific inline controls inside the standard TextView.
-mod inline {
-    use crate::ui::colors;
-    use nsh_core::{element::rgb, prelude::*};
-    use serde_json::Value;
-
-    /// What a paragraph's links do: `open` a link pressed, ⌘ (Ctrl here)
-    /// held or not, and `choose` an item of a file chip's menu.
-    #[derive(Clone, Copy)]
-    pub(super) struct Links<O, C> {
-        pub(super) open: O,
-        pub(super) choose: C,
-    }
-
-    pub(super) fn highlighted_run(run: &Value, find: crate::find::Find) -> Text {
-        if run["highlights"].as_array().is_none_or(Vec::is_empty) {
-            return text(run["text"].as_str().unwrap_or_default().to_owned());
-        }
-        let mut span = text("");
-        for fragment in super::search::fragments(run) {
-            let highlight = fragment.highlighted;
-            let active = fragment.active;
-            let reveal = fragment.reveal;
-            let fragment = text(fragment.text).style_when(
-                move || highlight,
-                |style| {
-                    style
-                        .bg(rgb(if active { 0xf97316 } else { 0xf59e0b }))
-                        .text_color(rgb(0x000000))
-                },
-            );
-            if reveal {
-                let reference = element_ref();
-                let key = find.key();
-                let anchor = view().element_ref(&reference).w(px(0.0)).h(px(1.0));
-                spawn(async move {
-                    next_frame().await;
-                    if let Some(key) = key {
-                        find.reveal_anchor(reference, key);
-                    }
-                });
-                span = span.child(anchor);
-            }
-            span = span.child(fragment);
-        }
-        span
-    }
-
-    /// A web link's explicit destinations share the native text actions.
-    pub(super) fn web_span<O, C>(label: Text, link: String, menu: Value, links: Links<O, C>) -> Text
-    where
-        O: Fn(String, bool) + Copy + 'static,
-        C: Fn(String, String) + Copy + 'static,
-    {
-        let (open, choose) = (links.open, links.choose);
-        let pressed = link.clone();
-        let span =
-            label
-                .text_color(colors::ACCENT)
-                .underline()
-                .on_press(move |event: &PressEvent| {
-                    open(
-                        pressed.clone(),
-                        crate::file_actions::primary_modifier(event.modifiers, apple_keys()),
-                    );
-                });
-        if !menu.is_array() {
-            return span;
-        }
-        span.on_context_menu(move |_: &ContextMenuEvent| {
-            let link = link.clone();
-            crate::ui::popup(&menu, move |id: &str| choose(link.clone(), id.into()));
-        })
-    }
-
-    /// A file chip as the desktop client's: its glyph and label in the file's accent, at
-    /// medium weight, its full path and size over it, its menu on a secondary
-    /// press; a press opens it as a link does.
-    pub(super) fn chip_span<O, C>(
-        label: Text,
-        chip: &Value,
-        link: String,
-        links: Links<O, C>,
-    ) -> Text
-    where
-        O: Fn(String, bool) + Copy + 'static,
-        C: Fn(String, String) + Copy + 'static,
-    {
-        let color = super::run_color(chip).unwrap_or_else(|| colors::ACCENT.into());
-        let glyph = if chip["folder"].as_bool().unwrap_or(false) {
-            crate::ui::icon(crate::ui::Icon::FOLDER, 14.0).into_element()
-        } else {
-            image(format!(
-                "data:image/png;base64,{}",
-                chip["icon"].as_str().unwrap_or_default(),
-            ))
-            .w(px(14.0))
-            .h(px(14.0))
-            .into_element()
-        };
-        let menu = chip["menu"].clone();
-        let (open, choose) = (links.open, links.choose);
-        let pressed = link.clone();
-        text("")
-            .text_color(color)
-            .font_weight(FontWeight::MEDIUM)
-            .tooltip(crate::ui::tooltip(SharedString::from(
-                chip["tooltip"].as_str().unwrap_or_default().to_owned(),
-            )))
-            .child(glyph)
-            .child(text(" "))
-            .child(label)
-            .on_press(move |event: &PressEvent| {
-                open(
-                    pressed.clone(),
-                    crate::file_actions::primary_modifier(event.modifiers, apple_keys()),
-                )
-            })
-            .on_context_menu(move |_: &ContextMenuEvent| {
-                let link = link.clone();
-                crate::ui::popup(&menu, move |id: &str| choose(link.clone(), id.into()));
-            })
     }
 }
 
@@ -605,7 +411,11 @@ fn code(
 }
 
 /// `blocks` as the parts views lay out, a Mermaid block with its drawing.
-fn parts(blocks: Vec<MarkdownBlock>, diagrams: &[(String, Diagram)], chip: Chip) -> Vec<Part> {
+pub(crate) fn parts(
+    blocks: Vec<MarkdownBlock>,
+    diagrams: &[(String, Diagram)],
+    chip: Chip,
+) -> Vec<Part> {
     let mut result = Vec::new();
     let mut text = Vec::new();
     for block in blocks {
@@ -751,24 +561,6 @@ mod tests {
                 "/repo/src/日本語.rs"
             ]
         );
-    }
-
-    #[test]
-    fn annotated_colors_keep_both_appearances_and_use_the_available_variant() {
-        for (run, expected) in [
-            (
-                json!({"lightColor":0x112233, "darkColor":0xaabbcc}),
-                [0x112233ff, 0xaabbccff],
-            ),
-            (json!({"lightColor":0x112233}), [0x112233ff, 0x112233ff]),
-            (json!({"darkColor":0xaabbcc}), [0xaabbccff, 0xaabbccff]),
-        ] {
-            let color = run_color(&run).unwrap();
-            assert_eq!(nsh_core::Color::from(color.light).0, expected[0]);
-            assert_eq!(nsh_core::Color::from(color.dark).0, expected[1]);
-        }
-        assert!(run_color(&json!({})).is_none());
-        assert!(run_color(&json!({"lightColor":u64::MAX, "darkColor":"bad"})).is_none());
     }
 
     #[test]

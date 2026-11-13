@@ -75,157 +75,152 @@ extension ThreadScreen {
         model.mediaAccess(presentation: mediaPresentation) { openedDirectory = $0 }
     }
 
-    #if !BEX_NSH_CONVERSATION
-        func historyControl(_ control: HistoryControl, session: SessionRef) -> some View {
-            VStack(spacing: 6) {
-                if control.hasMore {
-                    Button {
-                        scroll.following = false
-                        model.loadOlderHistory(session)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Rectangle().frame(height: 1).foregroundStyle(Color(UIColor.separator))
-                            Text(verbatim: control.loadLabel).fixedSize()
-                            Rectangle().frame(height: 1).foregroundStyle(Color(UIColor.separator))
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 8)
-                        .contentShape(Rectangle())
-                    }
-                    .disabled(control.loading)
-                    .accessibilityIdentifier("history.load")
-                }
-                if let error = control.error {
-                    ErrorTextView(text: error).font(.caption).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .multilineTextAlignment(.center)
-                        .accessibilityIdentifier("history.error")
-                }
-            }
-            .padding(.bottom, 8)
-        }
-
-        @ViewBuilder
-        func conversationRow(_ row: ThreadConversationRow) -> some View {
-            switch row.content {
-            case let .historyNotice(message): Text(verbatim: message).font(.caption).foregroundStyle(.secondary)
-            case let .native(row, item): nativeConversationRow(row, item: item)
-            }
-        }
-
-        @ViewBuilder
-        func nativeConversationRow(_ projected: VisibleConversationRow, item: ConversationItem?) -> some View {
-            let row = projected.data()
-            switch (row.content, item) {
-            case let (.preparation(preparation), _):
-                SetupProgressCard(preparation: preparation, openTerminal: {
-                    model.openSetupTerminal($0)
-                    openTools?(nil)
-                }, perform: { model.perform($0) })
-            case let (.providerHandoff(text), _):
-                Text(text).font(.caption).foregroundStyle(.secondary).padding(.vertical, 8)
-            case let (.notification(reports, _), _):
-                NotificationRow(reports: reports)
-            case let (.user, item?):
-                userMessageRow(item, row: projected, timestampMs: row.timestampMs)
-                    .padding(.top, projected.origin() == .queued ? 0 : 16)
-            case (let .response(_, showActions, turnId), let item?):
-                ThreadMessageRow(
-                    row: projected,
-                    item: item,
-                    isUser: false,
-                    media: mediaAccess,
-                    selection: selectionActions,
-                    showActions: showActions,
-                    timestampMs: row.timestampMs,
-                    fork: turnId
-                        .map { id in { model.forkAndOpen(through: id) { _ in } } },
-                    forking: turnId.map { model.conversationContext.forkPhase(turn: $0) == .running } ?? false,
-                    forkError: turnId.flatMap { model.conversationContext.forkError(turn: $0) }
-                ).equatable()
-            case let (.activityHeader(activity), _): activityHeader(
-                    activity,
-                    id: projected.id(),
-                    expanded: projected.expanded()
-                )
-            case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId)
-            case let (.error(error), _): ThreadErrorRow(error: error)
-            case (.inProgress, _), (.pendingRequest, _), (_, nil): EmptyView()
-            }
-        }
-
-        func userMessageRow(_ item: ConversationItem, row: VisibleConversationRow, timestampMs: UInt64?) -> some View {
-            ThreadMessageRow(
-                row: row,
-                item: item,
-                isUser: true,
-                media: mediaAccess,
-                selection: selectionActions,
-                timestampMs: timestampMs,
-                restoreUnknown: { model.restoreUnknownSubmission($0) },
-                discardUnknown: { model.discardUnknownSubmission($0) }
-            ).equatable()
-        }
-
-        func activityItem(_ item: ConversationItem, turnId: String) -> some View {
-            ThreadItemRow(
-                item: item,
-                media: mediaAccess,
-                selection: selectionActions,
-                isExpanded: expandedItemIds.contains(item.data.id),
-                toggleExpanded: {
-                    scroll.following = false
-                    if expandedItemIds.contains(item.data.id) {
-                        expandedItemIds.remove(item.data.id)
-                    } else {
-                        expandedItemIds.insert(item.data.id)
-                    }
-                },
-                loadDetails: {
-                    guard let threadId = conversation?.id else { return nil }
-                    return await model.readItemDetails(
-                        threadId: threadId, turnId: turnId,
-                        itemId: item.data.nativeId ?? item.data.id
-                    )
-                }
-            ).equatable()
-        }
-
-        @ViewBuilder
-        func activityHeader(_ turn: ActivityPresentation, id: String, expanded: Bool) -> some View {
-            let header = ThreadActivityHeader(summary: turn.activitySummary, canCollapse: turn.activityCanCollapse,
-                                              isInProgress: turn.isInProgress, expanded: expanded)
-            if turn.activityCanCollapse {
+    func historyControl(_ control: HistoryControl, session: SessionRef) -> some View {
+        VStack(spacing: 6) {
+            if control.hasMore {
                 Button {
                     scroll.following = false
-                    model.toggleActivity(id)
+                    model.loadOlderHistory(session)
                 } label: {
-                    header
+                    HStack(spacing: 12) {
+                        Rectangle().frame(height: 1).foregroundStyle(Color(UIColor.separator))
+                        Text(verbatim: control.loadLabel).fixedSize()
+                        Rectangle().frame(height: 1).foregroundStyle(Color(UIColor.separator))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("turn.activity." + turn.id)
-            } else {
-                header.accessibilityIdentifier("turn.activity." + turn.id)
+                .disabled(control.loading)
+                .accessibilityIdentifier("history.load")
+            }
+            if let error = control.error {
+                ErrorTextView(text: error).font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .multilineTextAlignment(.center)
+                    .accessibilityIdentifier("history.error")
             }
         }
+        .padding(.bottom, 8)
+    }
 
-        func threadAccessibilityValue(_ thread: ConversationPresentation, itemCount: UInt32) -> String {
-            "turns=\(thread.projection.source().turnCount());items=\(itemCount)"
-        }
-    #endif
-}
-
-#if !BEX_NSH_CONVERSATION
-    /// What the background work the agent woke for did, in the app's language.
-    private struct NotificationRow: View {
-        let reports: [BackgroundReport]
-        @Environment(\.locale) private var locale
-
-        var body: some View {
-            Text(notificationText(reports: reports, language: locale.appLanguage))
-                .font(.caption).foregroundStyle(.secondary).padding(.vertical, 8)
+    @ViewBuilder
+    func conversationRow(_ row: ThreadConversationRow) -> some View {
+        switch row.content {
+        case let .historyNotice(message): Text(verbatim: message).font(.caption).foregroundStyle(.secondary)
+        case let .native(row, item): nativeConversationRow(row, item: item)
         }
     }
 
-#endif
+    @ViewBuilder
+    func nativeConversationRow(_ projected: VisibleConversationRow, item: ConversationItem?) -> some View {
+        let row = projected.data()
+        switch (row.content, item) {
+        case let (.preparation(preparation), _):
+            SetupProgressCard(preparation: preparation, openTerminal: {
+                model.openSetupTerminal($0)
+                openTools?(nil)
+            }, perform: { model.perform($0) })
+        case let (.providerHandoff(text), _):
+            Text(text).font(.caption).foregroundStyle(.secondary).padding(.vertical, 8)
+        case let (.notification(reports, _), _):
+            NotificationRow(reports: reports)
+        case let (.user, item?):
+            userMessageRow(item, row: projected, timestampMs: row.timestampMs)
+                .padding(.top, projected.origin() == .queued ? 0 : 16)
+        case (let .response(_, showActions, turnId), let item?):
+            ThreadMessageRow(
+                row: projected,
+                item: item,
+                isUser: false,
+                media: mediaAccess,
+                selection: selectionActions,
+                showActions: showActions,
+                timestampMs: row.timestampMs,
+                fork: turnId
+                    .map { id in { model.forkAndOpen(through: id) { _ in } } },
+                forking: turnId.map { model.conversationContext.forkPhase(turn: $0) == .running } ?? false,
+                forkError: turnId.flatMap { model.conversationContext.forkError(turn: $0) }
+            ).equatable()
+        case let (.activityHeader(activity), _): activityHeader(
+                activity,
+                id: projected.id(),
+                expanded: projected.expanded()
+            )
+        case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId)
+        case let (.error(error), _): ThreadErrorRow(error: error)
+        case (.inProgress, _), (.pendingRequest, _), (_, nil): EmptyView()
+        }
+    }
+
+    func userMessageRow(_ item: ConversationItem, row: VisibleConversationRow, timestampMs: UInt64?) -> some View {
+        ThreadMessageRow(
+            row: row,
+            item: item,
+            isUser: true,
+            media: mediaAccess,
+            selection: selectionActions,
+            timestampMs: timestampMs,
+            restoreUnknown: { model.restoreUnknownSubmission($0) },
+            discardUnknown: { model.discardUnknownSubmission($0) }
+        ).equatable()
+    }
+
+    func activityItem(_ item: ConversationItem, turnId: String) -> some View {
+        ThreadItemRow(
+            item: item,
+            media: mediaAccess,
+            selection: selectionActions,
+            isExpanded: expandedItemIds.contains(item.data.id),
+            toggleExpanded: {
+                scroll.following = false
+                if expandedItemIds.contains(item.data.id) {
+                    expandedItemIds.remove(item.data.id)
+                } else {
+                    expandedItemIds.insert(item.data.id)
+                }
+            },
+            loadDetails: {
+                guard let threadId = conversation?.id else { return nil }
+                return await model.readItemDetails(
+                    threadId: threadId, turnId: turnId,
+                    itemId: item.data.nativeId ?? item.data.id
+                )
+            }
+        ).equatable()
+    }
+
+    @ViewBuilder
+    func activityHeader(_ turn: ActivityPresentation, id: String, expanded: Bool) -> some View {
+        let header = ThreadActivityHeader(summary: turn.activitySummary, canCollapse: turn.activityCanCollapse,
+                                          isInProgress: turn.isInProgress, expanded: expanded)
+        if turn.activityCanCollapse {
+            Button {
+                scroll.following = false
+                model.toggleActivity(id)
+            } label: {
+                header
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("turn.activity." + turn.id)
+        } else {
+            header.accessibilityIdentifier("turn.activity." + turn.id)
+        }
+    }
+
+    func threadAccessibilityValue(_ thread: ConversationPresentation, itemCount: UInt32) -> String {
+        "turns=\(thread.projection.source().turnCount());items=\(itemCount)"
+    }
+}
+
+/// What the background work the agent woke for did, in the app's language.
+private struct NotificationRow: View {
+    let reports: [BackgroundReport]
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        Text(notificationText(reports: reports, language: locale.appLanguage))
+            .font(.caption).foregroundStyle(.secondary).padding(.vertical, 8)
+    }
+}

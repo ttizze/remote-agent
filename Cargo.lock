@@ -121,7 +121,6 @@ name = "agent-ffi"
 version = "0.1.0"
 dependencies = [
  "agent-core",
- "agent-nsh",
 ]
 
 [[package]]

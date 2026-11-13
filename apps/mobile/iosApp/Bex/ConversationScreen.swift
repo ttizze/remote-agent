@@ -14,33 +14,24 @@ struct ThreadScreen: View {
     @Environment(\.locale) private var locale
     let model: ConversationModel
     let environment: ConversationEnvironment
-    #if BEX_NSH_CONVERSATION
-        @State private var selectedText = ""
-    #else
-        var conversation: ConversationPresentation? {
-            model.conversation
-        }
-    #endif
+    var conversation: ConversationPresentation? {
+        model.conversation
+    }
+
     var isSideChat = false
     var openTools: ((PanelKind?) -> Void)?
     @State var openedDirectory: WorkspaceDestination?
     @State var mediaPresentation = ConversationMediaPresentation()
-    #if !BEX_NSH_CONVERSATION
-        @State var scroll = ConversationScrollState()
-        @State var expandedItemIds = Set<String>()
-    #endif
+    @State var scroll = ConversationScrollState()
+    @State var expandedItemIds = Set<String>()
 
     var body: some View {
         chatContent
             .modifier(ConversationMediaPresenter(presentation: mediaPresentation))
             .onDisappear(perform: mediaPresentation.cancelPending)
             .onChange(of: model.draftKey) {
-                #if BEX_NSH_CONVERSATION
-                    selectedText = ""
-                #else
-                    expandedItemIds.removeAll()
-                    scroll.following = true
-                #endif
+                expandedItemIds.removeAll()
+                scroll.following = true
                 openedDirectory = nil
                 mediaPresentation.reset()
             }
@@ -53,22 +44,6 @@ struct ThreadScreen: View {
             .navigationSubtitle(ifPresent: isSideChat ? nil : conversationSubtitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                #if BEX_NSH_CONVERSATION
-                    if !selectedText.isEmpty {
-                        ToolbarItem(placement: .navigationBarTrailing) {
-                            Menu {
-                                Button("コピー") { UIPasteboard.general.string = selectedText }
-                                Button("チャットに追加") { messageAction("quote", selectedText) }
-                                if !isSideChat {
-                                    Button("詳細を表示") { messageAction("explain", selectedText) }
-                                    Button("サイドチャットで質問") { messageAction("sideChat", selectedText) }
-                                }
-                            } label: {
-                                Label("チャットに追加", systemImage: "text.quote")
-                            }
-                        }
-                    }
-                #endif
                 if !isSideChat {
                     ToolbarItemGroup(placement: .navigationBarTrailing) {
                         Button {
@@ -97,11 +72,6 @@ struct ThreadScreen: View {
         return VStack(spacing: 0) {
             ErrorNotices(notices: model.conversationContext.notices(), perform: { model.perform($0) })
                 .padding(.horizontal)
-            #if BEX_NSH_CONVERSATION
-                if let error = mediaPresentation.linkFailure {
-                    AppNotice(text: error.message).padding(.horizontal)
-                }
-            #endif
             if let notice = model.notice, errorText(language: locale.appLanguage, error: notice) != history?.error {
                 AppNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
@@ -136,67 +106,50 @@ struct ThreadScreen: View {
     }
 
     @ViewBuilder private var conversationBody: some View {
-        #if BEX_NSH_CONVERSATION
-            GeometryReader { viewport in
-                GeometryReader { canvas in
-                    NshConversationView(host: model.host, session: model.session, pane: model.pane,
-                                        composerInset: max(0, canvas.size.height - viewport.size.height),
-                                        perform: messageAction, preview: mediaAccess.presentation.openPreview)
-                        .id(ObjectIdentifier(model))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("task.detail")
+        let history = model.history
+        if let thread = conversation {
+            let rows = thread.rows
+            let hasHistory = thread.id != nil && history != nil
+            let ids: [ConversationList.RowID] = (hasHistory ? [.history] : []) + rows.map { .message($0.id) }
+            let showLatest = !scroll.latestVisible && !rows.isEmpty
+            GeometryReader { geometry in
+                ConversationList(ids: ids, scroll: scroll, following: scroll.following,
+                                 accessibilityValue: threadAccessibilityValue(
+                                     thread,
+                                     itemCount: thread.projection.sourceItemCount()
+                                 ),
+                                 viewportHeight: geometry.size.height) { index in
+                    let row = index - (hasHistory ? 1 : 0)
+                    return AnyView(Group {
+                        if row < 0, let session = thread.id, let history {
+                            historyControl(history, session: session)
+                        } else if rows.indices.contains(row) {
+                            conversationRow(rows[row])
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .environment(\.locale, locale))
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
             }
-        #else
-            let history = model.history
-            if let thread = conversation {
-                let rows = thread.rows
-                let hasHistory = thread.id != nil && history != nil
-                let ids: [ConversationList.RowID] = (hasHistory ? [.history] : []) + rows.map { .message($0.id) }
-                let showLatest = !scroll.latestVisible && !rows.isEmpty
-                GeometryReader { geometry in
-                    ConversationList(ids: ids, scroll: scroll, following: scroll.following,
-                                     accessibilityValue: threadAccessibilityValue(
-                                         thread,
-                                         itemCount: thread.projection.sourceItemCount()
-                                     ),
-                                     viewportHeight: geometry.size.height) { index in
-                        let row = index - (hasHistory ? 1 : 0)
-                        return AnyView(Group {
-                            if row < 0, let session = thread.id, let history {
-                                historyControl(history, session: session)
-                            } else if rows.indices.contains(row) {
-                                conversationRow(rows[row])
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .environment(\.locale, locale))
-                    }
-                    .ignoresSafeArea(.container, edges: .bottom)
-                }
-                .id(model.draftKey)
-                .overlay(alignment: .bottom) { latestButton(visible: showLatest).padding(.bottom, 6) }
-            }
-        #endif
+            .id(model.draftKey)
+            .overlay(alignment: .bottom) { latestButton(visible: showLatest).padding(.bottom, 6) }
+        }
     }
 
-    #if !BEX_NSH_CONVERSATION
-        @ViewBuilder private func latestButton(visible: Bool) -> some View {
-            if visible {
-                Button { scroll.following = true } label: {
-                    Image(systemName: "arrow.down").font(.title3.weight(.medium))
-                        .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-                .accessibilityLabel("最新のメッセージへ")
-                .accessibilityIdentifier("task.latest")
+    @ViewBuilder private func latestButton(visible: Bool) -> some View {
+        if visible {
+            Button { scroll.following = true } label: {
+                Image(systemName: "arrow.down").font(.title3.weight(.medium))
+                    .frame(width: 44, height: 44)
             }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel("最新のメッセージへ")
+            .accessibilityIdentifier("task.latest")
         }
-    #endif
+    }
 }
 
 /// Conversation navigation
@@ -215,49 +168,6 @@ extension ThreadScreen {
             environment.connecting ? localizedUiText(language: locale.appLanguage, source: "接続中…") : ""
         ].filter { !$0.isEmpty }.joined(separator: " · ")
     }
-
-    #if BEX_NSH_CONVERSATION
-        /// What a message asks for: its selection quoted in the composer or asked
-        /// about in a side chat, or a link opened.
-        func messageAction(_ action: String, _ text: String) {
-            switch action {
-            case "selection":
-                selectedText = text
-            case "error":
-                model.notice = text
-            case "setupTerminal":
-                guard let data = text.data(using: .utf8),
-                      let value = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-                      let handle = value["handle"], let cwd = value["cwd"] else { return }
-                model.openSetupTerminal(SetupTerminal(handle: handle, cwd: cwd))
-                openTools?(nil)
-            case "quote":
-                model.addSelectionToChat(text)
-            case "sideChat", "explain":
-                guard !isSideChat else { return }
-                model.askSelectionInSideChat(text)
-                openTools?(.sideChat)
-            case "link":
-                openMessageLink(text)
-            default:
-                break
-            }
-        }
-
-        private func openMessageLink(_ text: String) {
-            guard let url = URL(string: text) else { return }
-            if url.scheme == "https" || url.scheme == "http" ||
-                markdownFileTarget(source: text, cwd: mediaAccess.cwd, surface: .mobile) == nil {
-                UIApplication.shared.open(url)
-            } else {
-                mediaAccess.presentation.openLink(text, resolve: mediaAccess.resolve,
-                                                  download: mediaAccess.download,
-                                                  openDirectory: mediaAccess.openDirectory,
-                                                  openFile: mediaAccess.openFile)
-            }
-        }
-
-    #endif
 
     var conversationActions: some View {
         Group {
