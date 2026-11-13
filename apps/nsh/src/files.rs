@@ -25,6 +25,8 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 #[cfg(desktop)]
 mod desktop;
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Browser {
@@ -374,41 +376,45 @@ fn tree(owner: String, root: Memo<Option<String>>) -> impl Element {
     let keyed = stored(false);
     let list = element_ref();
     let area = element_ref();
-    #[cfg_attr(not(desktop), allow(unused_mut))]
-    let mut keys = vec![
-        ("up", "up", false),
-        ("down", "down", false),
-        ("left", "left", false),
-        ("right", "right", false),
-        ("home", "home", false),
-        ("end", "end", false),
-        ("enter", "enter", false),
-        ("space", "space", false),
-        ("shift+up", "up", true),
-        ("shift+down", "down", true),
-    ];
-    // The focused row's menu, as the desktop client's.
-    #[cfg(desktop)]
-    keys.push(("shift+f10", "contextmenu", false));
-    for (keystroke, key, shift) in keys {
-        let options = KeyOptions {
-            when: nsh_core::keymap::When::Always,
-            repeat: true,
-            ..Default::default()
-        };
-        on_key_with(keystroke, options, move |_| {
-            if engaged.get_untracked()
-                && tree.with_untracked(|tree| tree.handles_desktop_key(key, false, shift))
-            {
-                keyed.replace(true);
-                send(FileTreeAction::Keyboard {
-                    key: key.into(),
-                    additive: false,
-                    shift,
-                });
-            }
-        });
-    }
+    let shortcuts = move || {
+        #[cfg_attr(not(desktop), allow(unused_mut))]
+        let mut keys = vec![
+            ("up", "up", false),
+            ("down", "down", false),
+            ("left", "left", false),
+            ("right", "right", false),
+            ("home", "home", false),
+            ("end", "end", false),
+            ("enter", "enter", false),
+            ("space", "space", false),
+            ("shift+up", "up", true),
+            ("shift+down", "down", true),
+        ];
+        // The focused row's menu, as the desktop client's.
+        #[cfg(desktop)]
+        keys.push(("shift+f10", "contextmenu", false));
+        for (keystroke, key, shift) in keys {
+            on_key_with(
+                keystroke,
+                KeyOptions {
+                    when: nsh_core::keymap::When::NotEditing,
+                    repeat: true,
+                    ..Default::default()
+                },
+                move |_| {
+                    if tree.with_untracked(|tree| tree.handles_desktop_key(key, false, shift)) {
+                        keyed.replace(true);
+                        send(FileTreeAction::Keyboard {
+                            key: key.into(),
+                            additive: false,
+                            shift,
+                        });
+                    }
+                },
+            );
+        }
+        view()
+    };
     // A row the keys move past the viewport's edge scrolls in at that edge.
     let viewable = stored(None::<(usize, usize)>);
     let focused = computed(move || tree.with(|tree| tree.focused_path.clone()));
@@ -554,6 +560,10 @@ fn tree(owner: String, root: Memo<Option<String>>) -> impl Element {
                 .focusable(true)
                 .on_focus(move || engaged.set(true))
                 .on_blur(move || engaged.set(false))
+                // Matching consumes a key before the handler runs. Unbind on
+                // blur, and let native text inputs keep their editing keys
+                // even before that focus change has reached this view.
+                .child(when(engaged, shortcuts))
                 .child(
                     virtual_list(
                         move || tree.with(|tree| tree.rows.len()),

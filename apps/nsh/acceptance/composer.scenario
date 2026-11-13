@@ -20,3 +20,23 @@ expect "fixture-review" after 右パネルを切り替え
 # Sending clears the draft and restores the field's least height.
 type "AI に依頼する" "次の短い下書き"
 expect_height "次の短い下書き" below 65
+# An open file's explorer must release its editing keys to the composer.
+press 右パネルを切り替え
+press ファイル after ツールを追加
+press hello.txt after ツールを追加
+expect "日本語のファイル" after ツールを追加
+press nested after ファイルを検索
+type "AI に依頼する" "abc"
+key cmd+a
+key a
+key b
+key c
+key left
+key x
+key right
+key y
+expect "abxcy" after "AI に依頼する"
+key return
+expect "abxcy" after "会話の履歴"
+expect "シミュレータで完了しました。" 30000
+expect_absent "abxcy" after "AI に依頼する"
