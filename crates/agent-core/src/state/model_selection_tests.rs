@@ -789,6 +789,34 @@ async fn selecting_the_already_visible_model_publishes_the_remembered_choice() {
     store.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn the_first_welcome_model_choice_is_remembered_under_the_created_draft_id() {
+    let mut snapshot = Snapshot::default();
+    snapshot.catalog.models = Arc::new(catalog());
+    let store = crate::store::Store::offline(snapshot, None);
+    let model = catalog()[0].model.clone();
+    store
+        .dispatch(Intent::SelectModel {
+            thread_id: DraftKey::default(),
+            model: model.clone(),
+        })
+        .await
+        .unwrap();
+    let accepted = store.snapshot();
+    let key = &accepted.panes.primary().navigation.draft_key;
+    assert!(matches!(key, DraftKey::Session { .. }));
+    assert_eq!(accepted.input.drafts[key].model.as_ref(), Some(&model));
+    assert_eq!(
+        accepted.catalog.model_preferences.provider,
+        Some(ProviderKind::Codex)
+    );
+    assert_eq!(
+        accepted.catalog.model_preferences.selections[&ProviderKind::Codex].model,
+        model
+    );
+    store.close().await.unwrap();
+}
+
 #[test]
 fn selecting_another_providers_account_restores_its_settings_and_keeps_input() {
     use agent_core::state::operations::SelectAccountForDraft;

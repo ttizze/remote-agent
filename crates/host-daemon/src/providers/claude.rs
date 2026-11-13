@@ -3201,7 +3201,7 @@ pub(crate) mod execution_tests {
 
     /// Exercise the production process reader and response/input state machine.
     /// The reference query bridge has no idle envelope: its returned result is
-    /// adapted to Bex's explicit response-idle envelope, just as SDK main.ts does.
+    /// adapted to Bex's explicit response-idle envelope for these text-only queries.
     pub(crate) async fn replay_sdk(
         rows: &[Value],
         events: mpsc::Sender<AgentEvent>,

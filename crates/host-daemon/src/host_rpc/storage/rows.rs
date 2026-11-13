@@ -272,13 +272,24 @@ fn page_floor(connection: &Connection, key: i64, before: Option<Window>) -> Resu
             ],
             None,
         )?;
-        let cost = protocol::encode(&item).map_err(failure)?.len();
+        let mut item = decision::records::Item::from(item);
+        let mut cost = protocol::encode(item.content.as_ref())
+            .map_err(failure)?
+            .len();
+        // Large bodies travel separately; they must not consume the window's
+        // entire inline budget and hide the preceding messages.
+        if cost > agent_protocol::models::MAX_INLINE_ITEM_BYTES {
+            Arc::make_mut(&mut item.content).defer();
+            cost = protocol::encode(item.content.as_ref())
+                .map_err(failure)?
+                .len();
+        }
         if !selected.is_empty() && bytes.saturating_add(cost) > 1_048_576 {
             break;
         }
         bytes = bytes.saturating_add(cost);
         if matches!(
-            item.body,
+            item.content.body(),
             agent_protocol::items::ItemBody::UserMessage { .. }
         ) {
             user_turns.insert(turn);

@@ -2543,8 +2543,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/conversation/change");
     assert!(
-        !store.snapshot().sessions.pending_submissions
-            ["26cd410e-2f6d-5b40-aa3e-902997b896d4"]
+        !store.snapshot().sessions.pending_submissions["26cd410e-2f6d-5b40-aa3e-902997b896d4"]
             .queued
     );
     writer.reply(&request, json!({"result":{}})).await.unwrap();

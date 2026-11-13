@@ -508,7 +508,8 @@ fn rewind_retains_rows_and_counters_and_invalidates_native_bindings() {
         Outcome::Rejected(_)
     ));
     let completed = observe(&state, &attempt, Observation::Completed, 4);
-    let state = state.apply(&completed.changes);
+    let mut state = state.apply(&completed.changes);
+    state.thread.queue_held = true;
     let before = state.clone();
     let rewound = command(&state, 5, Command::Rewind(attempt.turn.clone()));
     let state = state.apply(&rewound.changes);
@@ -517,6 +518,10 @@ fn rewind_retains_rows_and_counters_and_invalidates_native_bindings() {
     assert_eq!(state.counters, before.counters);
     assert!(state.bindings.is_empty());
     assert!(state.attempts.is_empty());
+    assert!(
+        !state.thread.queue_held,
+        "rewinding without queued input releases the old hold"
+    );
     assert!(
         observe(&state, &attempt, Observation::Completed, 6)
             .changes
@@ -4519,4 +4524,21 @@ fn a_queued_compact_cannot_be_promoted_into_an_ordinary_running_turn() {
     assert!(matches!(promoted.outcome, Outcome::Rejected(_)));
     assert!(promoted.changes.is_empty());
     assert!(promoted.actions.is_empty());
+}
+
+#[test]
+fn an_unacknowledged_regular_input_does_not_offer_compaction_promotion() {
+    let (state, _, _, _) = starting(&state(), 1);
+    let queued = submit(&state, 2, FollowUp::Queue);
+    assert!(queued.actions.is_empty());
+    let state = state.apply(&queued.changes);
+    let promotion = command(
+        &state,
+        3,
+        Command::SteerInput(Uuid::from_u128(2).to_string().into()),
+    );
+    assert!(matches!(promotion.outcome, Outcome::Rejected(_)));
+    assert!(promotion.changes.is_empty());
+    assert!(promotion.actions.is_empty());
+    assert!(state.steer_target(true).is_none());
 }

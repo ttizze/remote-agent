@@ -858,6 +858,11 @@ fn reduce_intent(
     let Some(pane) = previous.panes.get(pane_id) else {
         return (next, Vec::new());
     };
+    if matches!(&intent, Intent::QuoteSelection { storage_scope, .. }
+        if storage_scope != &previous.connection.storage_scope)
+    {
+        return (next, Vec::new());
+    }
     if let Some(key) = intent.editing_draft()
         && key.is_empty()
     {
@@ -1248,13 +1253,11 @@ fn reduce_intent(
             draft.text = text;
         }
         Intent::SetDraftText { thread_id, text } => set_draft_text(&mut next, thread_id, text),
-        Intent::QuoteSelection { storage_scope, thread_id, text } => {
-            if previous.connection.storage_scope == storage_scope {
-                let draft = previous.input.drafts.get(&thread_id)
-                    .map(|draft| draft.text.as_str()).unwrap_or_default();
-                set_draft_text(&mut next, thread_id,
-                    crate::composer::append_selection_to_draft(draft, &text));
-            }
+        Intent::QuoteSelection { thread_id, text, .. } => {
+            let draft = previous.input.drafts.get(&thread_id)
+                .map(|draft| draft.text.as_str()).unwrap_or_default();
+            set_draft_text(&mut next, thread_id,
+                crate::composer::append_selection_to_draft(draft, &text));
         },
         Intent::AnswerQuestion { request_id, action } => {
             if let Some(answer) = crate::questions::act(&mut next, request_id.clone(), action) {
@@ -2114,6 +2117,13 @@ impl Snapshot {
         } else {
             recovered.clone()
         };
+        if slot == Some(WELCOME_DRAFT_SLOT) {
+            for pane in Arc::make_mut(&mut self.panes.0).values_mut() {
+                if pane.navigation.thread_id.is_none() && pane.navigation.draft_key.is_empty() {
+                    Arc::make_mut(&mut Arc::make_mut(pane).navigation).draft_key = target.clone();
+                }
+            }
+        }
         let current = Arc::make_mut(&mut self.input.drafts)
             .entry(target)
             .or_default();

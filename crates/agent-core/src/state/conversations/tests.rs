@@ -559,7 +559,10 @@ fn a_rejected_welcome_send_restores_reachable_user_work_and_newer_typing() {
                 }),
             );
         }
+        let pending = reduce(&pending, "", Event::Intent(Intent::ShowThreadList)).0;
+        assert!(pending.panes.primary().navigation.draft_key.is_empty());
         let failed = reduce(&pending, "", Event::SubmissionFailed(input)).0;
+        assert_eq!(failed.panes.primary().navigation.draft_key, key);
         let elsewhere = reduce(
             &failed,
             "",

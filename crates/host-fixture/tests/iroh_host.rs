@@ -1826,7 +1826,21 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         let mut history = conversations::Conversation::open(&mobile.peer, &history_id)
             .await
             .unwrap();
-        assert_eq!(history.view().thread.turns.as_ref().unwrap().len(), 10);
+        let first_page = history.view();
+        let turns = first_page.thread.turns.as_ref().unwrap();
+        // T3's threadHistoryPaging also caps a page at 500 items. This
+        // recording retains hundreds of intermediate messages, so that cap
+        // precedes the ten-user-turn limit; ordinary ten-turn windows are
+        // covered by a_cached_loading_window_resets_to_the_latest_ten_turns_after_import.
+        assert_eq!(
+            turns
+                .iter()
+                .flat_map(|turn| turn.items.iter().flatten())
+                .count(),
+            500
+        );
+        assert!(turns.len() <= 10);
+        assert_eq!(turns.last().unwrap().id.as_str(), "long-turn-14");
         history.extend(&mobile.peer).await;
         let history = history.view();
         let turns = history.thread.turns.as_ref().unwrap();

@@ -278,6 +278,23 @@ mod tests {
         assert!(effects.is_empty());
     }
 
+    #[test]
+    fn a_selection_from_another_account_does_not_create_a_welcome_draft() {
+        let previous = Snapshot::default();
+        let (next, effects) = reduce(
+            &previous,
+            "",
+            Event::Intent(Intent::QuoteSelection {
+                storage_scope: "previous-account".into(),
+                thread_id: previous.panes.primary().navigation.draft_key.clone(),
+                text: "stale selection".into(),
+            }),
+        );
+        assert_eq!(next.input, previous.input);
+        assert_eq!(next.panes, previous.panes);
+        assert!(effects.is_empty());
+    }
+
     #[rstest::rstest]
     #[case("Review code", "Review code")]
     #[case("  First line\nSecond line\r\n", "First line Second line")]
