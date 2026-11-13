@@ -72,6 +72,13 @@ pub(crate) fn start(
     fixture: Option<u16>,
     mtm: MainThreadMarker,
 ) -> Rc<Cell<bool>> {
+    // Request the logical SwiftUI accessibility tree, just as an OS client
+    // does. Backing NSViews alone omit SwiftUI Text and Button elements.
+    unsafe {
+        let _: () = msg_send![&*NSApplication::sharedApplication(mtm),
+            accessibilitySetValue: &*NSNumber::numberWithBool(true),
+            forAttribute: &*NSString::from_str("AXEnhancedUserInterface")];
+    }
     let passed = Rc::new(Cell::new(false));
     let driver = Rc::new(RefCell::new(Driver {
         scenario,

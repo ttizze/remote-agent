@@ -1,4 +1,6 @@
 import AppKit
+import NativeUI
+import SwiftUI
 
 struct ConversationButton: Decodable, Equatable {
     let action: String
@@ -25,17 +27,23 @@ struct NativeConversationRow: Decodable, Equatable {
     let time: String?
     let queued: Bool
     let steer: Bool
-    var busy: Bool? = nil
-    var trailing: Bool? = nil
-    var fold: Bool? = nil
     var collapsible: Bool? = nil
     var top: Double? = nil
     var agentStatus: String? = nil
     var icon: String? = nil
     var separator: Bool? = nil
     var plan: Bool? = nil
-    var timeAlways: Bool? = nil
-    var preparation: ConversationPreparation? = nil
+    var planTitle: String? = nil
+    var error: ConversationErrorData? = nil
+    var preparation: NativePreparation? = nil
+}
+
+struct ConversationErrorData: Decodable, Equatable {
+    let title: String
+    let message: String
+    let details: String?
+    let reconnecting: Bool
+    let usageLimit: Bool
 }
 
 struct NativeConversationUpdate: Decodable {
@@ -454,9 +462,11 @@ struct NativeConversationUpdate: Decodable {
     private func resizeRow(_ id: String) {
         guard active, let row = rows[id], let index = source.row(forItemIdentifier: id) else { return }
         let anchor = following ? nil : anchor()
-        heights.removeValue(forKey: id)
         if let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false) as? NativeConversationCell {
             cell.update(row, width: laneWidth, scope: scope, send: actionHandler)
+            heights[id] = cell.fittingSize.height
+        } else {
+            heights.removeValue(forKey: id)
         }
         table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: index))
         table.tile()
@@ -548,29 +558,13 @@ struct NativeConversationUpdate: Decodable {
     }
 }
 
+/// AppKit owns viewport reuse; iPhone's SwiftUI components own every row's appearance.
 @MainActor final class NativeConversationCell: NSTableCellView {
-    private let body = TranscriptBody()
-    private let sentImages = NativeSentImages()
-    private let bubble = NSView()
-    private let metadata = NSTextField(labelWithString: "")
-    private let marker = NSTextField(labelWithString: "")
-    private let progress = NSProgressIndicator()
-    private let rule = NSView()
-    private let agentBadge = NSView()
-    private let rowIcon = NSImageView()
-    private let preparation = NativePreparationView(frame: .zero)
-    private let preparationDetails = TranscriptBody()
-    private let fade = CAGradientLayer()
-    private let expand = NSButton()
-    private var buttons: [NSButton] = []
+    private let host = NSHostingView(rootView: AnyView(EmptyView()))
     private var row: NativeConversationRow?
     private var scope = ""
-    private var lane: CGFloat = 0
-    private var measured = NSSize.zero
-    private var send: (([String: Any]) -> Void)?
-    private var tracking: NSTrackingArea?
-    private var hovered = false
-    private var unfolded = false
+    private var lane: CGFloat = 1
+    private var measured = NSSize(width: 1, height: 1)
     var resized: (() -> Void)?
     override var isFlipped: Bool {
         true
@@ -582,370 +576,243 @@ struct NativeConversationUpdate: Decodable {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        for child in [
-            bubble,
-            body,
-            sentImages,
-            metadata,
-            marker,
-            progress,
-            rule,
-            expand,
-            agentBadge,
-            rowIcon,
-            preparation,
-            preparationDetails
-        ] {
-            addSubview(child)
-        }
-        body.wantsLayer = true
-        fade.colors = [NSColor.white.cgColor, NSColor.white.cgColor, NSColor.clear.cgColor]
-        fade.locations = [0, 0.8, 1]; fade.startPoint = CGPoint(x: 0, y: 0); fade.endPoint = CGPoint(x: 0, y: 1)
-        bubble.wantsLayer = true; bubble.layer?.cornerRadius = 18
-        bubble.layer?.backgroundColor = NSColor(white: 20.0 / 255, alpha: 1).cgColor
-        rule.wantsLayer = true; rule.layer?.backgroundColor = NSColor(white: 22.0 / 255, alpha: 1).cgColor
-        agentBadge.wantsLayer = true; agentBadge.layer?.cornerRadius = 4
-        rowIcon.contentTintColor = .secondaryLabelColor; rowIcon.setAccessibilityElement(false)
-        progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
-        metadata.font = .systemFont(ofSize: 12); marker.font = .systemFont(ofSize: 12)
-        metadata.textColor = NSColor(white: 170.0 / 255, alpha: 1); marker.textColor = metadata.textColor
-        expand.isBordered = false; expand.font = .systemFont(ofSize: 12); expand.contentTintColor = metadata.textColor
-        expand.target = self; expand.action = #selector(toggleExpanded)
-        setAccessibilityElement(true); setAccessibilityRole(.group)
-        body.resized = { [weak self] in self?.resized?() }
+        host.sizingOptions = .intrinsicContentSize
+        addSubview(host)
     }
 
     @available(*, unavailable) required init?(coder _: NSCoder) {
         fatalError()
     }
 
-    override func accessibilityChildren() -> [Any]? {
-        let time: [Any] = metadata.stringValue.isEmpty ? [] : [metadata]
-        let headers: [Any] = buttons.enumerated().filter { row?.buttons[$0.offset].header == true }.map(\.element)
-        let footer: [Any] = buttons.enumerated().filter { row?.buttons[$0.offset].header != true }.map(\.element)
-        let actions: [Any] = row?.user == true ? time + footer : footer + time
-        return (marker.isHidden ? [] : [marker]) + (sentImages.isHidden ? [] : [sentImages]) + headers + [body] +
-            (preparation.isHidden ? [] : [preparation]) + actions +
-            (preparationDetails.isHidden ? [] : [preparationDetails]) + (expand.isHidden ? [] : [expand])
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let tracking {
-            removeTrackingArea(tracking)
+    @discardableResult func update(_ row: NativeConversationRow, width: CGFloat, scope: String = "",
+                                   send: @escaping ([String: Any]) -> Void) -> Bool {
+        guard self.row != row || self.scope != scope || lane != max(1, width) else { return false }
+        self.row = row; self.scope = scope; lane = max(1, width)
+        let content = MacConversationRow(row: row) { action in
+            var value = action; value["row"] = row.id; value["scope"] = scope; send(value)
         }
-        let next = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(next); tracking = next
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        hovered = true; updateHover(); super.mouseEntered(with: event)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        hovered = false; updateHover(); super.mouseExited(with: event)
-    }
-
-    private func updateHover() {
-        guard let row else { return }
-        let alpha: CGFloat = hovered || row.trailing == true ? 1 : 0
-        metadata.alphaValue = row.timeAlways == true || row.agentStatus != nil ? 1 : alpha
-        for (index, button) in buttons
-            .enumerated() {
-            button.alphaValue = row.buttons[index].iconOnly == true ? alpha : 1
-        }
-    }
-
-    @discardableResult func update(
-        _ row: NativeConversationRow,
-        width: CGFloat,
-        scope: String = "",
-        send: @escaping ([String: Any]) -> Void
-    ) -> Bool {
-        let changed = self.row != row || self.scope != scope || lane != width
-        if self.row?.id != row.id || self.scope != scope {
-            unfolded = false; hovered = false
-            buttons.compactMap { $0 as? CopyActionButton }.forEach { $0.reset() }
-            body.clear()
-            preparationDetails.clear()
-        }
-        self.send = send; self.scope = scope
-        guard changed else { return false }
-        body.send = { [weak self] action in
-            guard let self, let row = self.row else { return }
-            var value = action; value["scope"] = self.scope; value["row"] = row.id; self.send?(value)
-        }
-        sentImages.send = body.send
-        sentImages.update(row.user ? row.images : [], document: row.document, media: row.media)
-        let parts = row.parts + (row.user ? [] : row.images.map { TranscriptPart.image(.init(source: $0)) })
-        body.update(parts, document: row.document, media: row.media)
-        preparation.update(row.preparation, document: row.document)
-        preparationDetails.isHidden = row.preparation?.details.isEmpty != false
-        preparationDetails.update(
-            (row.preparation?.details ?? []).map { .text([.plain("\($0.label)  \($0.value)")]) },
-            document: row.document,
-            media: [:]
-        )
-        preparationDetails.send = body.send
-        metadata.stringValue = row.time ?? ""
-        marker.stringValue = [
-            row.queued ? row.document.labels?["queued"] : nil,
-            row.steer ? row.document.labels?["steer"] : nil
-        ].compactMap(\.self).joined(separator: " · ")
-        marker.setAccessibilityLabel([
-            row.queued ? row.document.labels?["queuedDescription"] : nil,
-            row.steer ? row.document.labels?["steerDescription"] : nil
-        ].compactMap(\.self).joined(separator: " · "))
-        marker.isHidden = marker.stringValue.isEmpty
-        if self.row?.buttons != row.buttons {
-            buttons.forEach { $0.removeFromSuperview() }
-            buttons = row.buttons.map { action in
-                let button = action.action == "copy" ? CopyActionButton() : action
-                    .shimmer == nil ? NSButton() : ShimmerButton()
-                (button as? ShimmerButton)?.shimmer = action.shimmer
-                button.title = action.title; button.target = self; button.action = #selector(pressed(_:))
-                button.identifier = .init(action.action); button.isBordered = false; button.isEnabled = action
-                    .enabled ?? true
-                button.font = .systemFont(ofSize: action.disclosure == true ? 14 : 12)
-                button.contentTintColor = NSColor(white: 170.0 / 255, alpha: 1)
-                button.image = MessageAttributes.icon(
-                    action.icon,
-                    size: action.disclosure == true ? 14 : 12,
-                    label: action.accessibilityLabel ?? action.title
-                )
-                button.imagePosition = action.iconOnly == true ? .imageOnly : action
-                    .action == "agent" ? .imageLeading : .imageTrailing
-                button.setAccessibilityLabel(action.accessibilityLabel ?? action.title); button.toolTip = action.title
-                addSubview(button); return button
-            }
-        }
-        if row.busy == true, row.document.shimmer == nil, !row.buttons.contains(where: { $0.shimmer != nil }) {
-            progress.startAnimation(nil)
-        } else {
-            progress.stopAnimation(nil)
-        }
-        bubble.isHidden = !row.user && row.plan != true || row.parts.isEmpty
-        bubble.layer?.borderWidth = row.plan == true ? 1 : 0
-        bubble.layer?.borderColor = NSColor.separatorColor.cgColor
-        bubble.layer?.cornerRadius = row.plan == true ? 12 : 18
-        self.row = row; lane = width
-        rowIcon.image = MessageAttributes.icon(row.icon, size: 14); rowIcon.isHidden = rowIcon.image == nil
-        agentBadge.isHidden = row.agentStatus == nil
-        let color: NSColor = switch row.agentStatus {
-        case "completed": .systemGreen
-        case "running": .controlAccentColor
-        case "failed": .systemRed
-        default: .secondaryLabelColor
-        }
-        agentBadge.layer?.backgroundColor = color.cgColor
-        updateHover(); measure(); return changed
+        host.rootView = AnyView(content.accessibilityElement(children: .contain).id(scope + ":" + row.id)
+            .padding(.top, row.top ?? 0).padding(.bottom, row.gap)
+            .frame(width: lane, alignment: .leading).fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { [weak self] height in
+                guard let self, abs(measured.height - ceil(height)) > 0.5 else { return }
+                measured.height = max(1, ceil(height))
+                DispatchQueue.main.async { [weak self] in self?.resized?() }
+            })
+        measured = NSSize(width: lane, height: max(1, ceil(host.fittingSize.height)))
+        needsLayout = true
+        return true
     }
 
     override func layout() {
-        super.layout(); measure()
-    }
-
-    private func measure() {
-        guard let row else { return }
-        let outer = max(0, (bounds.width - lane) / 2)
-        let inset: CGFloat = row.user || row.plan == true ? 12 : 4
-        let width = row.user ? min(lane * 0.8, max(24, ceil(body.preferredWidth(max(1, lane * 0.8 - 24))) + 24)) : lane
-        let x = outer + (row.user ? lane - width : 0)
-        var y = CGFloat(row.top ?? 0)
-        let cardTop = y
-        if row.plan == true {
-            y += 12
-        }
-        y = placeUserHeader(x: x, y: y, laneX: outer, laneWidth: lane, hasText: !row.parts.isEmpty)
-        if row.agentStatus != nil {
-            measured = NSSize(width: lane, height: ceil(max(1, placeAgent(x: x, y: y, width: width) + row.gap)))
-            return
-        }
-        let headers = row.buttons.indices.filter { row.buttons[$0].header == true }
-        let iconInset: CGFloat = rowIcon.isHidden ? 0 : 28
-        rowIcon.frame = NSRect(x: x + 4, y: y + 5, width: 16, height: 16)
-        y += placeHeaders(headers, x: x + iconInset, y: y, width: width - iconInset)
-        let bodyIcon: CGFloat = headers.isEmpty ? iconInset : 0
-        metadata.sizeToFit()
-        let headerTime: CGFloat = row.preparation == nil ? 0 : metadata.frame.width + 12
-        let height = body.measure(max(1, width - inset * 2 - bodyIcon - headerTime))
-        let collapsed = row.collapsible == true && !unfolded && row.document.searching != true
-        let drawn = collapsed ? min(176, height) : height
-        body.frame = NSRect(
-            x: x + inset + bodyIcon,
-            y: y + (row.user ? 12 : 0),
-            width: width - inset * 2 - bodyIcon - headerTime,
-            height: drawn
-        )
-        body.layer?.masksToBounds = collapsed
-        fade.frame = body.bounds; body.layer?.mask = collapsed ? fade : nil
-        bubble.frame = NSRect(x: x, y: y, width: width, height: drawn + (row.user ? 24 : 0))
-        y = max(body.frame.maxY, bubble.isHidden ? 0 : bubble.frame.maxY)
-        if row.preparation != nil {
-            metadata.frame.origin = NSPoint(x: x + width - metadata.frame.width, y: body.frame.minY + 2)
-            rule.frame = NSRect(x: outer, y: y + 4, width: lane, height: 1)
-            y += 12
-            let stepsHeight = preparation.measure(width)
-            preparation.frame = NSRect(x: x, y: y, width: width, height: stepsHeight); y += stepsHeight
-        }
-        progress.frame = NSRect(x: max(0, x - 20), y: body.frame.minY, width: 16, height: 16)
-        expand.isHidden = row.collapsible != true
-        if !expand.isHidden {
-            expand.title = row.document.labels?[unfolded ? "collapse" : "expand"] ?? ""
-            expand.sizeToFit(); expand.frame.origin = NSPoint(x: x + width - expand.frame.width, y: y + 2); y = expand
-                .frame.maxY
-        }
-        y += row.fold == true ? 4 : row.user ? 4 : row.parts.isEmpty ? 2 : 6
-        y += placeFooter(row.buttons, user: row.user, headerTime: row.preparation != nil, x: x, y: y, width: width)
-        if !preparationDetails.isHidden {
-            let height = preparationDetails.measure(max(1, width - 30))
-            preparationDetails
-                .frame = NSRect(x: x + 30, y: y + 8, width: width - 30, height: height); y = preparationDetails.frame
-                .maxY
-        }
-        rule.isHidden = row.fold != true && row.separator != true && row.preparation == nil
-        if row.preparation == nil {
-            rule.frame = NSRect(x: outer, y: y + 4, width: lane, height: 1)
-        }
-        if row.plan == true {
-            y += 12; bubble.frame = NSRect(x: x, y: cardTop, width: width, height: y - cardTop)
-        }
-        measured = NSSize(width: lane, height: ceil(max(1, y + row.gap + (row.fold == true ? 8 : 0))))
-    }
-
-    private func placeUserHeader(x: CGFloat, y: CGFloat, laneX: CGFloat, laneWidth: CGFloat, hasText: Bool) -> CGFloat {
-        var y = y
-        if !marker.isHidden {
-            marker.sizeToFit(); marker.frame.origin = NSPoint(x: x, y: y); y += 20
-        }
-        if !sentImages.isHidden {
-            let size = sentImages.measure(laneWidth * 0.8)
-            sentImages.frame = NSRect(x: laneX + laneWidth - size.width, y: y, width: size.width, height: size.height)
-            y += size.height + (!hasText ? 0 : 4)
-        }
-        return y
-    }
-
-    private func placeAgent(x: CGFloat, y: CGFloat, width: CGFloat) -> CGFloat {
-        metadata.sizeToFit()
-        for button in buttons {
-            button.frame = NSRect(x: x, y: y, width: max(0, width - metadata.frame.width - 12), height: 28)
-            button.alignment = .left
-        }
-        metadata.frame.origin = NSPoint(x: x + width - metadata.frame.width, y: y + 6)
-        agentBadge.frame = NSRect(x: x + 13, y: y + 18, width: 8, height: 8)
-        let top = y + 30
-        let height = body.measure(max(1, width - 34))
-        body.frame = NSRect(x: x + 34, y: top, width: width - 34, height: height)
-        bubble.isHidden = true; rule.isHidden = true; expand.isHidden = true
-        return top + height
-    }
-
-    private func placeFooter(
-        _ actions: [ConversationButton],
-        user: Bool,
-        headerTime: Bool,
-        x: CGFloat,
-        y: CGFloat,
-        width: CGFloat
-    ) -> CGFloat {
-        metadata.sizeToFit()
-        let footer = actions.indices.filter { actions[$0].header != true }
-        let widths = footer.map { index -> CGFloat in
-            let action = actions[index]
-            if action.iconOnly == true {
-                return 24
-            }
-            buttons[index].sizeToFit(); return buttons[index].frame.width + 8
-        }
-        let gap: CGFloat = user ? 2 : 8
-        let total = widths.reduce(0,+) + CGFloat(max(0, widths.count - 1)) * gap
-        var bx = user ? x + width - total - 4 : x + 4
-        if user {
-            metadata.frame.origin = NSPoint(x: max(x, bx - metadata.frame.width - 8), y: y + 4)
-        }
-        for (at, index) in footer.enumerated() {
-            buttons[index].frame = NSRect(x: bx, y: y, width: widths[at], height: 24); bx += widths[at] + gap
-        }
-        if !user && !headerTime {
-            metadata.frame.origin = NSPoint(x: bx, y: y + 4)
-        }
-        let meta = !footer.isEmpty || !headerTime && !metadata.stringValue.isEmpty
-        return meta ? 24 : 0
-    }
-
-    private func placeHeaders(_ indices: [Int], x: CGFloat, y: CGFloat, width: CGFloat) -> CGFloat {
-        var height: CGFloat = 0
-        for index in indices {
-            let button = buttons[index]; button.sizeToFit()
-            let menu = button.imagePosition == .imageOnly
-            button.frame = NSRect(
-                x: menu ? x + width - 24 : x,
-                y: y,
-                width: menu ? 24 : min(width, button.frame.width + 8),
-                height: 24
-            )
-            if !menu {
-                height = 28
-            }
-        }
-        return height
-    }
-
-    @objc private func toggleExpanded() {
-        unfolded.toggle(); measure(); resized?()
-    }
-
-    @objc private func pressed(_ sender: NSButton) {
-        guard let row, let id = sender.identifier?.rawValue else { return }
-        if let items = row.buttons.first(where: { $0.action == id })?.menuItems {
-            let menu = NSMenu(); menu.autoenablesItems = false
-            for item in items {
-                let entry = NSMenuItem(title: item.title, action: #selector(menuPressed(_:)), keyEquivalent: "")
-                entry.target = self; entry.representedObject = item.id; entry.isEnabled = item.enabled ?? true; menu
-                    .addItem(entry)
-            }
-            menu.popUp(positioning: nil, at: NSPoint(x: sender.frame.minX, y: sender.frame.maxY), in: self)
-        } else {
-            send?(["action": id, "row": row.id, "scope": scope])
-            (sender as? CopyActionButton)?.copied(row.document.labels?["copied"] ?? "")
-        }
-    }
-
-    @objc private func menuPressed(_ item: NSMenuItem) {
-        guard let row, let id = item.representedObject as? String else { return }
-        send?(["action": id, "row": row.id, "scope": scope])
+        super.layout()
+        host.frame = NSRect(x: max(0, (bounds.width - lane) / 2), y: 0,
+                            width: lane, height: measured.height)
     }
 }
 
-/// Feedback belongs to the native button and ends when its row is reused.
-@MainActor private final class CopyActionButton: NSButton {
-    private var original: (NSImage?, String?, String?)?
-    private var serial = 0
-    func reset() {
-        serial += 1
-        if let original {
-            image = original.0; setAccessibilityLabel(original.1); toolTip = original.2
-        }
-        original = nil
+private struct MacConversationRow: View {
+    let row: NativeConversationRow
+    let send: ([String: Any]) -> Void
+    private var headers: [ConversationButton] {
+        row.buttons.filter { $0.header == true }
     }
 
-    func copied(_ label: String) {
-        if original == nil {
-            original = (image, accessibilityLabel(), toolTip)
+    private var footer: [ConversationButton] {
+        row.buttons.filter { $0.header != true }
+    }
+
+    var body: some View {
+        Group {
+            if let preparation = row.preparation {
+                MacPreparation(value: preparation, summary: row.parts, document: row.document,
+                               elapsed: row.time, actions: footer, send: send)
+            } else if let error = row.error {
+                VStack(alignment: .leading, spacing: 10) {
+                    ConversationError(context: label("thisResponse"), title: error.title,
+                                      reconnecting: error.reconnecting, usageLimit: error.usageLimit) {
+                        TranscriptContent(parts: [.text([.plain(error.message)])], document: row.document,
+                                          media: row.media, send: send)
+                    } details: {
+                        if let details = error.details, !details.isEmpty {
+                            DisclosureGroup(label("showDetails")) {
+                                TranscriptContent(parts: [.text([.plain(details)])], document: row.document,
+                                                  media: row.media, send: send)
+                            }.font(.caption)
+                        }
+                    }
+                    ConversationActions { ForEach(footer, id: \.action) { action($0) } }
+                }
+            } else if let status = row.agentStatus, let agent = headers.first {
+                ConversationSubagent(name: agent.title, status: status, elapsed: row.time,
+                                     enabled: agent.enabled ?? true, open: { emit(agent.action) }) {
+                    text
+                }.accessibilityIdentifier("subagent." + row.id)
+            } else if row.plan == true {
+                ConversationPlan(title: row.planTitle ?? "") { text } actions: {
+                    ForEach(headers, id: \.action) { action($0) }
+                }
+            } else if row.separator == true, row.icon == "compact" {
+                ConversationDivider(label: row.parts.compactMap { part in
+                    if case let .text(blocks) = part {
+                        return blocks.flatMap(\.runs).map(\.text).joined()
+                    }
+                    return nil
+                }.joined(separator: "\n"))
+            } else if let work = headers.first, work.action == "item" || work.action == "group" {
+                ConversationWork(
+                    title: work.title,
+                    symbol: MessageAttributes.symbol(row.icon) ?? "chevron.left.forwardslash.chevron.right",
+                    expanded: Binding(get: { work.icon == "chevronDown" }, set: { _ in emit(work.action) }),
+                    active: work.shimmer != nil
+                ) {
+                    text
+                }
+            } else if row.user || !footer.isEmpty || headers.isEmpty && row.icon == nil {
+                message
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(headers, id: \.action) { action($0) }
+                    if !row.parts.isEmpty {
+                        text
+                    }
+                }
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading).buttonStyle(.plain)
+    }
+
+    private var text: some View {
+        TranscriptContent(parts: row.parts + (row.user ? [] : row.images.map { .image(.init(source: $0)) }),
+                          document: row.document, media: row.media, send: send)
+    }
+
+    private var message: some View {
+        ConversationMessage(user: row.user, hasText: !row.parts.isEmpty || !row.user && !row.images.isEmpty,
+                            collapsible: row.collapsible ?? false, searching: row.document.searching ?? false,
+                            expandTitle: label("expand"), collapseTitle: label("collapse"), identifier: row.id) {
+            if row.queued {
+                Text(verbatim: label("queued")).font(.caption).foregroundStyle(.secondary)
+            }
+            if row.steer {
+                Text(verbatim: label("steer")).font(.caption).foregroundStyle(.secondary)
+            }
+        } images: {
+            if row.user, !row.images.isEmpty {
+                ConversationImages {
+                    ForEach(row.images, id: \.self) { source in
+                        TranscriptContent(parts: [.image(.init(source: source))], document: row.document,
+                                          media: row.media, send: send).frame(width: 80, height: 80).clipped()
+                    }
+                }
+            }
+        } content: {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(headers, id: \.action) { action($0) }
+                text
+            }
+        } actions: {
+            if !footer.isEmpty || row.time != nil {
+                ConversationActions {
+                    if row.user {
+                        time
+                    }
+                    ForEach(footer.sorted { ($0.action == "copy" ? 0 : 1) < ($1.action == "copy" ? 0 : 1) },
+                            id: \.action) { action($0) }
+                    if !row.user {
+                        time
+                    }
+                }
+            }
+        } notices: { EmptyView() }
+    }
+
+    @ViewBuilder private var time: some View {
+        if let time = row.time {
+            Text(verbatim: time).font(.caption)
         }
-        image = MessageAttributes.icon("check", size: 12, label: label)
-        setAccessibilityLabel(label); toolTip = label
-        serial += 1; let expected = serial
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, serial == expected else { return }
-            reset()
+    }
+
+    private func label(_ key: String) -> String {
+        row.document.labels?[key] ?? ""
+    }
+
+    private func emit(_ action: String) {
+        send(["action": action])
+    }
+
+    private func action(_ value: ConversationButton) -> some View {
+        ConversationAction(value: value, icon: row.icon, copiedTitle: label("copied"), send: emit)
+    }
+}
+
+private struct ConversationAction: View {
+    let value: ConversationButton
+    var icon: String?
+    let copiedTitle: String
+    let send: (String) -> Void
+
+    var body: some View {
+        Group {
+            if let items = value.menuItems {
+                Menu {
+                    ForEach(items, id: \.id) { item in
+                        if let id = item.id {
+                            Button(item.title) { send(id) }.disabled(item.enabled == false)
+                        }
+                    }
+                } label: { Image(systemName: "ellipsis") }
+                    .accessibilityLabel(Text(verbatim: value.accessibilityLabel ?? value.title))
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            } else if value.action == "copy" {
+                ConversationCopyButton(title: value.accessibilityLabel ?? value.title,
+                                       copiedTitle: copiedTitle) { send(value.action) }
+            } else {
+                Button { send(value.action) } label: { content }
+                    .accessibilityLabel(Text(verbatim: value.accessibilityLabel ?? value.title))
+            }
         }
+        .disabled(value.enabled == false)
+        .help(value.title)
+    }
+
+    @ViewBuilder private var content: some View {
+        if value.disclosure == true || value.shimmer != nil {
+            HStack(spacing: 8) {
+                if let symbol = MessageAttributes.symbol(icon) {
+                    Image(systemName: symbol).foregroundStyle(.secondary)
+                }
+                ConversationActivityHeader(summary: value.title, canCollapse: value.disclosure == true,
+                                           isInProgress: value.shimmer != nil,
+                                           expanded: value.icon == "chevronDown", progress: false)
+            }
+        } else if value.iconOnly == true, let symbol = MessageAttributes.symbol(value.icon) {
+            Image(systemName: symbol).rotationEffect(.degrees(value.action == "fork" ? 90 : 0))
+        } else {
+            Text(verbatim: value.title)
+        }
+    }
+}
+
+/// Native selection and text layout stay in TextKit; row decorations come from NativeUI.
+struct TranscriptContent: NSViewRepresentable {
+    let parts: [TranscriptPart]
+    let document: MessageDocument
+    let media: [String: String]
+    let send: ([String: Any]) -> Void
+    @State private var layoutRevision = 0
+    func makeNSView(context _: Context) -> TranscriptBody {
+        TranscriptBody()
+    }
+
+    func updateNSView(_ view: TranscriptBody, context _: Context) {
+        _ = layoutRevision
+        view.resized = { layoutRevision &+= 1 }
+        view.send = send; view.update(parts, document: document, media: media)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TranscriptBody, context _: Context) -> CGSize? {
+        let width = max(1, proposal.width ?? nsView.preferredWidth(10000))
+        return NSSize(width: width, height: nsView.measure(width))
     }
 }
 

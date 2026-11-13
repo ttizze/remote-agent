@@ -3,9 +3,9 @@ import AppKit
 import XCTest
 
 final class ConversationTests: XCTestCase {
-    @MainActor func testPreparationKeepsNativeStepStateTimingOutputDetailsAndFailure() throws {
+    @MainActor func testPreparationKeepsNativeStepStateTimingOutputDetailsAndFailure() async throws {
         let setup = try JSONDecoder().decode(
-            ConversationPreparation.self,
+            NativePreparation.self,
             from: Data(#"{"steps":[{"id":"install","label":"Install dependencies","detail":"installing","tail":"npm install\nready","icon":"running","dim":false,"running":true,"time":"2 seconds"}],"details":[{"label":"Workspace","value":"/repo/worktree"}],"error":"Setup failed"}"#
                 .utf8)
         )
@@ -22,20 +22,24 @@ final class ConversationTests: XCTestCase {
             time: "3 seconds",
             queued: false,
             steer: false,
-            timeAlways: true,
             preparation: setup
         )
         view.update(row, width: 700, send: { _ in })
-        func fields(_ view: NSView) -> [String] {
-            (view as? NSTextField).map { [$0.stringValue] } ?? view.subviews.flatMap(fields)
+        let window = mount(view)
+        defer { window.orderOut(nil) }
+        await settle()
+        let displayed = accessibility(view).flatMap { node in
+            [
+                node.accessibilityLabel?(),
+                node.accessibilityTitle?(),
+                (node as? NSObject)?.perform(NSSelectorFromString("accessibilityValue"))?
+                    .takeUnretainedValue() as? String
+            ].compactMap(\.self)
         }
-        let displayed = fields(view)
-        for value in ["Install dependencies", "installing", "2 seconds", "3 seconds", "Setup failed"] {
-            XCTAssertTrue(displayed.contains(value), value)
+        for value in ["Install dependencies", "installing", "2 seconds", "3 seconds", "Setup failed",
+                      "npm install\nready", "Workspace", "/repo/worktree"] {
+            XCTAssertTrue(displayed.contains(value), "\(value): \(displayed)")
         }
-        let native = texts(view).map(\.string)
-        XCTAssertTrue(native.contains("npm install\nready"))
-        XCTAssertTrue(native.contains("Workspace  /repo/worktree"))
         XCTAssertGreaterThan(view.fittingSize.height, 100)
     }
 
@@ -70,7 +74,7 @@ final class ConversationTests: XCTestCase {
         }
     }
 
-    @MainActor func testNativeCopyFeedbackResetsWhenItsCellChangesMessages() throws {
+    @MainActor func testNativeCopyFeedbackResetsWhenItsCellChangesMessages() async throws {
         let view = NativeConversationCell(frame: NSRect(x: 0, y: 0, width: 700, height: 200))
         var document = MessageDocument.empty; document.labels = ["copied": "Copied"]
         func row(_ id: String) -> NativeConversationRow {
@@ -90,33 +94,49 @@ final class ConversationTests: XCTestCase {
         }
         var actions: [[String: Any]] = []
         view.update(row("first"), width: 700, scope: "thread", send: { actions.append($0) })
-        let copy = try XCTUnwrap(controls(view).first { $0.title == "Copy message" })
-        copy.performClick(nil)
+        let window = mount(view)
+        defer { window.orderOut(nil) }
+        await settle()
+        let copy = try XCTUnwrap(accessibility(view)
+            .first { ($0.accessibilityLabel?() ?? $0.accessibilityTitle?()) == "Copy message" })
+        XCTAssertEqual(copy.accessibilityRole?(), .button)
+        XCTAssertTrue(copy.accessibilityPerformPress?() ?? false)
+        await settle()
         XCTAssertEqual(actions.last?["action"] as? String, "copy")
-        XCTAssertEqual(copy.accessibilityLabel(), "Copied")
-        XCTAssertEqual(copy.imagePosition, .imageOnly)
+        XCTAssertTrue(accessibility(view)
+            .contains { ($0.accessibilityLabel?() ?? $0.accessibilityTitle?()) == "Copied" })
         view.update(row("second"), width: 700, scope: "thread", send: { actions.append($0) })
-        XCTAssertEqual(copy.accessibilityLabel(), "Copy message")
-        XCTAssertEqual(copy.image?.accessibilityDescription, "Copy message")
+        await settle()
+        XCTAssertTrue(accessibility(view)
+            .contains { ($0.accessibilityLabel?() ?? $0.accessibilityTitle?()) == "Copy message" })
+        XCTAssertFalse(accessibility(view)
+            .contains { ($0.accessibilityLabel?() ?? $0.accessibilityTitle?()) == "Copied" })
     }
 
-    @MainActor func testNativeCodeAndTableKeepAccessibleIconActionsAndWrappingState() throws {
+    @MainActor func testNativeCodeAndTableKeepAccessibleIconActionsAndWrappingState() async throws {
         var document = MessageDocument.empty
         document.labels = ["copyCode": "Copy code", "copyTable": "Copy table", "wrap": "Wrap", "unwrap": "Unwrap"]
         let body = TranscriptBody()
         body.update([.code(.init(label: "swift", source: "let x = 1", blocks: [paragraph("let x = 1")], diagram: nil)),
                      .table(.init(source: "| a |", csv: "a", rows: [[[.text([paragraph("a")])]]]))], document: document,
                     media: [:])
-        let buttons = controls(body)
+        body.frame = NSRect(x: 0, y: 0, width: 700, height: body.measure(700))
+        let window = mount(body)
+        defer { window.orderOut(nil) }
+        await settle()
+        let buttons = accessibility(body)
+            .filter { $0.accessibilityRole?() == .button || $0.accessibilityRole?() == .menuButton }
         for title in ["Copy code", "Copy table", "Unwrap"] {
-            let button = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == title }, title)
-            XCTAssertEqual(button.imagePosition, .imageOnly)
-            XCTAssertNotNil(button.image)
+            XCTAssertTrue(
+                buttons.contains { ($0.accessibilityLabel?() ?? $0.accessibilityTitle?()) == title },
+                "\(title): \(buttons.map { $0.accessibilityLabel?() ?? $0.accessibilityTitle?() ?? "" })"
+            )
         }
-        let wrap = try XCTUnwrap(buttons.first { $0.title == "Unwrap" })
-        wrap.performClick(nil)
-        XCTAssertEqual(wrap.accessibilityLabel(), "Wrap")
-        XCTAssertEqual(wrap.image?.accessibilityDescription, "Wrap")
+        let wrap = try XCTUnwrap(buttons.first { ($0.accessibilityLabel?() ?? $0.accessibilityTitle?()) == "Unwrap" })
+        XCTAssertTrue(wrap.accessibilityPerformPress?() ?? false)
+        await settle()
+        XCTAssertTrue(accessibility(body)
+            .contains { ($0.accessibilityLabel?() ?? $0.accessibilityTitle?()) == "Wrap" })
     }
 
     @MainActor func testStreamingReusesTheNativeTextAndPreservesOnlyUnchangedSelection() throws {
@@ -135,6 +155,8 @@ final class ConversationTests: XCTestCase {
 
     @MainActor func testNativeViewportClearsRowsAndSelectionWhenTheConversationChanges() async throws {
         let view = NativeConversationView(frame: NSRect(x: 0, y: 0, width: 800, height: 400))
+        let window = mount(view)
+        defer { window.orderOut(nil) }
         try view.update(update(scope: "one", text: "Original conversation"))
         await settle()
         XCTAssertEqual(view.table.numberOfRows, 1)
@@ -235,8 +257,24 @@ final class ConversationTests: XCTestCase {
         (view as? NSTextView).map { [$0] } ?? view.subviews.flatMap(texts)
     }
 
-    @MainActor private func controls(_ view: NSView) -> [NSButton] {
-        (view as? NSButton).map { [$0] } ?? view.subviews.flatMap(controls)
+    @MainActor private func mount(_ view: NSView) -> NSWindow {
+        // Enable the same logical SwiftUI accessibility tree used by OS clients.
+        NSApp.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
+        let window = NSWindow(contentRect: view.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView = view
+        window.makeKeyAndOrderFront(nil)
+        view.layoutSubtreeIfNeeded()
+        view.displayIfNeeded()
+        NSApp.updateWindows()
+        return window
+    }
+
+    @MainActor private func accessibility(_ value: Any) -> [AnyObject] {
+        let node = value as AnyObject
+        let ordered = node.accessibilityChildrenInNavigationOrder?()
+        let children: [Any] = ordered?.map(\.self) ?? node.accessibilityChildren?() ?? []
+        let fallback = (value as? NSView)?.subviews ?? []
+        return [node] + (children.isEmpty ? fallback : children).flatMap(accessibility)
     }
 
     @MainActor private func settle() async {

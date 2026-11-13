@@ -140,6 +140,13 @@ struct MessageMenuTitles: Decodable, Equatable, Sendable {
 
 @MainActor enum MessageAttributes {
     static func icon(_ name: String?, size: CGFloat, label: String? = nil) -> NSImage? {
+        guard let symbol = symbol(name) else { return nil }
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(.init(
+            pointSize: size, weight: .regular
+        ))
+    }
+
+    static func symbol(_ name: String?) -> String? {
         guard let name else { return nil }
         let symbol: String
         switch name {
@@ -170,10 +177,7 @@ struct MessageMenuTitles: Decodable, Equatable, Sendable {
         case "minus": symbol = "minus"
         default: return nil
         }
-        return NSImage(systemSymbolName: symbol, accessibilityDescription: label)?.withSymbolConfiguration(.init(
-            pointSize: size,
-            weight: .regular
-        ))
+        return symbol
     }
 
     static func retainedSelection(_ range: NSRange, previous: String, next: String) -> NSRange {

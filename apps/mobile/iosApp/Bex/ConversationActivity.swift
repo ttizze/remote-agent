@@ -31,78 +31,40 @@ struct ThreadDecoratedActivity: View {
             ForEach(values.indices, id: \.self) { index in
                 switch values[index] {
                 case let .plan(title, markdown, filename):
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text(verbatim: title).font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Menu {
-                                Button { UIPasteboard.general.string = markdown } label: {
-                                    Label("クリップボードにコピー", systemImage: "doc.on.doc")
-                                }
-                                Button { plan(.export, filename, markdown) } label: {
-                                    Label("Markdownとして保存…", systemImage: "square.and.arrow.down")
-                                }
-                                Button { plan(.workspace, filename, markdown) } label: {
-                                    Label("ワークスペースに保存…", systemImage: "folder")
-                                }.disabled(!canSave)
-                            } label: { Image(systemName: "ellipsis") }
-                                .accessibilityLabel("計画のメニュー")
-                        }
-                        ConversationMarkdown(
-                            blocks: blocks,
-                            media: media,
-                            selection: selection
-                        )
-                    }
-                    .padding(12)
-                    .background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(UIColor.separator)))
-                case let .subagent(id, target, name, message, status, elapsed):
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Button {
-                                if let target {
-                                    open(target)
-                                }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "person.crop.circle")
-                                        .overlay(alignment: .bottomTrailing) {
-                                            Circle().fill(statusColor(status)).frame(width: 7, height: 7)
-                                        }
-                                    Text(verbatim: name).lineLimit(1)
-                                }
-                            }.disabled(target == nil)
-                            Spacer(minLength: 8)
-                            if let elapsed {
-                                Text(verbatim: elapsed).font(.caption).foregroundStyle(.secondary)
+                    ConversationPlan(title: title) {
+                        ConversationMarkdown(blocks: blocks, media: media, selection: selection)
+                    } actions: {
+                        Menu {
+                            Button { UIPasteboard.general.string = markdown } label: {
+                                Label("クリップボードにコピー", systemImage: "doc.on.doc")
                             }
+                            Button { plan(.export, filename, markdown) } label: {
+                                Label("Markdownとして保存…", systemImage: "square.and.arrow.down")
+                            }
+                            Button { plan(.workspace, filename, markdown) } label: {
+                                Label("ワークスペースに保存…", systemImage: "folder")
+                            }.disabled(!canSave)
+                        } label: { Image(systemName: "ellipsis") }
+                            .accessibilityLabel("計画のメニュー")
+                    }
+                case let .subagent(id, target, name, message, status, elapsed):
+                    ConversationSubagent(name: name, status: status, elapsed: elapsed, enabled: target != nil) {
+                        if let target {
+                            open(target)
                         }
+                    } message: {
                         if !message.isEmpty {
-                            Text(verbatim: message).textSelection(.enabled).padding(.leading, 28)
+                            Text(verbatim: message).textSelection(.enabled)
                         }
                     }
                     .accessibilityIdentifier("subagent." + id)
                 case let .divider(label):
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.down.right.and.arrow.up.left")
-                        Text(verbatim: label)
-                        Rectangle().frame(height: 1)
-                    }.font(.caption).foregroundStyle(.secondary)
+                    ConversationDivider(label: label)
                 }
             }
         }
         .buttonStyle(.plain)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func statusColor(_ status: String) -> Color {
-        switch status {
-        case "running": .accentColor
-        case "completed": .green
-        case "failed": .red
-        default: .secondary
-        }
     }
 }
 

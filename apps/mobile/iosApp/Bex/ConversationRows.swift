@@ -2,57 +2,20 @@ import AgentCore
 import SwiftUI
 import UIKit
 
-struct ThreadActivityHeader: View {
-    let summary: String
-    let canCollapse: Bool
-    let isInProgress: Bool
-    let expanded: Bool
-
-    var body: some View {
-        let label = Text(verbatim: summary)
-            .font(.system(size: 16))
-            .lineLimit(1).truncationMode(.tail)
-        HStack(spacing: 5) {
-            NativeShimmer(label: label, active: isInProgress)
-            if canCollapse {
-                Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    .font(.caption2.weight(.semibold)).foregroundColor(.secondary)
-            }
-            if isInProgress {
-                ProgressView().controlSize(.small)
-            }
-            Spacer(minLength: 0)
-        }.contentShape(Rectangle())
-    }
-}
-
 struct ThreadErrorRow: View {
     let error: TurnErrorPresentation
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("この応答").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                if error.isReconnecting {
-                    ProgressView().controlSize(.small)
-                }
-                Text(verbatim: error.title).font(.subheadline.weight(.semibold))
-            }
+        ConversationError(context: String(localized: "この応答"), title: error.title,
+                          reconnecting: error.isReconnecting, usageLimit: error.isUsageLimit) {
             Text(verbatim: error.message).textSelection(.enabled)
+        } details: {
             if let details = error.details, !details.isEmpty {
                 DisclosureGroup("詳細を表示") {
-                    Text(details).font(.caption).foregroundColor(.secondary).textSelection(.enabled)
+                    Text(details).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }.font(.caption)
             }
         }
-        .foregroundColor(error.isReconnecting ? .primary : error.isUsageLimit ? .orange : .red)
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(UIColor.secondarySystemBackground))
-        .overlay(RoundedRectangle(cornerRadius: 10)
-            .stroke((error.isUsageLimit ? Color.orange : .red).opacity(error.isReconnecting ? 0 : 0.2)))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .accessibilityIdentifier("turn.error")
     }
 }
 
@@ -71,8 +34,6 @@ struct ThreadMessageRow: View, Equatable {
     var discardUnknown: ((String) -> Void)?
     var edit: (() -> Void)?
     var editingEnabled = true
-    @State private var copied = false
-    @State private var expanded = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.row == rhs.row && lhs.item === rhs.item
@@ -98,50 +59,33 @@ struct ThreadMessageRow: View, Equatable {
                 .clipped()
         }
         if isUser, !sources.isEmpty {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) { thumbnails }
-                ScrollView(.horizontal) { HStack(spacing: 8) { thumbnails } }.frame(height: 80)
-            }
+            ConversationImages { thumbnails }
         } else {
             thumbnails
         }
     }
 
     var body: some View {
-        VStack(alignment: isUser ? .trailing : .leading, spacing: 14) {
+        ConversationMessage(user: isUser, hasText: !(item.data.body ?? "").isEmpty,
+                            collapsible: item.source.collapsesUserText(),
+                            expandTitle: String(localized: "全文を表示"), collapseTitle: String(localized: "折りたたむ"),
+                            identifier: "item.\(item.data.id)") {
             if row.data().queued {
-                Label("キューから送信", systemImage: "tray.full").font(.caption).foregroundStyle(.secondary)
+                Text("キューから送信").font(.caption).foregroundStyle(.secondary)
             }
             if row.data().steer {
-                Label("追加の指示", systemImage: "arrow.turn.down.right").font(.caption).foregroundStyle(.secondary)
+                Text("追加の指示").font(.caption).foregroundStyle(.secondary)
             }
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 12) {
-                images
-                if let text = item.data.body, !text.isEmpty {
-                    if isUser {
-                        ConversationMarkdown(blocks: item.markdown, media: media, selection: selection,
-                                             textIdentifier: "message.user-text")
-                            .frame(maxHeight: item.source.collapsesUserText() && !expanded ? 176 : nil, alignment: .top)
-                            .clipped()
-                            .padding(14)
-                            .background(Color(UIColor.secondarySystemBackground),
-                                        in: RoundedRectangle(cornerRadius: 22))
-                    } else {
-                        ConversationMarkdown(blocks: item.markdown, media: media, selection: selection)
-                    }
-                }
-            }
-            .padding(.leading, isUser ? 42 : 0)
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("item.\(item.data.id)")
-            if isUser, item.source.collapsesUserText() {
-                Button { expanded.toggle() } label: { Text(expanded ? "折りたたむ" : "全文を表示") }
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+        } images: {
+            images
+        } content: {
+            ConversationMarkdown(blocks: item.markdown, media: media, selection: selection,
+                                 textIdentifier: isUser ? "message.user-text" : "message.assistant-text")
+        } actions: {
             if isUser || showActions {
                 actions
             }
+        } notices: {
             if isUser, item.data.nativeId == nil {
                 if let title = item.data.title {
                     Text(title).font(.caption).foregroundStyle(.secondary)
@@ -166,26 +110,20 @@ struct ThreadMessageRow: View, Equatable {
                 ErrorTextView(text: forkError).font(.caption).foregroundColor(.red)
             }
         }
-        .padding(.bottom, isUser ? 12 : 8)
-        .task(id: copied) {
-            guard copied else { return }
-            do { try await Task.sleep(for: .seconds(2)) } catch { return }
-            copied = false
-        }
     }
 
     /// Both speakers share copy and time; the user's row mirrors toward its bubble and cannot fork.
     private var actions: some View {
         let text = item.data.body ?? ""
-        return HStack(spacing: 20) {
+        return ConversationActions {
             if isUser {
                 time
             }
             if !text.isEmpty {
-                Button { UIPasteboard.general.string = text; copied = true } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                ConversationCopyButton(title: String(localized: isUser ? "発言をコピー" : "回答をコピー"),
+                                       copiedTitle: String(localized: "コピーしました")) {
+                    UIPasteboard.general.string = text
                 }
-                .accessibilityLabel(LocalizedStringKey(copied ? "コピーしました" : isUser ? "発言をコピー" : "回答をコピー"))
             }
             if let edit {
                 Button(action: edit) { Image(systemName: "pencil") }
@@ -206,8 +144,6 @@ struct ThreadMessageRow: View, Equatable {
                 time
             }
         }
-        .font(.system(size: 19)).foregroundColor(.secondary).buttonStyle(.plain)
-        .padding(.vertical, 4)
     }
 
     @ViewBuilder private var time: some View {
@@ -246,7 +182,7 @@ struct ThreadItemRow: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if item.data.collapsible {
-                DisclosureGroup(isExpanded: Binding(
+                ConversationWork(title: item.data.title ?? "", symbol: icon, expanded: Binding(
                     get: { isExpanded },
                     set: {
                         if $0 != isExpanded {
@@ -281,17 +217,7 @@ struct ThreadItemRow: View, Equatable {
                             )
                         }
                     }
-                } label: {
-                    Label {
-                        if let title = item.data.title {
-                            Text(title).lineLimit(1)
-                        }
-                    } icon: { Image(systemName: icon) }
-                        .font(.system(size: 17))
-                        .foregroundColor(.secondary)
-                        .padding(.vertical, 5)
-                        .accessibilityIdentifier("item.\(item.data.id)")
-                }
+                }.accessibilityIdentifier("item.\(item.data.id)")
             } else {
                 ConversationMarkdown(blocks: item.markdown, media: media, selection: selection)
                     .foregroundColor(item.data.kind == "agent" || item.data.kind == "user" ? .primary : .secondary)

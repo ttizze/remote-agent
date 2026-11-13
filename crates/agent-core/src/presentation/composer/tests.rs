@@ -95,6 +95,72 @@ fn resume_releases_held_input_in_order_instead_of_submitting_an_extra_message() 
 }
 
 #[test]
+fn resume_only_releases_held_messages_and_never_starts_an_empty_completed_conversation() {
+    for (interrupted, held, queued, expected) in [
+        (false, false, false, "none"),
+        (false, true, false, "none"),
+        (false, false, true, "none"),
+        (false, true, true, "queue"),
+        (true, false, false, "continue"),
+        (true, true, false, "continue"),
+        (true, false, true, "continue"),
+        (true, true, true, "queue"),
+    ] {
+        let mut snapshot = snapshot();
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.sessions.conversations)
+                .get_mut(&session())
+                .unwrap(),
+        );
+        thread.turns = Some(vec![Arc::new(Turn {
+            id: "latest".into(),
+            status: if interrupted {
+                TurnStatus::Interrupted
+            } else {
+                TurnStatus::Completed
+            },
+            ..Default::default()
+        })]);
+        thread.queue.held = held;
+        if queued {
+            thread
+                .queue
+                .inputs
+                .push(agent_protocol::operations::Submission {
+                    thread_id: session(),
+                    client_user_message_id: "waiting".into(),
+                    input: vec![],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    follow_up: FollowUp::Queue,
+                });
+        }
+        let composer = presentation(&snapshot);
+        let intents = composer.resume_intents("continuation".into());
+        assert_eq!(
+            composer.can_resume(),
+            expected != "none",
+            "{interrupted} {held} {queued}"
+        );
+        match expected {
+            "none" => assert!(intents.is_empty()),
+            "queue" => assert!(matches!(
+                &intents[..],
+                [crate::state::Intent::Queue {
+                    action: crate::state::follow_up::QueueAction::Resume,
+                    ..
+                }]
+            )),
+            "continue" => assert!(
+                matches!(&intents[..], [crate::state::Intent::EditComposer {text, ..}, crate::state::Intent::Submit {..}] if text == "Continue where you left off.")
+            ),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn a_conversation_still_opening_or_failed_to_open_keeps_its_draft_but_sends_nothing() {
     let mut snapshot = snapshot();
     crate::state::set_draft_text(&mut snapshot, session().into(), "下書き".into());

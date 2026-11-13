@@ -10,58 +10,32 @@ struct SetupProgressCard: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            VStack(alignment: .leading, spacing: 6) {
+            ConversationPreparation(showSteps: preparation.showSteps, error: preparation.error) {
                 HStack {
-                    ThreadActivityHeader(summary: preparation.text, canCollapse: false,
-                                         isInProgress: preparation.shimmer, expanded: false)
+                    ConversationActivityHeader(summary: preparation.text, canCollapse: false,
+                                               isInProgress: preparation.shimmer, expanded: false)
                     Text(verbatim: elapsed(preparation.startedAtMs, preparation.endedAtMs, context.date))
                         .font(.caption)
                 }
-                if preparation.showSteps {
-                    Divider()
-                    ForEach(preparation.steps, id: \.id) { step in
-                        HStack(spacing: 8) {
-                            if step.state == "running" {
-                                ProgressView().controlSize(.mini).frame(width: 20)
-                            } else {
-                                Image(systemName: symbol(step.state)).frame(width: 20)
-                            }
-                            Text(verbatim: step.label).frame(maxWidth: .infinity, alignment: .leading)
-                            if let detail = step.detail {
-                                Text(verbatim: detail).font(.caption)
-                            }
-                            if step.state != "pending", step.state != "skipped" {
-                                Text(verbatim: elapsed(step.startedAtMs, step.endedAtMs, context.date))
-                                    .font(.caption)
-                            }
-                        }
-                        .opacity(step.state == "pending" ? 0.4 : 1)
-                        .foregroundStyle(step.state == "failed" ? Color.red : Color.secondary)
-                        if !step.tail.isEmpty {
-                            Text(verbatim: step.tail.joined(separator: "\n")).font(.caption.monospaced())
-                                .textSelection(.enabled).padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6)).padding(
-                                    .leading,
-                                    28
-                                )
-                        }
-                    }
+            } steps: {
+                ForEach(preparation.steps, id: \.id) { step in
+                    ConversationPreparationStep(label: step.label, detail: step.detail,
+                                                tail: step.tail.joined(separator: "\n"), symbol: symbol(step.state),
+                                                pending: step.state == "pending", running: step.state == "running",
+                                                failed: step.state == "failed",
+                                                elapsed: step.state == "pending" || step.state == "skipped" ? nil :
+                                                    elapsed(step.startedAtMs, step.endedAtMs, context.date))
                 }
-                if let error = preparation.error {
-                    Text(verbatim: error).font(.caption).foregroundStyle(.red)
-                }
-                ViewThatFits(in: .horizontal) {
-                    HStack { actions }
-                    VStack(alignment: .leading) { actions }
-                }
+            } actions: {
+                actions
+            } details: {
                 if details {
                     ForEach(preparation.details, id: \.label) { detail in
                         LabeledContent(detail.label, value: detail.value)
                             .textSelection(.enabled).font(.caption.monospaced())
                     }.font(.caption)
                 }
-            }.font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
-                .accessibilityIdentifier("task.preparation")
+            }
         }
     }
 

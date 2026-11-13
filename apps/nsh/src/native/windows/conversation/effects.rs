@@ -7,6 +7,7 @@ use windows::Win32::{
     Graphics::Gdi::*,
     UI::{HiDpi::GetDpiForWindow, WindowsAndMessaging::*},
 };
+use windows::core::BOOL;
 
 pub(super) const TIMER: usize = 2;
 

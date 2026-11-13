@@ -2,9 +2,8 @@ use crate::l10n::{tr, tr_format};
 use crate::{Connection, shared::Shared};
 use agent_core::{
     presentation::conversation::{
-        ActivityPresentation, ConversationRow, ConversationRowContent, ItemSource, LANE_WIDTH,
-        RenderedConversation, RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress,
-        lane_padding, turn_rows,
+        ActivityPresentation, ConversationRowContent, LANE_WIDTH, RenderedConversation,
+        RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress, lane_padding, turn_rows,
     },
     state::{Intent, operations as op},
 };
@@ -100,7 +99,6 @@ struct Row {
     preparation: Option<agent_core::presentation::conversation::PreparationPresentation>,
     id: String,
     body: SharedString,
-    streaming: bool,
     kind: Kind,
     shape: Shape,
     /// A group's work, which its icon names (`Icon::work`).
@@ -141,7 +139,6 @@ impl Row {
             preparation: None,
             id,
             body: body.into(),
-            streaming: false,
             kind,
             shape,
             group_kind: String::new(),
@@ -257,15 +254,6 @@ fn gap(kind: Kind, shape: Shape, actions: bool, next: Option<Shape>) -> f32 {
 /// A row of a turn on T3 Code's timeline.
 fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
     use crate::activity::{Item, Status};
-    let streaming = match &row {
-        TurnRow::Row(ConversationRow {
-            content: ConversationRowContent::Response { item, .. },
-            ..
-        })
-        | TurnRow::Commentary(item) => matches!(&item.source, ItemSource::Native(native)
-            if native.status == agent_protocol::models::ItemStatus::Running),
-        _ => false,
-    };
     let activity_item =
         |row: &agent_core::presentation::conversation::ConversationRow, live, label| {
             let ConversationRowContent::Activity { item, turn_id } = &row.content else {
@@ -283,7 +271,7 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
         row.status = Some(status);
         row
     };
-    let mut shown = match row {
+    let shown = match row {
         TurnRow::Row(row) => source_row(row)?,
         TurnRow::Fold { activity, open } => {
             let mut row = Row::new(
@@ -383,8 +371,6 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             tr("実行を中断しました"),
         ),
     };
-    shown.streaming =
-        streaming && turn.source.status == agent_protocol::models::TurnStatus::Running;
     Some(shown)
 }
 

@@ -149,8 +149,11 @@ pub(super) fn items(
             .flatten()
             .filter_map(Value::as_str)
         {
-            picture_parts(&mut result, image, &row["media"], &row["document"], width);
+            picture_parts(&mut result, image, &row["media"], &row["document"]);
         }
+    }
+    if let Some(title) = row["planTitle"].as_str() {
+        result.push(Descriptor::Caption(title.into(), false));
     }
     let body_start = result.len();
     for (index, part) in row["parts"].as_array().into_iter().flatten().enumerate() {
@@ -175,7 +178,7 @@ pub(super) fn items(
             .flatten()
             .filter_map(Value::as_str)
         {
-            picture_parts(&mut result, image, &row["media"], &row["document"], width);
+            picture_parts(&mut result, image, &row["media"], &row["document"]);
         }
     }
     if row["collapsible"] == true {
@@ -296,7 +299,7 @@ fn append_part(
             ]}),
         ));
     } else if let Some(source) = part["Image"]["source"].as_str() {
-        picture_parts(output, source, media, document, width);
+        picture_parts(output, source, media, document);
     } else if part.get("Rule").is_some() {
         output.push(Descriptor::Rule);
     } else if let Some(link) = part.get("Link") {
@@ -307,13 +310,7 @@ fn append_part(
     }
 }
 
-fn picture_parts(
-    output: &mut Vec<Descriptor>,
-    source: &str,
-    media: &Value,
-    document: &Value,
-    width: i32,
-) {
+fn picture_parts(output: &mut Vec<Descriptor>, source: &str, media: &Value, document: &Value) {
     let labels = &document["labels"];
     let reason = document["mediaErrors"][source].as_str();
     let data = media[source].as_str().map(str::to_owned);

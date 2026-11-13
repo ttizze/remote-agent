@@ -98,7 +98,7 @@ pub(super) fn project_row(
 ) -> Value {
     let mut buttons = row_buttons(row, open);
     let mut body = if matches!(row.shape, Shape::Plan) {
-        format!("{}\n\n{}", row.body, row.note)
+        row.note.to_string()
     } else if let Some(agent) = &row.agent {
         agent.message.clone()
     } else {
@@ -160,7 +160,7 @@ pub(super) fn project_row(
     } else if row.notification.is_some() {
         parts = vec![crate::rich_text::plain(body.clone(), None)];
     }
-    let labels = json!({"copyCode":tr("コードをコピー"),"saveImage":tr("画像を名前を付けて保存…"),"queuedDescription":tr("実行中の作業の後に送信しました"),"steerDescription":tr("実行中の作業に追加で指示しました"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
+    let labels = json!({"copyCode":tr("コードをコピー"),"thisResponse":tr("この応答"),"showDetails":tr("詳細を表示"),"saveImage":tr("画像を名前を付けて保存…"),"queuedDescription":tr("実行中の作業の後に送信しました"),"steerDescription":tr("実行中の作業に追加で指示しました"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
     let focus = row.progress.is_some()
         || row.status.is_some()
         || row.preparation.as_ref().is_some_and(|setup| setup.shimmer);
@@ -174,10 +174,11 @@ pub(super) fn project_row(
     }
     let document = json!({"shimmer":shimmer.filter(|_|row.detail.is_none()),"secondary":row.kind == Kind::Activity,"role":if row.kind == Kind::User {"user"} else {"assistant"},"target":target,"sideChat":side_chat,"labels":labels,"menu":{"quote":tr("チャットに追加"),"explain":tr("詳細を表示"),"sideChat":tr("サイドチャットで質問")}});
     json!({
-        "id":row.id,"plan":matches!(row.shape,Shape::Plan),"timeAlways":row.kind == Kind::Activity,"preparation":row.preparation.as_ref().map(|setup| preparation_card(setup,open)),"icon":row_icon(row),"separator":matches!(row.shape,Shape::Divider | Shape::Interrupted),"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
+        "id":row.id,"plan":matches!(row.shape,Shape::Plan),"planTitle":matches!(row.shape,Shape::Plan).then_some(row.body.as_ref()),
+        "error":row.error.as_ref().map(|error|json!({"title":error.title,"message":error.message,"details":error.details,"reconnecting":error.is_reconnecting,"usageLimit":error.is_usage_limit})),"timeAlways":row.kind == Kind::Activity,"preparation":row.preparation.as_ref().map(|setup| preparation_card(setup,open)),"icon":row_icon(row),"separator":matches!(row.shape,Shape::Divider | Shape::Interrupted),"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
         "collapsible":row.kind == Kind::User && agent_core::presentation::conversation::should_collapse_user_message(&row.body),
         "trailing":matches!(row.shape,Shape::Actions),"fold":matches!(row.shape,Shape::Fold{..} | Shape::Working),"time":row.time,"queued":row.queued,"steer":row.steer,
-        "busy":row.streaming || row.status.is_some() || row.detail.as_ref().is_some_and(|item|item.live),"document":document,
+        "document":document,
         "agentStatus":row.agent.as_ref().map(|agent| agent.status)
     })
 }
@@ -1012,9 +1013,6 @@ fn operation_display(
                     item_id,
                 },
             };
-            if p.snapshot.operation_running(key.clone()) {
-                value["busy"] = json!(true);
-            }
             if let Some(error) = p.snapshot.operation_error(key) {
                 notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
                 retry = Some("retryItem");

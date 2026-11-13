@@ -224,8 +224,8 @@ extension ThreadScreen {
 
     @ViewBuilder
     func activityHeader(_ turn: ActivityPresentation, id: String, expanded: Bool) -> some View {
-        let header = ThreadActivityHeader(summary: turn.activitySummary, canCollapse: turn.activityCanCollapse,
-                                          isInProgress: turn.isInProgress, expanded: expanded)
+        let header = ConversationActivityHeader(summary: turn.activitySummary, canCollapse: turn.activityCanCollapse,
+                                                isInProgress: turn.isInProgress, expanded: expanded)
         if turn.activityCanCollapse {
             Button {
                 scroll.following = false

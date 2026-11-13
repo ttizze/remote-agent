@@ -36,37 +36,3 @@ import SwiftUI
         host.frame = NSRect(x: 0, y: 0, width: min(extent, size.width), height: size.height)
     }
 }
-
-@MainActor final class ShimmerLabel: NSTextField {
-    var shimmer: MessageShimmer? {
-        didSet { needsLayout = true }
-    }
-
-    private let sweep = NativeTextShimmer()
-    override func layout() {
-        super.layout()
-        if sweep.view.superview !== self {
-            addSubview(sweep.view)
-        }
-        let text = NSAttributedString(string: stringValue, attributes: [.font: font ?? NSFont.systemFont(ofSize: 14)])
-        sweep.update(shimmer, text: text, size: bounds.size, extent: text.size().width)
-    }
-}
-
-@MainActor final class ShimmerButton: NSButton {
-    var shimmer: MessageShimmer? {
-        didSet { needsLayout = true }
-    }
-
-    private let sweep = NativeTextShimmer()
-    override func layout() {
-        super.layout()
-        if sweep.view.superview !== self {
-            addSubview(sweep.view)
-        }
-        let rect = cell?.titleRect(forBounds: bounds) ?? bounds
-        let text = NSAttributedString(string: title, attributes: [.font: font ?? NSFont.systemFont(ofSize: 14)])
-        sweep.update(shimmer, text: text, size: rect.size, extent: text.size().width)
-        sweep.view.frame.origin = rect.origin
-    }
-}
