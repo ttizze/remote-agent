@@ -95,6 +95,13 @@ private extension Optional {
         }
     }
 
+    func preferredWidth(_ maximum: CGFloat) -> CGFloat {
+        min(
+            maximum,
+            blocks.map { ($0 as? NativeParagraph)?.text.attributedString().size().width ?? maximum }.max() ?? 0
+        )
+    }
+
     func measure(_ width: CGFloat) -> CGFloat {
         var y: CGFloat = 0
         for (index, block) in blocks.enumerated() {
@@ -243,11 +250,11 @@ private extension Optional {
         text = NativeParagraph(code.blocks)
         super.init(frame: .zero)
         wantsLayer = true; layer?.cornerRadius = 8
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        layer?.backgroundColor = NSColor(white: 17.0 / 255, alpha: 1).cgColor
         header.stringValue = code.label
         header.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        copy.title = "コードをコピー"; copy.target = self; copy.action = #selector(copyCode)
-        wrap.title = "折り返し解除"; wrap.target = self; wrap.action = #selector(toggleWrap)
+        copy.target = self; copy.action = #selector(copyCode)
+        wrap.target = self; wrap.action = #selector(toggleWrap)
         for button in [copy, wrap] {
             button.bezelStyle = .inline; button.controlSize = .small
         }
@@ -271,6 +278,15 @@ private extension Optional {
     override func update(document: MessageDocument, media: [String: String]) {
         super.update(document: document, media: media)
         copy.title = label("copyCode"); wrap.title = label(wrapping ? "unwrap" : "wrap")
+        for (button, key) in [(copy, "copy"), (wrap, "wrap")] {
+            button.isBordered = false; button.setAccessibilityLabel(button.title); button.toolTip = button.title
+            button.image = MessageAttributes.icon(key, size: 12); button.imagePosition = .imageOnly
+        }
+        if document.findKey != nil,
+           code.blocks
+           .contains(where: { $0.runs.contains(where: { $0.highlights?.contains(where: \.active) == true }) }) {
+            showSource = true
+        }
         mode.title = label(showSource ? "diagram" : "source")
         header.stringValue = code.label
         drawing.image = code.diagram.flatMap { Data(base64Encoded: $0.png) }.flatMap(NSImage.init(data:))
@@ -284,7 +300,7 @@ private extension Optional {
 
     override func measure(_ width: CGFloat) -> CGFloat {
         let available = max(1, width - 30)
-        copy.sizeToFit(); wrap.sizeToFit()
+        copy.setFrameSize(NSSize(width: 24, height: 24)); wrap.setFrameSize(NSSize(width: 24, height: 24))
         copy.frame.origin = NSPoint(x: max(0, width - copy.frame.width - 7), y: 5)
         wrap.frame.origin = NSPoint(x: max(0, copy.frame.minX - wrap.frame.width - 6), y: 5)
         header.frame = NSRect(x: 14, y: 8, width: max(0, wrap.frame.minX - 20), height: 16)
@@ -320,7 +336,7 @@ private extension Optional {
     private let scroll = NSScrollView()
     private let content = FlippedTranscriptCanvas()
     private var cells: [[TranscriptBody]] = []
-    private let copy = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let copy = NSButton()
     init(_ table: TranscriptPart.Table) {
         self.table = table
         super.init(frame: .zero)
@@ -328,8 +344,7 @@ private extension Optional {
         for row in table.rows {
             cells.append(row.map { _ in let cell = TranscriptBody(); content.addSubview(cell); return cell })
         }
-        copy.addItems(withTitles: ["表をコピー", "Markdownをコピー", "CSVをコピー"])
-        copy.target = self; copy.action = #selector(copyTable)
+        copy.target = self; copy.action = #selector(showCopyMenu); copy.isBordered = false
         addSubview(scroll); addSubview(copy)
     }
 
@@ -339,7 +354,8 @@ private extension Optional {
 
     override func update(document: MessageDocument, media: [String: String]) {
         super.update(document: document, media: media)
-        copy.removeAllItems(); copy.addItems(withTitles: [label("copyTable"), label("copyMarkdown"), label("copyCsv")])
+        copy.title = label("copyTable"); copy.setAccessibilityLabel(copy.title); copy.toolTip = copy.title
+        copy.image = MessageAttributes.icon("copy", size: 12); copy.imagePosition = .imageOnly
         for (r, row) in cells.enumerated() {
             for (c, cell) in row.enumerated() {
                 cell.send = { [weak self] in self?.send?($0) }
@@ -362,13 +378,22 @@ private extension Optional {
         }
         content.frame = NSRect(x: 0, y: 0, width: column * CGFloat(count), height: y)
         scroll.frame = NSRect(x: 0, y: 0, width: width, height: y + 16)
-        copy.sizeToFit(); copy.frame.origin = NSPoint(x: max(0, width - copy.frame.width), y: scroll.frame.maxY + 2)
+        copy.frame = NSRect(x: max(0, width - 24), y: scroll.frame.maxY + 2, width: 24, height: 24)
         return copy.frame.maxY
     }
 
-    @objc private func copyTable() {
+    @objc private func showCopyMenu() {
+        let menu = NSMenu()
+        for (index, key) in ["copyMarkdown", "copyCsv"].enumerated() {
+            let item = NSMenuItem(title: label(key), action: #selector(copyTable(_:)), keyEquivalent: "")
+            item.target = self; item.tag = index; menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: copy.frame.minX, y: copy.frame.maxY), in: self)
+    }
+
+    @objc private func copyTable(_ sender: NSMenuItem) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(copy.indexOfSelectedItem == 2 ? table.csv : table.source, forType: .string)
+        NSPasteboard.general.setString(sender.tag == 1 ? table.csv : table.source, forType: .string)
     }
 }
 
@@ -376,13 +401,14 @@ private extension Optional {
     private let source: String
     private let button = NSButton()
     private let image: Bool
+    private let error = NSTextField(wrappingLabelWithString: "")
     init(_ source: String, image: Bool = true) {
         self.source = source; self.image = image
         super.init(frame: .zero)
-        button.title = image ? "画像を開く" : "ファイルを開く"
         button.bezelStyle = .inline; button.target = self; button.action = #selector(open)
         button.imageScaling = .scaleProportionallyUpOrDown
-        addSubview(button)
+        error.font = .systemFont(ofSize: 12); error.textColor = .secondaryLabelColor
+        addSubview(button); addSubview(error)
     }
 
     @available(*, unavailable) required init?(coder _: NSCoder) {
@@ -391,22 +417,32 @@ private extension Optional {
 
     override func update(document: MessageDocument, media: [String: String]) {
         super.update(document: document, media: media)
-        button.title = label(image ? "openImage" : "openFile")
         button.image = media[source].flatMap { Data(base64Encoded: $0) }.flatMap(NSImage.init(data:))
-        if button.image != nil {
-            button.imagePosition = .imageOnly
-        }
+        let reason = document.mediaErrors?[source]
+        error.stringValue = reason ?? ""; error.isHidden = reason == nil
+        button
+            .title = label(reason != nil ? "retry" : image && button
+                .image == nil ? "loadingImage" : image ? "openImage" : "openFile")
+        button.setAccessibilityLabel(button.title)
+        button.imagePosition = button.image != nil ? .imageOnly : .noImage
     }
 
     override func measure(_ width: CGFloat) -> CGFloat {
         let size = button.image?.size ?? .zero
         let height = size.width > 0 ? min(300, size.height * min(1, width / size.width)) : 30
-        button.frame = NSRect(x: 0, y: 0, width: width, height: height)
-        return height
+        let messageHeight: CGFloat = error.isHidden ? 0 : ceil(error.cell?.cellSize(forBounds: NSRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: .greatestFiniteMagnitude
+        )).height ?? 20)
+        error.frame = NSRect(x: 0, y: 0, width: width, height: messageHeight)
+        button.frame = NSRect(x: 0, y: messageHeight, width: width, height: height)
+        return height + messageHeight
     }
 
     @objc private func open() {
-        emit(image ? "image" : "link", text: source)
+        emit(document.mediaErrors?[source] != nil ? "retryImage" : image ? "image" : "link", text: source)
     }
 }
 

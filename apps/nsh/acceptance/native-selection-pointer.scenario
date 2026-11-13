@@ -1,0 +1,13 @@
+# Native buttons must retain the selection snapshot across mouse-down and mouse-up.
+expect "検証プロジェクト" 30000
+press このプロジェクトで新しいチャット
+type "AI に依頼する" "[selection] [immediate] 選択のクリックを確かめます"
+press 送信
+expect "Needle Alpha Bravo." 30000
+type "AI に依頼する" "元の下書き"
+select "*Needle Alpha*" Alpha
+expect_inside チャットに追加
+drag チャットに追加 チャットに追加
+expect_inside チャットに追加
+drop
+expect "元の下書き\n\n> Alpha" after "AI に依頼する"

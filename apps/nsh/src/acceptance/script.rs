@@ -34,7 +34,8 @@
 //!   as an input method does, inserting `<text>` in place of the marked text or
 //!   accepting the marked text as it is.
 //! - `expect <text> [after <anchor>] [timeout-ms]` / `expect_absent ...`: waits
-//!   until some element's text contains `<text>`, or none does.
+//!   until some element's text contains `<text>`, or none does. Leading or
+//!   trailing `*` uses the same pattern syntax as labels.
 //! - `expect_scrolled <label> <from> <to> [after <anchor>] [timeout-ms]`: waits
 //!   until that element is a scroll area whose vertical scroll bar says it is
 //!   scrolled between `<from>` and `<to>` (0 at the content's start, 1 at its
@@ -431,6 +432,14 @@ fn absolute(path: &str) -> bool {
 
 /// Whether an element's `text` is the `label` a step names, `*` at either end of
 /// it matching any text there.
+pub(crate) fn contains(text: &str, expected: &str) -> bool {
+    if expected.starts_with('*') || expected.ends_with('*') {
+        labels(text, expected)
+    } else {
+        text.contains(expected)
+    }
+}
+
 pub(crate) fn labels(text: &str, label: &str) -> bool {
     let text = text.trim();
     match (label.strip_prefix('*'), label.strip_suffix('*')) {
@@ -583,6 +592,16 @@ fn named(name: &str) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expectations_match_substrings_and_explicit_label_patterns() {
+        assert!(contains("prefix target suffix", "target"));
+        assert!(contains("prefix target suffix", "*target*"));
+        assert!(!contains("prefix target suffix", "target*"));
+        assert!(contains("target suffix", "target*"));
+        assert!(contains("a*b", "a*b"));
+        assert!(!contains("ab", "a*b"));
+    }
 
     #[test]
     fn steps_take_quoted_labels_and_optional_timeouts() {

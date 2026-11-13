@@ -594,7 +594,7 @@ fn counted(tree: &Tree, find: &Find, count: usize) -> Attempt {
             tree.nodes[index]
                 .texts
                 .iter()
-                .any(|(_, text)| text.contains(find.text.as_str()))
+                .any(|(_, text)| super::script::contains(text, &find.text))
         })
         .count();
     let message = format!("{shown} elements show {:?}", find.text);
@@ -861,18 +861,19 @@ impl Target {
                     NSApplication::sharedApplication(mtm).activate();
                 }
                 window.makeKeyAndOrderFront(None);
-                mouse(window, NSEventType::LeftMouseDown, *from);
-                // In steps, as a hand moves, so a drag's claim sees it start
-                // and its label follows.
+                HELD.with_borrow_mut(|held| *held = Some((window.clone(), *to)));
+                post_mouse(window, NSEventType::LeftMouseDown, *from);
                 for step in 1..=DRAG_STEPS {
                     let along = f64::from(step) / f64::from(DRAG_STEPS);
-                    let at = NSPoint::new(
-                        from.x + (to.x - from.x) * along,
-                        from.y + (to.y - from.y) * along,
+                    post_mouse(
+                        window,
+                        NSEventType::LeftMouseDragged,
+                        NSPoint::new(
+                            from.x + (to.x - from.x) * along,
+                            from.y + (to.y - from.y) * along,
+                        ),
                     );
-                    mouse(window, NSEventType::LeftMouseDragged, at);
                 }
-                HELD.with_borrow_mut(|held| *held = Some((window.clone(), *to)));
             }
             Self::Click {
                 element,
@@ -1045,7 +1046,7 @@ impl Tree {
             self.nodes[index]
                 .texts
                 .iter()
-                .any(|(_, text)| text.contains(needle))
+                .any(|(_, text)| super::script::contains(text, needle))
         })
     }
 
@@ -1774,19 +1775,25 @@ fn release() -> Result<String, String> {
     let (window, at) = HELD
         .with_borrow_mut(Option::take)
         .ok_or("no drag holds a press")?;
-    mouse(&window, NSEventType::LeftMouseUp, at);
+    post_mouse(&window, NSEventType::LeftMouseUp, at);
     Ok(format!("released at {:.0}, {:.0}", at.x, at.y))
 }
 
 /// A left button's `kind` of event at `at` of `window`, handed to it now, as
 /// the system times its events.
-fn mouse(window: &NSWindow, kind: NSEventType, at: NSPoint) {
+fn mouse_event(window: &NSWindow, kind: NSEventType, at: NSPoint) -> Option<Retained<NSEvent>> {
     let now = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
-    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-        kind, at, NSEventModifierFlags::empty(), now, window.windowNumber(), None, 0, 1, 1.0,
-    );
-    if let Some(event) = event {
-        window.sendEvent(&event);
+    NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        kind,at,NSEventModifierFlags::empty(),now,window.windowNumber(),None,0,1,1.0,
+    )
+}
+
+// Native controls track mouse-down synchronously. Queue the following events
+// so their tracking loop can consume the drag and release in order.
+fn post_mouse(window: &NSWindow, kind: NSEventType, at: NSPoint) {
+    if let Some(event) = mouse_event(window, kind, at) {
+        let application = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        application.postEvent_atStart(&event, false);
     }
 }
 

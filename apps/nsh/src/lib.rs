@@ -20,8 +20,6 @@ mod devices;
 #[cfg(dictation)]
 mod dictation;
 mod editor;
-#[cfg(target_os = "ios")]
-pub mod embedded_ios;
 mod environment;
 mod file_actions;
 mod files;
@@ -46,7 +44,6 @@ mod root;
 #[cfg(desktop)]
 mod settings;
 mod shared;
-mod shimmer;
 mod side_chat;
 #[cfg(desktop)]
 mod sidebar;
@@ -194,10 +191,6 @@ pub fn App() -> impl IntoElement {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Area {
     Mobile,
-    #[cfg(target_os = "ios")]
-    Conversation {
-        pane: Option<u64>,
-    },
     #[cfg(desktop)]
     Shell,
 }
@@ -255,12 +248,6 @@ fn app_content(
         client,
         pairing: computed(move || state.with(|state| state.pairing)),
     };
-    #[cfg(target_os = "ios")]
-    let pane = match area {
-        Area::Conversation { pane } => pane,
-        _ => None,
-    };
-    #[cfg(not(target_os = "ios"))]
     let pane = None;
     let connection = Connection::new(handles, host, publication, pane);
     provide_context(connection);
@@ -293,25 +280,6 @@ fn app_content(
         })
     });
     provide_context(typography);
-    #[cfg(target_os = "ios")]
-    if matches!(area, Area::Conversation { .. }) {
-        if let Some(actions) = use_context::<native::ExternalActions>() {
-            effect(move || {
-                if let Some(error) = failure.get() {
-                    actions.emit(serde_json::json!({"action":"error", "text":error}));
-                    application.with(|application| application.dismiss_failure());
-                }
-            });
-        }
-        let timeline = conversation::Timeline::new(signal(true));
-        let inset = use_context::<root::ComposerInset>().unwrap().0;
-        effect(move || timeline.cover(inset.get()));
-        return view()
-            .flex_1()
-            .child(media::preview())
-            .child(timeline.list())
-            .into_element();
-    }
     let routes = signal(vec![0_u8]);
     let settings = computed(move || state.with(|state| state.settings));
     let provider = computed(move || state.with(|state| state.provider));
@@ -664,8 +632,6 @@ fn app_content(
                 .into_element();
         }
         Area::Mobile => {}
-        #[cfg(target_os = "ios")]
-        Area::Conversation { .. } => unreachable!("embedded conversation returned above"),
     }
     let navigation = nsh_base::nav_stack().flex_1().child(each(
         move || {

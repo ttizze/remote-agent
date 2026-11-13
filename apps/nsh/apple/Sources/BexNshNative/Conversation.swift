@@ -3,6 +3,11 @@ import AppKit
 struct ConversationButton: Decodable, Equatable {
     let action: String
     let title: String
+    var icon: String? = nil
+    var iconOnly: Bool? = nil
+    var disclosure: Bool? = nil
+    var menuItems: [MessageMenuItem]? = nil
+    var enabled: Bool? = nil
 }
 
 struct NativeConversationRow: Decodable, Equatable {
@@ -17,6 +22,11 @@ struct NativeConversationRow: Decodable, Equatable {
     let time: String?
     let queued: Bool
     let steer: Bool
+    var busy: Bool? = nil
+    var trailing: Bool? = nil
+    var fold: Bool? = nil
+    var collapsible: Bool? = nil
+    var top: Double? = nil
 }
 
 struct NativeConversationUpdate: Decodable {
@@ -25,6 +35,8 @@ struct NativeConversationUpdate: Decodable {
         let enabled: Bool
     }
 
+    struct Opening: Decodable { let loading: Bool; let text: String; let retry: String? }
+    var opening: Opening? = nil
     let scope: String
     let reset: Bool
     let order: [String]?
@@ -35,6 +47,8 @@ struct NativeConversationUpdate: Decodable {
     let history: History?
     let notice: String?
     let latest: String
+    var lane: Double? = nil
+    var padding: Double? = nil
 }
 
 @MainActor final class ConversationScrollView: NSScrollView {
@@ -72,6 +86,9 @@ struct NativeConversationUpdate: Decodable {
     private let history = NSButton(title: "", target: nil, action: nil)
     private let notice = NSTextField(wrappingLabelWithString: "")
     private let latest = NSButton(title: "↓", target: nil, action: nil)
+    private let opening = NSTextField(wrappingLabelWithString: "")
+    private let retryOpen = NSButton()
+    private let loading = NSProgressIndicator()
     private var source: NSTableViewDiffableDataSource<Int, String>!
     private var rows: [String: NativeConversationRow] = [:]
     private var heights: [String: CGFloat] = [:]
@@ -88,6 +105,8 @@ struct NativeConversationUpdate: Decodable {
     private var observers: [NSObjectProtocol] = []
     private var readingAnchor: Anchor?
     private var laneWidth: CGFloat = 0
+    private var maximumWidth: CGFloat = 736
+    private var padding: CGFloat = 24
     private var generation: UInt64 = 0
     private var active = true
     var send: (([String: Any]) -> Void)?
@@ -125,10 +144,16 @@ struct NativeConversationUpdate: Decodable {
         selection.orientation = .horizontal
         selection.spacing = 6
         selection.wantsLayer = true
-        selection.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        selection.layer?.backgroundColor = NSColor(white: 20.0 / 255, alpha: 1).cgColor
         selection.layer?.cornerRadius = 12
         selection.isHidden = true
         addSubview(selection)
+        opening.textColor = .secondaryLabelColor
+        loading.style = .spinning; loading.controlSize = .small; loading.isDisplayedWhenStopped = false
+        retryOpen.target = self; retryOpen.action = #selector(openAgain)
+        for child in [opening, retryOpen, loading] {
+            addSubview(child)
+        }
         for button in [history, latest] {
             button.target = self
             button.bezelStyle = .inline
@@ -229,12 +254,21 @@ struct NativeConversationUpdate: Decodable {
             self.order = order
         }
         following = update.following
+        maximumWidth = CGFloat(update.lane ?? 736)
+        padding = CGFloat(update.padding ?? 24)
         inset = CGFloat(update.inset)
         history.title = update.history?.title ?? ""
         history.isEnabled = update.history?.enabled ?? false
         history.isHidden = update.history == nil
         notice.stringValue = update.notice ?? ""
         notice.isHidden = notice.stringValue.isEmpty
+        opening.stringValue = update.opening?.text ?? ""; opening.isHidden = update.opening == nil
+        if update.opening?.loading == true {
+            loading.startAnimation(nil)
+        } else {
+            loading.stopAnimation(nil)
+        }
+        retryOpen.title = update.opening?.retry ?? ""; retryOpen.isHidden = update.opening?.retry == nil
         latest.setAccessibilityLabel(update.latest)
         needsLayout = true
         layoutSubtreeIfNeeded()
@@ -329,6 +363,14 @@ struct NativeConversationUpdate: Decodable {
         super.layout()
         let anchor = following ? nil : anchor()
         var top: CGFloat = 0
+        if !opening.isHidden {
+            opening.frame = NSRect(x: 48, y: 16, width: max(0, bounds.width - 72), height: 40)
+            loading.frame = NSRect(x: 24, y: 24, width: 16, height: 16)
+            top = 64
+            if !retryOpen.isHidden {
+                retryOpen.frame = NSRect(x: 48, y: 56, width: 100, height: 28); top = 96
+            }
+        }
         if !notice.isHidden {
             notice.frame = NSRect(x: 24, y: top, width: max(0, bounds.width - 48), height: 40)
             top += 40
@@ -341,7 +383,7 @@ struct NativeConversationUpdate: Decodable {
         scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: inset + 16, right: 0)
         let width = scroll.contentSize.width
         column.width = width
-        let lane = max(40, min(700, width - 48))
+        let lane = max(40, min(maximumWidth, width - padding * 2))
         if lane != laneWidth {
             laneWidth = lane
             heights.removeAll()
@@ -355,10 +397,10 @@ struct NativeConversationUpdate: Decodable {
     }
 
     private func updateLatest() {
-        let visible = table.rows(in:scroll.documentVisibleRect)
-        if lastVisible != visible {
+        let visible = table.rows(in: scroll.documentVisibleRect)
+        if lastVisible != visible, visible.location != NSNotFound {
             lastVisible = visible
-            send?(["action":"visible", "scope":scope, "start":visible.location, "end":NSMaxRange(visible)])
+            send?(["action": "visible", "scope": scope, "start": visible.location, "end": NSMaxRange(visible)])
         }
         let remaining = table.bounds.height - scroll.documentVisibleRect.maxY
         latest.isHidden = following || remaining < 48
@@ -419,7 +461,9 @@ struct NativeConversationUpdate: Decodable {
         for id in items {
             guard let title = titles[id], !title.isEmpty else { continue }
             let button = NSButton(title: title, target: self, action: #selector(selectionPressed(_:)))
-            button.identifier = .init(id); button.bezelStyle = .inline; selection.addArrangedSubview(button)
+            button.identifier = .init(id); button.isBordered = false; button.font = .systemFont(ofSize: 12)
+            button.image = MessageAttributes.icon(id, size: 14); button.imagePosition = .imageLeading
+            button.setAccessibilityLabel(title); selection.addArrangedSubview(button)
         }
         let width = selection.fittingSize.width + 16
         let y = content.isFlipped ? values[1] : content.bounds.height - values[1] - values[3]
@@ -436,6 +480,10 @@ struct NativeConversationUpdate: Decodable {
     @objc private func selectionPressed(_ sender: NSButton) {
         guard var action = selectedAction, let id = sender.identifier?.rawValue else { return }
         action["action"] = id; hideSelection(); send?(action)
+    }
+
+    @objc private func openAgain() {
+        send?(["action": "retryOpen", "scope": scope])
     }
 
     @objc private func loadHistory() {
@@ -476,13 +524,21 @@ struct NativeConversationUpdate: Decodable {
 
 @MainActor final class NativeConversationCell: NSTableCellView {
     private let body = TranscriptBody()
+    private let bubble = NSView()
     private let metadata = NSTextField(labelWithString: "")
+    private let marker = NSTextField(labelWithString: "")
+    private let progress = NSProgressIndicator()
+    private let rule = NSView()
+    private let expand = NSButton()
     private var buttons: [NSButton] = []
     private var row: NativeConversationRow?
     private var scope = ""
     private var lane: CGFloat = 0
     private var measured = NSSize.zero
     private var send: (([String: Any]) -> Void)?
+    private var tracking: NSTrackingArea?
+    private var hovered = false
+    private var unfolded = false
     var resized: (() -> Void)?
     override var isFlipped: Bool {
         true
@@ -494,10 +550,18 @@ struct NativeConversationUpdate: Decodable {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        addSubview(body); addSubview(metadata)
+        for child in [bubble, body, metadata, marker, progress, rule, expand] {
+            addSubview(child)
+        }
+        bubble.wantsLayer = true; bubble.layer?.cornerRadius = 18
+        bubble.layer?.backgroundColor = NSColor(white: 20.0 / 255, alpha: 1).cgColor
+        rule.wantsLayer = true; rule.layer?.backgroundColor = NSColor(white: 22.0 / 255, alpha: 1).cgColor
+        progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
+        metadata.font = .systemFont(ofSize: 12); marker.font = .systemFont(ofSize: 12)
+        metadata.textColor = NSColor(white: 170.0 / 255, alpha: 1); marker.textColor = metadata.textColor
+        expand.isBordered = false; expand.font = .systemFont(ofSize: 12); expand.contentTintColor = metadata.textColor
+        expand.target = self; expand.action = #selector(toggleExpanded)
         setAccessibilityElement(true); setAccessibilityRole(.group)
-        metadata.font = .systemFont(ofSize: 11)
-        metadata.textColor = .secondaryLabelColor
         body.resized = { [weak self] in self?.resized?() }
     }
 
@@ -506,44 +570,86 @@ struct NativeConversationUpdate: Decodable {
     }
 
     override func accessibilityChildren() -> [Any]? {
-        [body, metadata] + buttons
+        let actions: [Any] = row?.user == true ? [metadata] + buttons : buttons + [metadata]
+        return [marker, body] + actions + (expand.isHidden ? [] : [expand])
     }
 
-    @discardableResult
-    func update(
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking {
+            removeTrackingArea(tracking)
+        }
+        let next = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(next); tracking = next
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true; updateHover(); super.mouseEntered(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovered = false; updateHover(); super.mouseExited(with: event)
+    }
+
+    private func updateHover() {
+        guard let row else { return }
+        let alpha: CGFloat = hovered || row.trailing == true ? 1 : 0
+        metadata.alphaValue = alpha
+        for (index, button) in buttons
+            .enumerated() {
+            button.alphaValue = row.buttons[index].iconOnly == true ? alpha : 1
+        }
+    }
+
+    @discardableResult func update(
         _ row: NativeConversationRow,
         width: CGFloat,
         scope: String = "",
         send: @escaping ([String: Any]) -> Void
     ) -> Bool {
         let changed = self.row != row || self.scope != scope || lane != width
+        if self.row?.id != row.id || self.scope != scope {
+            unfolded = false; hovered = false
+        }
         self.send = send; self.scope = scope
         body.send = { [weak self] action in
             guard let self, let row = self.row else { return }
-            var value = action; value["scope"] = self.scope; value["row"] = row.id
-            self.send?(value)
+            var value = action; value["scope"] = self.scope; value["row"] = row.id; self.send?(value)
         }
         let parts = row.parts + row.images.map { TranscriptPart.image(.init(source: $0)) }
         body.update(parts, document: row.document, media: row.media)
-        metadata.stringValue = [
-            row.time,
+        metadata.stringValue = row.time ?? ""
+        marker.stringValue = [
             row.queued ? row.document.labels?["queued"] : nil,
             row.steer ? row.document.labels?["steer"] : nil
         ].compactMap(\.self).joined(separator: " · ")
+        marker.isHidden = marker.stringValue.isEmpty
         if self.row?.buttons != row.buttons {
             buttons.forEach { $0.removeFromSuperview() }
             buttons = row.buttons.map { action in
                 let button = NSButton(title: action.title, target: self, action: #selector(pressed(_:)))
-                button.identifier = .init(action.action); button.bezelStyle = .inline; button.controlSize = .small
-                button
-                    .setAccessibilityLabel(action.title.hasPrefix("▸ ") || action.title
-                        .hasPrefix("▾ ") ? String(action.title.dropFirst(2)) : action.title)
+                button.identifier = .init(action.action); button.isBordered = false; button.isEnabled = action
+                    .enabled ?? true
+                button.font = .systemFont(ofSize: action.disclosure == true ? 14 : 12)
+                button.contentTintColor = NSColor(white: 170.0 / 255, alpha: 1)
+                button.setAccessibilityLabel(action.title); button.toolTip = action.title
+                button.image = MessageAttributes.icon(action.icon, size: action.disclosure == true ? 14 : 12)
+                button.imagePosition = action.iconOnly == true ? .imageOnly : .imageTrailing
                 addSubview(button); return button
             }
         }
+        if row.busy == true {
+            progress.startAnimation(nil)
+        } else {
+            progress.stopAnimation(nil)
+        }
         self.row = row; lane = width
-        measure()
-        return changed
+        updateHover(); measure(); return changed
     }
 
     override func layout() {
@@ -551,30 +657,81 @@ struct NativeConversationUpdate: Decodable {
     }
 
     private func measure() {
-        let user = row?.user == true
-        let width = max(40, user ? lane * 0.85 : lane)
-        let inset: CGFloat = user ? 14 : 0
-        let x = max(24, (bounds.width - lane) / 2) + (user ? lane - width : 0)
-        let height = body.measure(max(1, width - inset * 2))
-        body.frame = NSRect(x: x + inset, y: 10, width: width - inset * 2, height: height)
-        body.wantsLayer = true; body.layer?.cornerRadius = user ? 12 : 0
-        body.layer?.backgroundColor = user ? NSColor.controlBackgroundColor.cgColor : nil
-        var bx = x
-        var y = body.frame.maxY + 6
-        for button in buttons {
-            button.sizeToFit()
-            if bx + button.frame.width > x + width {
-                bx = x; y += 24
-            }
-            button.frame.origin = NSPoint(x: bx, y: y); bx += button.frame.width + 10
+        guard let row else { return }
+        let outer = max(0, (bounds.width - lane) / 2)
+        let inset: CGFloat = row.user ? 12 : 4
+        let width = row.user ? min(lane * 0.8, max(24, ceil(body.preferredWidth(max(1, lane * 0.8 - 24))) + 24)) : lane
+        let x = outer + (row.user ? lane - width : 0)
+        var y = CGFloat(row.top ?? 0)
+        if !marker.isHidden {
+            marker.sizeToFit(); marker.frame.origin = NSPoint(x: x, y: y); y += 20
         }
-        metadata.sizeToFit(); metadata.frame.origin = NSPoint(x: x, y: y + (buttons.isEmpty ? 0 : 24))
-        measured = NSSize(width: lane + 48, height: ceil(metadata.frame.maxY + max(8, row?.gap ?? 0)))
+        let height = body.measure(max(1, width - inset * 2))
+        let collapsed = row.collapsible == true && !unfolded && row.document.findKey == nil
+        let drawn = collapsed ? min(176, height) : height
+        body.frame = NSRect(x: x + inset, y: y + (row.user ? 12 : 0), width: width - inset * 2, height: drawn)
+        body.wantsLayer = true; body.layer?.masksToBounds = collapsed
+        bubble.isHidden = !row.user || row.parts.isEmpty
+        bubble.frame = NSRect(x: x, y: y, width: width, height: drawn + (row.user ? 24 : 0))
+        y = max(body.frame.maxY, bubble.isHidden ? 0 : bubble.frame.maxY)
+        progress.frame = NSRect(x: max(0, x - 20), y: body.frame.minY, width: 16, height: 16)
+        expand.isHidden = row.collapsible != true
+        if !expand.isHidden {
+            expand.title = row.document.labels?[unfolded ? "collapse" : "expand"] ?? ""
+            expand.sizeToFit(); expand.frame.origin = NSPoint(x: x + width - expand.frame.width, y: y + 2); y = expand
+                .frame.maxY
+        }
+        y += row.fold == true ? 4 : row.user ? 4 : row.parts.isEmpty ? 2 : 6
+        metadata.sizeToFit()
+        let widths = row.buttons.enumerated().map { index, action -> CGFloat in
+            if action.iconOnly == true {
+                return 24
+            }
+            buttons[index].sizeToFit(); return buttons[index].frame.width + 8
+        }
+        let gap: CGFloat = row.user ? 2 : 8
+        let total = widths.reduce(0,+) + CGFloat(max(0, widths.count - 1)) * gap
+        var bx = row.user ? x + width - total - 4 : x + 4
+        if row.user {
+            metadata.frame.origin = NSPoint(x: max(x, bx - metadata.frame.width - 8), y: y + 4)
+        }
+        for (index, button) in buttons.enumerated() {
+            button.frame = NSRect(x: bx, y: y, width: widths[index], height: 24); bx += widths[index] + gap
+        }
+        if !row.user {
+            metadata.frame.origin = NSPoint(x: bx, y: y + 4)
+        }
+        let meta = !buttons.isEmpty || !metadata.stringValue.isEmpty
+        if meta {
+            y += 24
+        }
+        rule.isHidden = row.fold != true
+        rule.frame = NSRect(x: outer, y: y + 4, width: lane, height: 1)
+        measured = NSSize(width: lane, height: ceil(max(1, y + row.gap + (row.fold == true ? 8 : 0))))
     }
 
-    @objc private func pressed(_ button: NSButton) {
-        guard let row, let action = button.identifier?.rawValue else { return }
-        send?(["action": action, "row": row.id, "scope": scope])
+    @objc private func toggleExpanded() {
+        unfolded.toggle(); measure(); resized?()
+    }
+
+    @objc private func pressed(_ sender: NSButton) {
+        guard let row, let id = sender.identifier?.rawValue else { return }
+        if let items = row.buttons.first(where: { $0.action == id })?.menuItems {
+            let menu = NSMenu()
+            for item in items {
+                let entry = NSMenuItem(title: item.title, action: #selector(menuPressed(_:)), keyEquivalent: "")
+                entry.target = self; entry.representedObject = item.id; entry.isEnabled = item.enabled ?? true; menu
+                    .addItem(entry)
+            }
+            menu.popUp(positioning: nil, at: NSPoint(x: sender.frame.minX, y: sender.frame.maxY), in: self)
+        } else {
+            send?(["action": id, "row": row.id, "scope": scope])
+        }
+    }
+
+    @objc private func menuPressed(_ item: NSMenuItem) {
+        guard let row, let id = item.representedObject as? String else { return }
+        send?(["action": id, "row": row.id, "scope": scope])
     }
 }
 

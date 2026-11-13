@@ -644,7 +644,7 @@ jobs:
             -NoNewWindow -Wait -PassThru -RedirectStandardOutput $buildNumberPath
           $desktopBuildNumber = Get-Content -Raw $buildNumberPath
           if ($probe.ExitCode -ne 0 -or "$desktopBuildNumber".Trim() -ne "0") {
-            throw "The desktop updater could not read the development build number."
+            throw "The desktop updater returned exit code $($probe.ExitCode) and build number '$desktopBuildNumber'; expected 0."
           }
       - name: Build the SDK runtime beside the Host
         if: ${{ !inputs.release-tag }}

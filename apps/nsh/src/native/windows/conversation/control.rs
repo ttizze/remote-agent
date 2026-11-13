@@ -10,8 +10,15 @@ use std::{
 use windows::{
     Win32::{
         Foundation::*,
+        Graphics::Gdi::*,
         System::LibraryLoader::*,
-        UI::{Controls::RichEdit::*, Shell::*, WindowsAndMessaging::*},
+        UI::{
+            Controls::{DRAWITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_SELECTED, RichEdit::*},
+            HiDpi::GetDpiForWindow,
+            Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL},
+            Shell::*,
+            WindowsAndMessaging::*,
+        },
     },
     core::{Interface, PCWSTR, PWSTR, w},
 };
@@ -26,6 +33,7 @@ pub(super) fn message(hwnd: HWND, id: u32, w: usize, l: isize) -> LRESULT {
 pub(super) enum Descriptor {
     Text(Document, bool),
     Button(String, Value),
+    Caption(String),
 }
 pub(super) struct Item {
     edit: Edit,
@@ -44,6 +52,10 @@ pub(super) struct EditContext {
     document: RefCell<Document>,
     wrap: Cell<bool>,
     button: bool,
+    compact: Cell<bool>,
+    caption: bool,
+    symbol: Cell<Option<u16>>,
+    icon_only: Cell<bool>,
 }
 
 pub(super) fn items(
@@ -58,8 +70,7 @@ pub(super) fn items(
         append_part(
             &mut result,
             part,
-            id,
-            index,
+            (id, index),
             wrapping.get(&(id.into(), index)).copied().unwrap_or(true),
             width,
             &row["media"],
@@ -83,41 +94,52 @@ pub(super) fn items(
             json!({"action":"image","text":image}),
         ));
     }
+    let time = row["time"].as_str().filter(|time| !time.is_empty());
+    if row["user"] == true
+        && let Some(time) = time
+    {
+        result.push(Descriptor::Caption(time.into()));
+    }
     for button in row["buttons"].as_array().into_iter().flatten() {
         result.push(Descriptor::Button(
             button["title"].as_str().unwrap_or_default().into(),
-            json!({"action":button["action"],"row":id}),
+            button.clone(),
         ));
     }
-    if let Some(time) = row["time"].as_str() {
-        result.push(Descriptor::Text(
-            rich_document::paragraphs(&[json!({"runs":[{"text":time}]})]),
-            true,
-        ));
+    if row["user"] != true
+        && let Some(time) = time
+    {
+        result.push(Descriptor::Caption(time.into()));
     }
+
     result
 }
 
 fn append_part(
     output: &mut Vec<Descriptor>,
     part: &Value,
-    row: &str,
-    index: usize,
+    key: (&str, usize),
     wrapping: bool,
     width: i32,
     media: &Value,
     labels: &Value,
 ) {
+    let (row, index) = key;
     if let Some(blocks) = part["Text"].as_array() {
         output.push(Descriptor::Text(rich_document::paragraphs(blocks), true));
     } else if let Some(code) = part.get("Code") {
         let label = code["label"].as_str().unwrap_or_default();
+        if !label.is_empty() {
+            output.push(Descriptor::Text(
+                rich_document::paragraphs(&[
+                    json!({"size":11,"runs":[{"text":label,"code":true}]}),
+                ]),
+                true,
+            ));
+        }
         output.push(Descriptor::Button(
-            format!(
-                "{label} · {}",
-                labels["copyCode"].as_str().unwrap_or_default()
-            ),
-            json!({"action":"copyText","text":code["source"]}),
+            labels["copyCode"].as_str().unwrap_or_default().to_owned(),
+            json!({"action":"copyText","text":code["source"],"iconOnly":true,"icon":"copy"}),
         ));
         output.push(Descriptor::Button(
             if wrapping {
@@ -126,7 +148,7 @@ fn append_part(
                 labels["wrap"].as_str().unwrap_or_default()
             }
             .into(),
-            json!({"action":"wrapCode","row":row,"part":index}),
+            json!({"action":"wrapCode","row":row,"part":index,"iconOnly":true,"icon":"wrap"}),
         ));
         let blocks = code["blocks"]
             .as_array()
@@ -201,6 +223,10 @@ impl Item {
             document: RefCell::new(Document::default()),
             wrap: Cell::new(true),
             button,
+            caption: matches!(descriptor, Descriptor::Caption(_)),
+            compact: Cell::new(false),
+            symbol: Cell::new(None),
+            icon_only: Cell::new(false),
         });
         let class = if button {
             w!("BUTTON")
@@ -260,6 +286,8 @@ impl Item {
                 (ENM_REQUESTRESIZE | ENM_LINK) as isize,
             );
             message(window, EM_AUTOURLDETECT, 0, 0);
+            // Match the shared UI point sizes at Windows' 96-DPI logical scale.
+            message(window, EM_SETZOOM, 3, 4);
         }
         let mut item = Self {
             edit: Edit { window, context },
@@ -269,7 +297,9 @@ impl Item {
         item
     }
     pub fn update(&mut self, descriptor: &Descriptor, scope: &str, row: &Value) -> bool {
-        if self.button != matches!(descriptor, Descriptor::Button(..)) {
+        if self.button != matches!(descriptor, Descriptor::Button(..))
+            || self.edit.context.caption != matches!(descriptor, Descriptor::Caption(_))
+        {
             return false;
         }
         let base = json!({"scope":scope,"row":row["id"],"target":row["document"]["target"],"menu":row["document"]["menu"],"sideChat":row["document"]["sideChat"]});
@@ -279,28 +309,73 @@ impl Item {
                 unsafe {
                     let _ = SetWindowTextW(self.edit.window, PCWSTR(title.as_ptr()));
                 }
+                unsafe {
+                    let _ = EnableWindow(self.edit.window, action["enabled"] != false);
+                }
+                self.edit.context.compact.set(action["iconOnly"] == true);
+                self.edit
+                    .icon(action["icon"].as_str(), action["iconOnly"] == true);
                 let mut base = base;
-                for (key, value) in action.as_object().into_iter().flatten() {
-                    base[key] = value.clone();
+                for key in ["action", "text", "part", "menuItems"] {
+                    if let Some(value) = action.get(key) {
+                        base[key] = value.clone();
+                    }
                 }
                 *self.edit.context.payload.borrow_mut() = base;
             }
             Descriptor::Text(document, wrap) => {
                 *self.edit.context.payload.borrow_mut() = base;
-                if self.edit.context.wrap.replace(*wrap) != *wrap {
-                    self.edit.context.width.set(0);
-                }
-                if self.edit.context.document.borrow().rtf != document.rtf {
-                    self.edit.set_document(document);
-                }
+                self.text(document, *wrap);
+            }
+            Descriptor::Caption(text) => {
+                *self.edit.context.payload.borrow_mut() = base;
+                self.text(
+                    &rich_document::paragraphs(&[json!({"size":12,"runs":[{"text":text}]})]),
+                    true,
+                );
             }
         }
         true
     }
+    fn text(&self, document: &Document, wrap: bool) {
+        if self.edit.context.wrap.replace(wrap) != wrap {
+            self.edit.context.width.set(0);
+        }
+        if self.edit.context.document.borrow().rtf != document.rtf {
+            self.edit.set_document(document);
+        }
+    }
+    pub fn inline_width(&self, scale: f32) -> Option<i32> {
+        if self.edit.context.caption {
+            Some(
+                ((self.edit.context.document.borrow().text.chars().count() as f32 * 7.0 + 8.0)
+                    * scale) as i32,
+            )
+        } else if self.edit.context.compact.get() {
+            Some((24.0 * scale) as i32)
+        } else {
+            None
+        }
+    }
+    pub fn visibility(&self, hovered: bool, trailing: bool) {
+        let payload = self.edit.context.payload.borrow();
+        let meta = self.edit.context.caption
+            || matches!(payload["action"].as_str(), Some("copy" | "fork" | "edit"));
+        unsafe {
+            let _ = ShowWindow(
+                self.edit.window,
+                if !meta || hovered || trailing {
+                    SW_SHOWNOACTIVATE
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
     pub fn place(&mut self, x: i32, y: i32, width: i32, scale: f32) -> i32 {
         let context = &self.edit.context;
         let changed = context.width.replace(width) != width;
-        let height = if self.button {
+        let height = if self.button || context.caption {
             (26.0 * scale) as i32
         } else {
             context.height.get()
@@ -335,6 +410,134 @@ impl Item {
 }
 
 impl Edit {
+    fn icon(&self, name: Option<&str>, only: bool) {
+        // OS glyphs are independent of the semantic WindowText accessibility name.
+        self.context.symbol.set(match name {
+            Some("copy") => Some(0xe8c8),
+            Some("edit") => Some(0xe70f),
+            Some("fork") => Some(0xef90),
+            Some("more") => Some(0xe712),
+            Some("chevronDown") => Some(0xe70d),
+            Some("chevronRight") => Some(0xe76c),
+            Some("check") => Some(0xe8fb),
+            Some("wrap") => Some(0xe751),
+            _ => None,
+        });
+        self.context.icon_only.set(only);
+        unsafe {
+            let style = GetWindowLongPtrW(self.window, GWL_STYLE);
+            let _ = SetWindowLongPtrW(
+                self.window,
+                GWL_STYLE,
+                (style & !(BS_TYPEMASK as isize))
+                    | if self.context.symbol.get().is_some() {
+                        BS_OWNERDRAW as isize
+                    } else {
+                        BS_PUSHBUTTON as isize
+                    }
+                    | BS_FLAT as isize,
+            );
+        }
+    }
+    pub unsafe fn draw(item: &DRAWITEMSTRUCT) -> bool {
+        let Some(context) = (unsafe { Self::context(item.hwndItem) }) else {
+            return false;
+        };
+        let Some(symbol) = context.symbol.get() else {
+            return false;
+        };
+        let scale = unsafe { GetDpiForWindow(item.hwndItem) }.max(96) as f32 / 96.0;
+        unsafe {
+            let saved = SaveDC(item.hDC);
+            let brush = CreateSolidBrush(COLORREF(if item.itemState.contains(ODS_SELECTED) {
+                0x282828
+            } else {
+                0x080808
+            }));
+            FillRect(item.hDC, &item.rcItem, brush);
+            let _ = DeleteObject(brush.into());
+            SetBkMode(item.hDC, TRANSPARENT);
+            SetTextColor(
+                item.hDC,
+                COLORREF(if item.itemState.contains(ODS_DISABLED) {
+                    0x7e7e7e
+                } else {
+                    0xaaaaaa
+                }),
+            );
+            let font = CreateFontW(
+                -(12.0 * scale) as i32,
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                0,
+                w!("Segoe Fluent Icons"),
+            );
+            SelectObject(item.hDC, font.into());
+            let mut rect = item.rcItem;
+            if !context.icon_only.get() {
+                rect.left = (rect.right - (20.0 * scale) as i32).max(rect.left);
+            }
+            DrawTextW(
+                item.hDC,
+                &mut [symbol],
+                &mut rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            if !context.icon_only.get() {
+                let text_font = CreateFontW(
+                    -(14.0 * scale) as i32,
+                    0,
+                    0,
+                    0,
+                    400,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    0,
+                    w!("Segoe UI"),
+                );
+                SelectObject(item.hDC, text_font.into());
+                let mut title =
+                    vec![0_u16; GetWindowTextLengthW(item.hwndItem).max(0) as usize + 1];
+                let length = GetWindowTextW(item.hwndItem, &mut title).max(0) as usize;
+                let mut rect = item.rcItem;
+                rect.left += (4.0 * scale) as i32;
+                rect.right -= (20.0 * scale) as i32;
+                DrawTextW(
+                    item.hDC,
+                    &mut title[..length],
+                    &mut rect,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                );
+                SelectObject(item.hDC, font.into());
+                let _ = DeleteObject(text_font.into());
+            }
+            let _ = RestoreDC(item.hDC, saved);
+            let _ = DeleteObject(font.into());
+            if item.itemState.contains(ODS_FOCUS) {
+                DrawFocusRect(item.hDC, &item.rcItem);
+            }
+        }
+        true
+    }
+    pub unsafe fn row(window: HWND) -> Option<String> {
+        let context = unsafe { Self::context(window) }?;
+        context.payload.borrow()["row"].as_str().map(str::to_owned)
+    }
+
     fn set_document(&self, next: &Document) {
         let range = self.range();
         let selected = self.selected(range);
@@ -415,6 +618,7 @@ impl Edit {
             let mut action = context.payload.borrow().clone();
             action["action"] = json!("link");
             action["text"] = json!(destination);
+            action["command"] = json!(unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0);
             context.owner.emit("action", action);
         }
     }
@@ -502,6 +706,9 @@ fn popup(window: HWND, context: &EditContext) {
         (&mut range as *mut CHARRANGE) as isize,
     );
     let text = selected(window, range);
+    if text.is_empty() && file_menu(window, context) {
+        return;
+    }
     if text.is_empty() {
         return;
     }
@@ -577,6 +784,16 @@ unsafe extern "system" fn procedure(
         Rc::increment_strong_count(data as *const EditContext);
         Rc::from_raw(data as *const EditContext)
     };
+    if msg == WM_MOUSEMOVE {
+        unsafe {
+            let _ = PostMessageW(
+                Some(context.parent),
+                super::HOVER,
+                WPARAM(0),
+                LPARAM(hwnd.0 as isize),
+            );
+        }
+    }
     if !context.button && msg == WM_MOUSEWHEEL {
         return message(context.parent, msg, w.0, l.0);
     }
@@ -589,4 +806,79 @@ unsafe extern "system" fn procedure(
         popup(hwnd, &context);
     }
     result
+}
+
+fn file_menu(window: HWND, context: &EditContext) -> bool {
+    let mut point = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut point);
+        let _ = ScreenToClient(window, &mut point);
+    }
+    let at = message(window, EM_CHARFROMPOS, 0, (&point as *const POINT) as isize).0;
+    let link = context
+        .document
+        .borrow()
+        .links
+        .iter()
+        .find(|link| link.start <= at as usize && (at as usize) < link.end)
+        .cloned();
+    let Some(link) = link.filter(|link| link.menu.is_array()) else {
+        return false;
+    };
+    let payload = context.payload.borrow().clone();
+    let mut actions = Vec::new();
+    unsafe fn append(menu: HMENU, items: &[Value], actions: &mut Vec<String>) {
+        for item in items {
+            let title: Vec<_> = item["title"]
+                .as_str()
+                .unwrap_or_default()
+                .encode_utf16()
+                .chain([0])
+                .collect();
+            if let Some(children) = item["children"].as_array() {
+                if let Ok(child) = unsafe { CreatePopupMenu() } {
+                    unsafe {
+                        append(child, children, actions);
+                        let _ =
+                            AppendMenuW(menu, MF_POPUP, child.0 as usize, PCWSTR(title.as_ptr()));
+                    }
+                }
+            } else if let Some(id) = item["id"].as_str() {
+                actions.push(id.to_owned());
+                unsafe {
+                    let _ = AppendMenuW(menu, MF_STRING, actions.len(), PCWSTR(title.as_ptr()));
+                }
+            }
+        }
+    }
+    unsafe {
+        let Ok(menu) = CreatePopupMenu() else {
+            return false;
+        };
+        append(menu, link.menu.as_array().unwrap(), &mut actions);
+        let mut point = POINT::default();
+        let _ = GetCursorPos(&mut point);
+        let chosen = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY,
+            point.x,
+            point.y,
+            None,
+            window,
+            None,
+        )
+        .0;
+        let _ = DestroyMenu(menu);
+        if let Some(id) = chosen
+            .checked_sub(1)
+            .and_then(|index| actions.get(index as usize))
+        {
+            let mut value = payload;
+            value["action"] = json!(link.action);
+            value["id"] = json!(id);
+            value["text"] = json!(link.destination);
+            context.owner.emit("action", value);
+        }
+    }
+    true
 }

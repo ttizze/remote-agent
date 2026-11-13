@@ -14,61 +14,23 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 mod copy_tests;
 pub(crate) mod native;
-mod preparation;
 
 /// T3 Code's timeline as its dark theme draws it.
 pub(crate) mod look {
     use crate::ui::colors;
     use nsh_core::element::{Rgba, rgb};
-
-    /// `--muted-foreground` and `--secondary-label`: work rows, headers, times.
     pub(crate) fn muted() -> Rgba {
         colors::text(0xaaaaaa)
     }
-    /// `--icon-muted`: a tool's icon.
-    pub(crate) fn icon() -> Rgba {
-        colors::text(0x7e7e7e)
-    }
-    /// `--foreground`: the shimmer's band, a hovered header.
     pub(crate) fn foreground() -> Rgba {
         colors::text(0xe6e6e6)
     }
-    /// `max-h-44`: a long message's folded height.
-    pub(crate) const FOLDED_MESSAGE: f32 = 176.0;
-    /// `bg-message`: the user's bubble.
-    pub(crate) const BUBBLE: Rgba = rgb(0x141414);
-    /// `border-border/60`: the rule under a turn's header.
     pub(crate) fn rule() -> Rgba {
         colors::line(0x161616)
     }
-    /// `text-foreground/80`: an error's message.
-    pub(crate) fn message() -> Rgba {
-        colors::text(0xc4c4c4)
-    }
-    /// `bg-input/32`: a code block.
     pub(crate) const CODE: Rgba = rgb(0x111111);
-    /// `--destructive`.
     pub(crate) const DESTRUCTIVE: Rgba = rgb(0xfb414a);
-    /// `border-border/80` around a card (a proposed plan) and an avatar.
-    pub(crate) fn card_border() -> Rgba {
-        colors::line(0x1b1b1b)
-    }
-    /// `--secondary` and an outlined control's fill: a badge, a menu button.
-    pub(crate) const CONTROL: Rgba = rgb(0x161616);
-    /// A subagent's avatar.
-    pub(crate) const AVATAR: Rgba = rgb(0x121212);
-    /// `--success`: a subagent that finished.
-    pub(crate) const SUCCESS: Rgba = rgb(0x01b276);
-    /// `text-sm leading-relaxed`, in rows that are not Markdown.
     pub(crate) const TEXT: f32 = 14.0;
-    pub(crate) const LINE: f32 = 22.75;
-    /// Touchscreens keep message actions visible; desktops reveal them on hover.
-    pub(crate) const IDLE_ACTION_OPACITY: f32 = if cfg!(target_os = "ios") { 1.0 } else { 0.0 };
-    /// A work log row's icon box (`size-6`), its icon (`size-4`) and the gap
-    /// to its label (`gap-1.5`).
-    pub(crate) const ICON_BOX: f32 = 24.0;
-    pub(crate) const ICON_SIZE: f32 = 16.0;
-    pub(crate) const ICON_GAP: f32 = 6.0;
 }
 
 pub(crate) fn reveal_row(list: ElementRef, index: u32) {
@@ -533,8 +495,7 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
     }
     Some(shown)
 }
-/// The background work the agent woke for, as T3 Code's notification row:
-/// the work's icon beside what it did.
+/// Shared timeline state; the platform viewport owns row measurements.
 #[derive(Clone, Copy)]
 pub(crate) struct Timeline {
     following: Signal<bool>,
@@ -554,7 +515,6 @@ pub(crate) struct Timeline {
     /// The composer's current height positions the latest-message button and
     /// starts the next conversation's scroll reservation.
     covered: Signal<f32>,
-    position: Stored<Option<agent_core::presentation::conversation::ScrollPosition>>,
 }
 
 impl Timeline {
@@ -629,7 +589,6 @@ impl Timeline {
             width: signal(0.0),
             inset: signal(0.0),
             covered: signal(0.0),
-            position: stored(None),
         }
     }
 
@@ -839,59 +798,7 @@ fn strip(
         }))
 }
 
-/// A completed turn's folded work, as T3 Code's: its label and disclosure,
-/// its time at the end while the pointer is over it, ruled below.
-fn opening(connection: Connection) -> View {
-    use crate::ui::{self, colors};
-    use agent_core::presentation::context::ConversationOpening;
-    let opening = computed(move || connection.context.with(|p| p.opening()));
-    let failure = move || match opening.get() {
-        Some(ConversationOpening::Failed { error }) => Some(error),
-        _ => None,
-    };
-    view()
-        .w_full()
-        .items_center()
-        .child(when(
-            move || opening.get() == Some(ConversationOpening::Loading),
-            || {
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .py_8()
-                    .text_color(colors::muted())
-                    .child(ui::spinner())
-                    .child(text(tr("会話を読み込み中…")).text_size(px(14.0)))
-            },
-        ))
-        .child(when(
-            move || failure().is_some(),
-            move || {
-                view()
-                    .items_center()
-                    .gap_2()
-                    .py_8()
-                    .px_6()
-                    .child(
-                        text(move || failure().map(|error| error.to_string()).unwrap_or_default())
-                            .selectable(true),
-                    )
-                    .child(ui::text_button(tr("再試行"), move || {
-                        if let Some(thread) = connection
-                            .context
-                            .with_untracked(|p| p.navigation().thread_id)
-                        {
-                            connection.dispatch(Intent::ReadThread(op::ReadThread::open(thread)));
-                        }
-                    }))
-            },
-        ))
-}
-
-/// A turn's error, as T3 Code's provider error row: its alert and what
-/// failed, its time at the end, the provider's message below; Bex's details
-/// under it, and copying them all while the pointer is over the row.
+/// Rewinding belongs to the conversation owner, including its confirmation.
 fn edit_from_here(connection: Connection, turn: agent_protocol::ids::TurnId) {
     let Some(thread_id) = connection
         .context

@@ -7,16 +7,6 @@ use serde_json::{Value, json};
 #[cfg(any(windows, test))]
 mod rich_document;
 
-/// The embedding screen owns the presentation of selected text and links.
-#[derive(Clone, Copy)]
-pub(crate) struct ExternalActions(pub Stored<std::sync::Arc<dyn Fn(Value) + Send + Sync>>);
-
-impl ExternalActions {
-    pub fn emit(self, event: Value) {
-        self.0.with(|send| send(event));
-    }
-}
-
 #[derive(Clone, PartialEq, serde::Serialize)]
 pub(crate) struct RowIndicators {
     pub activity: Option<agent_core::presentation::thread_status::ThreadActivity>,

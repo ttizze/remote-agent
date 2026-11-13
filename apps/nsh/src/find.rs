@@ -59,11 +59,6 @@ impl Find {
                 .map(|(_, selected)| (selected.document, selected.range))
         })
     }
-    pub(crate) fn active(self, row: &str, document: usize) -> Option<TextMatch> {
-        self.selection(row)
-            .filter(|(index, _)| *index == document)
-            .map(|(_, range)| range)
-    }
     pub(crate) fn key(self) -> Option<String> {
         let (navigation, selected) = self.selected.get()?;
         Some(

@@ -258,7 +258,7 @@ pub(crate) struct Application {
     stop: CancellationToken,
     runtime: tokio::runtime::Handle,
     jobs: tokio_util::task::TaskTracker,
-    selection_path: Option<PathBuf>,
+    selection_path: PathBuf,
     #[cfg(desktop)]
     onboarding_path: PathBuf,
     #[cfg(any(desktop, test))]
@@ -281,35 +281,8 @@ impl Application {
         root: PathBuf,
         local: Option<agent_local_host::launch::HostScope>,
     ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
-        Self::start(root, local, None)
-    }
-
-    #[cfg(any(target_os = "ios", test))]
-    pub(crate) fn embedded(
-        root: PathBuf,
-        borrowed: crate::client::BorrowedSession,
-    ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
-        Self::start(root, None, Some(borrowed))
-    }
-
-    fn start(
-        root: PathBuf,
-        local: Option<agent_local_host::launch::HostScope>,
-        borrowed: Option<crate::client::BorrowedSession>,
-    ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
-        let selection_path = borrowed
-            .is_none()
-            .then(|| root.join("connection-selection.json"));
-        let selection = match &selection_path {
-            Some(path) => connections::load_selection(path)?,
-            None => agent_core::presentation::connection_list::ConnectionSelection {
-                host_id: borrowed.as_ref().map(|borrowed| borrowed.host.clone()),
-                all: false,
-            },
-        };
-        let language = borrowed
-            .as_ref()
-            .map(|borrowed| borrowed.session.snapshot().catalog.ui_language);
+        let selection_path = root.join("connection-selection.json");
+        let selection = connections::load_selection(&selection_path)?;
         #[cfg(any(desktop, test))]
         let explorer_width_path = root.join("file-explorer-width.json");
         #[cfg(any(desktop, test))]
@@ -332,10 +305,10 @@ impl Application {
         let onboarding_path = root.join(onboarding::COMPLETED);
         #[cfg(desktop)]
         let scope = local.clone();
-        let (runtime, client, incoming) = Client::start(root, local, borrowed)?;
+        let (runtime, client, incoming) = Client::start(root, local)?;
         // The device's language, which Core's copy follows too; an unreadable
         // choice is the default, as on a first launch.
-        let language = language.unwrap_or_else(|| client.device.language());
+        let language = client.device.language();
         crate::l10n::set(language);
         let contrast = client.device.contrast();
         crate::ui::colors::set_contrast(contrast);
@@ -861,12 +834,9 @@ impl Application {
         self.jobs.close();
         self.jobs.wait().await;
         // Producer jobs have stopped; include changes accepted during a save.
-        let saved = match &self.selection_path {
-            Some(path) => {
-                connections::save_selection(path.clone(), self.snapshot().selection()).await
-            }
-            None => Ok(()),
-        };
+        let saved =
+            connections::save_selection(self.selection_path.clone(), self.snapshot().selection())
+                .await;
         let closed = self.client.shutdown().await;
         closed.and(saved)
     }

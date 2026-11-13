@@ -87,7 +87,7 @@ pub(crate) fn diagrams(source: &str) -> Vec<(String, Diagram)> {
                     .or_insert_with_key(|fence| {
                         markdown_diagram(fence).map(|diagram| {
                             let drawing = Diagram {
-                                png: diagram_png(&diagram.svg).unwrap_or_default(),
+                                png: svg_png(&diagram.svg, 1600.0).unwrap_or_default(),
                                 svg: diagram.svg,
                                 width: diagram.width,
                                 height: diagram.height,
@@ -101,11 +101,15 @@ pub(crate) fn diagrams(source: &str) -> Vec<(String, Diagram)> {
     })
 }
 
-fn diagram_png(svg: &str) -> Option<String> {
+pub(crate) fn svg_png(svg: &str, maximum: f32) -> Option<String> {
     use base64::Engine;
     use resvg::{tiny_skia, usvg};
-    let tree = usvg::Tree::from_str(svg, &usvg::Options::default()).ok()?;
-    let scale = (1600.0 / tree.size().width().max(tree.size().height())).min(2.0);
+    let mut options = usvg::Options::default();
+    if svg.contains("<text") {
+        options.fontdb_mut().load_system_fonts();
+    }
+    let tree = usvg::Tree::from_str(svg, &options).ok()?;
+    let scale = (maximum / tree.size().width().max(tree.size().height())).min(2.0);
     let size = tree.size().to_int_size().scale_by(scale)?;
     let mut pixels = tiny_skia::Pixmap::new(size.width(), size.height())?;
     resvg::render(
@@ -166,7 +170,6 @@ pub(crate) struct Surroundings {
     pub files: crate::files::Browser,
     pub preview: crate::media::Preview,
     pub workspace: crate::workbench::Workbench,
-    pub external_actions: Option<crate::native::ExternalActions>,
     pub find: crate::find::Find,
 }
 
@@ -178,7 +181,6 @@ impl Surroundings {
             files: use_context::<crate::files::Browser>().unwrap(),
             preview: use_context::<crate::media::Preview>().unwrap(),
             workspace: use_context::<crate::workbench::Workbench>().unwrap(),
-            external_actions: use_context::<crate::native::ExternalActions>(),
             find: use_context::<crate::find::Find>().unwrap(),
         }
     }
@@ -186,10 +188,6 @@ impl Surroundings {
     /// Web pages follow this device's preference; ⌘/Ctrl opens them externally.
     /// Files retain their primary action and modifier shortcut to the editor.
     fn open_link(self, link: String, target: Target, command: bool) {
-        #[cfg(any(desktop, target_os = "ios"))]
-        if let Some(actions) = self.external_actions {
-            return actions.emit(json!({"action":"link", "text":link}));
-        }
         let preference = self
             .connection
             .publication
@@ -266,14 +264,6 @@ pub(crate) fn target(connection: Connection) -> Memo<String> {
 /// What message text asks for: a selection quoted, explained or asked about
 /// in a side chat, a link pressed, or an item of a file chip's menu chosen.
 pub(crate) fn action(surroundings: Surroundings, data: &Value) {
-    if let Some(actions) = surroundings.external_actions
-        && matches!(
-            data["action"].as_str(),
-            Some("quote" | "sideChat" | "explain")
-        )
-    {
-        return actions.emit(data.clone());
-    }
     let connection = surroundings.connection;
     let Some(text) = data["text"].as_str().filter(|s| !s.is_empty()) else {
         return;
@@ -347,6 +337,19 @@ impl Target {
             host: self.host,
         }
     }
+}
+
+pub(crate) fn plain(text: String, color: Option<u32>) -> Part {
+    Part::Text(vec![paragraph(
+        vec![MarkdownRun {
+            text,
+            dark_color: color,
+            light_color: color,
+            ..Default::default()
+        }],
+        &MarkdownStyle::default(),
+        &|_| None,
+    )])
 }
 
 /// A paragraph of the shared document; a run naming a file carries its chip.

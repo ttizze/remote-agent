@@ -4,6 +4,25 @@ import CoreText
 import XCTest
 
 final class MessageTests: XCTestCase {
+    @MainActor func testConversationActionsUseAvailableSystemSymbols() {
+        for name in [
+            "copy",
+            "edit",
+            "fork",
+            "more",
+            "wrap",
+            "check",
+            "chevronDown",
+            "chevronRight",
+            "quote",
+            "explain",
+            "sideChat"
+        ] {
+            let image = MessageAttributes.icon(name, size: 12)
+            XCTAssertNotNil(image, name)
+        }
+    }
+
     @MainActor func testWebLinkMenuReportsExplicitDestinationAndOriginalUrl() throws {
         let url = "https://example.com/path?q=1#section"
         let json = """

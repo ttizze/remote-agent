@@ -11,7 +11,7 @@ import Foundation
     typealias MessageColor = UIColor
 #endif
 
-struct MessageRun: Decodable, Equatable {
+struct MessageRun: Decodable, Equatable, Sendable {
     let text: String
     let strong: Bool
     let emphasis: Bool
@@ -28,7 +28,7 @@ struct MessageRun: Decodable, Equatable {
 }
 
 /// Core's UTF-8 byte ranges within one displayed run.
-struct MessageHighlight: Decodable, Equatable {
+struct MessageHighlight: Decodable, Equatable, Sendable {
     let start: Int
     let end: Int
     let active: Bool
@@ -36,7 +36,7 @@ struct MessageHighlight: Decodable, Equatable {
 
 /// A file chip as Core describes it: its glyph (a folder's, or the file's artwork),
 /// its full path and size, its menu, and its accent in either look.
-struct MessageFile: Decodable, Equatable {
+struct MessageFile: Decodable, Equatable, Sendable {
     /// The shared SVG artwork rasterized at build time, as a base64 PNG.
     let icon: String?
     let folder: Bool
@@ -47,10 +47,11 @@ struct MessageFile: Decodable, Equatable {
 }
 
 /// An item of a chip's menu: an action by its opaque id, or a submenu.
-struct MessageMenuItem: Decodable, Equatable {
+struct MessageMenuItem: Decodable, Equatable, Sendable {
     let id: String?
     let title: String
     let children: [MessageMenuItem]?
+    var enabled: Bool? = nil
 }
 
 extension NSAttributedString.Key {
@@ -83,7 +84,7 @@ final class MessageWebLink: NSObject {
     }
 }
 
-struct MessageParagraph: Decodable, Equatable {
+struct MessageParagraph: Decodable, Equatable, Sendable {
     let header: Int?
     let marker: String?
     let code: Bool
@@ -94,7 +95,7 @@ struct MessageParagraph: Decodable, Equatable {
     var markerHighlights: [MessageHighlight]? = nil
 }
 
-struct MessageDocument: Decodable, Equatable {
+struct MessageDocument: Decodable, Equatable, Sendable {
     let blocks: [MessageParagraph]
     let secondary: Bool
     /// The text's color at the device's contrast.
@@ -109,6 +110,7 @@ struct MessageDocument: Decodable, Equatable {
     /// The selection menu's items in the app's language.
     let menu: MessageMenuTitles
     var labels: [String: String]? = nil
+    var mediaErrors: [String: String]? = nil
     /// A table's cell, `header` or `body`, whose text is smaller.
     var cell: String? = nil
 
@@ -118,13 +120,36 @@ struct MessageDocument: Decodable, Equatable {
 
 /// What a selection's menu calls adding it to the chat and asking about it in
 /// a side chat, as Bex's localization names them.
-struct MessageMenuTitles: Decodable, Equatable {
+struct MessageMenuTitles: Decodable, Equatable, Sendable {
     let quote: String
     let sideChat: String
     var explain: String? = nil
 }
 
 @MainActor enum MessageAttributes {
+    static func icon(_ name: String?, size: CGFloat) -> NSImage? {
+        guard let name else { return nil }
+        let symbol: String
+        switch name {
+        case "copy": symbol = "doc.on.doc"
+        case "fork": symbol = "arrow.triangle.branch"
+        case "edit": symbol = "pencil"
+        case "more": symbol = "ellipsis"
+        case "chevronDown": symbol = "chevron.down"
+        case "chevronRight": symbol = "chevron.right"
+        case "quote": symbol = "text.quote"
+        case "explain": symbol = "sparkles"
+        case "sideChat": symbol = "bubble.left.and.bubble.right"
+        case "wrap": symbol = "arrow.turn.down.left"
+        case "check": symbol = "checkmark"
+        default: return nil
+        }
+        return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(.init(
+            pointSize: size,
+            weight: .regular
+        ))
+    }
+
     static func retainedSelection(_ range: NSRange, previous: String, next: String) -> NSRange {
         guard range.length > 0, NSMaxRange(range) <= previous.utf16.count, NSMaxRange(range) <= next.utf16.count,
               (previous as NSString).substring(with: range) == (next as NSString).substring(with: range)

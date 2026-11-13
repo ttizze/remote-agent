@@ -15,6 +15,8 @@ pub(crate) struct Link {
     pub start: usize,
     pub end: usize,
     pub destination: String,
+    pub menu: Value,
+    pub action: &'static str,
 }
 
 struct Writer {
@@ -22,6 +24,7 @@ struct Writer {
     text: String,
     links: Vec<Link>,
     colors: Vec<u32>,
+    units: usize,
 }
 
 pub(crate) fn paragraphs(blocks: &[Value]) -> Document {
@@ -48,8 +51,20 @@ pub(crate) fn picture(data: &str, width: u32) -> Option<Document> {
     } else {
         return None;
     };
+    let height = if kind == "pngblip" {
+        let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+        let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+        width.saturating_mul(h) / w.max(1)
+    } else {
+        width
+    };
     let mut writer = Writer::new();
-    let _ = write!(writer.body, "{{\\pict\\{kind}\\picwgoal{} ", width * 20);
+    let _ = write!(
+        writer.body,
+        "{{\\pict\\{kind}\\picwgoal{}\\pichgoal{} ",
+        width * 20,
+        height * 20
+    );
     for byte in bytes {
         let _ = write!(writer.body, "{byte:02x}");
     }
@@ -98,6 +113,7 @@ impl Writer {
             body: String::new(),
             text: String::new(),
             links: Vec::new(),
+            units: 0,
             colors: vec![0xd4d4d4, 0x60a5fa, 0x313131, 0x6b5300, 0x9a6700],
         }
     }
@@ -134,6 +150,7 @@ impl Writer {
     fn separator(&mut self, rtf: &str, text: char) {
         self.body.push_str(rtf);
         self.text.push(text);
+        self.units += text.len_utf16();
     }
     fn paragraph(&mut self, block: &Value, in_table: bool) {
         self.body
@@ -145,11 +162,14 @@ impl Writer {
             * 440
             + u64::from(block["quoted"] == true) * 240;
         let heading = block["header"].as_u64().and_then(|level| {
-            [52, 46, 42, 38, 36, 36]
+            [40, 36, 32, 28, 28, 28]
                 .get(level.checked_sub(1)? as usize)
                 .copied()
         });
-        let size = heading.unwrap_or(if block["code"] == true { 26 } else { 28 });
+        let size = block["size"]
+            .as_u64()
+            .map(|size| (size * 2) as u32)
+            .unwrap_or_else(|| heading.unwrap_or(if block["code"] == true { 26 } else { 28 }));
         let font = u8::from(block["code"] == true);
         let alignment = match block["alignment"].as_str() {
             Some("center") => "\\qc",
@@ -191,14 +211,23 @@ impl Writer {
             escape(destination, &mut self.body);
             self.body.push_str("\"}{\\fldrslt\\ul ");
         }
-        let start = self.text.encode_utf16().count();
+        let start = self.units;
         self.highlighted(text, run);
         if let Some(destination) = link {
             self.body.push_str("}}");
             self.links.push(Link {
                 start,
-                end: self.text.encode_utf16().count(),
+                end: self.units,
                 destination: destination.into(),
+                menu: run
+                    .get("file")
+                    .map(|file| file["menu"].clone())
+                    .unwrap_or_else(|| run["webMenu"].clone()),
+                action: if run["file"].is_object() {
+                    "file"
+                } else {
+                    "webLink"
+                },
             });
         }
         self.body.push('}');
@@ -229,6 +258,7 @@ impl Writer {
     fn literal(&mut self, text: &str) {
         escape(text, &mut self.body);
         self.text.push_str(text);
+        self.units += text.encode_utf16().count();
     }
 }
 
@@ -255,6 +285,16 @@ fn escape(text: &str, output: &mut String) {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn native_tables_keep_cell_text_and_boundaries_without_markdown_separators() {
+        let rows = serde_json::json!([[[{"Text":[{"runs":[{"text":"日本語"}]}]}],[{"Text":[{"runs":[{"text":"value"}]}]}]]]);
+        let doc = table(rows.as_array().unwrap(), 400);
+        assert_eq!(doc.text, "日本語\tvalue\t\r");
+        let rtf = String::from_utf8(doc.rtf).unwrap();
+        assert!(rtf.contains("\\trowd"));
+        assert!(rtf.contains("\\cellx8000"));
+    }
+
     #[test]
     fn selected_text_keeps_unicode_and_literal_code_while_rtf_escapes_commands() {
         let text = "日本語 👋 {\\rtf1} \"quoted\"\nsecond";

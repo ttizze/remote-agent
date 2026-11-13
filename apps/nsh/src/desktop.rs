@@ -83,7 +83,7 @@ pub fn run() -> std::process::ExitCode {
         Err(reason) => return fail(&reason),
     };
     let result = run_app(
-        AppSource::Rust(crate::root::root(application.clone(), Area::Shell, None)),
+        AppSource::Rust(crate::root::root(application.clone(), Area::Shell)),
         options,
     );
     tracing::info!(target: "agent", operation = "shutdown", "Bex shutting down");

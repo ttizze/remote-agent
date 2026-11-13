@@ -16,6 +16,17 @@ fn native_message_copy_actions_keep_the_original_body_and_role() {
                 .iter()
                 .any(|button| button["action"] == "copy" && button["title"] == label)
         );
+        let copy = native["buttons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|button| button["action"] == "copy")
+            .unwrap();
+        assert_eq!(
+            copy["iconOnly"], true,
+            "copy stays an icon, with a semantic label for accessibility"
+        );
+        assert!(!copy["icon"].as_str().unwrap().is_empty());
         assert_eq!(
             native["document"]["role"],
             if kind == Kind::User {

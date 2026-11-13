@@ -158,6 +158,7 @@ dependencies = [
  "block2",
  "chrono",
  "cpal",
+ "image",
  "libloading",
  "lucide-static-svg",
  "native-browser",

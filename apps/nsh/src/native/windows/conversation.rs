@@ -13,7 +13,7 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         UI::{
-            Controls::{NMHDR, RichEdit::*, SetScrollInfo},
+            Controls::{DRAWITEMSTRUCT, NMHDR, RichEdit::*, SetScrollInfo},
             HiDpi::GetDpiForWindow,
             Shell::*,
             WindowsAndMessaging::*,
@@ -22,6 +22,7 @@ use windows::{
     core::w,
 };
 
+const HOVER: u32 = WM_APP + 144;
 const LAYOUT: u32 = WM_APP + 143;
 const SUBCLASS: usize = 0x424558;
 
@@ -49,11 +50,18 @@ struct Viewport {
     height: i32,
     total: i32,
     following: bool,
+    inset: i32,
+    lane: f32,
+    padding: f32,
+    latest: Option<Item>,
+    hovered: Option<String>,
     wrap: HashMap<(String, usize), bool>,
 }
 
 struct Row {
     items: Vec<Item>,
+    value: Value,
+    width: i32,
 }
 
 struct Conversation {
@@ -96,6 +104,11 @@ impl Conversation {
                 total: 0,
                 following: true,
                 wrap: HashMap::new(),
+                inset: 0,
+                lane: 736.0,
+                padding: 24.0,
+                latest: None,
+                hovered: None,
             }),
         });
         unsafe {
@@ -113,6 +126,7 @@ impl Conversation {
 impl Drop for Conversation {
     fn drop(&mut self) {
         self.context.state.get_mut().controls.clear();
+        self.context.state.get_mut().latest = None;
         unsafe {
             let _ = RemoveWindowSubclass(self.window, Some(procedure), SUBCLASS);
             let _ = DestroyWindow(self.window);
@@ -139,6 +153,44 @@ impl NativeComponent for Conversation {
             state.scope = scope.into();
         }
         state.rows = value["rows"].as_array().cloned().unwrap_or_default();
+        let mut parts = Vec::new();
+        if let Some(text) = value["opening"]["text"].as_str() {
+            parts.push(json!(crate::rich_text::plain(text.into(), None)));
+        }
+        let mut buttons = Vec::new();
+        if let Some(title) = value["opening"]["retry"].as_str() {
+            buttons.push(json!({"action":"retryOpen","title":title}));
+        }
+        if let Some(notice) = value["notice"].as_str() {
+            parts.push(json!({"Text":[{"runs":[{"text":notice}]}]}));
+        }
+        if value["history"].is_object() && value["history"]["enabled"] == true {
+            buttons.push(json!({"title":value["history"]["title"],"action":"history"}));
+        }
+        if !parts.is_empty() || !buttons.is_empty() {
+            state.rows.insert(
+                0,
+                json!({"id":"native.history","parts":parts,"buttons":buttons}),
+            );
+        }
+        let scale = unsafe { GetDpiForWindow(state.window) }.max(96) as f32 / 96.0;
+        state.inset = (value["inset"].as_f64().unwrap_or_default() as f32 * scale) as i32;
+        state.lane = value["lane"].as_f64().unwrap_or(736.0) as f32;
+        state.padding = value["padding"].as_f64().unwrap_or(24.0) as f32;
+        state.latest = None;
+        if value["following"] == false {
+            let data = json!({"id":"native.latest"});
+            state.latest = Some(Item::new(
+                control::Descriptor::Button(
+                    value["latest"].as_str().unwrap_or_default().into(),
+                    json!({"action":"latest"}),
+                ),
+                state.window,
+                &self.context.owner,
+                scope,
+                &data,
+            ));
+        }
         state.following = value["following"].as_bool().unwrap_or(true);
         if !state.following {
             state.restore(anchor);
@@ -169,10 +221,11 @@ impl Viewport {
                     .copied()
                     .unwrap_or(160)
             })
-            .sum()
+            .sum::<i32>()
+            + 16
     }
     fn anchor(&self) -> Option<(String, i32)> {
-        let mut y = 0;
+        let mut y = 16;
         for row in &self.rows {
             let id = row["id"].as_str()?;
             let height = self.heights.get(id).copied().unwrap_or(160);
@@ -202,9 +255,11 @@ impl Viewport {
         }
         self.width = width;
         let scale = unsafe { GetDpiForWindow(self.window) }.max(96) as f32 / 96.0;
-        let lane = (700.0 * scale) as i32;
-        let available = (width - (48.0 * scale) as i32).max(40).min(lane);
-        self.total = self.before(self.rows.len()) + 32;
+        let lane = (self.lane * scale) as i32;
+        let available = (width - (self.padding * 2.0 * scale) as i32)
+            .max(40)
+            .min(lane);
+        self.total = self.before(self.rows.len()) + 16 + self.inset;
         if self.following {
             self.offset = (self.total - self.height).max(0);
         }
@@ -217,12 +272,23 @@ impl Viewport {
             let estimated = self.heights.get(&id).copied().unwrap_or(160);
             if y + estimated >= self.offset - self.height && y < self.offset + self.height * 2 {
                 visible.push(id.clone());
-                let row = self
-                    .controls
-                    .entry(id.clone())
-                    .or_insert_with(|| Row { items: Vec::new() });
-                let descriptors = items(value, &self.wrap, available);
-                row.update(descriptors, self.window, owner, &self.scope, value);
+                let row = self.controls.entry(id.clone()).or_insert_with(|| Row {
+                    items: Vec::new(),
+                    value: Value::Null,
+                    width: 0,
+                });
+                if row.value != *value || row.width != available {
+                    let descriptors = items(value, &self.wrap, (available as f32 / scale) as i32);
+                    row.update(descriptors, self.window, owner, &self.scope, value);
+                    row.value = value.clone();
+                    row.width = available;
+                }
+                for item in &row.items {
+                    item.visibility(
+                        self.hovered.as_ref() == Some(&id),
+                        value["trailing"] == true,
+                    );
+                }
                 let height = row.layout((width - available) / 2, y - self.offset, available, scale);
                 self.heights.insert(id, height);
                 y += height;
@@ -231,11 +297,56 @@ impl Viewport {
             }
         }
         self.controls.retain(|id, _| visible.contains(id));
-        self.total = y + 16;
+        self.total = y + 16 + self.inset;
         if self.following {
             self.offset = (self.total - self.height).max(0);
         } else {
             self.restore(anchor);
+        }
+        let mut actual_y = 16;
+        let mut visible_range = None;
+        for (index, value) in self.rows.iter().enumerate() {
+            let id = value["id"].as_str().unwrap_or_default();
+            let height = self.heights.get(id).copied().unwrap_or(160);
+            if actual_y + height >= self.offset && actual_y < self.offset + self.height {
+                let first = visible_range.map_or(index, |(first, _)| first);
+                visible_range = Some((first, index + 1));
+                if !self.controls.contains_key(id) {
+                    unsafe {
+                        let _ = PostMessageW(Some(self.window), LAYOUT, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+            if let Some(row) = self.controls.get_mut(id) {
+                row.layout(
+                    (width - available) / 2,
+                    actual_y - self.offset,
+                    available,
+                    scale,
+                );
+            }
+            actual_y += height;
+        }
+        if let Some((start, end)) = visible_range {
+            let header = usize::from(
+                self.rows
+                    .first()
+                    .is_some_and(|row| row["id"] == "native.history"),
+            );
+            let start = start.saturating_sub(header);
+            let end = end.saturating_sub(header);
+            owner.emit(
+                "action",
+                json!({"action":"visible","scope":self.scope,"start":start,"end":end.saturating_sub(1)}),
+            );
+        }
+        if let Some(latest) = &mut self.latest {
+            latest.place(
+                (width - available) / 2,
+                self.height - (40.0 * scale) as i32,
+                available,
+                scale,
+            );
         }
         let mut info = SCROLLINFO {
             cbSize: size_of::<SCROLLINFO>() as u32,
@@ -248,6 +359,36 @@ impl Viewport {
         };
         unsafe {
             SetScrollInfo(self.window, SB_VERT, &mut info, true);
+        }
+    }
+    fn hover(&mut self, id: Option<String>) {
+        self.hovered = id;
+        for (id, row) in &self.controls {
+            for item in &row.items {
+                item.visibility(
+                    self.hovered.as_ref() == Some(id),
+                    row.value["trailing"] == true,
+                );
+            }
+        }
+    }
+    fn button(&mut self, mut action: Value, owner: &ComponentContext) {
+        if action["action"] == "wrapCode" {
+            let id = action["row"].as_str().unwrap_or_default();
+            let key = (
+                id.to_owned(),
+                action["part"].as_u64().unwrap_or_default() as usize,
+            );
+            let wrap = self.wrap.entry(key).or_insert(true);
+            *wrap = !*wrap;
+            if let Some(row) = self.controls.get_mut(id) {
+                row.value = Value::Null;
+            }
+            self.heights.clear();
+            self.layout(owner);
+        } else {
+            action["scope"] = json!(self.scope);
+            owner.emit("action", action);
         }
     }
     fn scroll(&mut self, delta: i32, owner: &ComponentContext) {
@@ -290,11 +431,35 @@ impl Row {
         }
     }
     fn layout(&mut self, x: i32, y: i32, width: i32, scale: f32) -> i32 {
+        let mut index = 0;
         let mut offset = 0;
-        for item in &mut self.items {
-            offset += item.place(x, y + offset, width, scale) + 6;
+        while index < self.items.len() {
+            if self.items[index].inline_width(scale).is_some() {
+                let end = (index..self.items.len())
+                    .find(|at| self.items[*at].inline_width(scale).is_none())
+                    .unwrap_or(self.items.len());
+                let total: i32 = self.items[index..end]
+                    .iter()
+                    .map(|item| item.inline_width(scale).unwrap() + (4.0 * scale) as i32)
+                    .sum();
+                let mut left = if self.value["user"] == true {
+                    (width - total).max(0)
+                } else {
+                    0
+                };
+                for item in &mut self.items[index..end] {
+                    let size = item.inline_width(scale).unwrap();
+                    item.place(x + left, y + offset, size, scale);
+                    left += size + (4.0 * scale) as i32;
+                }
+                offset += (30.0 * scale) as i32;
+                index = end;
+            } else {
+                offset += self.items[index].place(x, y + offset, width, scale) + 6;
+                index += 1;
+            }
         }
-        offset + 14
+        offset + (self.value["gap"].as_f64().unwrap_or(8.0) as f32 * scale) as i32
     }
 }
 
@@ -329,6 +494,9 @@ unsafe extern "system" fn procedure(
             return LRESULT(0);
         }
     }
+    if msg == WM_DRAWITEM && l.0 != 0 && unsafe { Edit::draw(&*(l.0 as *const DRAWITEMSTRUCT)) } {
+        return LRESULT(1);
+    }
     if msg == WM_ERASEBKGND {
         let mut rect = RECT::default();
         unsafe {
@@ -341,6 +509,8 @@ unsafe extern "system" fn procedure(
     }
     if let Ok(mut state) = context.state.try_borrow_mut() {
         match msg {
+            HOVER => state.hover(unsafe { Edit::row(HWND(l.0 as *mut _)) }),
+            WM_MOUSEMOVE | WM_MOUSELEAVE => state.hover(None),
             WM_SIZE => state.layout(&context.owner),
             LAYOUT => {
                 context.pending.set(false);
@@ -369,20 +539,8 @@ unsafe extern "system" fn procedure(
                 state.scroll(delta, &context.owner);
             }
             WM_COMMAND if l.0 != 0 => {
-                if let Some(mut action) = unsafe { Edit::button(HWND(l.0 as *mut _)) } {
-                    if action["action"] == "wrapCode" {
-                        let key = (
-                            action["row"].as_str().unwrap_or_default().into(),
-                            action["part"].as_u64().unwrap_or_default() as usize,
-                        );
-                        let wrap = state.wrap.entry(key).or_insert(true);
-                        *wrap = !*wrap;
-                        state.heights.clear();
-                        state.layout(&context.owner);
-                    } else {
-                        action["scope"] = json!(state.scope);
-                        context.owner.emit("action", action);
-                    }
+                if let Some(action) = unsafe { Edit::button(HWND(l.0 as *mut _)) } {
+                    state.button(action, &context.owner);
                 }
             }
             _ => {}

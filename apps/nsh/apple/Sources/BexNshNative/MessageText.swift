@@ -98,7 +98,7 @@ final class MessageTextView: NSTextView, NSTextViewDelegate {
                      "explain": document.menu.explain ?? "",
                      "sideChat": document.menu.sideChat
                  ],
-                 "bounds": [frame.minX, top, frame.width, frame.height]])
+                 "bounds": [Double(frame.minX), Double(top), Double(frame.width), Double(frame.height)]])
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

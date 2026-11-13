@@ -13,8 +13,6 @@ use std::{rc::Rc, sync::Arc};
 #[derive(Clone, Copy)]
 pub(crate) struct Preview {
     state: Signal<PreviewState>,
-    #[cfg(target_os = "ios")]
-    external_actions: Option<native::ExternalActions>,
     /// The sent message's images or the conversation's generated images,
     /// beside the image the desktop viewer shows.
     #[cfg(desktop)]
@@ -45,8 +43,6 @@ impl Preview {
     pub fn new() -> Self {
         Self {
             state: signal(PreviewState::Closed),
-            #[cfg(target_os = "ios")]
-            external_actions: use_context::<native::ExternalActions>(),
             #[cfg(desktop)]
             gallery: signal(None),
             owner: Owner::current(),
@@ -54,14 +50,6 @@ impl Preview {
     }
 
     fn show(self, file: Shared<LocalFile>) {
-        #[cfg(target_os = "ios")]
-        if let Some(actions) = self.external_actions {
-            // The embedding owner copies the borrowed file before this callback returns.
-            actions
-                .emit(serde_json::json!({"action":"preview", "text":file.path.to_string_lossy()}));
-            self.state.set(PreviewState::Closed);
-            return;
-        }
         self.state.set(PreviewState::Ready(file));
     }
 
@@ -78,6 +66,31 @@ impl Preview {
     }
 
     pub fn load(self, transfer: impl Future<Output = Result<Shared<LocalFile>, String>> + 'static) {
+        self.load_with(transfer, move |file| self.show(file));
+    }
+
+    pub fn load_image(self, connection: Connection, source: String, sources: Option<Vec<String>>) {
+        let client = connection.client.get();
+        let host = connection.host.get_untracked();
+        let cwd = connection
+            .composer
+            .with_untracked(|p| p.controls.navigation.cwd.clone());
+        self.load_with(load_image(client, host, cwd, source.clone()), move |file| {
+            #[cfg(desktop)]
+            self.open_image(connection, source, file, sources);
+            #[cfg(not(desktop))]
+            {
+                let _ = (source, sources);
+                self.show(file);
+            }
+        });
+    }
+
+    fn load_with(
+        self,
+        transfer: impl Future<Output = Result<Shared<LocalFile>, String>> + 'static,
+        show: impl FnOnce(Shared<LocalFile>) + 'static,
+    ) {
         let request = self.begin();
         // Preview ownership is independent of recycled conversation rows.
         self.owner.run(move || {
@@ -87,7 +100,7 @@ impl Preview {
                     return;
                 }
                 match result {
-                    Ok(file) => self.show(file),
+                    Ok(file) => show(file),
                     Err(reason) => {
                         self.state.set(PreviewState::Closed);
                         native::message(tr("ファイル"), reason);
@@ -116,7 +129,7 @@ impl Preview {
     /// Shows `file` from `source` beside its sent message's `sources`, or
     /// the conversation's generated images when no message gallery is given.
     #[cfg(desktop)]
-    fn open_image(
+    pub(crate) fn open_image(
         self,
         connection: Connection,
         source: String,
@@ -200,12 +213,6 @@ pub(crate) fn preview() -> impl Element {
     let root = root.child(opened_file(preview));
     #[cfg(target_os = "macos")]
     let root = root.child(quick_look(preview));
-    #[cfg(target_os = "ios")]
-    let root = if preview.external_actions.is_none() {
-        root.child(quick_look(preview))
-    } else {
-        root
-    };
     root.child(when(
         move || matches!(preview.state.get(), PreviewState::Loading(_)),
         || text(tr("ファイルを読み込み中…")),
@@ -637,108 +644,10 @@ pub(crate) enum ImageSize {
     /// As T3 Code's answer images: a point per pixel, at most 30rem tall and
     /// as wide as there is room, its corners rounded.
     Natural,
-    /// As T3 Code's lone sent image: 12rem tall and as wide as its picture,
-    /// from 6rem, cropped where there is less room.
-    Sent,
     /// Filling its cell of a sent message's collage, cropped.
     Cell,
 }
 
-/// T3 Code's ring around sent media and its collage's hairlines: white at 12%.
-const MEDIA_EDGE: u32 = 0xffffff1f;
-
-/// The images a sent message carries, above its bubble as T3 Code's: one
-/// keeps its own shape, several share one rounded shape split by hairlines.
-pub(crate) fn sent_images(
-    connection: Connection,
-    preview: Preview,
-    sources: Memo<Vec<String>>,
-    above_bubble: impl Fn() -> bool + 'static,
-    max_width: impl Fn() -> f32 + 'static,
-) -> impl Element {
-    let count = move || sources.with(Vec::len);
-    let collage = move || count() > 1;
-    view()
-        .max_w(move || px(max_width()))
-        .rounded(px(16.0))
-        // The corner by the bubble tightens, as the bubble's does.
-        .style_when(above_bubble, |s| s.mb(px(4.0)).rounded_br(px(6.0)))
-        .overflow_hidden()
-        // An inset shadow sits below native image children. The outline
-        // draws above them, inside the frame, without changing its size.
-        .outline(px(1.0))
-        .outline_offset(px(-1.0))
-        .outline_color(nsh_core::element::rgba(MEDIA_EDGE))
-        .style_when(collage, move |s| {
-            // T3 Code's collage: two side by side 12rem tall, three with the
-            // first beside the other two, more in pairs 6rem tall with an odd
-            // last one across.
-            s.w(px(320.0))
-                .grid()
-                .gap(px(1.0))
-                .bg(nsh_core::element::rgba(MEDIA_EDGE))
-                .grid_template_columns(move || {
-                    if count() == 3 {
-                        "3fr 2fr"
-                    } else {
-                        "repeat(2, minmax(0, 1fr))"
-                    }
-                })
-                .grid_template_rows(move || {
-                    SharedString::from(match count() {
-                        2 => "192px".to_owned(),
-                        3 => "95.5px 95.5px".to_owned(),
-                        count => vec!["96px"; count.div_ceil(2)].join(" "),
-                    })
-                })
-        })
-        .child(each(
-            move || {
-                sources
-                    .get()
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, source)| (index, source, collage()))
-                    .collect::<Vec<_>>()
-            },
-            // A single image becoming a collage must recreate its image frame.
-            |item: &(usize, String, bool)| item.clone(),
-            move |item, _| {
-                let index = item.get_untracked().0;
-                let source = move || item.get().1;
-                view()
-                    .overflow_hidden()
-                    .style_when(collage, move |s| {
-                        s.bg(crate::ui::colors::BACKGROUND)
-                            .row_span(move || -> u16 {
-                                if count() == 3 && index == 0 { 2 } else { 1 }
-                            })
-                            .col_span(move || -> u16 {
-                                let count = count();
-                                if count > 3 && count % 2 == 1 && index + 1 == count {
-                                    2
-                                } else {
-                                    1
-                                }
-                            })
-                    })
-                    .child(image_view(
-                        connection,
-                        preview,
-                        source,
-                        if item.get_untracked().2 {
-                            ImageSize::Cell
-                        } else {
-                            ImageSize::Sent
-                        },
-                        Some(sources),
-                    ))
-            },
-        ))
-}
-
-/// A conversation's or the composer's image, which opens in the viewer and,
-/// on the desktop, offers to save it from its menu.
 pub(crate) fn image_view(
     connection: Connection,
     preview: Preview,
@@ -802,15 +711,11 @@ fn loaded_image(
             let scale = (480.0 / height).min(1.0);
             (width * scale, height * scale)
         }),
-        // `h-48 w-auto min-w-24`; until it loads, its `w-64` placeholder.
-        ImageSize::Sent => pixels.get().map_or((256.0, 192.0), |(width, height)| {
-            ((width * 192.0 / height.max(1.0)).max(96.0), 192.0)
-        }),
         ImageSize::Cell => (0.0, 0.0),
     };
     let fit = match size {
         ImageSize::Box(..) | ImageSize::Natural => ResizeMode::Contain,
-        ImageSize::Sent | ImageSize::Cell => ResizeMode::Cover,
+        ImageSize::Cell => ResizeMode::Cover,
     };
     let loaded = resource(
         move || Some(key.get()),
