@@ -303,6 +303,10 @@ impl<'a> ListSource<'a> {
                 .lists
                 .expanded_projects
                 .same(&other.lists.expanded_projects)
+            && self
+                .lists
+                .search_expanded_projects
+                .same(&other.lists.search_expanded_projects)
             && self.lists.list_query.same(&other.lists.list_query)
             && self.lists.activity.same(&other.lists.activity)
             && self
@@ -493,7 +497,13 @@ impl ListSource<'_> {
         let preferences = self.lists.project_preferences.get(self.storage_scope);
         let mut projects = Vec::new();
         let mut hidden_projects = Vec::new();
-        for (index, project) in list.projects.iter().enumerate() {
+        let searching = !self.lists.list_query.search_term.trim().is_empty();
+        let expanded = if !searching {
+            &self.lists.expanded_projects
+        } else {
+            &self.lists.search_expanded_projects
+        };
+        for project in &list.projects {
             let prefs = preferences.and_then(|prefs| prefs.get(&project.id));
             if prefs.is_some_and(|prefs| prefs.hidden) {
                 hidden_projects.push(project_summary(
@@ -507,8 +517,9 @@ impl ListSource<'_> {
                     project,
                     prefs,
                     self.lists.project_threads.get(&project.id),
-                    self.lists.expanded_projects.contains_key(&project.id)
-                        || !self.lists.list_query.search_term.trim().is_empty() && index < 5,
+                    expanded
+                        .get(&project.id)
+                        .map_or(searching, |limit| *limit > 0),
                 ));
             }
         }
@@ -997,7 +1008,7 @@ mod tests {
                 threads: Some(std::sync::Arc::new(
                     serde_json::from_value(json!({
                         "data":data,"projects":[{"id":"project","name":"Project","roots":[]}],
-                        "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,}))
+                        "hasMore":false,"hasMoreProjects":false,"limit":5,}))
                     .unwrap(),
                 )),
                 ..Default::default()
@@ -1151,10 +1162,10 @@ mod tests {
         let page = serde_json::from_value(json!({
             "data":[
                 {"id":{"provider":"codex","id":"project-chat"},"projectId":"project","updatedAt":30},
-                {"id":{"provider":"codex","id":"duplicate"},"projectId":"project","updatedAt":20,"listRevision":2},
+                {"id":{"provider":"codex","id":"duplicate"},"projectId":"project","updatedAt":20},
                 {"id":{"provider":"claude","id":"duplicate"},"projectId":"project","updatedAt":15},
                 {"id":{"provider":"codex","id":"agent"},"parentId":{"provider":"codex","id":"project-chat"},"projectId":"project","updatedAt":40}
-            ],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false,"projectPages":{}
+            ],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false
         })).unwrap();
         Arc::make_mut(&mut snapshot.lists.project_threads).insert("project".into(), Arc::new(page));
         Arc::make_mut(&mut snapshot.lists.list_query).limit = 2;
@@ -1212,7 +1223,7 @@ mod tests {
                     {"id":{"provider":"codex","id":"unknown"},"updatedAt":1}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
-                 "hasMore":true,"hasMoreProjects":false,"projectPages":{},"limit":5, }))
+                 "hasMore":true,"hasMoreProjects":false,"limit":5, }))
             .unwrap(),
         );
         let list = snapshot.thread_list().unwrap();
@@ -1240,7 +1251,7 @@ mod tests {
         crate::state::list_sync::seed(&mut snapshot, serde_json::from_value(json!({
                 "data":[{"id":{"provider":"codex","id":"task"},"projectId":"project"}],
                 "projects":[{"id":"project","name":"Old project","roots":[],"icon":{"lightPng":"BAUG","darkPng":"BAUG"}}],
-                "hasMore":false,"hasMoreProjects":false,"projectPages":{"project":{"limit":5,"hasMore":false}},"limit":5
+                "hasMore":false,"hasMoreProjects":false,"limit":5
             }))
             .unwrap());
         for icon in [Some("AQID"), None] {
@@ -1406,7 +1417,7 @@ mod tests {
                 "data":[
                     {"id":{"provider":"codex","id":"native"},"name":"Cached","listStale":true},
                     {"id":{"provider":"claude","id":"uuid"},"name":"Available"}
-                ],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
+                ],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5
             }))
             .unwrap(),
         );
@@ -1458,7 +1469,7 @@ mod tests {
         }
         let page: models::ThreadList = serde_json::from_value(json!({
             "data":[thread], "projects":[],
-            "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5, }))
+            "hasMore":false,"hasMoreProjects":false,"limit":5, }))
         .unwrap();
         snapshot.lists.threads = Some(Arc::new(page));
         let restored: Snapshot =

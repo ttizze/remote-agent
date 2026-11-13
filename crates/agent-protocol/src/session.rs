@@ -190,8 +190,6 @@ pub enum SubmissionDelivery {
     },
     Unknown,
     Rejected,
-    /// Removed from the queue before it ran; nothing will run it.
-    Withdrawn,
 }
 
 /// Durable Host admission, independent of the provider acknowledging execution.

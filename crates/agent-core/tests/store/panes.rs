@@ -301,6 +301,7 @@ async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_p
     );
     assert!(pane.snapshot().is_err());
     assert!(snapshot.sessions.conversations.contains_key(&closed));
+    assert!(!snapshot.sessions.subscriptions.contains_key(&closed));
     assert!(snapshot.panes.get(pane.id()).is_none());
     assert!(Arc::ptr_eq(&primary, snapshot.panes.primary()));
     store.close().await.unwrap();
@@ -924,7 +925,7 @@ async fn connection_reopens_every_pane_in_one_shared_subscription_map() {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
             "host/list/subscribe" => {
-                json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5})
+                json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5})
             }
             "host/model/list" => json!({"data":[]}),
             "host/account/list" => json!({"accounts":[],"selected":{}}),

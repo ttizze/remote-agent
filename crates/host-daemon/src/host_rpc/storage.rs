@@ -455,8 +455,8 @@ impl Storage {
                 if changed { transaction.execute("UPDATE threads SET body=?1 WHERE key=?2", params![codec::header(&header,&counters)?,key]).map_err(failure)?; }
                 changed
             } else { false };
-            let retry = if let Event::Command { id, command: decision::Command::RetryInput { id: input, work_locally }, receipt: None } = &event {
-                match workspace::retry(header.details.workspace.as_deref(), state.inputs.get(input).map(|input| &input.state), state.thread.workspace.cwd(), state.bindings.is_empty(), *work_locally) {
+            let retry = if let Event::Command { id, command, receipt: None } = &event {
+                match workspace::command(header.details.workspace.as_deref(), command, &state.inputs, state.thread.workspace.cwd(), state.bindings.is_empty(), state.active_turn().is_some()) {
                     Ok(retry) => retry,
                     Err(reason) => { event = Event::RejectedCommand { id: *id, reason: reason.into(), receipt: None }; None }
                 }
@@ -719,16 +719,23 @@ change,
         };
         let current = cursor(connection)?;
         let (pruned,history):(i64,i64)=connection.query_row("SELECT store.removals_pruned_through,t.history_seq FROM store,threads t WHERE t.key=?1",[key],|row|Ok((row.get(0)?,row.get(1)?))).map_err(failure)?;
+        let history = u64::try_from(history).map_err(failure)?;
         let resume = agent_protocol::sync::can_resume(
             cached,
             current,
             u64::try_from(pruned).map_err(failure)?,
-            u64::try_from(history).map_err(failure)?,
+            history,
         );
         let floor = rows::window(
             connection,
             key,
-            window.filter(|_| cached.is_some_and(|cached| cached.store == current.store)),
+            // A replaced history, including its first completed import, resets
+            // the window just as the live replacement snapshot does.
+            window.filter(|_| {
+                cached.is_some_and(|cached| {
+                    cached.store == current.store && cached.sequence >= history
+                })
+            }),
         )?;
         let mut saved = rows::snapshot(connection, key, id, floor)?;
         decision::records::summarize(&mut saved, 128 * 1024)?;

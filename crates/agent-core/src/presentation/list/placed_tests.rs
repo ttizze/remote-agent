@@ -20,7 +20,7 @@ fn fixture() -> Snapshot {
         lists: crate::state::Lists {
             threads: Some(Arc::new(serde_json::from_value(serde_json::json!({
                 "data":[],"projects":[{"id":"destination","name":"Destination","roots":[]},{"id":"source","name":"Source","roots":[]}],
-                "limit":5,"hasMore":false,"hasMoreProjects":false,"projectPages":{}
+                "limit":5,"hasMore":false,"hasMoreProjects":false
             })).unwrap())),
             ..Default::default()
         },
@@ -804,7 +804,7 @@ fn translated_list_copy_preserves_titles_paths_and_provider_names() {
             {"id":{"provider":"codex","id":"named"},"name":"設定\n{0}","cwd":"/設定/{0}","listStale":true},
             {"id":{"provider":"codex","id":"unnamed"}},
             {"id":{"provider":"codex","id":"literal"},"name":"無題のタスク"}
-        ],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,
+        ],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,
         "providerErrors":{"設定":"provider failure"}
     })).unwrap()));
     let japanese = Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap();

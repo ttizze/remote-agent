@@ -19,6 +19,7 @@ pub(in crate::host_rpc) enum SetupChange {
         id: SetupStageId,
         status: SetupStageStatus,
         exit_code: Option<i32>,
+        error: Option<String>,
     },
     Finish {
         phase: SetupPhase,
@@ -137,8 +138,12 @@ fn apply(
             id,
             status,
             exit_code,
+            error,
         } => {
             setup.stage(id, status, now);
+            if error.is_some() {
+                setup.error = error;
+            }
             if let Some(stage) = setup.stages.iter_mut().find(|stage| stage.id == id) {
                 stage.exit_code = exit_code;
             }
@@ -158,9 +163,55 @@ fn apply(
             )
         })
     {
-        setup.finish(SetupPhase::Done, None, now);
+        setup.finish(SetupPhase::Done, setup.error.clone(), now);
     }
     true
+}
+
+/// Setup admission shares the writer transaction with AgentStarted, so Stop
+/// cannot cross the point where provider creation is no longer cancellable.
+pub(super) fn command(
+    saved: Option<&WorkspacePreparation>,
+    command: &decision::Command,
+    inputs: &std::collections::BTreeMap<ClientInputId, decision::PendingInput>,
+    cwd: Option<&str>,
+    bindings_empty: bool,
+    active_turn: bool,
+) -> Result<Option<(WorkspacePreparation, String)>, &'static str> {
+    match command {
+        decision::Command::RetryInput { id, work_locally } => retry(
+            saved,
+            inputs.get(id).map(|input| &input.state),
+            cwd,
+            bindings_empty,
+            *work_locally,
+        ),
+        decision::Command::Interrupt { turn } => {
+            let started = saved
+                .and_then(|workspace| workspace.setup.as_ref())
+                .is_some_and(|setup| !setup.can_cancel && setup.phase == SetupPhase::Running);
+            let targeting_preparation = !active_turn || turn.is_some();
+            if started
+                && targeting_preparation
+                && inputs.values().any(|input| {
+                    matches!(
+                        input.state,
+                        decision::InputState::Preparing {
+                            stage: agent_protocol::session::PreparationStage::Provider,
+                            ..
+                        }
+                    ) && turn
+                        .as_ref()
+                        .is_none_or(|turn| turn.as_str() == input.id.as_str())
+                })
+            {
+                Err("The agent has already started")
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
 }
 
 /// A failed or interrupted script re-enters setup automatically. Working locally is an
@@ -296,5 +347,33 @@ mod tests {
             .unwrap();
         assert_eq!(workspace, saved);
         assert_eq!(cwd, "/checkout");
+    }
+    #[test]
+    fn an_async_script_failure_keeps_its_message_when_the_setup_card_finishes() {
+        let mut setup = WorkspaceSetup::new(None, 0);
+        for stage in &mut setup.stages {
+            stage.status = SetupStageStatus::Done;
+        }
+        assert!(apply(
+            &mut setup,
+            SetupChange::Stage {
+                id: SetupStageId::SetupScript,
+                status: SetupStageStatus::Failed,
+                exit_code: None,
+                error: Some("terminal output failed".into())
+            },
+            1
+        ));
+        assert_eq!(setup.phase, SetupPhase::Done);
+        assert_eq!(setup.error.as_deref(), Some("terminal output failed"));
+        assert_eq!(
+            setup
+                .stages
+                .iter()
+                .find(|stage| stage.id == SetupStageId::SetupScript)
+                .unwrap()
+                .status,
+            SetupStageStatus::Failed
+        );
     }
 }

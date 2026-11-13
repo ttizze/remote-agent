@@ -764,7 +764,7 @@ fn restart_never_resends_an_ambiguous_start_and_rejects_its_late_evidence() {
 fn interrupted_and_failed_turns_hold_the_queue_and_fence_late_events() {
     for terminal in [
         Observation::Interrupted,
-        Observation::Failed(ExecutionError::default()),
+        Observation::Failed(Some(ExecutionError::default())),
     ] {
         let (state, attempt) = running();
         let queued = submit(&state, 3, FollowUp::Queue);
@@ -1598,7 +1598,7 @@ fn an_empty_background_roster_completes_and_failure_marks_running_items_failed()
     let failed = observe(
         &state,
         &attempt,
-        Observation::Failed(ExecutionError::default()),
+        Observation::Failed(Some(ExecutionError::default())),
         5,
     );
     assert_eq!(
@@ -3090,7 +3090,7 @@ fn ending_a_newer_turn_rearms_an_older_retry_whose_timer_fired_while_it_was_bloc
     for terminal in [
         Observation::Completed,
         Observation::Interrupted,
-        Observation::Failed(ExecutionError::default()),
+        Observation::Failed(Some(ExecutionError::default())),
     ] {
         let (state, old) = running();
         let background = observe(
@@ -3474,7 +3474,7 @@ fn finishing_a_turn_closes_its_requests_and_only_finishes_its_running_items() {
         (Observation::Completed, ItemStatus::Completed),
         (Observation::Interrupted, ItemStatus::Interrupted),
         (
-            Observation::Failed(ExecutionError::default()),
+            Observation::Failed(Some(ExecutionError::default())),
             ItemStatus::Failed,
         ),
     ] {
@@ -3599,7 +3599,7 @@ fn capacity_retries_have_five_exact_delays_and_keep_one_canonical_turn() {
         let failed = observe(
             &state,
             &attempt,
-            Observation::Failed(overload()),
+            Observation::Failed(Some(overload())),
             100 + index as u128,
         );
         assert_eq!(failed.actions, [Action::WaitUntil(100 + delay)]);
@@ -3627,7 +3627,7 @@ fn capacity_retries_have_five_exact_delays_and_keep_one_canonical_turn() {
         );
         attempt = fresh;
     }
-    let final_failure = observe(&state, &attempt, Observation::Failed(overload()), 500);
+    let final_failure = observe(&state, &attempt, Observation::Failed(Some(overload())), 500);
     assert!(final_failure.actions.is_empty());
     assert!(matches!(
         state.apply(&final_failure.changes).turns[&attempt.turn].state,
@@ -3652,7 +3652,7 @@ fn other_errors_and_provider_owned_retries_never_start_a_host_capacity_retry() {
             }),
             ..Default::default()
         };
-        let result = observe(&state, &attempt, Observation::Failed(error), 3);
+        let result = observe(&state, &attempt, Observation::Failed(Some(error)), 3);
         assert!(result.actions.is_empty());
         assert!(matches!(
             state.apply(&result.changes).turns[&attempt.turn].state,
@@ -3665,7 +3665,7 @@ fn manual_input_cancels_a_capacity_wait_and_keeps_queued_input_held() {
     let (state, attempt) = codex_running();
     let queued = submit(&state, 10, FollowUp::Queue);
     let state = state.apply(&queued.changes);
-    let waiting = observe(&state, &attempt, Observation::Failed(overload()), 11);
+    let waiting = observe(&state, &attempt, Observation::Failed(Some(overload())), 11);
     let state = state.apply(&waiting.changes);
     let manual = submit(&state, 12, FollowUp::Queue);
     let next = state.apply(&manual.changes);
@@ -3842,5 +3842,126 @@ fn unmaterialized_external_work_blocks_start_and_steering_until_the_current_sour
         assert!(
             matches!(&ready.actions[..],[Action::Deliver {attempt,steer:false,..}] if attempt.source=="native-session")
         );
+    }
+}
+
+#[test]
+fn unwritten_steering_requeues_only_the_matching_delivery_and_waits_for_an_addressable_attempt() {
+    let (running, attempt) = running();
+    let delivery = submit(&running, 3, FollowUp::Steer);
+    let state = running.apply(&delivery.changes);
+    let Action::Deliver { id, action, .. } = &delivery.actions[0] else {
+        panic!("steering delivery")
+    };
+    let waiting = Context {
+        steer_ready: false,
+        ..context(4)
+    };
+    assert_eq!(
+        step(
+            &state,
+            Event::DeliveryDeferred {
+                id: id.clone(),
+                action: Uuid::new_v4()
+            },
+            waiting
+        ),
+        Step::default()
+    );
+    let (starting, input, token, _) = starting(&self::state(), 1);
+    assert_eq!(
+        step(
+            &starting,
+            Event::DeliveryDeferred {
+                id: input,
+                action: token
+            },
+            waiting
+        ),
+        Step::default()
+    );
+    let deferred = step(
+        &state,
+        Event::DeliveryDeferred {
+            id: id.clone(),
+            action: *action,
+        },
+        waiting,
+    );
+    assert_eq!(deferred.outcome, Outcome::Accepted);
+    assert!(deferred.actions.is_empty());
+    let queued = state.apply(&deferred.changes);
+    assert_eq!(queued.inputs[id].position, state.inputs[id].position);
+    assert!(
+        matches!(queued.inputs[id].state, InputState::Queued { steer: Some(current) } if current == attempt.id)
+    );
+    assert!(!queued.permits(&delivery.actions[0]));
+    let next = step(&queued, Event::Wake, context(5));
+    assert!(
+        matches!(next.actions.as_slice(), [Action::Deliver { id: current, action: token, attempt: target, steer: true, .. }] if current == id && token != action && target == &attempt)
+    );
+    let delivered = queued.apply(&next.changes);
+    assert!(step(&delivered, Event::Wake, context(6)).actions.is_empty());
+}
+
+#[test]
+fn a_terminal_failure_without_details_keeps_the_prior_notice_and_its_retry_owner() {
+    for retrying in [false, true] {
+        let (state, attempt) = codex_running();
+        let notice = ExecutionError {
+            retry: Some(crate::execution::RetryEvidence {
+                retrying,
+                attempt: None,
+                max_attempts: None,
+            }),
+            ..overload()
+        };
+        let noted = observe(&state, &attempt, Observation::Notice(notice), 10);
+        let state = state.apply(&noted.changes);
+        let failed = observe(&state, &attempt, Observation::Failed(None), 11);
+        let next = state.apply(&failed.changes);
+        if retrying {
+            assert!(failed.actions.is_empty());
+            assert!(
+                matches!(&next.turns[&attempt.turn].state, TurnState::Failed(error) if error.message == "capacity" && error.retry.is_none())
+            );
+        } else {
+            assert_eq!(failed.actions, [Action::WaitUntil(2100)]);
+            assert_eq!(
+                next.turns[&attempt.turn].error.as_ref().unwrap().message,
+                "capacity"
+            );
+        }
+    }
+}
+
+#[test]
+fn failed_compaction_never_resumes_the_preceding_task() {
+    for (text, compact) in [
+        ("/compact", true),
+        ("  /CoMpAcT\n", true),
+        ("/compact please", false),
+    ] {
+        let (mut state, attempt) = codex_running();
+        let item = state
+            .items
+            .values_mut()
+            .find(|item| {
+                item.turn == attempt.turn && matches!(item.body, ItemBody::UserMessage { .. })
+            })
+            .unwrap();
+        item.body = ItemBody::UserMessage {
+            text: None,
+            content: vec![crate::items::MessagePart::Text { text: text.into() }],
+        };
+        let failed = observe(&state, &attempt, Observation::Failed(Some(overload())), 10);
+        assert_eq!(failed.actions.is_empty(), compact);
+        if compact {
+            assert!(
+                matches!(&state.apply(&failed.changes).turns[&attempt.turn].state, TurnState::Failed(error) if error.message == "capacity")
+            );
+        } else {
+            assert_eq!(failed.actions, [Action::WaitUntil(2100)]);
+        }
     }
 }

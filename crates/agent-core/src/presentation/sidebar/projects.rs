@@ -310,7 +310,7 @@ mod tests {
                     "projects": [{"id":"source", "name":"Source", "roots":[]},
                                  {"id":"destination", "name":"Destination", "roots":[]}],
                     "data": [{"id":id, "projectId":original}], "limit":60,
-                    "hasMore":false, "hasMoreProjects":false, "projectPages":{}
+                    "hasMore":false, "hasMoreProjects":false
                 }))
                 .unwrap(),
             ));
@@ -446,7 +446,7 @@ mod tests {
         snapshot.lists.threads = Some(std::sync::Arc::new(
             serde_json::from_value(json!({
                 "projects": [{"id":"repo", "name":"Repo", "roots":[{"path":"/repo"}]}, {"id":"z-later", "name":"Later", "roots":[{"path":"/later"}]}],
-                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":true, "projectPages":{}
+                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":true
             }))
             .unwrap(),
         ));
@@ -514,8 +514,7 @@ mod tests {
             serde_json::from_value(json!({
                 "projects": [{"id": "repo", "name": "日本語 Project", "roots": []}],
                 "data": [{"id":{"provider":"codex","id":"chat"}, "name":"Standalone"}],
-                "limit": 60, "hasMore": true, "hasMoreProjects": true,
-                "projectPages": {}
+                "limit": 60, "hasMore": true, "hasMoreProjects": true
             }))
             .unwrap(),
         ));
@@ -529,7 +528,7 @@ mod tests {
         snapshot.lists.threads = Some(std::sync::Arc::new(
             serde_json::from_value(json!({
                 "projects": [], "data": [], "limit":60, "hasMore":false,
-                "hasMoreProjects":false, "projectPages":{}
+                "hasMoreProjects":false
             }))
             .unwrap(),
         ));

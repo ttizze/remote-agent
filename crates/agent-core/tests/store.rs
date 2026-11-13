@@ -796,7 +796,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
                 .unwrap_or_else(
                     || json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}),
                 ),
-            "host/list/search"=>json!({"data":[],"projects":[],"limit":10000,"hasMore":false,"hasMoreProjects":false}),
+            "host/list/search" => json!({"data":[],"projects":[],"limit":10000,"hasMore":false,"hasMoreProjects":false}),
             "host/account/list" => snapshot
                 .catalog.account
                 .accounts
@@ -806,7 +806,8 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
             "host/account/usage" => json!({"windows":[],"fetchedAt":1,"error":null}),
             "host/model/list" => json!({"data":snapshot.catalog.models,"nextCursor":null}),
             "host/conversation/subscribe" => {
-                json!({"thread": snapshot.sessions.conversations[snapshot.panes.primary().navigation.thread_id.as_ref().unwrap()]})
+                let id: SessionRef = serde_json::from_value(request["params"]["session"].clone()).unwrap();
+                json!({"thread": snapshot.sessions.conversations[&id]})
             }
             "host/workspace/review" => {
                 assert_eq!(request["params"]["cwd"], cwd);
@@ -2430,8 +2431,11 @@ async fn a_failed_open_keeps_selection_and_draft_and_can_retry() {
     }
 }
 
+#[rstest::rstest]
 #[tokio::test]
-async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
+async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat(
+    #[values(false, true)] active: bool,
+) {
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let opening = tokio::spawn({
         let store = store.clone();
@@ -2453,8 +2457,13 @@ async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
         .navigation
         .draft_key
         .clone();
+    let mut loaded = thread("loaded");
+    if !active {
+        Arc::make_mut(&mut loaded.turns.as_mut().unwrap()[0]).status =
+            agent_protocol::models::TurnStatus::Completed;
+    }
     writer
-        .reply(&request, json!({"result":{"thread":thread("loaded")}}))
+        .reply(&request, json!({"result":{"thread":loaded}}))
         .await
         .unwrap();
     opening.await.unwrap().unwrap();
@@ -2465,6 +2474,13 @@ async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
     assert_ne!(
         new_draft,
         DraftKey::from(SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap())
+    );
+    assert_eq!(
+        snapshot
+            .sessions
+            .subscriptions
+            .contains_key(&SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap()),
+        active
     );
     assert_eq!(loaded_text(&snapshot), Some("loaded"));
 }
@@ -2853,6 +2869,16 @@ async fn creating_a_chat_updates_matching_search_results_without_reading_the_lis
 async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_window() {
     let initial: Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"historyLimit":10,"historyHasMore":true,"turns":[{"id":"latest","items":[],"status":"unknown"}]})).unwrap();
     let (store, mut reader, writer) = setup(Snapshot {
+        panes: agent_core::state::PaneStates::with_primary(Arc::new(
+            agent_core::state::PaneState {
+                navigation: Arc::new(agent_core::state::Navigation {
+                    thread_id: initial.id.clone(),
+                    draft_key: initial.id.clone().unwrap().into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )),
         sessions: agent_core::state::Sessions {
             conversations: Arc::new(BTreeMap::from([(
                 SessionRef {
@@ -2932,6 +2958,16 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
 async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
     let initial: Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"historyLimit":10,"historyHasMore":true,"turns":[{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]})).unwrap();
     let (store, mut reader, writer) = setup(Snapshot {
+        panes: agent_core::state::PaneStates::with_primary(Arc::new(
+            agent_core::state::PaneState {
+                navigation: Arc::new(agent_core::state::Navigation {
+                    thread_id: initial.id.clone(),
+                    draft_key: initial.id.clone().unwrap().into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )),
         sessions: agent_core::state::Sessions {
             conversations: Arc::new(BTreeMap::from([(
                 SessionRef {
@@ -3160,6 +3196,12 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             ..Default::default()
         }),
     );
+    Arc::make_mut(initial.panes.primary_mut()).navigation =
+        Arc::new(agent_core::state::Navigation {
+            thread_id: Some(source.clone()),
+            draft_key: source.clone().into(),
+            cwd: "/fixture".into(),
+        });
     let (store, mut reader, writer) = setup(initial).await;
     let rewind = store.dispatch(Intent::RewindSession(op::RewindSession::new(
         source.clone(),
@@ -3181,13 +3223,15 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         navigation.await.unwrap();
     }
     // An active subscription receives the authoritative replacement before
-    // the command ACK. A conversation left in the meantime is read afresh.
+    // the command ACK. A conversation left in the meantime stays unsubscribed
+    // until an explicit read catches up its cached cursor.
     let subscription = store
         .snapshot()
         .sessions
         .subscriptions
         .get(&source)
         .copied();
+    assert_eq!(subscription.is_some(), !navigate);
     if let Some(subscription) = subscription {
         let current = store.snapshot();
         let mut response: agent_protocol::models::ThreadResponse = serde_json::from_value(
@@ -3209,7 +3253,15 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         .await
         .unwrap();
     rewind.await.unwrap();
-    if subscription.is_none() {
+    if navigate {
+        assert!(
+            !store
+                .snapshot()
+                .sessions
+                .subscriptions
+                .contains_key(&source)
+        );
+        let reopening = store.dispatch(Intent::ReadThread(op::ReadThread::new(source.clone())));
         let refresh = loop {
             let request = read(&mut reader).await;
             if request["method"] == "host/conversation/subscribe" {
@@ -3221,7 +3273,34 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
                 .await
                 .unwrap();
         };
-        writer.reply(&refresh, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"cwd":"/fixture","turns":[kept]}}})).await.unwrap();
+        let current = store.snapshot();
+        let mut response: agent_protocol::models::ThreadResponse =
+            serde_json::from_value(json!({"thread":{"id":source,"cwd":"/fixture","turns":[kept]}}))
+                .unwrap();
+        response.thread.transcript_version = Some(
+            current.sessions.replicas[&source]
+                .cursor()
+                .unwrap()
+                .sequence
+                + 1,
+        );
+        let opened = agent_protocol::conversation::records::Opened {
+            session: source.clone(),
+            subscription_id: uuid::Uuid::nil(),
+            initial: host_fixture::rows::replica(response, 1).snapshot().unwrap(),
+        };
+        writer
+            .reply(&refresh, json!({"result":opened}))
+            .await
+            .unwrap();
+        reopening.await.unwrap();
+        assert!(
+            !store
+                .snapshot()
+                .sessions
+                .subscriptions
+                .contains_key(&source)
+        );
     }
     let mut changes = store.subscribe();
     tokio::time::timeout(
@@ -3787,7 +3866,10 @@ async fn initial_titles_wait_for_scope_verification_and_use_the_current_query() 
                             assert!(request["params"]["cached"].is_null());
                             titles("fresh")["result"].clone()
                         }
-                        "host/list/search"=> {assert_eq!(request["params"]["term"],"new query");titles("fresh")["result"].clone()},
+                        "host/list/search" => {
+                            assert_eq!(request["params"]["term"], "new query");
+                            titles("fresh")["result"].clone()
+                        },
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         method => panic!("unexpected bootstrap: {method}"),
@@ -4119,6 +4201,7 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
     saved.sessions.pending_submissions = Arc::new(BTreeMap::from([(
         "ba739aed-7c1b-5223-83c6-26f68997d8bf".into(),
         Arc::new(PendingSubmission {
+            new_draft_slot: None,
             cursor: None,
             sequence: 0,
             submitted_at_ms: None,
@@ -4670,7 +4753,6 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         ] {
             let completion = store.dispatch(intent);
             let request = requests.recv().await.unwrap();
-
             assert!(matches!(request["method"].as_str(), Some("host/conversation/change")));
             output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
             completion.await.unwrap();
@@ -4692,9 +4774,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         let retry = requests.recv().await.unwrap();
         assert_eq!(retry["method"], "host/conversation/hydrate");
         output.lock().await.reply(&retry, json!({"result":{"item":{"id":"item","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"complete prefix + new suffix","exitCode":null}}}}}}})).await.unwrap();
-
         reading.await.unwrap();
-
         duplicate.await.unwrap();
         let snapshot = store.snapshot();
         let turn = &snapshot.sessions.conversations[&SessionRef { provider: Some(ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0];
@@ -4702,12 +4782,10 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         assert!(!turn.items.as_ref().unwrap()[0].is_deferred());
         assert!(requests.try_recv().is_err(), "same-item requests must be coalesced");
         for failure in ["digest", "id", "timeout"] {
-
             let wrong_id = failure == "id";
             let before = store.snapshot().sessions.conversations.clone();
             let mut failed_read = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
             let request = requests.recv().await.unwrap();
-
             let invalid = agent_protocol::protocol::encode(serde_json::from_value::<agent_protocol::models::Item>(json!({"id":if wrong_id {"different"} else {"item"},"status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"invalid body","exitCode":null}}}}})).unwrap()).unwrap();
             let digest = if wrong_id { ring::digest::digest(&ring::digest::SHA256, &invalid).as_ref().to_vec() } else { vec![0;32] };
             output.lock().await.reply(&request, json!({"result":{"item":{"id":"item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null}}}}},"transfer":{"token":([2u8;32]),"sha256":digest,"size":invalid.len()}}})).await.unwrap();
@@ -4723,23 +4801,18 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
                 tokio::time::resume();
                 let interrupt = store.dispatch(Intent::Interrupt(op::Interrupt {thread_id:SessionRef { provider: Some(ProviderKind::Codex), id: "A".into() },turn_id:"turn".into()}));
                 let request = requests.recv().await.unwrap();
-
                 assert_eq!(request["method"], "host/conversation/change");
                 output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
                 interrupt.await.unwrap();
                 tokio::time::pause();
                 tokio::time::advance(Duration::from_secs(60)).await;
                 tokio::time::resume();
-
                 let result = failed_read.await;
-
                 assert!(matches!(result, Err(PeerError::RequestTimeout { .. })), "{result:?}");
             } else {
                 transfer.write_all(&invalid).await.unwrap();
                 transfer.shutdown().await.unwrap();
-
                 let result = failed_read.await;
-
                 if wrong_id {
                     assert!(matches!(&result, Err(PeerError::InvalidMessage(reason)) if reason.contains("item ID")), "{failure}: {result:?}");
                 } else {
@@ -4749,7 +4822,6 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             assert!(Arc::ptr_eq(&before, &store.snapshot().sessions.conversations));
             let interrupt = store.dispatch(Intent::Interrupt(op::Interrupt {thread_id:SessionRef { provider: Some(ProviderKind::Codex), id: "A".into() },turn_id:"turn".into()}));
             let request = requests.recv().await.unwrap();
-
             assert_eq!(request["method"], "host/conversation/change");
             output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
             interrupt.await.unwrap();
@@ -4762,7 +4834,6 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         host.close().await;
     }).await.unwrap();
 }
-
 #[rstest::rstest]
 #[case::restored(true)]
 #[case::read_failed(false)]
@@ -5517,6 +5588,16 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
     )
     .unwrap();
     let (store, mut reader, writer) = setup(Snapshot {
+        panes: agent_core::state::PaneStates::with_primary(Arc::new(
+            agent_core::state::PaneState {
+                navigation: Arc::new(agent_core::state::Navigation {
+                    thread_id: Some(id.clone()),
+                    draft_key: id.clone().into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )),
         sessions: agent_core::state::Sessions {
             conversations: Arc::new(BTreeMap::from([(id.clone(), Arc::new(initial))])),
             ..Default::default()
@@ -5789,5 +5870,68 @@ async fn terminal_handles_progress_independently_while_each_keeps_input_order() 
     assert_eq!(input_a["params"]["processHandle"], "A");
     writer.reply(&input_a, json!({"result":{}})).await.unwrap();
     writing_a.await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn local_unknown_input_restore_and_discard_follow_the_user_intent_after_host_rejection(
+    #[values(false, true)] restore: bool,
+) {
+    let session = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
+    let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
+    let mut initial = snapshot();
+    Arc::make_mut(&mut initial.input.drafts).insert(
+        session.clone().into(),
+        Arc::new(Draft {
+            text: "newer".into(),
+            ..Default::default()
+        }),
+    );
+    Arc::make_mut(&mut initial.sessions.pending_submissions).insert(
+        input.clone(),
+        Arc::new(agent_core::state::PendingSubmission {
+            new_draft_slot: None,
+            cursor: None,
+            sequence: 0,
+            submitted_at_ms: None,
+            draft_key: session.clone().into(),
+            draft: Arc::new(Draft {
+                text: "uncertain".into(),
+                ..Default::default()
+            }),
+            turn_id: None,
+            after_item_id: None,
+            accepted: false,
+            delivery_unknown: true,
+            queued: false,
+        }),
+    );
+    let (store, mut reader, writer) = setup(initial).await;
+    let receipt = store.dispatch(if restore {
+        Intent::RestoreUnknownSubmission {
+            client_user_message_id: input.clone(),
+        }
+    } else {
+        Intent::DiscardUnknownSubmission {
+            client_user_message_id: input.clone(),
+        }
+    });
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/conversation/change");
+    assert_eq!(request["params"]["session"], json!(session));
+    assert_eq!(request["params"]["operation"], json!(input));
+    assert_eq!(
+        request["params"]["command"]["ResolveUnknown"],
+        json!({"id":input,"retry":false})
+    );
+    writer.reply(&request, json!({"result":{"outcome":{"Rejected":"original was never admitted"},"cursor":{"store":uuid::Uuid::from_u128(1),"sequence":8}}})).await.unwrap();
+    receipt.await.unwrap();
+    let state = store.snapshot();
+    assert!(!state.sessions.pending_submissions.contains_key(&input));
+    assert_eq!(
+        state.input.drafts[&session.into()].text,
+        if restore { "uncertain\nnewer" } else { "newer" }
+    );
     store.close().await.unwrap();
 }

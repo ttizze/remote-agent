@@ -4,6 +4,7 @@ use agent_protocol::sync::{Cursor, Message};
 
 fn pending(session: &SessionRef) -> Arc<PendingSubmission> {
     Arc::new(PendingSubmission {
+        new_draft_slot: None,
         cursor: None,
         sequence: 0,
         submitted_at_ms: None,

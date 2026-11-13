@@ -650,7 +650,7 @@ pub enum Observation {
     RequestResolved(RequestId),
     Completed,
     Notice(ExecutionError),
-    Failed(ExecutionError),
+    Failed(Option<ExecutionError>),
     Interrupted,
     Retry {
         at: i64,

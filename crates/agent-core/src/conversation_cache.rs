@@ -553,9 +553,67 @@ mod tests {
         let directory = root.path().join("host-a/b");
         let (updates, receiver) = watch::channel(snapshot([]));
         let saving = tokio::spawn(run(directory.clone(), receiver, unflushed()));
+        let mut running = thread("running", 2, TurnStatus::Running);
+        let submission = agent_protocol::operations::Submission {
+            thread_id: running.id.clone().unwrap(),
+            client_user_message_id: "preparing".into(),
+            input: Vec::new(),
+            model: None,
+            effort: None,
+            service_tier: None,
+            follow_up: Default::default(),
+        };
+        running
+            .preparations
+            .push(agent_protocol::session::SessionPreparation {
+                submission: submission.clone(),
+                status: agent_protocol::session::PreparationStatus::Preparing,
+                stage: agent_protocol::session::PreparationStage::Provider,
+            });
+        running
+            .queue
+            .inputs
+            .push(agent_protocol::operations::Submission {
+                client_user_message_id: "queued".into(),
+                ..submission
+            });
+        running
+            .background
+            .push(agent_protocol::execution::BackgroundTask {
+                id: "job".into(),
+                kind: agent_protocol::execution::BackgroundTaskKind::Command,
+                description: None,
+            });
+        running.requests.insert(
+            "approval".into(),
+            Arc::new(agent_protocol::requests::Request {
+                id: "approval".into(),
+                target: agent_protocol::requests::RequestTarget::Turn {
+                    turn_id: "running-1".into(),
+                    item_id: None,
+                },
+                delivery: agent_protocol::session::RequestDelivery::Awaiting,
+                body: agent_protocol::requests::RequestBody::Permission {
+                    description: "permission".into(),
+                    details: String::new(),
+                    choices: Vec::new(),
+                },
+            }),
+        );
+        let live = snapshot([running.clone()]);
+        let live = records::project(live.sessions.replicas.values().next().unwrap())
+            .unwrap()
+            .thread;
+        assert!(
+            !live.requests.is_empty()
+                && !live.submissions.is_empty()
+                && !live.preparations.is_empty()
+                && !live.background.is_empty()
+                && !live.queue.inputs.is_empty()
+        );
         updates.send_replace(snapshot([
             thread("settled", 2, TurnStatus::Completed),
-            thread("running", 2, TurnStatus::Running),
+            running,
             thread(
                 "expanded",
                 HISTORY_WINDOW_TURNS as usize + 1,
@@ -571,6 +629,26 @@ mod tests {
         written(&directory, "settled").await;
         let copies = restored(&directory);
         assert_eq!(copies.len(), 3);
+        let running = copies
+            .values()
+            .find(|thread| thread.name.as_deref() == Some("running"))
+            .unwrap();
+        assert_eq!(running.status, SessionStatus::Unknown);
+        assert!(
+            running
+                .turns
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|turn| turn.status == TurnStatus::Unknown)
+        );
+        assert!(
+            running.requests.is_empty()
+                && running.submissions.is_empty()
+                && running.preparations.is_empty()
+                && running.background.is_empty()
+                && running.queue.inputs.is_empty()
+        );
         let copy = copies
             .values()
             .find(|thread| thread.name.as_deref() == Some("settled"))

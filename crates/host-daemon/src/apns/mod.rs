@@ -40,10 +40,15 @@ pub(crate) fn now() -> u64 {
 impl Apns {
     #[cfg(test)]
     pub(crate) fn testing() -> Arc<Self> {
+        let mut registry = Registry::default();
+        registry.update(
+            agent_protocol::live_activity::TaskActivitySummary::default().display(),
+            now(),
+        );
         Arc::new(Self {
             client: Client::testing(),
             host_name: "PC".into(),
-            registry: Mutex::default(),
+            registry: Mutex::new(registry),
             path: None,
             ready: AtomicBool::new(true),
             wake: Arc::new(Notify::new()),
@@ -178,12 +183,7 @@ impl Apns {
         }
         self.ready.store(true, Ordering::Release);
     }
-    pub fn register(
-        &self,
-        owner: &str,
-        params: &RegisterLiveActivity,
-        display: TaskActivityDisplay,
-    ) -> Result<(), String> {
+    pub fn register(&self, owner: &str, params: &RegisterLiveActivity) -> Result<(), String> {
         if !self.is_ready() {
             return Err("Host task state is still initializing".into());
         }
@@ -198,7 +198,7 @@ impl Apns {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         registry
-            .register(owner, params, &self.host_name, display, now())
+            .register(owner, params, &self.host_name, now())
             .map_err(str::to_owned)?;
         self.save(&registry)
             .map_err(|_| "cannot persist Live Activity registration".to_owned())?;
@@ -273,13 +273,12 @@ mod tests {
             ..Default::default()
         }
         .display();
-        let error = service
-            .register("phone", &params, display.clone())
-            .unwrap_err();
+        service.activate(display);
+        let error = service.register("phone", &params).unwrap_err();
         assert!(error.contains("Production"));
         assert!(service.test_payloads(now()).is_empty());
         params.environment = PushEnvironment::Sandbox;
-        service.register("phone", &params, display).unwrap();
+        service.register("phone", &params).unwrap();
         assert_eq!(service.test_payloads(now()).len(), 1);
     }
 
@@ -294,6 +293,7 @@ mod tests {
         .display();
         let mut service = Apns::testing();
         Arc::get_mut(&mut service).unwrap().path = Some(path.clone());
+        service.activate(running);
         service
             .register(
                 "phone",
@@ -303,7 +303,6 @@ mod tests {
                     token: vec![1; 32],
                     environment: PushEnvironment::Sandbox,
                 },
-                running.clone(),
             )
             .unwrap();
         #[cfg(unix)]
@@ -340,5 +339,42 @@ mod tests {
         let mut restored: Registry =
             serde_json::from_slice(&Zeroizing::new(std::fs::read(&path).unwrap())).unwrap();
         assert!(restored.deliveries(now() + 100).is_empty());
+    }
+    #[test]
+    fn registering_after_a_display_update_uses_the_latest_state_even_without_existing_entries() {
+        for summary in [
+            TaskActivitySummary {
+                waiting: 1,
+                ..Default::default()
+            },
+            TaskActivitySummary::default(),
+        ] {
+            let service = Apns::testing();
+            service.activate(
+                TaskActivitySummary {
+                    running: 1,
+                    ..Default::default()
+                }
+                .display(),
+            );
+            let latest = summary.display();
+            service.update(latest.clone());
+            service
+                .register(
+                    "phone",
+                    &RegisterLiveActivity {
+                        activity_id: Some("late".into()),
+                        allow_start: false,
+                        token: vec![1; 32],
+                        environment: PushEnvironment::Sandbox,
+                    },
+                )
+                .unwrap();
+            let payload = service.test_payloads(now()).pop().unwrap();
+            assert_eq!(
+                payload["aps"]["content-state"]["display"],
+                serde_json::to_value(latest).unwrap()
+            );
+        }
     }
 }

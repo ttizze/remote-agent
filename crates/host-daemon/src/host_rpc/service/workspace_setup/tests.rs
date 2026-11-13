@@ -519,6 +519,7 @@ async fn asynchronous_failure_does_not_block_or_resend_the_initial_input() {
     let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
     assert_eq!(done.stages[2].status, SetupStageStatus::Failed);
     assert_eq!(done.stages[2].exit_code, Some(9));
+    assert_eq!(done.error.as_deref(), Some("Setup script exited with 9"));
     assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
 }
 
@@ -677,6 +678,7 @@ async fn automatic_workspace_preference_selects_the_initial_checkout() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn stopping_a_running_setup_then_retrying_reruns_the_script_in_the_same_checkout() {
     let fixture = Fixture::new(script("if [ ! -f .attempted ]; then touch .attempted; printf 'waiting\\n'; sleep 120; fi; printf 'retried\\n'", false)).await;
@@ -786,6 +788,10 @@ async fn restarted_host_restores_the_remaining_setup_card_lifetime() {
     })
     .await
     .expect("restart keeps the original expiry deadline");
+    assert!(
+        started.elapsed() >= Duration::from_secs(9),
+        "the card keeps its original remaining lifetime"
+    );
     assert!(started.elapsed() <= Duration::from_secs(11));
     assert!(
         host.inner
@@ -842,6 +848,7 @@ async fn retry_after_restart_restores_a_deleted_checkout_before_the_first_provid
     .await;
     assert_eq!(done.cwd.as_deref(), Some(checkout.as_str()));
     assert!(Path::new(&checkout).join(".git").exists());
+    assert_eq!(*agent.created_in.lock().unwrap(), [true]);
     assert_eq!(agent.inputs.lock().unwrap().len(), 1);
     assert_eq!(done.id, Some(id));
 }

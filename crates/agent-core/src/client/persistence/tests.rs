@@ -890,6 +890,7 @@ async fn autosave_keeps_each_kind_of_host_owned_work() {
             Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
                 "pending".into(),
                 Arc::new(crate::state::PendingSubmission {
+                    new_draft_slot: None,
                     cursor: None,
                     sequence: 1,
                     submitted_at_ms: None,

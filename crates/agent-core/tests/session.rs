@@ -516,6 +516,7 @@ fn local_storage_keeps_user_work_without_host_caches() {
                 [(
                     "send-id".into(),
                     Arc::new(PendingSubmission {
+                        new_draft_slot: None,
                         cursor: None,
                         sequence: 0,
                         submitted_at_ms: None,

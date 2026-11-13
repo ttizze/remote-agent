@@ -14,16 +14,7 @@ impl HostRpcService {
         if enabled {
             self.inner
                 .router
-                .register_live_activity(
-                    session,
-                    params,
-                    self.inner
-                        .conversation
-                        .storage
-                        .activity()
-                        .map_err(super::super::runtime::storage_failure)?
-                        .display,
-                )
+                .register_live_activity(session, params)
                 .map_err(|error| Failure::new("live_activity_failed", error))?;
         }
         Ok(agent_protocol::live_activity::LiveActivityRegistration { enabled })
@@ -165,7 +156,7 @@ impl HostRpcService {
     }
 }
 
-fn incomplete() -> Failure {
+pub(super) fn incomplete() -> Failure {
     Failure::new(
         "task_activity_incomplete",
         "実行中のタスクをすべて確認できません。時間をおいて再試行してください。",
@@ -192,7 +183,7 @@ mod tests {
         conversation::records,
         live_activity::{MarkSessionRead, TaskActivityState},
         session::SessionRef,
-        sync::{Content, Key, Scope},
+        sync::Scope,
     };
     struct ListReader {
         updates: crate::host_rpc::routing::HostSubscription,
@@ -230,15 +221,7 @@ mod tests {
             )
             .unwrap();
             reader.replica = reader.replica.apply(1, message).unwrap();
-            records::list_activity(reader.replica.rows().values().filter_map(|row| {
-                let record = match &row.content {
-                    Content::Full(record) | Content::Summary(record) => record,
-                };
-                match (&row.key, record.as_ref()) {
-                    (Key::Thread(id), records::Record::Thread(header)) => Some((id, header)),
-                    _ => None,
-                }
-            }))
+            records::list_rows_activity(reader.replica.rows().values())
         })
         .await
         .expect("committed list update arrives")
@@ -551,6 +534,15 @@ rl.on('line', line => {
                 super::super::super::runtime::now(),
             )
             .unwrap();
+        apns.activate(
+            service
+                .inner
+                .conversation
+                .storage
+                .activity()
+                .unwrap()
+                .display,
+        );
         let phone = service.open_authenticated_session("phone".into());
         let params = RegisterLiveActivity {
             activity_id: Some("activity".into()),

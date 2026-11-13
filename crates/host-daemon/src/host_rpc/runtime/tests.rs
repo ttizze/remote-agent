@@ -300,7 +300,13 @@ async fn expanded_commands_stream_bounded_tails_until_provider_stop() {
 
 #[tokio::test]
 async fn background_command_completion_and_completion_while_stop_is_pending_save_the_tail() {
-    for case in ["background", "background-stop"] {
+    for case in [
+        "background",
+        "background-stop",
+        "background-failed",
+        "background-interrupted",
+        "foreground-stop",
+    ] {
         command_output_case(case).await;
     }
 }
@@ -457,7 +463,8 @@ async fn command_output_case(case: &str) {
     .await
     .unwrap();
     assert_eq!(late.initial, tail);
-    if case.starts_with("background") {
+    let background = case.starts_with("background");
+    if background || case == "foreground-stop" {
         send(SessionChange::Background {
             tasks: vec![agent_protocol::execution::BackgroundTask {
                 id: "background-command".into(),
@@ -467,10 +474,69 @@ async fn command_output_case(case: &str) {
         })
         .await
         .unwrap();
+        if case == "foreground-stop" {
+            let runtime = &service.inner.conversation;
+            let operation = Uuid::new_v4();
+            let queued = operation.to_string().into();
+            let admitted = runtime
+                .storage
+                .decide(
+                    &target,
+                    Event::Command {
+                        id: decision::OperationId::Client(operation),
+                        receipt: None,
+                        command: Command::Submit {
+                            id: queued,
+                            content: content(),
+                        },
+                    },
+                    Runtime::context(&service, Some(ProviderKind::Codex)),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(admitted.step.outcome, Outcome::Accepted);
+            let state = runtime.storage.state(&target).unwrap();
+            runtime
+                .storage
+                .decide(
+                    &target,
+                    Event::Command {
+                        id: decision::OperationId::Client(Uuid::new_v4()),
+                        receipt: None,
+                        command: Command::Interrupt {
+                            turn: state.active_turn().map(|turn| turn.id.clone()),
+                        },
+                    },
+                    Runtime::context(&service, Some(ProviderKind::Codex)),
+                    None,
+                )
+                .unwrap();
+            send(SessionChange::Background { tasks: Vec::new() })
+                .await
+                .unwrap();
+            let state = runtime.storage.state(&target).unwrap();
+            assert!(matches!(
+                state.active_turn().map(|turn| &turn.state),
+                Some(decision::TurnState::Running { interrupt: Some(_) })
+            ));
+            assert_eq!(
+                state
+                    .inputs
+                    .values()
+                    .filter(|input| matches!(input.state, decision::InputState::Queued { .. }))
+                    .count(),
+                1
+            );
+        }
+        let status = match case {
+            "background-failed" => TurnStatus::Failed,
+            "background-interrupted" | "foreground-stop" => TurnStatus::Interrupted,
+            _ => TurnStatus::Completed,
+        };
         send(SessionChange::Turn {
             turn: agent_protocol::models::Turn {
                 id: "tools".into(),
-                status: TurnStatus::Completed,
+                status,
                 ..Default::default()
             },
             completed: true,
@@ -488,7 +554,7 @@ async fn command_output_case(case: &str) {
                     Event::Command {
                         id: decision::OperationId::Client(Uuid::new_v4()),
                         receipt: None,
-                        command: decision::Command::Interrupt {
+                        command: Command::Interrupt {
                             turn: state.active_turn().map(|turn| turn.id.clone()),
                         },
                     },
@@ -497,9 +563,16 @@ async fn command_output_case(case: &str) {
                 )
                 .unwrap();
         }
-        send(SessionChange::Background { tasks: Vec::new() })
-            .await
-            .unwrap();
+        if matches!(case, "background" | "background-stop") {
+            send(SessionChange::Background { tasks: Vec::new() })
+                .await
+                .unwrap();
+        }
+        let state = service.inner.conversation.storage.state(&target).unwrap();
+        assert!(state.active_turn().is_none());
+        if case == "foreground-stop" {
+            assert!(state.thread.queue_held);
+        }
     } else if stopped {
         Runtime::observe(
             &service,
@@ -552,10 +625,10 @@ async fn command_output_case(case: &str) {
     assert!(output_omitted);
     assert_eq!(
         stored.status,
-        if stopped {
-            ItemStatus::Failed
-        } else {
-            ItemStatus::Completed
+        match case {
+            "stopped" | "background-failed" => ItemStatus::Failed,
+            "background-interrupted" | "foreground-stop" => ItemStatus::Interrupted,
+            _ => ItemStatus::Completed,
         }
     );
     assert!(updates.recv().await.is_none());

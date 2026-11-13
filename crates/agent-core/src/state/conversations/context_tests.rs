@@ -559,3 +559,37 @@ fn follow_up_delivery_in_an_established_checkout_keeps_the_review_available() {
         );
     }
 }
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn failed_worktree_preparation_hides_the_source_checkout_until_a_checkout_exists(
+    #[case] created: bool,
+) {
+    let preparation = agent_protocol::session::SessionPreparation {
+        submission: agent_protocol::operations::Submission {
+            thread_id: SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap(),
+            client_user_message_id: "failed".into(),
+            input: Vec::new(),
+            model: None,
+            effort: None,
+            service_tier: None,
+            follow_up: Default::default(),
+        },
+        status: agent_protocol::session::PreparationStatus::Failed {
+            error: Default::default(),
+        },
+        stage: agent_protocol::session::PreparationStage::Provider,
+    };
+    let mut setup = agent_protocol::workspace::WorkspaceSetup::new(Some("main".into()), 0);
+    setup.finish(
+        agent_protocol::workspace::SetupPhase::Failed,
+        Some("checkout failed".into()),
+        1,
+    );
+    setup.worktree_path = created.then(|| "/worktree".into());
+    assert_eq!(
+        op::preparing_workspace(&[preparation], Some(&setup)),
+        !created
+    );
+}

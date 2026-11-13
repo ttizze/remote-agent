@@ -48,7 +48,7 @@ class ThreadListTest {
                 {"id":{"provider":"codex","id":"project-chat"},"name":"Project conversation","projectId":"bex","updatedAt":20},
                 {"id":{"provider":"claude","id":"standalone"},"name":"Standalone conversation","updatedAt":10}],
                 "projects":[{"id":"bex","name":"BEX project","roots":[]}],
-                "hasMore":true,"hasMoreProjects":false,"limit":5,"projectPages":{}}"""
+                "hasMore":true,"hasMoreProjects":false,"limit":5}"""
                     ),
                 )
         Snapshot.restore(persisted.toString().encodeToByteArray()).use { snapshot ->
@@ -87,7 +87,7 @@ class ThreadListTest {
                         """{"data":[],"projects":[
                 {"id":"a","name":"Alpha","roots":[]},
                 {"id":"b","name":"Beta","roots":[]}],
-                "hasMore":false,"hasMoreProjects":false,"limit":5,"projectPages":{}}"""
+                "hasMore":false,"hasMoreProjects":false,"limit":5}"""
                     ),
                 )
         Snapshot.restore(persisted.toString().encodeToByteArray()).use { snapshot ->
@@ -236,7 +236,7 @@ class ThreadListTest {
                     {"id":{"provider":"claude","id":"pending-unread"},"name":"Pending unread worktree","hasChanges":true},
                     {"id":{"provider":"claude","id":"running"},"name":"Claude conversation"}
                 ],
-                "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,"projectPages":{}}"""
+                "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}"""
                     ),
                 )
                 .put(

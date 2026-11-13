@@ -53,9 +53,10 @@ fn merge_recovered_draft(recovered: &Draft, current: &Draft) -> Draft {
     draft
 }
 
-/// A restore that the Host may have committed before its reply reached us.
+/// A saved disposition whose Host reply may have been lost.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputRecovery {
+    pub restore: bool,
     pub store: uuid::Uuid,
     pub session: crate::session::SessionRef,
     pub operation: uuid::Uuid,
@@ -211,6 +212,9 @@ pub struct AccountState {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
+    /// The original folder/pane slot for an uncreated conversation's first input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_draft_slot: Option<String>,
     #[serde(default)]
     pub cursor: Option<agent_protocol::sync::Cursor>,
     pub sequence: u64,
@@ -426,6 +430,9 @@ group! {
         pub project_threads: Arc<BTreeMap<String, Arc<ThreadList>>>,
         #[serde(skip)]
         pub expanded_projects: Arc<BTreeMap<String, u32>>,
+        /// Search has its own disclosure choices; zero means explicitly collapsed.
+        #[serde(skip)]
+        pub search_expanded_projects: Arc<BTreeMap<String, u32>>,
         #[serde(skip)]
         pub list_query: Arc<ListQuery>,
         pub activity: Arc<Activity>,
@@ -996,11 +1003,12 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
 
         Intent::ListSessions(operation) => return list_sync::query(next, operation.query, true),
         Intent::ListProjectSessions(operation) => {
-            if next.lists.expanded_projects.contains_key(&operation.project_id) {
-                Arc::make_mut(&mut next.lists.expanded_projects).insert(operation.project_id,operation.limit);
+            let projects = if next.lists.list_query.search_term.trim().is_empty() { &mut next.lists.expanded_projects } else { &mut next.lists.search_expanded_projects };
+            if projects.contains_key(&operation.project_id) {
+                Arc::make_mut(projects).insert(operation.project_id, operation.limit);
             }
-            let effects=list_sync::project(&mut next, false);
-            return (next,effects);
+            let effects = list_sync::project(&mut next, false);
+            return (next, effects);
         }
         Intent::SetWorkspaceComparison { cwd, base_ref } => {
             if cwd.is_empty() || next.selected_directory(next.panes.get(pane_id).expect("admitted pane exists")) != cwd {
@@ -1013,7 +1021,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         }
         Intent::RefreshProject { project_id } => {
             let effects=list_sync::refresh_project(&next,&project_id);
-            return (next,effects);
+            return (next, effects);
         }
         Intent::SetProjectPinned { project_id, pinned } => projects::update(&mut next, &project_id, |p| p.pinned = pinned),
         Intent::ReorderProject { project_id, target_id, after } => projects::reorder(&mut next, &project_id, &target_id, after),
@@ -1045,19 +1053,24 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             p.archived_ids.clear();
         }),
         Intent::SetProjectExpanded { project_id, expanded } => {
+            let searching = !next.lists.list_query.search_term.trim().is_empty();
+            let projects = if searching { &mut next.lists.search_expanded_projects } else { &mut next.lists.expanded_projects };
             if expanded {
-                Arc::make_mut(&mut next.lists.expanded_projects).entry(project_id).or_insert(5);
+                Arc::make_mut(projects).entry(project_id).and_modify(|limit| *limit = (*limit).max(5)).or_insert(5);
+            } else if searching {
+                Arc::make_mut(projects).insert(project_id, 0);
             } else {
-                Arc::make_mut(&mut next.lists.expanded_projects).remove(&project_id);
+                Arc::make_mut(projects).remove(&project_id);
             }
-            let effects=list_sync::project(&mut next, false);
-            return (next,effects);
+            let effects = list_sync::project(&mut next, false);
+            return (next, effects);
         }
         Intent::ExpandThreadList { project_id } => {
-            if let Some(project_id)=project_id {
-                if let Some(limit)=Arc::make_mut(&mut next.lists.expanded_projects).get_mut(&project_id) {*limit=limit.saturating_add(10);}
-                let effects=list_sync::project(&mut next, false);
-                return (next,effects);
+            if let Some(project_id) = project_id {
+                let projects = if next.lists.list_query.search_term.trim().is_empty() { &mut next.lists.expanded_projects } else { &mut next.lists.search_expanded_projects };
+                if let Some(limit) = Arc::make_mut(projects).get_mut(&project_id) { *limit = limit.saturating_add(10); }
+                let effects = list_sync::project(&mut next, false);
+                return (next, effects);
             }
             let mut query=(*next.lists.list_query).clone();
             query.limit=query.limit.saturating_add(10);
@@ -1066,8 +1079,8 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         Intent::ShowRecentChats | Intent::ExpandRecentChats => {
             if matches!(intent,Intent::ExpandRecentChats) {Arc::make_mut(&mut next.lists.list_query).limit=next.lists.list_query.limit.saturating_add(10);}
             next.lists.recent_chats=true;
-            let effects=list_sync::project(&mut next, false);
-            return (next,effects);
+            let effects = list_sync::project(&mut next, false);
+            return (next, effects);
         }
         Intent::ExpandProjects => {
             let mut query=(*next.lists.list_query).clone();
@@ -1313,17 +1326,9 @@ fn navigate(snapshot: &mut Snapshot, pane_id: &str, navigation: Navigation) {
     }
     let selected = navigation.thread_id.clone();
     pane.navigation = Arc::new(navigation);
-    let _ = previous_id
-        .filter(|id| selected.as_ref() != Some(id) && !snapshot.selected_in_any_pane(id))
-        .filter(|id| {
-            snapshot.lists.activity.active.get(id) != Some(&true)
-                && snapshot
-                    .sessions
-                    .conversations
-                    .get(id)
-                    .is_none_or(|thread| thread.requests.is_empty())
-        })
-        .and_then(|id| Arc::make_mut(&mut snapshot.sessions.subscriptions).remove(&id));
+    if previous_id != selected {
+        snapshot.prune_subscriptions();
+    }
     if let Some(id) = selected
         && snapshot.lists.activity.unread.contains(&id)
     {
@@ -1400,6 +1405,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
             next.lists.task_activity = None;
             next.lists.activity = Arc::default();
             next.lists.expanded_projects = Arc::default();
+            next.lists.search_expanded_projects = Arc::default();
             next.lists.project_threads = Arc::default();
             if !next.connection.storage_scope.is_empty() {
                 let archived = ScopedData {
@@ -1464,10 +1470,11 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
         Event::SubmissionFailed(id) => {
             if let Some(pending) = Arc::make_mut(&mut next.sessions.pending_submissions).remove(&id)
             {
-                let draft = Arc::make_mut(&mut next.input.drafts)
-                    .entry(pending.draft_key.clone())
-                    .or_default();
-                *draft = Arc::new(merge_recovered_draft(&pending.draft, draft));
+                next.restore_submission_draft(
+                    pending.draft_key.clone(),
+                    &pending.draft,
+                    pending.new_draft_slot.as_deref(),
+                );
             }
         }
         Event::ConnectionChecked { failure } => next.connection.connection_failure = failure,
@@ -1965,6 +1972,17 @@ fn submission(
     Arc::make_mut(&mut next.sessions.pending_submissions).insert(
         client_user_message_id.clone(),
         Arc::new(PendingSubmission {
+            new_draft_slot: thread_id
+                .is_none()
+                .then(|| {
+                    previous
+                        .input
+                        .new_drafts
+                        .iter()
+                        .find(|(_, id)| DraftKey::from(*id) == draft_key)
+                        .map(|(slot, _)| slot.clone())
+                })
+                .flatten(),
             cursor: None,
             sequence,
             submitted_at_ms: None,
@@ -2006,6 +2024,49 @@ fn submission(
         }
     };
     (next, vec![effect])
+}
+
+impl Snapshot {
+    fn restore_submission_draft(
+        &mut self,
+        original: DraftKey,
+        recovered: &Draft,
+        slot: Option<&str>,
+    ) {
+        let target = match (&original, slot) {
+            (DraftKey::Session { session }, Some(slot))
+                if !self.sessions.conversations.contains_key(session) =>
+            {
+                DraftKey::from(
+                    Arc::make_mut(&mut self.input.new_drafts)
+                        .entry(slot.into())
+                        .or_insert_with(|| session.clone())
+                        .clone(),
+                )
+            }
+            _ => original.clone(),
+        };
+        let recovered = if target != original {
+            let previous = Arc::make_mut(&mut self.input.drafts)
+                .remove(&original)
+                .unwrap_or_default();
+            for pane in Arc::make_mut(&mut self.panes.0)
+                .values_mut()
+                .filter(|pane| {
+                    pane.navigation.thread_id.is_none() && pane.navigation.draft_key == original
+                })
+            {
+                Arc::make_mut(&mut Arc::make_mut(pane).navigation).draft_key = target.clone();
+            }
+            merge_recovered_draft(recovered, &previous)
+        } else {
+            recovered.clone()
+        };
+        let current = Arc::make_mut(&mut self.input.drafts)
+            .entry(target)
+            .or_default();
+        *current = Arc::new(merge_recovered_draft(&recovered, current));
+    }
 }
 
 #[cfg(test)]

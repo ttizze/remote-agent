@@ -100,3 +100,47 @@ fn pre_cutover_project_drafts_receive_a_persisted_address_without_losing_text() 
     let again = persistence::decode(&persistence::encode(&restored).unwrap()).unwrap();
     assert_eq!(again.panes.primary().navigation.draft_key, *key);
 }
+
+#[test]
+fn pre_cutover_pending_only_first_input_can_be_restored_after_navigation() {
+    use agent_core::state::{DraftKey, Event, Intent, PendingSubmission, reduce};
+    let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
+    let mut original = Snapshot::default();
+    Arc::make_mut(&mut original.sessions.pending_submissions).insert(
+        input.clone(),
+        Arc::new(PendingSubmission {
+            new_draft_slot: None,
+            cursor: None,
+            sequence: 1,
+            submitted_at_ms: None,
+            draft_key: DraftKey::from("new:/orphan"),
+            draft: Arc::new(Draft {
+                text: "pending only".into(),
+                ..Default::default()
+            }),
+            turn_id: None,
+            after_item_id: None,
+            accepted: false,
+            delivery_unknown: true,
+            queued: false,
+        }),
+    );
+    let restored = persistence::decode(&persistence::encode(&original).unwrap()).unwrap();
+    assert!(matches!(
+        restored.sessions.pending_submissions[&input].draft_key,
+        DraftKey::Session { .. }
+    ));
+    let failed = reduce(&restored, "", Event::SubmissionFailed(input)).0;
+    let returned = reduce(
+        &failed,
+        "",
+        Event::Intent(Intent::NewChat {
+            cwd: "/orphan".into(),
+        }),
+    )
+    .0;
+    assert_eq!(
+        returned.input.drafts[&returned.panes.primary().navigation.draft_key].text,
+        "pending only"
+    );
+}

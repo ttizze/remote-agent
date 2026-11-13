@@ -6,7 +6,13 @@ pub(super) struct Source {
     pub io: AsyncMutex<()>,
     pub(super) updates: AsyncMutex<()>,
     pub(super) text: Mutex<super::text::Text>,
-    background: Mutex<HashMap<Uuid, Vec<agent_protocol::execution::BackgroundTask>>>,
+    background: Mutex<HashMap<Uuid, Background>>,
+}
+
+#[derive(Default)]
+struct Background {
+    tasks: Vec<agent_protocol::execution::BackgroundTask>,
+    native_ended: bool,
 }
 
 pub(super) struct PendingRequest {
@@ -29,28 +35,57 @@ impl Source {
             .lock()
             .unwrap()
             .get(&execution)
-            .cloned()
+            .map(|background| background.tasks.clone())
             .unwrap_or_default()
+    }
+
+    pub(super) fn finish_foreground(
+        &self,
+        execution: Uuid,
+        fallback: Vec<agent_protocol::execution::BackgroundTask>,
+    ) -> Vec<agent_protocol::execution::BackgroundTask> {
+        let mut roster = self.background.lock().unwrap();
+        if let Some(background) = roster.get_mut(&execution) {
+            background.native_ended = true;
+            return background.tasks.clone();
+        }
+        if !fallback.is_empty() {
+            roster.insert(
+                execution,
+                Background {
+                    tasks: fallback.clone(),
+                    native_ended: true,
+                },
+            );
+        }
+        fallback
     }
 
     pub(super) fn roster(
         &self,
         execution: Uuid,
         tasks: Vec<agent_protocol::execution::BackgroundTask>,
-    ) -> Vec<(Uuid, Vec<agent_protocol::execution::BackgroundTask>)> {
+    ) -> Vec<(Uuid, Vec<agent_protocol::execution::BackgroundTask>, bool)> {
         let mut roster = self.background.lock().unwrap();
         let previous = std::mem::take(&mut *roster);
         for task in tasks {
             let owner = previous
                 .iter()
-                .find_map(|(owner, tasks)| {
-                    tasks
+                .find_map(|(owner, background)| {
+                    background
+                        .tasks
                         .iter()
                         .any(|known| known.id == task.id)
                         .then_some(*owner)
                 })
                 .unwrap_or(execution);
-            roster.entry(owner).or_default().push(task);
+            let background = roster.entry(owner).or_insert_with(|| Background {
+                native_ended: previous
+                    .get(&owner)
+                    .is_some_and(|background| background.native_ended),
+                ..Default::default()
+            });
+            background.tasks.push(task);
         }
         let executions: std::collections::HashSet<_> =
             previous.keys().chain(roster.keys()).copied().collect();
@@ -59,7 +94,13 @@ impl Source {
             .map(|execution| {
                 (
                     execution,
-                    roster.get(&execution).cloned().unwrap_or_default(),
+                    roster
+                        .get(&execution)
+                        .map(|background| background.tasks.clone())
+                        .unwrap_or_default(),
+                    previous
+                        .get(&execution)
+                        .is_some_and(|background| background.native_ended),
                 )
             })
             .collect()
@@ -566,6 +607,7 @@ impl Runtime {
                     id: SetupStageId::Agent,
                     status: SetupStageStatus::Done,
                     exit_code: None,
+                    error: None,
                 }),
                 Some(decision::InputState::Failed(error)) => Some(SetupChange::Finish {
                     phase: SetupPhase::Failed,
@@ -691,7 +733,7 @@ impl Runtime {
                         native_items: vec![],
                         native_turn: None,
                         attempt: attempt.id,
-                        observation: Observation::Failed(error),
+                        observation: Observation::Failed(Some(error)),
                     },
                 )
                 .await?;
@@ -739,7 +781,7 @@ impl Runtime {
                         native_items: Vec::new(),
                         native_turn: None,
                         attempt: attempt.id,
-                        observation: Observation::Failed(execution_error(error)),
+                        observation: Observation::Failed(Some(execution_error(error))),
                     },
                 )
                 .await?;
@@ -907,13 +949,13 @@ mod tests {
                         attempt: attempt.id,
                         native_turn: None,
                         native_items: vec![],
-                        observation: Observation::Failed(
+                        observation: Observation::Failed(Some(
                             agent_protocol::execution::ExecutionError {
                                 message: "original overload".into(),
                                 provider_code: Some("serverOverloaded".into()),
                                 ..Default::default()
                             },
-                        ),
+                        )),
                     },
                     context,
                     None,
@@ -1155,15 +1197,18 @@ mod tests {
         };
         assert_eq!(
             source.roster(first.id, vec![task.clone()]),
-            vec![(first.id, vec![task.clone()])]
+            vec![(first.id, vec![task.clone()], false)]
         );
         assert_eq!(
             source.roster(second.id, vec![task.clone()]),
-            vec![(first.id, vec![task.clone()])]
+            vec![(first.id, vec![task.clone()], false)]
         );
         assert_eq!(source.background(first.id), vec![task]);
         assert!(source.background(second.id).is_empty());
-        assert_eq!(source.roster(second.id, vec![]), vec![(first.id, vec![])]);
+        assert_eq!(
+            source.roster(second.id, vec![]),
+            vec![(first.id, vec![], false)]
+        );
         assert!(source.background(first.id).is_empty());
     }
 }

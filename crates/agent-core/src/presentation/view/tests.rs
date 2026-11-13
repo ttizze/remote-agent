@@ -38,7 +38,7 @@ fn snapshot() -> Snapshot {
     state.lists.threads = Some(Arc::new(
         serde_json::from_value(serde_json::json!({
             "data":[],"projects":[{"id":"project","name":"Project","roots":[]}],
-            "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
+            "hasMore":false,"hasMoreProjects":false,"limit":5
         }))
         .unwrap(),
     ));

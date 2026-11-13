@@ -444,8 +444,11 @@ pub(crate) fn apply(
             before.cwd.as_deref(),
             thread.cwd.as_deref(),
             completed
-                || op::preparing_workspace(&before.preparations)
-                    && !op::preparing_workspace(&thread.preparations)
+                || op::preparing_workspace(&before.preparations, before.workspace_setup.as_ref())
+                    && !op::preparing_workspace(
+                        &thread.preparations,
+                        thread.workspace_setup.as_ref(),
+                    )
                 || work_finished,
             discovered_agents,
         ));
@@ -455,13 +458,8 @@ pub(crate) fn apply(
             effects.extend(op::refresh_file_trees(snapshot, cwd));
         }
     }
-    if completed
-        && snapshot.connection.connected
-        && !crate::models::task_active(None, thread.status)
-        && thread.requests.is_empty()
-        && !snapshot.selected_in_any_pane(id)
-    {
-        Arc::make_mut(&mut snapshot.sessions.subscriptions).remove(id);
+    if completed {
+        snapshot.prune_subscriptions();
     }
     Ok(effects)
 }

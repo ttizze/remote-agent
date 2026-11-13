@@ -278,7 +278,6 @@ async fn wait_for_submission(
                         Some(SubmissionDelivery::Accepted {turn_id}) => return Ok(turn_id.clone()),
                         Some(SubmissionDelivery::Unknown) => anyhow::bail!("input delivery result is unknown; resolve it in the conversation before retrying"),
                         Some(SubmissionDelivery::Rejected) => anyhow::bail!("input was rejected"),
-                        Some(SubmissionDelivery::Withdrawn) => anyhow::bail!("input was withdrawn before it ran"),
                         _ => {},
                     }
                     if let Some(turn) = thread.turns.iter().flatten().find(|turn|
@@ -337,7 +336,6 @@ mod tests {
                 Err("delivery result is unknown"),
             ),
             (SubmissionDelivery::Rejected, Err("rejected")),
-            (SubmissionDelivery::Withdrawn, Err("withdrawn")),
         ] {
             let id = SessionRef::new(ProviderKind::Codex, "conversation".into()).unwrap();
             let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();

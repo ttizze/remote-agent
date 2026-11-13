@@ -543,10 +543,7 @@ impl State {
         &mut self,
         page: agent_protocol::models::ThreadList,
     ) -> std::io::Result<agent_protocol::conversation::records::Message> {
-        use agent_protocol::{
-            conversation::records,
-            sync::{Cursor, Scope},
-        };
+        use agent_protocol::sync::Cursor;
         self.sequence = self.sequence.max(7) + 1;
         for thread in &page.data {
             if let Some(id) = &thread.id {
@@ -565,11 +562,6 @@ impl State {
                 store: uuid::Uuid::from_u128(1),
                 sequence: self.sequence,
             },
-        );
-        self.list_replica = Some(
-            records::Replica::new(Scope::List, 1)
-                .apply(1, message.clone())
-                .map_err(std::io::Error::other)?,
         );
         Ok(message)
     }
@@ -661,8 +653,9 @@ impl State {
             .unwrap();
             if let Some(response) = agent_protocol::conversation::records::project(&replica) {
                 self.threads
-                    .insert(opened.session, serde_json::to_value(response)?);
+                    .insert(opened.session.clone(), serde_json::to_value(response)?);
             }
+            self.replicas.insert(opened.session, replica);
         }
         Ok(())
     }

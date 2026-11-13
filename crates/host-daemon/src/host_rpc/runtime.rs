@@ -173,20 +173,7 @@ impl Runtime {
                     }
                 };
                 if published && let Some(apns) = inner.router.apns() {
-                    let headers = replica.rows().values().filter_map(|row| {
-                        let record = match &row.content {
-                            agent_protocol::sync::Content::Full(record)
-                            | agent_protocol::sync::Content::Summary(record) => record,
-                        };
-                        match (&row.key, record.as_ref()) {
-                            (
-                                agent_protocol::sync::Key::Thread(id),
-                                records::Record::Thread(header),
-                            ) => Some((id, header)),
-                            _ => None,
-                        }
-                    });
-                    let activity = records::list_activity(headers);
+                    let activity = records::list_rows_activity(replica.rows().values());
                     if inner.providers.startup_errors().next().is_none()
                         && inner
                             .conversation
@@ -289,47 +276,6 @@ impl Runtime {
             None
         };
         let admission = (|| {
-            if let Command::Interrupt { turn } = &request.command {
-                let header = service
-                    .inner
-                    .conversation
-                    .storage
-                    .header(&request.session)
-                    .map_err(storage_failure)?;
-                let state = service
-                    .inner
-                    .conversation
-                    .storage
-                    .state(&request.session)
-                    .map_err(storage_failure)?;
-                let starting = state.inputs.values().any(|input| {
-                    matches!(
-                        input.state,
-                        decision::InputState::Preparing {
-                            stage: PreparationStage::Provider,
-                            ..
-                        }
-                    ) && turn
-                        .as_ref()
-                        .is_none_or(|turn| turn.as_str() == input.id.as_str())
-                });
-                if starting
-                    && header
-                        .details
-                        .workspace
-                        .as_ref()
-                        .and_then(|workspace| workspace.setup.as_ref())
-                        .is_some_and(|setup| {
-                            !setup.can_cancel
-                                && setup.phase == agent_protocol::workspace::SetupPhase::Running
-                        })
-                {
-                    return Err(Failure::new(
-                        "preparation_started",
-                        "The agent has already started",
-                    ));
-                }
-            }
             if let Command::Submit { content, .. } = &request.command {
                 let current = service
                     .inner

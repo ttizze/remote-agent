@@ -76,18 +76,22 @@ impl ProjectStore {
             .map_err(anyhow::Error::msg)
     }
     pub(crate) async fn register(&self, root: &Path) -> anyhow::Result<String> {
-        let root = resolve_root(root).await?;
+        let state_path = self.path.clone();
+        let chats = tokio::task::spawn_blocking(move || chat_directories(&state_path)).await??;
+        let root = if chats.contains(dunce::simplified(root)) {
+            root.to_owned()
+        } else {
+            resolve_root(root).await?
+        };
         let root = dunce::simplified(&root);
+        let path = root.to_str().context("project path is not UTF-8")?;
+        if chats.contains(root) {
+            return Ok(path.into());
+        }
         anyhow::ensure!(
             tokio::fs::metadata(root).await?.is_dir(),
             "project path must be a directory"
         );
-        let path = root.to_str().context("project path is not UTF-8")?;
-        let state_path = self.path.clone();
-        let chats = tokio::task::spawn_blocking(move || chat_directories(&state_path)).await??;
-        if chats.contains(root) {
-            return Ok(path.into());
-        }
         let projects = self.read_projects().await?;
         for registered in projects.iter().flat_map(|project| &project.roots) {
             if registered.path == path
@@ -265,6 +269,8 @@ mod tests {
             if created {
                 std::fs::create_dir(&chats).unwrap();
             }
+            store.register(&chats).await.unwrap();
+            assert_eq!(store.storage.projects().unwrap().len(), 1);
             let snapshot = store.load().await.unwrap();
             assert_eq!(
                 snapshot.project_membership(chats.to_str()),

@@ -107,6 +107,7 @@ fn pending() -> (Snapshot, crate::session::SessionRef, uuid::Uuid, ReadScope) {
     Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
         operation.to_string().into(),
         Arc::new(PendingSubmission {
+            new_draft_slot: None,
             cursor: None,
             sequence: 0,
             submitted_at_ms: None,
@@ -431,4 +432,86 @@ fn new_chat_after_admitting_the_first_input_allocates_an_independent_draft() {
     assert_ne!(next.panes.primary().navigation.draft_key, key);
     assert!(next.panes.primary().navigation.thread_id.is_none());
     assert_eq!(next.sessions.pending_submissions.len(), 1);
+}
+
+#[test]
+fn a_rejected_first_message_returns_to_its_folder_and_merges_a_newer_draft() {
+    use crate::state::{Event, Intent, reduce};
+    for occupied in [false, true] {
+        let first = reduce(
+            &Snapshot::default(),
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/project".into(),
+            }),
+        )
+        .0;
+        let original = first.panes.primary().navigation.draft_key.clone();
+        let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
+        let draft = Arc::new(Draft {
+            text: "recover me".into(),
+            model: Some(crate::models::ModelRef {
+                provider: crate::session::ProviderKind::Codex,
+                id: "model".into(),
+            }),
+            ..Default::default()
+        });
+        let (mut pending, _) = super::super::submission(
+            &first,
+            super::super::Destination {
+                thread_id: None,
+                cwd: Some("/project".into()),
+                draft_key: original,
+            },
+            draft,
+            input.clone(),
+            None,
+            Default::default(),
+        );
+        if occupied {
+            pending = reduce(
+                &pending,
+                "",
+                Event::Intent(Intent::NewChat {
+                    cwd: "/project".into(),
+                }),
+            )
+            .0;
+            let key = pending.panes.primary().navigation.draft_key.clone();
+            Arc::make_mut(&mut pending.input.drafts).insert(
+                key,
+                Arc::new(Draft {
+                    text: "new typing".into(),
+                    ..Default::default()
+                }),
+            );
+        }
+        let failed = reduce(&pending, "", Event::SubmissionFailed(input)).0;
+        let elsewhere = reduce(
+            &failed,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/else".into(),
+            }),
+        )
+        .0;
+        let saved =
+            crate::persistence::decode(&crate::persistence::encode(&elsewhere).unwrap()).unwrap();
+        let returned = reduce(
+            &saved,
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/project".into(),
+            }),
+        )
+        .0;
+        assert_eq!(
+            returned.input.drafts[&returned.panes.primary().navigation.draft_key].text,
+            if occupied {
+                "recover me\nnew typing"
+            } else {
+                "recover me"
+            }
+        );
+    }
 }

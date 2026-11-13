@@ -1200,6 +1200,7 @@ mod preparation_tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             "input".into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
                 cursor: None,
                 sequence: 0,
                 submitted_at_ms: Some(12_000),
@@ -2431,6 +2432,7 @@ mod tests {
         let pending = [(
             "pending".into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
                 cursor: None,
                 sequence: 0,
                 submitted_at_ms: None,
@@ -2948,6 +2950,7 @@ mod tests {
             Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
                 id.into(),
                 Arc::new(PendingSubmission {
+                    new_draft_slot: None,
                     cursor: None,
                     sequence: sequence as u64,
                     submitted_at_ms: None,
@@ -3720,6 +3723,7 @@ mod tests {
             Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
                 id.into(),
                 Arc::new(PendingSubmission {
+                    new_draft_slot: None,
                     cursor: None,
                     sequence: sequence as u64,
                     submitted_at_ms: None,
@@ -3790,6 +3794,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             "pending".into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
                 cursor: None,
                 sequence: 0,
                 submitted_at_ms: Some(12_000),
@@ -3843,6 +3848,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             "pending".into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
                 cursor: None,
                 sequence: 0,
                 submitted_at_ms: Some(12_000),
@@ -4000,6 +4006,7 @@ mod tests {
         }
         let pending = |turn_id| {
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
                 cursor: None,
                 sequence: 0,
                 submitted_at_ms: None,

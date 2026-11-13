@@ -267,6 +267,7 @@ impl HostRpcService {
                         id,
                         status: SetupStageStatus::Done,
                         exit_code: None,
+                        error: None,
                     },
                 )
                 .await?;
@@ -314,6 +315,7 @@ impl HostRpcService {
                             id,
                             status: SetupStageStatus::Skipped,
                             exit_code: None,
+                            error: None,
                         },
                     )
                     .await?;

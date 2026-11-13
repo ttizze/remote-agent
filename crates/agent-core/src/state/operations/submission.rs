@@ -177,6 +177,7 @@ impl Operation for StartSubmission {
     type Output = super::super::conversations::Opened;
     fn stale(self, snapshot: &mut Snapshot, _pane_id: &str, output: Self::Output) -> Vec<Effect> {
         super::super::conversations::install(snapshot, output);
+        snapshot.prune_subscriptions();
         Vec::new()
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
@@ -419,6 +420,7 @@ mod startup_identity_tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             input.clone().into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
                 cursor: None,
                 sequence: 1,
                 submitted_at_ms: None,

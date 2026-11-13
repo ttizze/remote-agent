@@ -111,6 +111,7 @@ pub(crate) fn query(
     let changed = query.search_term != snapshot.lists.list_query.search_term;
     if changed {
         snapshot.lists.search_results = None;
+        snapshot.lists.search_expanded_projects = Arc::default();
     }
     let searching = !query.search_term.trim().is_empty();
     let term = query.search_term.clone();
@@ -417,6 +418,7 @@ pub(crate) fn project(snapshot: &mut Snapshot, refresh: bool) -> Vec<Effect> {
     if snapshot.lists.activity.active != active || snapshot.lists.activity.unread != unread {
         snapshot.lists.activity = Arc::new(Activity { active, unread });
     }
+    snapshot.prune_subscriptions();
     if snapshot.lists.task_activity.as_deref() != Some(&activity) {
         snapshot.lists.task_activity = Some(Arc::new(activity));
     }
@@ -497,11 +499,30 @@ fn pages(
     });
     let has_more_projects = projects.len() > snapshot.lists.list_query.project_limit as usize;
     projects.truncate(snapshot.lists.list_query.project_limit as usize);
+    let searching = !snapshot.lists.list_query.search_term.trim().is_empty();
+    if searching {
+        let choices = Arc::make_mut(&mut snapshot.lists.search_expanded_projects);
+        let preferences = snapshot
+            .lists
+            .project_preferences
+            .get(&snapshot.connection.storage_scope);
+        for project in &projects {
+            if !preferences
+                .and_then(|prefs| prefs.get(&project.id))
+                .is_some_and(|prefs| prefs.hidden)
+            {
+                choices.entry(project.id.clone()).or_insert(5);
+            }
+        }
+    }
+    let expanded = if searching {
+        &snapshot.lists.search_expanded_projects
+    } else {
+        &snapshot.lists.expanded_projects
+    };
     let mut pages = BTreeMap::new();
     for (id, rows) in groups {
-        let limit = snapshot
-            .lists
-            .expanded_projects
+        let limit = expanded
             .get(&id)
             .copied()
             .unwrap_or(5)

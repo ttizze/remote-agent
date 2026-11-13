@@ -536,6 +536,7 @@ fn queued_inputs_keep_their_footer_between_turns_and_session_rows_without_inflat
     let mut pending: std::collections::BTreeMap<_, _> = [(
         "pending".into(),
         Arc::new(PendingSubmission {
+            new_draft_slot: None,
             cursor: None,
             sequence: 0,
             submitted_at_ms: Some(12_000),
@@ -636,10 +637,10 @@ fn rapid_activity_clicks_use_the_owners_pending_choices() {
         "a second click closes before the frame is published"
     );
     let third = collapsed
-        .toggle_activity(id.clone(), [(id, "running".into())].into())
+        .toggle_activity(id.clone(), [(id.clone(), "running".into())].into())
         .unwrap();
-    assert!(
-        !third.is_empty(),
+    assert_eq!(
+        third[&id], "completed",
         "a stale running choice does not expand completed work"
     );
 }

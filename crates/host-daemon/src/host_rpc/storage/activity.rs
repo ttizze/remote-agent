@@ -3,23 +3,14 @@ use super::*;
 use agent_protocol::ids::TurnId;
 
 impl Storage {
+    #[cfg(test)]
     pub(in crate::host_rpc) fn activity(
         &self,
     ) -> Result<agent_protocol::live_activity::TaskActivityState, String> {
         let Message::Snapshot { rows, .. } = self.list(None)? else {
             unreachable!("initial list is a snapshot")
         };
-        Ok(decision::records::list_activity(rows.iter().filter_map(
-            |row| {
-                let record = match &row.content {
-                    Content::Full(record) | Content::Summary(record) => record,
-                };
-                match (&row.key, record.as_ref()) {
-                    (Key::Thread(id), Record::Thread(header)) => Some((id, header)),
-                    _ => None,
-                }
-            },
-        )))
+        Ok(decision::records::list_rows_activity(rows.iter()))
     }
     pub(in crate::host_rpc) fn mark_read(
         &self,

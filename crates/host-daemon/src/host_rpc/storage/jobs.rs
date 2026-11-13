@@ -11,6 +11,7 @@ pub(in crate::host_rpc) enum Work {
         cursor: Option<String>,
         seen: Vec<String>,
         listed: std::collections::BTreeSet<String>,
+        missing: std::collections::BTreeSet<String>,
         progress: CatalogProgress,
     },
     Continue {

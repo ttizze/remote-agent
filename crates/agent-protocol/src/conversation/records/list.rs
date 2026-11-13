@@ -1,4 +1,5 @@
 use super::*;
+use crate::sync::{Content, Key};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeList {
@@ -122,4 +123,19 @@ pub fn catalog_ready(replica: &Replica) -> bool {
             &row.content;
         matches!(record.as_ref(), Record::Catalog(Catalog::Loading))
     })
+}
+
+/// Derive activity directly from the canonical list rows.
+pub fn rows_activity<'a>(
+    rows: impl Iterator<Item = &'a Row>,
+) -> crate::live_activity::TaskActivityState {
+    activity(rows.filter_map(|row| {
+        let record = match &row.content {
+            Content::Full(record) | Content::Summary(record) => record,
+        };
+        match (&row.key, record.as_ref()) {
+            (Key::Thread(id), Record::Thread(header)) => Some((id, header)),
+            _ => None,
+        }
+    }))
 }

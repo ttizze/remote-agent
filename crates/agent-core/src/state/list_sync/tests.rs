@@ -403,3 +403,137 @@ fn paging_during_initial_subscription_keeps_its_in_flight_operation() {
     assert_eq!(next.operations, state.operations);
     assert!(next.lists.list_query.limit > state.lists.list_query.limit);
 }
+
+#[test]
+fn search_projects_expand_page_and_collapse_without_changing_normal_disclosures() {
+    let mut state = list();
+    let from = state.lists.replica.as_ref().unwrap().cursor().unwrap();
+    let through = Cursor {
+        sequence: from.sequence + 1,
+        ..from
+    };
+    let mut rows = (24..48)
+        .map(|index| row(index, true, through.sequence))
+        .collect::<Vec<_>>();
+    rows.push(Row {
+        key: Key::Project("other".into()),
+        version: through.sequence,
+        position: Position::Unordered,
+        content: Content::Full(Arc::new(Record::Project(crate::models::Project {
+            id: "other".into(),
+            name: "Other".into(),
+            ..Default::default()
+        }))),
+    });
+    for index in 0..7 {
+        let id = format!("extra-{index}");
+        rows.push(Row {
+            key: Key::Project(id.clone()),
+            version: through.sequence,
+            position: Position::Unordered,
+            content: Content::Full(Arc::new(Record::Project(crate::models::Project {
+                id: id.clone(),
+                name: id.clone(),
+                ..Default::default()
+            }))),
+        });
+        let mut child = row(100 + index, true, through.sequence);
+        let Content::Full(record) = &mut child.content else {
+            unreachable!()
+        };
+        let Record::Thread(header) = Arc::make_mut(record) else {
+            unreachable!()
+        };
+        header.details.project = crate::models::ProjectMembership::Assigned(id);
+        header.details.updated_at = 0;
+        rows.push(child);
+    }
+    state = received(
+        &state,
+        state.lists.subscription.unwrap(),
+        Message::Changes {
+            from,
+            through,
+            rows,
+            removed: Vec::new(),
+        },
+    )
+    .0;
+    let query = crate::models::ListQuery {
+        search_term: "Task".into(),
+        ..Default::default()
+    };
+    let (searched, _) = super::query(state, query, false);
+    assert_eq!(searched.thread_list().unwrap().projects[0].threads.len(), 5);
+    let (searched, _) = reduce_intent(&searched, "", Intent::ExpandProjects);
+    assert_eq!(searched.thread_list().unwrap().projects.len(), 8);
+    assert!(
+        searched
+            .thread_list()
+            .unwrap()
+            .projects
+            .iter()
+            .all(|project| !project.threads.is_empty())
+    );
+    let (more, _) = reduce_intent(
+        &searched,
+        "",
+        Intent::ExpandThreadList {
+            project_id: Some("project".into()),
+        },
+    );
+    assert_eq!(more.thread_list().unwrap().projects[0].threads.len(), 15);
+    let (mut closed, _) = reduce_intent(
+        &more,
+        "",
+        Intent::SetProjectExpanded {
+            project_id: "project".into(),
+            expanded: false,
+        },
+    );
+    project(&mut closed, false);
+    assert!(closed.thread_list().unwrap().projects[0].threads.is_empty());
+    let (normal, _) = super::query(closed, Default::default(), false);
+    assert!(
+        normal
+            .thread_list()
+            .unwrap()
+            .projects
+            .iter()
+            .all(|project| project.threads.is_empty())
+    );
+}
+
+#[test]
+fn an_idle_catalog_update_releases_an_unselected_subscription_after_completion() {
+    let mut state = list();
+    let id = address(0);
+    Arc::make_mut(&mut state.sessions.subscriptions).insert(id.clone(), uuid::Uuid::new_v4());
+    Arc::make_mut(&mut state.sessions.conversations).insert(
+        id.clone(),
+        Arc::new(crate::models::Thread {
+            id: Some(id.clone()),
+            status: crate::models::SessionStatus::Idle,
+            ..Default::default()
+        }),
+    );
+    Arc::make_mut(&mut state.lists.activity)
+        .active
+        .insert(id.clone(), true);
+    let from = state.lists.replica.as_ref().unwrap().cursor().unwrap();
+    let through = Cursor {
+        sequence: from.sequence + 1,
+        ..from
+    };
+    let (next, _) = received(
+        &state,
+        state.lists.subscription.unwrap(),
+        Message::Changes {
+            from,
+            through,
+            rows: vec![row(0, false, through.sequence)],
+            removed: Vec::new(),
+        },
+    );
+    assert!(!next.sessions.subscriptions.contains_key(&id));
+}

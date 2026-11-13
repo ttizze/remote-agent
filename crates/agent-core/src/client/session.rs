@@ -1254,7 +1254,7 @@ mod tests {
                 lists: crate::state::Lists {
                     threads: Some(Arc::new(serde_json::from_value(serde_json::json!({
                         "data":[{"id":{"provider":"codex","id":"same-session"},"name":host,"projectId":null}],
-                        "projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":10
+                        "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":10
                     })).unwrap())),
                     ..Default::default()
                 },

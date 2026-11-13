@@ -12,7 +12,7 @@ impl HostRpcService {
                 .inner
                 .updating
                 .swap(true, std::sync::atomic::Ordering::AcqRel),
-            "ホストを更新中です。"
+            "ホストの更新が既に進行中です。"
         );
         let reset = scopeguard::guard(&self.inner.updating, |updating| {
             updating.store(false, std::sync::atomic::Ordering::Release)
@@ -36,9 +36,7 @@ impl HostRpcService {
                 super::super::runtime::Runtime::await_import(self, &session),
             )
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("task_activity_incomplete: 履歴の読み込みが完了しませんでした。")
-            })?
+            .map_err(|_| anyhow::Error::msg(super::activity::incomplete()))?
             .map_err(anyhow::Error::msg)?;
             let state = self
                 .inner
@@ -61,12 +59,17 @@ impl HostRpcService {
             });
         }
         let _report = self.inner.conversation.update_report.lock().await;
+        let storage = &self.inner.conversation.storage;
+        storage.set_updating(true).map_err(anyhow::Error::msg)?;
+        // The report lock hides this transaction's admission marker until the
+        // replacement is durable. Failed preparation keeps the prior report live.
+        let reset_storage = scopeguard::guard(storage, |storage| {
+            if let Err(error) = storage.set_updating(false) {
+                tracing::error!(target: "agent", operation="host.update.rollback", %error);
+            }
+        });
         agent_local_host::save_private_json(&directory.join(RECOVERY_FILE), &Recovery { tasks })?;
-        self.inner
-            .conversation
-            .storage
-            .set_updating(true)
-            .map_err(anyhow::Error::msg)?;
+        let _ = scopeguard::ScopeGuard::into_inner(reset_storage);
         let _ = scopeguard::ScopeGuard::into_inner(reset);
         Ok(())
     }
@@ -82,11 +85,7 @@ impl HostRpcService {
             return Ok(());
         };
         let _report = self.inner.conversation.update_report.lock().await;
-        if self
-            .inner
-            .updating
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if self.inner.conversation.storage.updating()? {
             return Ok(());
         }
         let path = directory.join(RECOVERY_FILE);
@@ -129,11 +128,7 @@ impl HostRpcService {
             return Ok(());
         };
         let _report = self.inner.conversation.update_report.lock().await;
-        if self
-            .inner
-            .updating
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        if self.inner.conversation.storage.updating()? {
             return Ok(());
         }
         let path = directory.join(RECOVERY_FILE);
@@ -190,8 +185,10 @@ impl HostRpcService {
                 let _report = self.inner.conversation.update_report.lock().await;
                 if self
                     .inner
-                    .updating
-                    .load(std::sync::atomic::Ordering::Acquire)
+                    .conversation
+                    .storage
+                    .updating()
+                    .map_err(anyhow::Error::msg)?
                 {
                     return Ok(());
                 }
@@ -360,13 +357,13 @@ mod tests {
                             attempt: attempt.id,
                             native_turn: None,
                             native_items: vec![],
-                            observation: Observation::Failed(
+                            observation: Observation::Failed(Some(
                                 agent_protocol::execution::ExecutionError {
                                     message: "overloaded".into(),
                                     provider_code: Some("serverOverloaded".into()),
                                     ..Default::default()
                                 },
-                            ),
+                            )),
                         },
                         context,
                         None,
@@ -595,39 +592,111 @@ mod tests {
             2
         );
     }
+    #[tokio::test(start_paused = true)]
+    async fn a_new_update_serializes_its_report_and_only_a_committed_update_stops_the_prior_reader()
+    {
+        for failed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let service = HostRpcService::new(
+                [],
+                crate::ProjectStore::new(directory.path().join("projects.json")),
+            );
+            service.set_history_scope(directory.path().into(), true);
+            let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+            service
+                .inner
+                .conversation
+                .storage
+                .create(
+                    &target,
+                    &agent_protocol::conversation::records::Header {
+                        state: agent_protocol::conversation::Thread {
+                            name: "prior update".into(),
+                            workspace: agent_protocol::conversation::Workspace::Missing,
+                            provider: ProviderKind::Codex,
+                            queue_held: false,
+                        },
+                        details: Default::default(),
+                    },
+                )
+                .unwrap();
+            if failed {
+                rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap().execute_batch("CREATE TRIGGER reject_new_update BEFORE UPDATE OF updating ON store WHEN NEW.updating=1 BEGIN SELECT RAISE(ABORT,'update storage unavailable'); END;").unwrap();
+            }
+            let path = directory.path().join(RECOVERY_FILE);
+            agent_local_host::save_private_json(
+                &path,
+                &Recovery {
+                    tasks: vec![InterruptedTask {
+                        session: target.clone(),
+                        input: uuid::Uuid::new_v4().to_string().into(),
+                        last_turn: None,
+                        delivery: ContinuationDelivery::Pending,
+                    }],
+                },
+            )
+            .unwrap();
+            let previous = std::fs::read(&path).unwrap();
+            let report = service.inner.conversation.update_report.lock().await;
+            let mut resumed = Box::pin(service.resume_after_update(directory.path()));
+            assert!(futures_util::poll!(&mut resumed).is_pending());
+            let mut preparing = Box::pin(service.prepare_update());
+            assert!(futures_util::poll!(&mut preparing).is_pending());
+            assert_eq!(std::fs::read(&path).unwrap(), previous);
+            drop(report);
+            // Preparation is admitted but hasn't replaced the old report yet.
+            assert!(futures_util::poll!(&mut resumed).is_pending());
+            let prepared = preparing.await;
+            if failed {
+                assert!(prepared.is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), previous);
+                assert!(
+                    !service
+                        .inner
+                        .updating
+                        .load(std::sync::atomic::Ordering::Acquire)
+                );
+                service.update_recovery_committed(&target).await.unwrap();
+                tokio::time::advance(std::time::Duration::from_millis(50)).await;
+                resumed.await.unwrap();
+                let report: Recovery =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(report.tasks.len(), 1);
+                assert!(matches!(
+                    report.tasks[0].delivery,
+                    ContinuationDelivery::Completed
+                ));
+            } else {
+                prepared.unwrap();
+                tokio::time::advance(std::time::Duration::from_millis(50)).await;
+                resumed.await.unwrap();
+                let report: Recovery =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert!(report.tasks.is_empty());
+            }
+        }
+    }
     #[tokio::test]
-    async fn a_new_update_serializes_its_report_and_stops_an_older_resume_reader() {
+    async fn a_report_write_failure_rolls_back_both_update_gates_and_preserves_existing_contents() {
         let directory = tempfile::tempdir().unwrap();
+        let reports = directory.path().join("reports");
+        let path = reports.join(RECOVERY_FILE);
+        std::fs::create_dir_all(&path).unwrap();
+        let marker = path.join("keep");
+        std::fs::write(&marker, b"existing contents").unwrap();
         let service = HostRpcService::new(
             [],
             crate::ProjectStore::new(directory.path().join("projects.json")),
         );
-        service.set_history_scope(directory.path().into(), true);
-        let path = directory.path().join(RECOVERY_FILE);
-        agent_local_host::save_private_json(
-            &path,
-            &Recovery {
-                tasks: vec![InterruptedTask {
-                    session: SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap(),
-                    input: uuid::Uuid::new_v4().to_string().into(),
-                    last_turn: None,
-                    delivery: ContinuationDelivery::Pending,
-                }],
-            },
-        )
-        .unwrap();
-        let previous = std::fs::read(&path).unwrap();
-        let report = service.inner.conversation.update_report.lock().await;
-        let mut resumed = Box::pin(service.resume_after_update(directory.path()));
-        assert!(futures_util::poll!(&mut resumed).is_pending());
-        let mut preparing = Box::pin(service.prepare_update());
-        assert!(futures_util::poll!(&mut preparing).is_pending());
-        assert_eq!(std::fs::read(&path).unwrap(), previous);
-        drop(report);
-        let (resumed, prepared) = tokio::join!(resumed, preparing);
-        resumed.unwrap();
-        prepared.unwrap();
-        let report: Recovery = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(report.tasks.is_empty());
+        service.set_history_scope(reports, true);
+        assert!(service.prepare_update().await.is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"existing contents");
+        assert!(
+            !service
+                .inner
+                .updating
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(!service.inner.conversation.storage.updating().unwrap());
     }
 }

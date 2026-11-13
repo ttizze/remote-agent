@@ -237,14 +237,11 @@ rpc::rpc_method!(ReviewWorkspace, ReviewWorkspace, |self| {
 
 pub(in crate::state) fn preparing_workspace(
     preparations: &[crate::session::SessionPreparation],
+    setup: Option<&agent_protocol::workspace::WorkspaceSetup>,
 ) -> bool {
     preparations.iter().any(|preparation| {
         preparation.status == crate::session::PreparationStatus::Preparing
-            || matches!(
-                preparation.stage,
-                crate::session::PreparationStage::Workspace
-                    | crate::session::PreparationStage::Worktree
-            )
+            || setup.is_some_and(|setup| setup.base_ref.is_some() && setup.worktree_path.is_none())
     })
 }
 
@@ -258,7 +255,9 @@ pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot, pane_id: &str)
         .thread_id
         .as_ref()
         .and_then(|id| snapshot.sessions.conversations.get(id))
-        .is_some_and(|thread| preparing_workspace(&thread.preparations));
+        .is_some_and(|thread| {
+            preparing_workspace(&thread.preparations, thread.workspace_setup.as_ref())
+        });
     if preparing || snapshot.selected_directory(&pane).is_empty() {
         if pane.workspace.review.is_some() || pane.workspace.review_cwd.is_some() {
             let pane = Arc::make_mut(snapshot.panes.get_mut(pane_id)?);

@@ -62,7 +62,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     assert_eq!(request["params"], json!({"term":"CLI search","limit":null}));
                     assert!(!handled);
                     handled = true;
-                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"limit":10000,"hasMore":false,"hasMoreProjects":false})
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"projects":[],"limit":10000,"hasMore":false,"hasMoreProjects":false})
                 }
                 Some("host/conversation/subscribe") => {
                     reads += 1;
@@ -155,7 +155,7 @@ async fn exercise(command: &[&str], expected: Value) {
     let actual: Value = serde_json::from_slice(&output.stdout).unwrap();
     if mode == "list" {
         assert_eq!(actual["data"][0]["id"], expected["data"][0]["id"]);
-        assert_eq!(actual["data"][0]["name"], "CLI fixture");
+        assert_eq!(actual["data"][0]["name"], "Search result");
         assert_eq!(actual["limit"], 11);
     } else {
         assert_eq!(actual, expected);
@@ -166,7 +166,7 @@ async fn exercise(command: &[&str], expected: Value) {
 async fn cli_lists_over_iroh() {
     exercise(
         &["list", "--limit", "11", "--search", "CLI search"],
-        json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}),
+        json!({"data":[{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}),
     )
     .await;
 }

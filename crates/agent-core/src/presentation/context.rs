@@ -411,7 +411,7 @@ mod chrome_tests {
         let mut snapshot = Snapshot::default();
         snapshot.lists.threads = Some(Arc::new(
             serde_json::from_value(serde_json::json!({
-                "limit": 20, "data": [], "hasMore": false, "hasMoreProjects": false, "projectPages": {},
+                "limit": 20, "data": [], "hasMore": false, "hasMoreProjects": false,
                 "projects": [{"id": "p", "name": "Bex app", "roots": [{"path": "/work/bex"}, {"path": "/work/other"}], "icon": null}],
             }))
             .unwrap(),

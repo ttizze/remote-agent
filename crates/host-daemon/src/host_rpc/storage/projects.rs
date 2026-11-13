@@ -46,7 +46,7 @@ pub(super) fn read(connection: &Connection, after: u64) -> Result<Vec<Row>, Stri
 }
 
 impl Storage {
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn replace_projects(&self, projects: &[Project]) -> Result<(), String> {
         self.with(|connection| {
             let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;

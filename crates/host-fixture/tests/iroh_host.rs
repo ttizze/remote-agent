@@ -1580,8 +1580,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
             Arc::new(Memory::default()), "isolated Host", false, None, None).await.unwrap();
         let local = fixture.local().await.unwrap();
         let previous: models::Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"history"},"historyCursor":null,
-            "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}],
-                "itemsSummary":true}]})).unwrap();
+            "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}]}]})).unwrap();
         let initial = Snapshot {
             sessions: agent_core::state::Sessions {
                 conversations: Arc::new(std::collections::BTreeMap::from([(agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "history".into() }, Arc::new(previous))])),
@@ -1603,7 +1602,9 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         assert!(timeline.len() > 1);
         assert!(timeline.iter().any(|entry| entry["cursor"].is_string()), "the import reads every older page");
         let imported_reads = read(directory.path()).len();
-        store.dispatch(Intent::ReadThread(op::ReadThread::new(session.clone()))).await.unwrap();
+        // Opening after background import must start at the latest ten turns,
+        // even if the cached loading snapshot had an all-history floor of zero.
+        store.dispatch(Intent::ReadThread(op::ReadThread::open(session.clone()))).await.unwrap();
         let snapshot = store.snapshot();
         let thread = &snapshot.sessions.conversations[&session];
         let window = op::HISTORY_WINDOW_TURNS as usize;

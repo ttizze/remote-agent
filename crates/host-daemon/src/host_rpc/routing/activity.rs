@@ -17,7 +17,6 @@ impl SessionRouter {
         &self,
         connection: SessionId,
         params: &agent_protocol::live_activity::RegisterLiveActivity,
-        display: agent_protocol::live_activity::TaskActivityDisplay,
     ) -> Result<(), String> {
         let activity = lock_state(&self.activity);
         let principal = self.principal(connection)?;
@@ -25,6 +24,6 @@ impl SessionRouter {
             .apns
             .as_ref()
             .ok_or("APNs is unavailable")?
-            .register(&principal, params, display)
+            .register(&principal, params)
     }
 }

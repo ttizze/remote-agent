@@ -83,6 +83,10 @@ impl Snapshot {
         }
         Arc::make_mut(&mut self.panes.0).remove(id);
         Arc::make_mut(&mut self.operations).retain(|key, _| key.pane() != Some(id));
+        self.prune_subscriptions();
+        super::outputs::retire(self);
+    }
+    pub(crate) fn prune_subscriptions(&mut self) {
         let retained: BTreeSet<_> = self
             .panes
             .0
@@ -91,14 +95,17 @@ impl Snapshot {
             .collect();
         let conversations = &self.sessions.conversations;
         let active = &self.lists.activity.active;
+        let pending = &self.sessions.pending_submissions;
         Arc::make_mut(&mut self.sessions.subscriptions).retain(|id, _| {
             retained.contains(id)
                 || active.get(id) == Some(&true)
-                || conversations
-                    .get(id)
-                    .is_some_and(|thread| !thread.requests.is_empty())
+                || pending
+                    .values()
+                    .any(|input| input.draft_key == DraftKey::from(id))
+                || conversations.get(id).is_some_and(|thread| {
+                    crate::models::task_active(None, thread.status) || !thread.requests.is_empty()
+                })
         });
-        super::outputs::retire(self);
     }
     pub(crate) fn selected_in_any_pane(&self, id: &crate::session::SessionRef) -> bool {
         self.panes

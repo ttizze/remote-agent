@@ -204,6 +204,7 @@ fn assign_draft_addresses(
     let keys: Vec<_> = drafts
         .keys()
         .chain(std::iter::once(&navigation.draft_key))
+        .chain(pending.values().map(|input| &input.draft_key))
         .filter_map(|key| match key {
             DraftKey::Local { key: value } => value
                 .strip_prefix("new:")
@@ -220,7 +221,7 @@ fn assign_draft_addresses(
                 |(slot, cwd)| format!("{slot}:{cwd}"),
             );
         let session = Arc::make_mut(new_drafts)
-            .entry(project)
+            .entry(project.clone())
             .or_insert_with(|| crate::session::SessionRef {
                 provider: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -237,9 +238,16 @@ fn assign_draft_addresses(
             .values_mut()
             .filter(|input| input.draft_key == old)
         {
-            Arc::make_mut(input).draft_key = key.clone();
+            let input = Arc::make_mut(input);
+            input.draft_key = key.clone();
+            input.new_draft_slot = Some(project.clone());
         }
     }
+    Arc::make_mut(new_drafts).retain(|_, id| {
+        !pending
+            .values()
+            .any(|input| input.draft_key == DraftKey::from(id.clone()))
+    });
 }
 
 /// Structured domain keys are stored as entries, without encoding keys into strings.

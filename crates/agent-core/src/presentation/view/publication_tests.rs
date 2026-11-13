@@ -132,7 +132,7 @@ fn waiting_membership_refreshes_lists_without_republishing_other_surfaces() {
                 serde_json::from_value(serde_json::json!({
                     "data":[{"id":id,"status":"running"}],
                     "projects":[],"hasMore":false,"hasMoreProjects":false,
-                    "projectPages":{},"limit":5
+                    "limit":5
                 }))
                 .unwrap(),
             )),
@@ -182,9 +182,12 @@ fn waiting_membership_refreshes_lists_without_republishing_other_surfaces() {
 fn publication_changes_keep_independent_surfaces_and_connection_epochs_distinct() {
     let before = Arc::new(Snapshot {
         lists: crate::state::Lists {
-            threads: Some(Arc::new(serde_json::from_value(serde_json::json!({
-                "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
-            })).unwrap())),
+            threads: Some(Arc::new(
+                serde_json::from_value(serde_json::json!({
+                    "data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5
+                }))
+                .unwrap(),
+            )),
             ..Default::default()
         },
         ..Default::default()

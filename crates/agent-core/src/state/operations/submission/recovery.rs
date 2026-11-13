@@ -23,7 +23,7 @@ pub(crate) fn reconnect_input_recovery(snapshot: &Snapshot) -> Vec<Effect> {
             Effect::execute(ResolveSavedInput {
                 session: recovery.session.clone(),
                 input: input.clone(),
-                restore: true,
+                restore: recovery.restore,
                 operation: recovery.operation,
             })
         })
@@ -35,11 +35,13 @@ pub(crate) fn resolve_saved_input(
     input: &ClientInputId,
     restore: bool,
 ) -> Option<Effect> {
-    if let Some(recovery) = snapshot.input.input_recoveries.get(input) {
+    if let Some(recovery) = Arc::make_mut(&mut snapshot.input.input_recoveries).get_mut(input) {
+        let recovery = Arc::make_mut(recovery);
+        recovery.restore = restore;
         return Some(Effect::execute(ResolveSavedInput {
             session: recovery.session.clone(),
             input: input.clone(),
-            restore: true,
+            restore,
             operation: recovery.operation,
         }));
     }
@@ -89,6 +91,7 @@ impl Operation for ResolveSavedInput {
                     Arc::make_mut(&mut snapshot.input.input_recoveries).insert(
                         self.input.clone(),
                         Arc::new(InputRecovery {
+                            restore: true,
                             store,
                             session: self.session.clone(),
                             operation: self.operation,
@@ -105,7 +108,7 @@ impl Operation for ResolveSavedInput {
         if let Some(recovery) = snapshot.input.input_recoveries.get(&self.input) {
             return Ok((
                 snapshot.connection.storage_scope.clone(),
-                Some((*recovery.draft).clone()),
+                recovery.restore.then(|| (*recovery.draft).clone()),
                 recovery.store,
             ));
         }
@@ -187,7 +190,11 @@ impl Operation for ResolveSavedInput {
         {
             return Ok(Vec::new());
         }
-        Arc::make_mut(&mut snapshot.input.input_recoveries).remove(&self.input);
+        let recovered =
+            match Arc::make_mut(&mut snapshot.input.input_recoveries).remove(&self.input) {
+                Some(saved) => saved.restore.then(|| (*saved.draft).clone()),
+                None => recovered,
+            };
         crate::client::command_result(acknowledged)?;
         if let Some(recovered) = recovered {
             let current = Arc::make_mut(&mut snapshot.input.drafts)
@@ -364,8 +371,10 @@ mod tests {
         session::{PreparationStage, ProviderKind, SessionPreparation},
     };
 
-    #[test]
-    fn a_restore_survives_a_lost_reply_and_restart_without_duplicating_the_draft() {
+    #[rstest::rstest]
+    fn a_restore_survives_a_lost_reply_and_restart_without_duplicating_the_draft(
+        #[values(false, true)] discard: bool,
+    ) {
         let session = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
         let input: ClientInputId = uuid::Uuid::new_v4().to_string().into();
         let operation = uuid::Uuid::new_v4();
@@ -374,6 +383,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.input.input_recoveries).insert(
             input.clone(),
             Arc::new(InputRecovery {
+                restore: true,
                 store: uuid::Uuid::from_u128(1),
                 session: session.clone(),
                 operation,
@@ -425,6 +435,11 @@ mod tests {
                 .is_err()
         );
         assert!(reopened.input.input_recoveries.contains_key(&input));
+        if discard {
+            assert!(resolve_saved_input(&mut reopened, &input, false).is_some());
+            reopened = crate::persistence::decode(&crate::persistence::encode(&reopened).unwrap())
+                .unwrap();
+        }
         replay
             .complete(
                 &mut reopened,
@@ -438,7 +453,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             reopened.input.drafts[&DraftKey::from(&session)].text,
-            "unresolved text\nnew typing"
+            if discard {
+                "new typing"
+            } else {
+                "unresolved text\nnew typing"
+            }
         );
         assert!(reconnect_input_recovery(&reopened).is_empty());
     }
@@ -462,6 +481,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             input.clone(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
                 draft_key: key.clone(),
                 draft: Arc::new(Draft {
                     text: "uncertain input".into(),

@@ -408,12 +408,13 @@ impl Runtime {
                     )?;
                 }
                 if completed {
-                    let tasks = source.background(attempt.id);
-                    let tasks = if tasks.is_empty() {
-                        background(&turn)
-                    } else {
-                        tasks
-                    };
+                    let tasks =
+                        if matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted) {
+                            source.cancel_background(attempt.id);
+                            Vec::new()
+                        } else {
+                            source.finish_foreground(attempt.id, background(&turn))
+                        };
                     if tasks.is_empty() {
                         service.inner.conversation.finish_outputs(
                             &source.target,
@@ -423,7 +424,7 @@ impl Runtime {
                         )?;
                     }
                     observations.push(match turn.status {
-                        TurnStatus::Failed => Observation::Failed(turn.error.unwrap_or_default()),
+                        TurnStatus::Failed => Observation::Failed(turn.error),
                         TurnStatus::Interrupted => Observation::Interrupted,
                         _ if !tasks.is_empty() => Observation::Background { tasks },
                         _ => Observation::Completed,
@@ -461,7 +462,7 @@ impl Runtime {
             }
             SessionChange::Background { tasks } => {
                 let state = service.inner.conversation.storage.state(&source.target)?;
-                for (owner, tasks) in source.roster(execution, tasks) {
+                for (owner, tasks, native_ended) in source.roster(execution, tasks) {
                     let Some(owner) = service
                         .inner
                         .conversation
@@ -476,8 +477,11 @@ impl Runtime {
                         matches!(
                             turn.state,
                             decision::TurnState::Waiting(decision::Wait::Background { .. })
-                                | decision::TurnState::Running { interrupt: Some(_) }
-                        )
+                        ) || native_ended
+                            && matches!(
+                                turn.state,
+                                decision::TurnState::Running { interrupt: Some(_) }
+                            )
                     }) {
                         let native_turn = service
                             .inner

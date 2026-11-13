@@ -2639,6 +2639,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             "00000000-0000-0000-0000-00000000002a".into(),
             Arc::new(crate::state::PendingSubmission {
+                new_draft_slot: None,
                 cursor: None,
                 sequence: 0,
                 submitted_at_ms: None,
@@ -2932,7 +2933,7 @@ mod tests {
                 let result = match request["method"].as_str().unwrap() {
                     "host/list/subscribe" => {
                         json!({"data":[{"id":{"provider":"claude","id":"latest"}}],
-                        "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,"projectPages":{}})
+                        "projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5})
                     }
                     "host/model/list" => json!({"data":[]}),
                     "host/account/list" => json!({"accounts":[],"selected":{}}),
@@ -3033,6 +3034,7 @@ mod tests {
     fn scheduling_a_submission_dates_only_that_input_once() {
         let pending = |submitted_at_ms| {
             Arc::new(crate::state::PendingSubmission {
+                new_draft_slot: None,
                 cursor: None,
                 sequence: 0,
                 submitted_at_ms,

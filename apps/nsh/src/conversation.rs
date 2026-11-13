@@ -1970,6 +1970,7 @@ fn interrupted_row(label: impl Fn() -> String + 'static) -> View {
         .child(rule())
 }
 
+// History controls scroll with messages without changing their row indices.
 fn history_header(
     connection: Connection,
     following: Signal<bool>,

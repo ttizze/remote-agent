@@ -542,5 +542,5 @@ pub use outputs::{OpenedOutput, OutputKey, SubscribeOutput};
 mod list;
 pub use list::{
     OpenedList, SearchList, SubscribeList, activity as list_activity, catalog_ready,
-    validate as validate_list,
+    rows_activity as list_rows_activity, validate as validate_list,
 };

@@ -17,7 +17,7 @@ pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
             }
         }
         Event::ExecutionLost { attempt, error } => {
-            provider(state, attempt, Observation::Failed(error), context)
+            provider(state, attempt, Observation::Failed(Some(error)), context)
         }
         Event::Title(name) => {
             if !state.thread.name.trim().is_empty() || name.trim().is_empty() {
@@ -875,12 +875,22 @@ fn retry(state: &State, turn: &Turn, at: i64, error: Option<ExecutionError>) -> 
     }
 }
 
-fn failed(state: &State, turn: &Turn, error: ExecutionError, context: Context) -> Step {
+fn is_compaction(body: &ItemBody) -> bool {
+    matches!(body, ItemBody::UserMessage { content, .. }
+        if matches!(&content[..], [crate::items::MessagePart::Text { text }] if text.trim().eq_ignore_ascii_case("/compact")))
+}
+
+fn failed(state: &State, turn: &Turn, error: Option<ExecutionError>, context: Context) -> Step {
+    let error = error.or_else(|| turn.error.clone()).unwrap_or_default();
     const DELAYS: [i64; 5] = [2_000, 4_000, 8_000, 16_000, 30_000];
     if matches!(turn.state, TurnState::Running { interrupt: Some(_) }) {
         return finish(state, turn, TurnState::Interrupted, context.now);
     }
     if turn.provider == ProviderKind::Codex
+        && !state
+            .items
+            .values()
+            .any(|item| item.turn == turn.id && is_compaction(&item.body))
         && error.provider_code.as_deref() == Some("serverOverloaded")
         && !error.retry.as_ref().is_some_and(|retry| retry.retrying)
         && let Some(delay) = DELAYS.get(usize::from(turn.retry_count))

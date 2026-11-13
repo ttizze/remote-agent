@@ -1863,7 +1863,27 @@ fn completed_catalog_scans_remove_missing_rows_once_and_preserve_pages_across_re
         .unwrap();
     assert!(storage.lookup(&vanished).unwrap().is_some());
     storage
-        .catalog_page(&claim, &[(child.clone(), child_header)], None, 60_000)
+        .catalog_page(
+            &claim,
+            &[(child.clone(), child_header.clone())],
+            None,
+            60_000,
+        )
+        .unwrap();
+    assert!(
+        storage.lookup(&vanished).unwrap().is_some(),
+        "one completed scan can miss a row moved between pages"
+    );
+    drop(storage);
+    let storage = Storage::open(&path);
+    let claim = storage.claim(120_000, 1).unwrap().remove(0);
+    storage
+        .catalog_page(
+            &claim,
+            &[(kept.clone(), header()), (child.clone(), child_header)],
+            None,
+            120_000,
+        )
         .unwrap();
     replica = replica.apply(1, storage.list(before).unwrap()).unwrap();
     for id in [&kept, &child, &owned] {
@@ -1885,7 +1905,7 @@ fn completed_catalog_scans_remove_missing_rows_once_and_preserve_pages_across_re
     );
     // Reappearing identical metadata becomes visible again, even when the
     // parent identity was retained only for a child relationship.
-    let claim = storage.claim(120_000, 1).unwrap().remove(0);
+    let claim = storage.claim(180_000, 1).unwrap().remove(0);
     storage
         .catalog_page(
             &claim,
@@ -1895,7 +1915,7 @@ fn completed_catalog_scans_remove_missing_rows_once_and_preserve_pages_across_re
                 (vanished.clone(), header()),
             ],
             None,
-            120_000,
+            180_000,
         )
         .unwrap();
     let next = before_remove
@@ -2033,6 +2053,12 @@ fn rewind_resets_old_cursors_retains_the_prefix_and_reimport_cannot_resurrect_re
     )
     .apply(1, before)
     .unwrap();
+    let window = replica.window();
+    assert!(window.is_some());
+    assert!(matches!(
+        storage.snapshot(&target, replica.cursor(), window).unwrap(),
+        Message::Changes { .. }
+    ));
     let turns = storage.history(&target, 0).unwrap().thread.turns.unwrap();
     let rewind = storage
         .decide(
@@ -2047,7 +2073,7 @@ fn rewind_resets_old_cursors_retains_the_prefix_and_reimport_cannot_resurrect_re
         )
         .unwrap();
     assert_eq!(rewind.step.outcome, Outcome::Accepted);
-    let snapshot = storage.snapshot(&target, replica.cursor(), None).unwrap();
+    let snapshot = storage.snapshot(&target, replica.cursor(), window).unwrap();
     assert!(matches!(snapshot, Message::Snapshot { .. }));
     let after = decision::records::Replica::new(
         agent_protocol::sync::Scope::Conversation(target.clone()),
@@ -2079,12 +2105,190 @@ fn rewind_resets_old_cursors_retains_the_prefix_and_reimport_cannot_resurrect_re
             &Default::default(),
         )
         .unwrap();
+    storage
+        .with(|connection| {
+            let transaction = connection.transaction().map_err(failure)?;
+            let key = thread_key(&transaction, &target)?;
+            let binding = Change::Binding {
+                provider: ProviderKind::Claude,
+                value: Some(Binding::Ready {
+                    source: target.id.clone(),
+                    covered: state.history_end(),
+                }),
+            };
+            let state = state.apply(std::slice::from_ref(&binding));
+            rows::write(
+                &transaction,
+                &rows::WriteScope {
+                    key,
+                    id: &target,
+                    sequence: 0,
+                    at: 300,
+                    process: storage.process,
+                },
+                &binding,
+                &state,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )?;
+            transaction.commit().map_err(failure)
+        })
+        .unwrap();
     storage.queue_import(&target, &target, 300).unwrap();
     let claim = storage.claim(300, 1).unwrap().remove(0);
-    storage
+    let imported = storage
         .reimport(&target, &target, claim.id, claim.attempt, &response, 300)
         .unwrap();
+    assert_eq!(imported.step.outcome, Outcome::Accepted);
     let retained = storage.history(&target, 0).unwrap().thread.turns.unwrap();
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].id, turns[0].id);
+}
+
+#[test]
+fn setup_stop_is_rejected_by_the_storage_transaction_after_agent_creation_started() {
+    use super::workspace::SetupChange;
+    use agent_protocol::conversation::records::WorkspacePreparation;
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = address("setup-stop");
+    storage.create(&target, &header()).unwrap();
+    let input: ClientInputId = Uuid::from_u128(1).to_string().into();
+    let admitted = storage
+        .decide(&target, submit(1), context(1), None)
+        .unwrap();
+    let state = admitted.state.unwrap();
+    let InputState::Preparing { action, .. } = state.inputs[&input].state else {
+        panic!("not preparing")
+    };
+    storage
+        .setup(
+            &target,
+            action,
+            SetupChange::Begin {
+                input,
+                workspace: Box::new(WorkspacePreparation {
+                    project_cwd: "/project".into(),
+                    strategy: None,
+                    generation: action,
+                    setup: Some(agent_protocol::workspace::WorkspaceSetup::new(None, 100)),
+                    visible: true,
+                }),
+            },
+            100,
+        )
+        .unwrap();
+    assert!(
+        storage
+            .header(&target)
+            .unwrap()
+            .details
+            .workspace
+            .unwrap()
+            .setup
+            .unwrap()
+            .can_cancel
+    );
+    storage
+        .setup(&target, action, SetupChange::AgentStarted, 101)
+        .unwrap();
+    let rejected = storage
+        .decide(
+            &target,
+            Event::Command {
+                id: OperationId::Client(Uuid::new_v4()),
+                receipt: None,
+                command: Command::Interrupt { turn: None },
+            },
+            context(2),
+            None,
+        )
+        .unwrap();
+    assert!(matches!(rejected.step.outcome, Outcome::Rejected(_)));
+    assert!(matches!(
+        storage
+            .state(&target)
+            .unwrap()
+            .inputs
+            .values()
+            .next()
+            .unwrap()
+            .state,
+        InputState::Preparing { .. }
+    ));
+}
+
+#[test]
+fn a_catalog_row_seen_again_resets_missing_scan_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = address("moved-between-pages");
+    storage.queue_catalog(ProviderKind::Claude, 0).unwrap();
+    for (index, present) in [true, false, true, false, false].into_iter().enumerate() {
+        let now = index as i64 * 60_000;
+        let claim = storage.claim(now, 1).unwrap().remove(0);
+        let headers = if present {
+            vec![(target.clone(), header())]
+        } else {
+            Vec::new()
+        };
+        storage.catalog_page(&claim, &headers, None, now).unwrap();
+        assert_eq!(storage.lookup(&target).unwrap().is_some(), index != 4);
+    }
+}
+
+#[test]
+fn a_cached_loading_window_resets_to_the_latest_ten_turns_after_import() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = address("loading");
+    storage.queue_catalog(ProviderKind::Claude, 0).unwrap();
+    let claim = storage.claim(0, 1).unwrap().remove(0);
+    storage
+        .catalog_page(&claim, &[(target.clone(), header())], None, 0)
+        .unwrap();
+    let replica = decision::records::Replica::new(
+        agent_protocol::sync::Scope::Conversation(target.clone()),
+        1,
+    )
+    .apply(1, storage.snapshot(&target, None, None).unwrap())
+    .unwrap();
+    assert_eq!(replica.window().unwrap().turn, 0);
+    let response = agent_protocol::models::ThreadResponse {
+        thread: agent_protocol::models::Thread {
+            id: Some(target.clone()),
+            turns: Some(
+                (1..=12)
+                    .map(|index| {
+                        Arc::new(agent_protocol::models::Turn {
+                            id: format!("native-{index}").into(),
+                            status: agent_protocol::models::TurnStatus::Completed,
+                            items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                                format!("answer-{index}").into(),
+                                ItemStatus::Completed,
+                                ItemBody::AssistantText {
+                                    text: format!("answer {index}"),
+                                    phase: Default::default(),
+                                },
+                            ))]),
+                            ..Default::default()
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    storage
+        .import(&target, &response, Some(&target), 100)
+        .unwrap();
+    let message = storage
+        .snapshot(&target, replica.cursor(), replica.window())
+        .unwrap();
+    assert!(matches!(message, Message::Snapshot { .. }));
+    let next = replica.apply(1, message).unwrap();
+    let thread = decision::records::project(&next).unwrap().thread;
+    assert_eq!(thread.turns.as_ref().unwrap().len(), 10);
+    assert_eq!(thread.history_has_more, Some(true));
 }

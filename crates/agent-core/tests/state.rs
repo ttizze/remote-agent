@@ -255,6 +255,7 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     snapshot.sessions.pending_submissions = Arc::new(BTreeMap::from([(
         "sent".into(),
         Arc::new(agent_core::state::PendingSubmission {
+            new_draft_slot: None,
             cursor: None,
             sequence: 0,
             submitted_at_ms: None,
@@ -1341,10 +1342,15 @@ fn project_registration_navigates_only_while_current() {
     );
     let (opened, effects) = applied(&pending, operation.clone(), "/resolved-project".into());
     assert_eq!(opened.panes.primary().navigation.cwd, "/resolved-project");
-    assert!(matches!(
-        opened.panes.primary().navigation.draft_key,
-        DraftKey::Session { .. }
-    ));
+    let expected = DraftKey::from(opened.input.new_drafts["0:/resolved-project"].clone());
+    assert_eq!(opened.panes.primary().navigation.draft_key, expected);
+    assert!(
+        !opened
+            .sessions
+            .conversations
+            .keys()
+            .any(|id| DraftKey::from(id) == expected)
+    );
     assert_eq!(effects.len(), 2); // Workspace review and project-list refresh.
     let (mut elsewhere, _) = reduce(
         &pending,
@@ -1461,6 +1467,7 @@ fn unknown_submission_waits_for_host_confirmation_before_restoration_or_discard(
     };
     let pending = |text: &str| {
         Arc::new(agent_core::state::PendingSubmission {
+            new_draft_slot: None,
             cursor: None,
             sequence: 0,
             submitted_at_ms: None,
@@ -1541,6 +1548,7 @@ fn unresolved_submission_actions_ignore_known_delivery_states() {
             pending_submissions: Arc::new(BTreeMap::from([(
                 "192867ea-8fe3-5a20-bf00-78605e31a020".into(),
                 Arc::new(agent_core::state::PendingSubmission {
+                    new_draft_slot: None,
                     cursor: None,
                     sequence: 0,
                     submitted_at_ms: None,

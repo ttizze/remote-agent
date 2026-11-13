@@ -84,7 +84,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         }
         "readItem" => {
             let session: SessionRef = serde_json::from_value(command["threadId"].clone()).unwrap();
-            client
+            let opened = client
                 .call(&records::Subscribe {
                     session: session.clone(),
                     subscription: uuid::Uuid::from_u128(2),
@@ -92,14 +92,16 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     window: None,
                 })
                 .await?;
+            let records::Message::Snapshot { cursor: cached, .. } = opened.initial else {
+                return Err(PeerError::InvalidMessage(
+                    "initial conversation snapshot is missing".into(),
+                ));
+            };
             let response = client
                 .call(&records::Hydrate {
                     session,
                     subscription: uuid::Uuid::from_u128(2),
-                    cached: agent_protocol::sync::Cursor {
-                        store: uuid::Uuid::from_u128(1),
-                        sequence: 7,
-                    },
+                    cached,
                     item: text(command, "itemId").into(),
                 })
                 .await?;

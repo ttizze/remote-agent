@@ -125,7 +125,7 @@ impl Fixture {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/list/subscribe" => {
-                            json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,})
+                            json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,})
                         }
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
                         "host/model/list" => json!({"data":[],"nextCursor":null}),

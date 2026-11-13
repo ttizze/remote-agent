@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     models::{SessionStatus, Turn, TurnStatus},
-    session::{Capabilities, ProviderKind, SessionRef, SubmissionDelivery},
+    session::{Capabilities, ProviderKind, SessionRef},
     state::{Draft, Intent, op},
 };
 
@@ -329,17 +329,10 @@ fn removing_moving_steering_and_resuming_ask_the_host() {
 }
 
 #[test]
-fn a_withdrawn_message_leaves_without_returning_to_the_composer() {
-    let state = snapshot(thread(true, true, Vec::new()), "");
+fn a_queued_message_removed_before_its_admission_frame_arrives_does_not_return_to_the_composer() {
+    use agent_protocol::sync::{Cursor, Key, Message};
+    let state = snapshot(thread(true, true, Vec::new()), "withdraw me");
     let (mut state, _) = submit(&state, "queued", false);
-    assert!(text(&state).is_empty());
-    Arc::make_mut(&mut state.sessions.conversations).insert(
-        session(),
-        Arc::new(Thread {
-            submissions: [("queued".into(), SubmissionDelivery::Withdrawn)].into(),
-            ..thread(true, true, Vec::new())
-        }),
-    );
     let replica = crate::test_conversations::replica(
         crate::models::ThreadResponse {
             thread: thread(true, true, Vec::new()),
@@ -347,13 +340,44 @@ fn a_withdrawn_message_leaves_without_returning_to_the_composer() {
         },
         1,
     );
+    let from = replica.cursor().unwrap();
+    // The Submit ACK precedes a later removal by another device. This device
+    // resumes after both commits, so it sees a tombstone rather than the input.
+    let accepted = Cursor {
+        sequence: from.sequence + 1,
+        ..from
+    };
     Arc::make_mut(
         Arc::make_mut(&mut state.sessions.pending_submissions)
             .get_mut("queued")
             .unwrap(),
     )
-    .cursor = replica.cursor();
+    .cursor = Some(accepted);
     Arc::make_mut(&mut state.sessions.replicas).insert(session(), Arc::new(replica));
+    super::super::reconcile_pending(&mut state, &session());
+    assert!(state.sessions.pending_submissions.contains_key("queued"));
+    let replica = &state.sessions.replicas[&session()];
+    let next = replica
+        .apply(
+            replica.subscription(),
+            Message::Changes {
+                from,
+                through: Cursor {
+                    sequence: accepted.sequence + 1,
+                    ..accepted
+                },
+                rows: Vec::new(),
+                removed: vec![agent_protocol::sync::Removal {
+                    key: Key::Input {
+                        thread: session(),
+                        id: "queued".into(),
+                    },
+                    version: accepted.sequence + 1,
+                }],
+            },
+        )
+        .unwrap();
+    Arc::make_mut(&mut state.sessions.replicas).insert(session(), Arc::new(next));
     super::super::reconcile_pending(&mut state, &session());
     assert!(state.sessions.pending_submissions.is_empty());
     assert!(text(&state).is_empty());

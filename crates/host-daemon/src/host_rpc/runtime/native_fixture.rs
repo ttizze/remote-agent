@@ -51,6 +51,7 @@ pub(in crate::host_rpc) struct NativeAgent {
     pub(in crate::host_rpc) fail_submit: AtomicUsize,
     pub(in crate::host_rpc) create_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) create_started: tokio::sync::Notify,
+    pub(in crate::host_rpc) created_in: Mutex<Vec<bool>>,
     pub(in crate::host_rpc) create_response_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) created: tokio::sync::Notify,
     fail_inject: AtomicUsize,
@@ -90,6 +91,7 @@ impl NativeAgent {
             fail_submit: AtomicUsize::new(0),
             create_gate: tokio::sync::Semaphore::new(1),
             create_started: tokio::sync::Notify::new(),
+            created_in: Mutex::default(),
             create_response_gate: tokio::sync::Semaphore::new(1),
             created: tokio::sync::Notify::new(),
             fail_inject: AtomicUsize::new(0),
@@ -123,6 +125,7 @@ impl NativeAgent {
             fail_submit: AtomicUsize::new(0),
             create_gate: tokio::sync::Semaphore::new(1),
             create_started: tokio::sync::Notify::new(),
+            created_in: Mutex::default(),
             create_response_gate: tokio::sync::Semaphore::new(1),
             created: tokio::sync::Notify::new(),
             fail_inject: AtomicUsize::new(0),
@@ -343,6 +346,10 @@ impl Agent for NativeAgent {
         model: Option<&str>,
         _: Option<serde_json::Value>,
     ) -> Result<ThreadResponse, Failure> {
+        self.created_in
+            .lock()
+            .unwrap()
+            .push(Path::new(cwd).is_dir());
         self.create_started.notify_one();
         let _permit = self
             .create_gate

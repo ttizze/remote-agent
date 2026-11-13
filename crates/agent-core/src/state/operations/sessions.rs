@@ -272,6 +272,7 @@ impl Operation for ReadThread {
         } else {
             Vec::new()
         });
+        snapshot.prune_subscriptions();
         effects.extend(super::super::conversations::receipt_check(
             snapshot,
             &self.thread_id,
@@ -280,6 +281,7 @@ impl Operation for ReadThread {
     }
     fn stale(self, snapshot: &mut Snapshot, _pane_id: &str, output: Self::Output) -> Vec<Effect> {
         if super::super::conversations::install(snapshot, output).is_some() {
+            snapshot.prune_subscriptions();
             super::super::conversations::receipt_check(snapshot, &self.thread_id)
                 .into_iter()
                 .collect()
@@ -586,12 +588,8 @@ impl Operation for RewindSession {
                 }
             }
         }
-        let effects = if !snapshot.sessions.subscriptions.contains_key(&id) {
-            vec![Effect::execute(if current {
-                ReadThread::open(id)
-            } else {
-                ReadThread::new(id)
-            })]
+        let effects = if current && !snapshot.sessions.subscriptions.contains_key(&id) {
+            vec![Effect::execute(ReadThread::open(id))]
         } else {
             Vec::new()
         };
@@ -687,7 +685,7 @@ impl Operation for StartConversation {
         let Some(response) = super::super::conversations::install(snapshot, output) else {
             return Vec::new();
         };
-        open_thread(
+        let effects = open_thread(
             snapshot,
             pane_id,
             self.target.clone(),
@@ -695,10 +693,13 @@ impl Operation for StartConversation {
             response.model,
             response.effort,
             response.service_tier,
-        )
+        );
+        snapshot.prune_subscriptions();
+        effects
     }
     fn stale(self, snapshot: &mut Snapshot, _pane: &str, output: Self::Output) -> Vec<Effect> {
         super::super::conversations::install(snapshot, output);
+        snapshot.prune_subscriptions();
         Vec::new()
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
@@ -1246,7 +1247,7 @@ mod tests {
         let id = SessionRef::new(ProviderKind::Codex, "old".into()).unwrap();
         let page: crate::models::ThreadList = serde_json::from_value(serde_json::json!({
             "data":[{"id":id,"projectId":"p","cwd":"/old-project","status":"running","canAcceptDirectInput":false}],
-            "projects":[{"id":"p","name":"P","roots":[]}],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5,
+            "projects":[{"id":"p","name":"P","roots":[]}],"hasMore":false,"hasMoreProjects":false,"limit":5,
         })).unwrap();
         let mut snapshot = Snapshot {
             connection: crate::state::Connection {

@@ -252,7 +252,7 @@ mod tests {
     fn fixture() -> Snapshot {
         let list: ThreadList = serde_json::from_value(json!({
             "data":[],"projects":[{"id":"a","name":"Alpha","roots":[{"path":"C:/alpha"}]},{"id":"b","name":"Beta","roots":[]}],
-            "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
+            "hasMore":false,"hasMoreProjects":false,"limit":5
         })).unwrap();
         Snapshot {
             connection: crate::state::Connection {

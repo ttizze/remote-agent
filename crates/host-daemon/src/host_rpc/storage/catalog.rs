@@ -79,6 +79,7 @@ impl Storage {
                         cursor: None,
                         seen: Vec::new(),
                         listed: Default::default(),
+                        missing: Default::default(),
                         progress: jobs::CatalogProgress::Scanning,
                     },
                 )?;
@@ -111,6 +112,7 @@ impl Storage {
             provider,
             seen,
             listed,
+            missing,
             ..
         } = &claim.work
         else {
@@ -164,10 +166,10 @@ impl Storage {
             let sequence=match sequence {Some(sequence)=>sequence,None=>Self::advance(&transaction)?.sequence};
             transaction.execute("UPDATE jobs SET seq=?1 WHERE id=?2",params![integer(sequence)?,claim.id.to_string()]).map_err(failure)?;
             let complete=next.is_none();
-            if complete { prune_catalog(&transaction, *provider, &listed, sequence, now)?; }
+            let missing = if complete { prune_catalog(&transaction, *provider, &listed, missing, sequence, now)? } else { missing.clone() };
             let body: Vec<u8> = transaction.query_row("SELECT body FROM jobs WHERE id=?1", [claim.id.to_string()], |row|row.get(0)).map_err(failure)?;
             let jobs::Work::Catalog {progress,..}=codec::enum_record("catalog",&body)? else {return Err("expected catalog job".into())};
-            let work=jobs::Work::Catalog {provider:*provider,cursor:next,seen:if complete {Vec::new()} else {seen},listed:if complete {Default::default()} else {listed},progress:if !complete {progress} else if progress==jobs::CatalogProgress::Refresh {jobs::CatalogProgress::Scanning} else {jobs::CatalogProgress::Ready}};
+            let work=jobs::Work::Catalog {provider:*provider,cursor:next,seen:if complete {Vec::new()} else {seen},listed:if complete {Default::default()} else {listed},missing,progress:if !complete {progress} else if progress==jobs::CatalogProgress::Refresh {jobs::CatalogProgress::Scanning} else {jobs::CatalogProgress::Ready}};
             let (_,body)=codec::enum_parts(&work)?;
             transaction.execute("UPDATE jobs SET state='pending',run_after=?1,last_error=NULL,body=?2 WHERE id=?3 AND attempts=?4",params![if complete && progress!=jobs::CatalogProgress::Refresh {now.saturating_add(60_000)} else {now},body,claim.id.to_string(),integer(claim.attempt)?]).map_err(failure)?;
             transaction.commit().map_err(failure)
@@ -179,9 +181,10 @@ fn prune_catalog(
     transaction: &Transaction<'_>,
     provider: ProviderKind,
     listed: &std::collections::BTreeSet<String>,
+    previous_missing: &std::collections::BTreeSet<String>,
     sequence: u64,
     now: i64,
-) -> Result<(), String> {
+) -> Result<std::collections::BTreeSet<String>, String> {
     let candidates = {
         let mut statement = transaction.prepare("SELECT key,id FROM threads t WHERE provider=?1 AND loaded=0 AND NOT EXISTS(SELECT 1 FROM sources s WHERE s.provider=t.provider AND s.native_id=t.id)").map_err(failure)?;
         statement
@@ -192,8 +195,15 @@ fn prune_catalog(
             .collect::<Result<Vec<_>, _>>()
             .map_err(failure)?
     };
+    let mut missing = std::collections::BTreeSet::new();
     for (key, id) in candidates {
         if listed.contains(&id) {
+            continue;
+        }
+        // Offset-based provider pages can skip a row moved to an earlier page.
+        // Require absence in two complete scans; failed/partial scans do not count.
+        missing.insert(id.clone());
+        if !previous_missing.contains(&id) {
             continue;
         }
         let session = SessionRef::new(provider, id.clone()).map_err(failure)?;
@@ -213,5 +223,5 @@ fn prune_catalog(
         }
         transaction.execute("INSERT INTO removals(seq,kind,provider,id,thread,at) VALUES (?1,'thread',?2,?3,NULL,?4)", params![integer(sequence)?,provider.key(),id,now]).map_err(failure)?;
     }
-    Ok(())
+    Ok(missing)
 }

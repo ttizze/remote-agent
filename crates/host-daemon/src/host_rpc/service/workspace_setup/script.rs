@@ -55,6 +55,7 @@ impl HostRpcService {
                     id: SetupStageId::SetupScript,
                     status: SetupStageStatus::Skipped,
                     exit_code: None,
+                    error: None,
                 },
             )
             .await?;
@@ -144,6 +145,7 @@ impl HostRpcService {
                                 id: SetupStageId::SetupScript,
                                 status: if code == 0 { SetupStageStatus::Done } else { SetupStageStatus::Failed },
                                 exit_code: Some(code),
+                                error: (code != 0).then(|| format!("Setup script exited with {code}")),
                             }).await?;
                             if code != 0 && !script.asynchronous { return Err(Failure::new("setup_script_failed", format!("Setup script exited with {code}"))); }
                             return Ok(());
@@ -166,6 +168,7 @@ impl HostRpcService {
                                 id: SetupStageId::SetupScript,
                                 status: SetupStageStatus::Failed,
                                 exit_code: None,
+                                error: Some(error.message.clone()),
                             },
                         )
                         .await;

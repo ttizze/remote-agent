@@ -355,7 +355,7 @@ pub(super) fn worktree_active<'a>(
         || has_requests
         || turns.iter().any(|turn| turn.status == TurnStatus::Running)
         || submissions.any(|delivery| match delivery {
-            SubmissionDelivery::Rejected | SubmissionDelivery::Withdrawn => false,
+            SubmissionDelivery::Rejected => false,
             SubmissionDelivery::Accepted { turn_id: Some(id) } => {
                 // Completed receipts can remain for replay after interruption.
                 // Only a known finished turn proves that input no longer owns work.
