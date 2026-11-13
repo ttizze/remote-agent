@@ -332,7 +332,8 @@ fn removing_moving_steering_and_resuming_ask_the_host() {
 fn a_queued_message_removed_before_its_admission_frame_arrives_does_not_return_to_the_composer() {
     use agent_protocol::sync::{Cursor, Key, Message};
     let state = snapshot(thread(true, true, Vec::new()), "withdraw me");
-    let (mut state, _) = submit(&state, "queued", false);
+    let input = uuid::Uuid::from_u128(10).to_string();
+    let (mut state, _) = submit(&state, &input, false);
     let replica = crate::test_conversations::replica(
         crate::models::ThreadResponse {
             thread: thread(true, true, Vec::new()),
@@ -349,13 +350,18 @@ fn a_queued_message_removed_before_its_admission_frame_arrives_does_not_return_t
     };
     Arc::make_mut(
         Arc::make_mut(&mut state.sessions.pending_submissions)
-            .get_mut("queued")
+            .get_mut(input.as_str())
             .unwrap(),
     )
     .cursor = Some(accepted);
     Arc::make_mut(&mut state.sessions.replicas).insert(session(), Arc::new(replica));
     super::super::reconcile_pending(&mut state, &session());
-    assert!(state.sessions.pending_submissions.contains_key("queued"));
+    assert!(
+        state
+            .sessions
+            .pending_submissions
+            .contains_key(input.as_str())
+    );
     let replica = &state.sessions.replicas[&session()];
     let next = replica
         .apply(
@@ -370,7 +376,7 @@ fn a_queued_message_removed_before_its_admission_frame_arrives_does_not_return_t
                 removed: vec![agent_protocol::sync::Removal {
                     key: Key::Input {
                         thread: session(),
-                        id: "queued".into(),
+                        id: input.into(),
                     },
                     version: accepted.sequence + 1,
                 }],

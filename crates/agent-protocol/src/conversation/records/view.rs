@@ -270,17 +270,18 @@ mod tests {
             (false, "conversation header is missing"),
         ] {
             use crate::operations::RpcMethod;
-            let session = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+            let session =
+                SessionRef::new(None, uuid::Uuid::from_u128(u128::MAX - 1).to_string()).unwrap();
             let response = Opened {
                 session: if wrong_session {
-                    SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap()
+                    SessionRef::new(None, uuid::Uuid::from_u128(u128::MAX - 2).to_string()).unwrap()
                 } else {
                     session.clone()
                 },
-                subscription_id: uuid::Uuid::new_v4(),
+                subscription_id: uuid::Uuid::from_u128(u128::MAX - 3),
                 initial: Message::Snapshot {
                     cursor: Cursor {
-                        store: uuid::Uuid::new_v4(),
+                        store: uuid::Uuid::from_u128(u128::MAX - 4),
                         sequence: 1,
                     },
                     window: Some(Window { turn: 0, item: 0 }),
@@ -289,7 +290,7 @@ mod tests {
             };
             let request = Subscribe {
                 session: session.clone(),
-                subscription: uuid::Uuid::new_v4(),
+                subscription: uuid::Uuid::from_u128(u128::MAX - 5),
                 cached: None,
                 window: None,
             };
@@ -298,7 +299,7 @@ mod tests {
                 workspace: None,
                 session,
                 provider: ProviderKind::Codex,
-                subscription: uuid::Uuid::new_v4(),
+                subscription: uuid::Uuid::from_u128(u128::MAX - 6),
                 cwd: None,
                 selection: Default::default(),
                 initial: None,
@@ -337,7 +338,7 @@ mod tests {
 
     #[test]
     fn projection_keeps_every_unconfirmed_input_in_admission_order() {
-        let id = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+        let id = SessionRef::new(None, uuid::Uuid::from_u128(u128::MAX - 7).to_string()).unwrap();
         let header = Header {
             state: Thread {
                 name: "conversation".into(),
@@ -384,7 +385,7 @@ mod tests {
                 1,
                 Message::Snapshot {
                     cursor: Cursor {
-                        store: uuid::Uuid::new_v4(),
+                        store: uuid::Uuid::from_u128(u128::MAX - 8),
                         sequence: 1,
                     },
                     window: Some(Window { turn: 0, item: 0 }),

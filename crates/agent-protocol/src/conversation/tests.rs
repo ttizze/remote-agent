@@ -481,7 +481,7 @@ fn rewind_rejects_work_running_outside_the_saved_history() {
     let result = step(
         &state,
         Event::Command {
-            id: OperationId::Client(Uuid::new_v4()),
+            id: OperationId::Client(Uuid::from_u128(u128::MAX - 1)),
             receipt: None,
             command: Command::Rewind(attempt.turn),
         },
@@ -3862,7 +3862,7 @@ fn unwritten_steering_requeues_only_the_matching_delivery_and_waits_for_an_addre
             &state,
             Event::DeliveryDeferred {
                 id: id.clone(),
-                action: Uuid::new_v4()
+                action: Uuid::from_u128(u128::MAX - 2)
             },
             waiting
         ),
