@@ -467,7 +467,7 @@ fn list_and_conversation_cursors_and_id_namespaces_are_independent() {
     let b = Row {
         key: Key::Project("a".into()),
         version: 3,
-        position: Position::Unordered,
+        position: Position::Project { position: 1 },
         content: Content::Full("project".into()),
     };
     let next = list

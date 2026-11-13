@@ -1350,7 +1350,7 @@ fn project_registration_navigates_only_while_current() {
             .keys()
             .any(|id| DraftKey::from(id) == expected)
     );
-    assert_eq!(effects.len(), 2); // Workspace review and project-list refresh.
+    assert_eq!(effects.len(), 2); // Workspace review and the initial catalog subscription.
     let (mut elsewhere, _) = reduce(
         &pending,
         "",

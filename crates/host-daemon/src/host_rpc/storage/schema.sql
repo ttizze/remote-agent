@@ -25,10 +25,12 @@ CREATE INDEX threads_children ON threads (parent) WHERE parent IS NOT NULL;
 
 CREATE TABLE projects (
     id TEXT PRIMARY KEY,
+    position INTEGER NOT NULL,
     seq INTEGER NOT NULL,
     body BLOB NOT NULL              -- 名前、フォルダ
 ) STRICT;
 CREATE INDEX projects_changed ON projects (seq);
+CREATE UNIQUE INDEX projects_position ON projects (position);
 
 CREATE TABLE inputs (
     id TEXT PRIMARY KEY,            -- 操作の識別子を兼ね、配送後は発言の項目の識別子になる
@@ -121,7 +123,7 @@ CREATE TABLE bindings (
     source_id INTEGER NOT NULL REFERENCES sources (id),
     covered INTEGER,                -- そのセッションが知っている最後のターンの順序番号
     state TEXT NOT NULL,            -- ready | aligning | fork
-    body BLOB NOT NULL,             -- 分岐で保持する native のターン
+    body BLOB NOT NULL,             -- 履歴注入の準備トークン、または分岐で保持する native のターン
     PRIMARY KEY (thread, provider)
 ) STRICT;
 

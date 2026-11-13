@@ -2497,7 +2497,7 @@ fn a_private_native_source_cannot_create_a_second_conversation_row() {
 }
 
 #[test]
-fn item_and_timing_changes_preserve_activity_time_without_republishing_identical_headers() {
+fn item_only_header_updates_follow_t3_shells_five_second_resend_window() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(&directory.path().join("state.sqlite"));
     let id = address("quiet-header");
@@ -2513,7 +2513,7 @@ fn item_and_timing_changes_preserve_activity_time_without_republishing_identical
         ..
     } = &sent.step.actions[0]
     else {
-        panic!("delivery");
+        panic!("delivery")
     };
     storage
         .decide(
@@ -2527,39 +2527,54 @@ fn item_and_timing_changes_preserve_activity_time_without_republishing_identical
             None,
         )
         .unwrap();
-    let mut expected = storage.header(&id).unwrap();
-    expected.details.updated_at = 1000;
-    for (index, observation) in [
-        Observation::Item {
-            id: "answer".into(),
-            deferred: false,
-            status: ItemStatus::Running,
-            body: ItemBody::AssistantText {
-                text: "paragraph\n\n".into(),
-                phase: AssistantPhase::default(),
-            },
-        },
-        Observation::Timing {
-            started_at: Some(42),
-            completed_at: None,
-            duration_ms: Some(10),
-        },
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let original = storage.header(&id).unwrap();
+    let event = |observation| Event::Provider {
+        attempt: attempt.id,
+        native_turn: None,
+        native_items: vec![],
+        observation,
+    };
+    for index in 0..10 {
         let committed = storage
             .decide(
                 &id,
-                Event::Provider {
-                    attempt: attempt.id,
-                    native_turn: None,
-                    native_items: vec![],
-                    observation,
-                },
+                event(Observation::Item {
+                    id: format!("paragraph-{index}").into(),
+                    deferred: false,
+                    status: ItemStatus::Running,
+                    body: ItemBody::AssistantText {
+                        text: format!("paragraph {index}\n\n"),
+                        phase: AssistantPhase::default(),
+                    },
+                }),
                 Context {
-                    now: 1000,
+                    now: 1000 + index * 400,
                     ..context(1200 + index as u128)
+                },
+                None,
+            )
+            .unwrap();
+        assert!(
+            !committed
+                .rows
+                .iter()
+                .any(|row| row.key == Key::Thread(id.clone()))
+        );
+        assert_eq!(storage.header(&id).unwrap(), original);
+    }
+    for (at, updated) in [(5099, false), (5100, true)] {
+        let before = storage.with(|connection| cursor(connection)).unwrap();
+        let committed = storage
+            .decide(
+                &id,
+                event(Observation::Timing {
+                    started_at: Some(42),
+                    completed_at: None,
+                    duration_ms: Some(at as u64),
+                }),
+                Context {
+                    now: at,
+                    ..context(at as u128)
                 },
                 None,
             )
@@ -2569,10 +2584,36 @@ fn item_and_timing_changes_preserve_activity_time_without_republishing_identical
                 .rows
                 .iter()
                 .any(|row| row.key == Key::Thread(id.clone())),
-            index == 0
+            updated,
+            "at={at}"
         );
-        assert_eq!(storage.header(&id).unwrap(), expected);
+        let Message::Changes { rows, .. } = storage.list(Some(before)).unwrap() else {
+            panic!("list catchup")
+        };
+        assert_eq!(
+            rows.iter().any(|row| row.key == Key::Thread(id.clone())),
+            updated
+        );
     }
+    let ended = storage
+        .decide(
+            &id,
+            event(Observation::Completed),
+            Context {
+                now: 5101,
+                ..context(1300)
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        ended
+            .rows
+            .iter()
+            .any(|row| row.key == Key::Thread(id.clone())),
+        "status changes publish immediately"
+    );
+    assert_eq!(storage.header(&id).unwrap().details.updated_at, 5101);
 }
 
 #[test]
@@ -2871,4 +2912,267 @@ fn stopped_checkout_cleanup_survives_a_restart_before_the_resource_effect() {
         storage.header(&target).unwrap().state.workspace.cwd(),
         Some("/project")
     );
+}
+
+#[test]
+fn external_reimport_finishes_text_that_was_first_seen_while_running() {
+    use agent_protocol::models::{
+        ItemBody, ItemStatus, Thread as NativeThread, ThreadResponse, Turn as NativeTurn,
+        TurnStatus,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = address("external-continuation");
+    let response = |turn: &str, status, text: &str| ThreadResponse {
+        thread: NativeThread {
+            id: Some(target.clone()),
+            turns: Some(vec![Arc::new(NativeTurn {
+                id: turn.into(),
+                status,
+                items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                    format!("{turn}-answer").into(),
+                    if status == TurnStatus::Running {
+                        ItemStatus::Running
+                    } else {
+                        ItemStatus::Completed
+                    },
+                    ItemBody::AssistantText {
+                        text: text.into(),
+                        phase: Default::default(),
+                    },
+                ))]),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    storage
+        .import(
+            &target,
+            &response("old", TurnStatus::Completed, "earlier answer"),
+            Some(&target),
+            1,
+        )
+        .unwrap();
+    for (at, status, text) in [
+        (2, TurnStatus::Running, "partial"),
+        (3, TurnStatus::Completed, "final answer"),
+    ] {
+        storage.queue_import(&target, &target, at).unwrap();
+        let claim = storage
+            .claim(at, 16)
+            .unwrap()
+            .into_iter()
+            .find(|claim| matches!(claim.work, jobs::Work::Import { .. }))
+            .unwrap();
+        storage
+            .reimport(
+                &target,
+                &target,
+                claim.id,
+                claim.attempt,
+                &response("new", status, text),
+                at,
+            )
+            .unwrap();
+    }
+    let history = storage.history(&target, 0).unwrap();
+    let turn = history.thread.turns.as_ref().unwrap().last().unwrap();
+    assert_eq!(turn.status, TurnStatus::Completed);
+    let item = &turn.items.as_ref().unwrap()[0];
+    assert_eq!(item.status, ItemStatus::Completed);
+    assert!(matches!(item.body(),ItemBody::AssistantText {text,..} if text=="final answer"));
+}
+
+#[test]
+fn a_failed_import_finishes_and_a_new_source_supersedes_an_old_claim() {
+    use agent_protocol::models::{Thread as NativeThread, ThreadResponse};
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = address("import-lane");
+    let response = ThreadResponse {
+        thread: NativeThread {
+            id: Some(target.clone()),
+            turns: Some(vec![]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    storage
+        .import(&target, &response, Some(&target), 1)
+        .unwrap();
+    storage.queue_import(&target, &target, 2).unwrap();
+    let first = storage
+        .claim(2, 16)
+        .unwrap()
+        .into_iter()
+        .find(|claim| matches!(claim.work, jobs::Work::Import { .. }))
+        .unwrap();
+    let failed = storage
+        .import_failed(
+            &target,
+            first.id,
+            first.attempt,
+            "native session was deleted".into(),
+        )
+        .unwrap();
+    assert!(matches!(failed.step.outcome, Outcome::Rejected(_)));
+    assert!(
+        !storage
+            .retry(first.id, first.attempt, 3, "must not repeat")
+            .unwrap()
+    );
+    assert!(storage.claim(100_000, 16).unwrap().is_empty());
+    storage.queue_import(&target, &target, 3).unwrap();
+    let stale = storage
+        .claim(3, 16)
+        .unwrap()
+        .into_iter()
+        .find(|claim| matches!(claim.work, jobs::Work::Import { .. }))
+        .unwrap();
+    let replacement = SessionRef::new(ProviderKind::Codex, "replacement-source".into()).unwrap();
+    storage.queue_import(&target, &replacement, 4).unwrap();
+    let current = storage.claim(4, 16).unwrap();
+    assert!(
+        matches!(&current[..],[jobs::Claim {work:jobs::Work::Import {source,..},..}] if source==&replacement)
+    );
+    let cursor = storage.with(|connection| cursor(connection)).unwrap();
+    let ignored = storage
+        .import_failed(&target, stale.id, stale.attempt, "late old failure".into())
+        .unwrap();
+    assert_eq!(ignored.cursor, cursor);
+    assert!(ignored.rows.is_empty());
+    let replay = storage
+        .reimport(&target, &target, stale.id, stale.attempt, &response, 5)
+        .unwrap();
+    assert!(replay.rows.is_empty());
+    assert!(
+        !storage
+            .retry(stale.id, stale.attempt, 6, "must not block replacement")
+            .unwrap()
+    );
+}
+
+#[test]
+fn projects_keep_registration_order_in_storage_and_synced_positions() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    for id in ["z", "a", "m"] {
+        storage
+            .register_project(&agent_protocol::models::Project {
+                id: id.into(),
+                name: id.into(),
+                roots: vec![agent_protocol::models::ProjectRoot {
+                    path: format!("/{id}"),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        storage
+            .projects()
+            .unwrap()
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["z", "a", "m"]
+    );
+    let rows = storage
+        .with(|connection| projects::read(connection, 0))
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.position.clone())
+            .collect::<Vec<_>>(),
+        [
+            Position::Project { position: 1 },
+            Position::Project { position: 2 },
+            Position::Project { position: 3 },
+        ]
+    );
+}
+
+#[test]
+fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
+    use agent_protocol::{conversation::Observation, execution::ExecutionError};
+    for (text, ending) in [("hello", "stop"), ("hello", "retry"), ("/compact", "stop")] {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("state.sqlite"));
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let mut initial = header();
+        initial.state.provider = ProviderKind::Codex;
+        initial.details.capabilities.steer = text == "hello";
+        storage.create(&target, &initial).unwrap();
+        ready(&storage, &target);
+        let mut event = submit(601);
+        let Event::Command {
+            command: Command::Submit { content, .. },
+            ..
+        } = &mut event
+        else {
+            panic!("submit")
+        };
+        content.parts = vec![Input::Text { text: text.into() }];
+        let started = storage.decide(&target, event, context(601), None).unwrap();
+        let [
+            decision::Action::Deliver {
+                id,
+                action,
+                attempt,
+                ..
+            },
+        ] = &started.step.actions[..]
+        else {
+            panic!("delivery")
+        };
+        assert_eq!(
+            storage.history(&target, 0).unwrap().thread.steerable,
+            text == "/compact",
+            "unacknowledged {text}"
+        );
+        storage
+            .decide(
+                &target,
+                Event::Delivered {
+                    id: id.clone(),
+                    action: *action,
+                    native_turn: Some("native-turn".into()),
+                },
+                context(602),
+                None,
+            )
+            .unwrap();
+        assert!(
+            storage.history(&target, 0).unwrap().thread.steerable,
+            "acknowledged {text}"
+        );
+        let terminal = if ending == "stop" {
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(603)),
+                command: Command::Interrupt { turn: None },
+                receipt: None,
+            }
+        } else {
+            Event::Provider {
+                attempt: attempt.id,
+                native_turn: None,
+                native_items: vec![],
+                observation: Observation::Failed(Some(ExecutionError {
+                    provider_code: Some("serverOverloaded".into()),
+                    category: agent_protocol::execution::ErrorCategory::Overloaded,
+                    ..Default::default()
+                })),
+            }
+        };
+        storage
+            .decide(&target, terminal, context(603), None)
+            .unwrap();
+        assert_eq!(
+            storage.history(&target, 0).unwrap().thread.steerable,
+            text == "/compact",
+            "{text} / {ending}"
+        );
+    }
 }

@@ -115,6 +115,8 @@ pub struct SearchList {
     pub term: String,
     pub limit: Option<u32>,
 }
+/// T3 ThreadSearch defaults to fifty results when the caller supplies no bound.
+pub const DEFAULT_SEARCH_LIMIT: u32 = 50;
 
 /// A failed provider has settled too: its error remains visible beside healthy rows.
 pub fn catalog_ready(replica: &Replica) -> bool {

@@ -37,7 +37,7 @@ impl Operation for SearchCatalog {
         context
             .call(&records::SearchList {
                 term: self.term.clone(),
-                limit: None,
+                limit: Some(records::DEFAULT_SEARCH_LIMIT),
             })
             .await
     }
@@ -334,7 +334,11 @@ pub(crate) fn project(snapshot: &mut Snapshot, refresh: bool) -> Vec<Effect> {
             Content::Full(record) | Content::Summary(record) => record,
         };
         match (&row.key, record.as_ref()) {
-            (Key::Project(_), records::Record::Project(project)) => projects.push(project.clone()),
+            (Key::Project(_), records::Record::Project(project)) => {
+                if let agent_protocol::sync::Position::Project { position } = row.position {
+                    projects.push((position, project.clone()));
+                }
+            }
             (Key::Catalog(provider), records::Record::Catalog(records::Catalog::Failed(error))) => {
                 errors.insert(provider.key().into(), serde_json::json!({"message":error}));
             }
@@ -365,6 +369,8 @@ pub(crate) fn project(snapshot: &mut Snapshot, refresh: bool) -> Vec<Effect> {
             _ => {}
         }
     }
+    projects.sort_by_key(|(position, _)| *position);
+    let mut projects = projects.into_iter().map(|(_, project)| project).collect();
     let mut activity = records::list_activity(headers);
     if snapshot.lists.subscription.is_none() {
         for (_, status) in &mut activity.statuses {
@@ -495,7 +501,6 @@ fn pages(
             .copied()
             .unwrap_or_default()
             .total_cmp(&newest.get(a.id.as_str()).copied().unwrap_or_default())
-            .then_with(|| a.id.cmp(&b.id))
     });
     let has_more_projects = projects.len() > snapshot.lists.list_query.project_limit as usize;
     projects.truncate(snapshot.lists.list_query.project_limit as usize);

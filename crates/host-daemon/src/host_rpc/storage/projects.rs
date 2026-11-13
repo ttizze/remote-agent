@@ -10,7 +10,7 @@ pub(super) fn write(
     let (_, body) = codec::pack(project, &["id", "icon"], false)?;
     transaction
         .execute(
-            "INSERT INTO projects(id,seq,body) VALUES (?1,?2,?3)",
+            "INSERT INTO projects(id,seq,body,position) VALUES (?1,?2,?3,(SELECT coalesce(max(position),0)+1 FROM projects))",
             params![project.id, integer(sequence)?, body],
         )
         .map_err(failure)?;
@@ -19,7 +19,7 @@ pub(super) fn write(
 
 pub(super) fn read(connection: &Connection, after: u64) -> Result<Vec<Row>, String> {
     let mut statement = connection
-        .prepare("SELECT id,seq,body FROM projects WHERE seq>?1 ORDER BY id")
+        .prepare("SELECT id,seq,body,position FROM projects WHERE seq>?1 ORDER BY position")
         .map_err(failure)?;
     let mut entries = statement.query([integer(after)?]).map_err(failure)?;
     let mut rows = Vec::new();
@@ -38,7 +38,13 @@ pub(super) fn read(connection: &Connection, after: u64) -> Result<Vec<Row>, Stri
         rows.push(Row {
             key: Key::Project(id),
             version: sequence.try_into().map_err(failure)?,
-            position: Position::Unordered,
+            position: Position::Project {
+                position: entry
+                    .get::<_, i64>(3)
+                    .map_err(failure)?
+                    .try_into()
+                    .map_err(failure)?,
+            },
             content: Content::Full(Arc::new(Record::Project(project))),
         });
     }

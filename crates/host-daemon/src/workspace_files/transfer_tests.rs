@@ -275,7 +275,10 @@ async fn attachments_outlive_worktrees_while_linked_images_fail_only_their_downl
             .await
             .unwrap();
         upload.await.unwrap();
-        let attached = fixture.store.snapshot().input.drafts[&draft_key].attachments[0].clone();
+        let snapshot = fixture.store.snapshot();
+        let attached = snapshot.input.drafts[&snapshot.panes.primary().navigation.draft_key]
+            .attachments[0]
+            .clone();
         assert!(
             std::path::Path::new(&attached.path)
                 .starts_with(dunce::canonicalize(fixture.files.upload_directory.as_ref()).unwrap())
@@ -313,7 +316,10 @@ async fn attachments_outlive_worktrees_while_linked_images_fail_only_their_downl
             .unwrap();
         download.await.unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), bytes);
-        assert_eq!(before.input.drafts[&draft_key].text, "edited during upload");
+        assert_eq!(
+            before.input.drafts[&before.panes.primary().navigation.draft_key].text,
+            "edited during upload"
+        );
         assert!(!source.exists());
         let download = fixture
             .store

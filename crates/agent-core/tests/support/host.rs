@@ -781,7 +781,7 @@ impl State {
             }
         }
         incoming.sort_by_key(|row| match row.position {
-            Position::Unordered => (0, 0, 0),
+            Position::Unordered | Position::Project { .. } => (0, 0, 0),
             Position::Turn { ordinal } => (1, ordinal, 0),
             Position::Item {
                 ordinal, position, ..

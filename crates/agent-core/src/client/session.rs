@@ -523,7 +523,18 @@ mod tests {
         restored.clone().ready().await.unwrap();
         assert!(!restored.snapshot().connection_enabled());
         assert_eq!(
-            restored.snapshot().draft(Default::default()).text,
+            restored
+                .snapshot()
+                .draft(
+                    restored
+                        .snapshot()
+                        .panes
+                        .primary()
+                        .navigation
+                        .draft_key
+                        .clone()
+                )
+                .text,
             "Keep my work"
         );
         // An off connection must not even parse a ticket or load an identity.
@@ -562,7 +573,12 @@ mod tests {
         restored.clone().flush().await.unwrap();
         let saved = crate::persistence::decode(&storage.bytes.lock().unwrap()).unwrap();
         assert!(!saved.connection_enabled());
-        assert_eq!(saved.draft(Default::default()).text, "Keep my work");
+        assert_eq!(
+            saved
+                .draft(saved.panes.primary().navigation.draft_key.clone())
+                .text,
+            "Keep my work"
+        );
         restored.shutdown().await.unwrap();
     }
 

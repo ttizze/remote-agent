@@ -903,9 +903,7 @@ async fn read_tool_output_tail(path: &str) -> Result<agent_protocol::sync::Outpu
             .position(|byte| byte & 0xc0 != 0x80)
             .unwrap_or(bytes.len())
     };
-    let text = std::str::from_utf8(&bytes[boundary..])
-        .map_err(|error| error.to_string())?
-        .to_owned();
+    let text = String::from_utf8_lossy(&bytes[boundary..]);
     let mut output = Output::persisted(&text);
     output.truncated |= offset != 0;
     Ok(output)
@@ -2598,7 +2596,7 @@ impl Agent for Claude {
 }
 
 #[cfg(test)]
-mod execution_tests {
+pub(crate) mod execution_tests {
     use super::*;
 
     #[tokio::test]
@@ -3111,34 +3109,12 @@ mod execution_tests {
     #[derive(Clone, Default)]
     struct Observed(Arc<std::sync::Mutex<agent_protocol::models::Thread>>);
     impl Observed {
-        fn apply(&self, change: AgentChange, _: &[()]) -> Result<(), String> {
-            if let AgentChange::Session { change, .. } = change {
-                let mut thread = self.0.lock().unwrap();
-                *thread = change.apply(&thread).map_err(|error| error.to_string())?;
-            }
+        fn apply(&self, change: SessionChange) -> Result<(), String> {
+            let mut thread = self.0.lock().unwrap();
+            *thread = change.apply(&thread).map_err(|error| error.to_string())?;
             Ok(())
         }
-        fn session_change(&self, _: &SessionRef, change: SessionChange) {
-            self.apply(
-                AgentChange::Session {
-                    session: SessionRef {
-                        provider: Some(ProviderKind::Claude),
-                        id: "fixture".into(),
-                    },
-                    change,
-                },
-                &[],
-            )
-            .unwrap();
-        }
-        fn overlay_execution(
-            &self,
-            _: &SessionRef,
-            _: agent_protocol::models::Thread,
-        ) -> agent_protocol::models::Thread {
-            self.0.lock().unwrap().clone()
-        }
-        fn current_turn(&self, _: &SessionRef, turn: &str) -> Option<Arc<Turn>> {
+        fn turn(&self, turn: &str) -> Option<Arc<Turn>> {
             self.0
                 .lock()
                 .unwrap()
@@ -3157,7 +3133,10 @@ mod execution_tests {
         let consumer = router.clone();
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                let result = consumer.apply(event.change, &[]);
+                let result = match event.change {
+                    AgentChange::Session { change, .. } => consumer.apply(change),
+                    _ => Ok(()),
+                };
                 if let Some(applied) = event.applied {
                     let _ = applied.send(result);
                 }
@@ -3165,16 +3144,15 @@ mod execution_tests {
         });
         let uuid = Uuid::new_v4();
         let session = SessionRef::new(ProviderKind::Claude, uuid.to_string()).unwrap();
-        router.session_change(
-            &session,
-            SessionChange::Turn {
+        router
+            .apply(SessionChange::Turn {
                 turn: agent_protocol::models::Turn {
                     id: "turn".into(),
                     ..Default::default()
                 },
                 completed: false,
-            },
-        );
+            })
+            .unwrap();
         let (input, _receiver) = mpsc::channel(1);
         let (interrupt, interrupted) = watch::channel(None);
         let worker = Worker {
@@ -3220,10 +3198,187 @@ mod execution_tests {
         };
         (router, session, worker)
     }
+
+    /// Exercise the production process reader and response/input state machine.
+    /// The reference query bridge has no idle envelope: its returned result is
+    /// adapted to Bex's explicit response-idle envelope, just as SDK main.ts does.
+    pub(crate) async fn replay_sdk(
+        rows: &[Value],
+        events: mpsc::Sender<AgentEvent>,
+    ) -> Result<(SessionRef, tokio::task::JoinHandle<()>, CancellationToken), String> {
+        let (_, _, mut worker) = routed_worker();
+        worker.events = events;
+        let native = rows
+            .iter()
+            .filter(|row| row["type"] == "emit_inbound")
+            .map(|row| &row["frame"])
+            .filter(|frame| frame["type"] == "system" && frame["subtype"] == "init")
+            .find_map(|frame| frame["session_id"].as_str())
+            .unwrap();
+        worker.record.lock().await.session_id = Uuid::parse_str(native).unwrap();
+        worker.session = SessionRef::new(ProviderKind::Claude, native.into()).unwrap();
+        let session = worker.session.clone();
+        let offers = rows
+            .iter()
+            .filter(|row| {
+                row["type"] == "expect_outbound" && row["frame"]["type"] == "prompt.offer"
+            })
+            .map(|row| row["frame"]["message"]["message"]["content"].clone())
+            .collect::<Vec<_>>();
+        assert!(!offers.is_empty());
+        let user = |index: usize, content: &Value| {
+            let text = content.as_str().expect("text-only reference prompt");
+            Item::new(
+                format!("replay-input-{index}").into(),
+                ItemStatus::Completed,
+                ItemBody::UserMessage {
+                    text: Some(text.into()),
+                    content: Vec::new(),
+                },
+            )
+        };
+        worker
+            .change(SessionChange::Item {
+                turn_id: worker.turn_id.clone(),
+                item: Arc::new(user(0, &offers[0])),
+            })
+            .await?;
+        let (input, receiver) = mpsc::channel(offers.len().max(1));
+        worker.input = input.clone();
+        for (index, content) in offers.iter().enumerate().skip(1) {
+            input
+                .send(Command {
+                    execution: Some(Uuid::new_v4()),
+                    value: SdkInput::Message {
+                        id: format!("replay-input-{index}"),
+                        content: content.clone(),
+                    },
+                    user: Some(user(index, content)),
+                    delivered: None,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let file = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+        std::fs::write(
+            file.path(),
+            serde_json::to_vec(rows).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let script = r#"
+import { readFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+const rows = JSON.parse(readFileSync(process.argv[1], 'utf8'));
+const reader = createInterface({input:process.stdin});
+const inputs = reader[Symbol.asyncIterator]();
+const emit = event => process.stdout.write(JSON.stringify(event)+'\n');
+emit({type:'ready',initialized:{}});
+let first=true, current='replay-input-0';
+for (const row of rows) {
+  if (row.type==='expect_outbound' && row.frame.type==='prompt.offer') {
+    if(first) first=false;
+    else {
+      const {value,done}=await inputs.next();
+      if(done) throw Error('reference prompt was never delivered');
+      const input=JSON.parse(value);
+      if(input.type!=='message' || JSON.stringify(input.content)!==JSON.stringify(row.frame.message.message.content)) throw Error('reference prompt differs');
+      current=input.id;
+    }
+  }
+  if(row.type!=='emit_inbound') continue;
+  // Prompt UUIDs are transport-local: this bridge's offer supplies Bex's UUID.
+  const message=['assistant','result'].includes(row.frame.type) ? {...row.frame,user_message_uuid:current} : row.frame;
+  emit({type:'message',message});
+  if(row.frame.type==='result') emit({type:'message',message:{type:'system',subtype:'session_state_changed',state:'idle'}});
+}
+reader.close();
+process.stdin.pause();
+"#;
+        let path = std::env::var_os("PATH");
+        let node = process::executable(Path::new("node"), path.as_deref())?;
+        let mut command = tokio::process::Command::new(node);
+        command
+            .args(["--input-type=module", "-e", script])
+            .arg(file.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut process = Process::spawn_command(command)?;
+        assert!(matches!(
+            process.read().await?,
+            Some(SdkEvent::Ready { .. })
+        ));
+        let stop = worker.stop.clone();
+        let running = tokio::spawn(worker.run(process, receiver));
+        Ok((session, running, stop))
+    }
+
+    #[tokio::test]
+    async fn recorded_claude_sdk_messages_cross_the_native_content_adapter() {
+        let manifest: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/manifest.json")).unwrap();
+        for recording in manifest
+            .iter()
+            .filter(|entry| entry["provider"] == "claude")
+        {
+            let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/providers/fixtures")
+                .join(recording["file"].as_str().unwrap());
+            let (observed, _, mut worker) = routed_worker();
+            let rows: Vec<Value> = std::fs::read_to_string(file)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            for (index, row) in rows.iter().enumerate() {
+                if row["type"] == "expect_outbound" && row["frame"]["type"] == "query.open" {
+                    let native = rows[index + 1..]
+                        .iter()
+                        .take_while(|row| row["frame"]["type"] != "query.open")
+                        .filter(|row| {
+                            row["type"] == "emit_inbound"
+                                && row["frame"]["type"] == "system"
+                                && row["frame"]["subtype"] == "init"
+                        })
+                        .find_map(|row| row["frame"]["session_id"].as_str())
+                        .or_else(|| row["frame"]["options"]["sessionId"].as_str())
+                        .or_else(|| row["frame"]["options"]["resume"].as_str())
+                        .unwrap();
+                    worker.record.lock().await.session_id = Uuid::parse_str(native).unwrap();
+                    worker.session = SessionRef::new(ProviderKind::Claude, native.into()).unwrap();
+                }
+                if row["type"] != "emit_inbound" {
+                    continue;
+                }
+                let frame = row["frame"].clone();
+                if frame["type"] == "permission.request" {
+                    // T3's query bridge exposes canUseTool directly; Bex's
+                    // bridge carries the same fields in its tagged Tool request.
+                    let request: SdkRequest = serde_json::from_value(json!({
+                        "type":"tool", "toolName":frame["toolName"], "input":frame["input"],
+                        "toolUseId":frame["options"]["toolUseID"], "description":frame["options"]["description"]
+                    })).unwrap();
+                    match request {
+                        SdkRequest::Tool { tool_name, .. } => assert!(!tool_name.is_empty()),
+                        _ => panic!("expected tool request"),
+                    }
+                } else {
+                    worker.message(frame).await.unwrap_or_else(|error| {
+                        panic!("{} frame {index}: {error}", recording["file"])
+                    });
+                }
+            }
+            if recording["scenario"] == "simple" {
+                let turn = observed.turn("turn").unwrap();
+                assert!(turn.items.iter().flatten().any(|item| matches!(item.body(), ItemBody::AssistantText {text,..} if text == "fixture simple ok")));
+            }
+        }
+    }
     #[tokio::test]
     async fn background_completion_marks_only_actually_truncated_output() {
         for text in ["short 日".into(), "日".repeat(100_000)] {
-            let (observed, session, mut worker) = routed_worker();
+            let (observed, _, mut worker) = routed_worker();
             let file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(file.path(), &text).unwrap();
             worker
@@ -3251,7 +3406,7 @@ mod execution_tests {
             )
             .unwrap();
             assert!(worker.complete_background(&outcome).await.unwrap());
-            let turn = observed.current_turn(&session, "turn").unwrap();
+            let turn = observed.turn("turn").unwrap();
             let item = turn
                 .items
                 .as_ref()
@@ -3778,7 +3933,7 @@ for await (const line of createInterface({input: process.stdin})) {
             process.read().await.unwrap(),
             Some(SdkEvent::Ready { .. })
         ));
-        let (router, session, mut worker) = routed_worker();
+        let (router, _, mut worker) = routed_worker();
         let (input, receiver) = mpsc::channel(2);
         worker.input = input.clone();
         let record = worker.record.clone();
@@ -3792,11 +3947,7 @@ for await (const line of createInterface({input: process.stdin})) {
             observed
         };
         let run = tokio::spawn(worker.run(process, receiver));
-        let roster = |router: &Observed| {
-            router
-                .overlay_execution(&session, agent_protocol::models::Thread::default())
-                .background
-        };
+        let roster = |router: &Observed| router.0.lock().unwrap().background.clone();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while roster(&router).len() < 3 {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -3852,7 +4003,7 @@ for await (const line of createInterface({input: process.stdin})) {
 
     #[tokio::test]
     async fn background_work_reports_to_the_turn_it_ran_in_after_input_opens_another() {
-        let (router, session, mut worker) = routed_worker();
+        let (router, _, mut worker) = routed_worker();
         worker
             .message(json!({"type":"assistant","message":{"id":"call","content":[
                 {"type":"tool_use","id":"work","name":"Bash","input":{"command":"work"}}]}}))
@@ -3891,7 +4042,7 @@ for await (const line of createInterface({input: process.stdin})) {
             .find(|item| item.id == "work".into())
             .unwrap();
         assert_eq!(work.status, ItemStatus::Completed);
-        let next = router.current_turn(&session, "next").unwrap();
+        let next = router.turn("next").unwrap();
         assert_eq!(next.status, TurnStatus::Running);
         assert!(
             next.items
@@ -3945,7 +4096,7 @@ for await (const line of createInterface({input: process.stdin})) {
         }
         worker.message(json!({"type":"assistant","uuid":"envelope","message":{"id":"message","content":[{"type":"text","text":"answer"}]}})).await.unwrap();
         worker.stream_event(&json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"abandoned"}})).await.unwrap();
-        let turn = router.current_turn(&session, "turn").unwrap();
+        let turn = router.turn("turn").unwrap();
         let items = turn.items.as_ref().unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].id.as_str(), "message:0");
@@ -3962,15 +4113,12 @@ for await (const line of createInterface({input: process.stdin})) {
             .stream_event(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}))
             .await
             .unwrap();
-        assert_eq!(
-            phase(router.current_turn(&session, "turn").unwrap()),
-            AssistantPhase::Final
-        );
+        assert_eq!(phase(router.turn("turn").unwrap()), AssistantPhase::Final);
         worker
             .message(json!({"type":"system","subtype":"api_retry","attempt":1}))
             .await
             .unwrap();
-        let turn = router.current_turn(&session, "turn").unwrap();
+        let turn = router.turn("turn").unwrap();
         let items = turn.items.as_ref().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id.as_str(), "message:0");
@@ -4076,7 +4224,7 @@ for await (const line of createInterface({input: process.stdin})) {
         .unwrap();
         let history = history::read(&path, 10).unwrap();
         let saved = history.thread.turns.unwrap();
-        let live = router.current_turn(&session, "turn").unwrap();
+        let live = router.turn("turn").unwrap();
         assert_eq!(live.items, saved[0].items);
         let items = live.items.as_ref().unwrap();
         assert_eq!(items.len(), 9);
@@ -4169,4 +4317,10 @@ async fn background_output_reads_only_a_bounded_utf8_tail_of_large_files() {
         .unwrap();
     assert!(!small.truncated);
     assert_eq!(small.text, "short 日");
+    std::fs::write(file.path(), b"before\xffafter").unwrap();
+    let binary = read_tool_output_tail(file.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(binary.text, "before\u{fffd}after");
+    assert!(!binary.truncated);
 }

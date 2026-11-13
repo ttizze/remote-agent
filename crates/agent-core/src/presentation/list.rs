@@ -1273,7 +1273,7 @@ mod tests {
                 rows: vec![records::Row {
                     key: Key::Project(project.id.clone()),
                     version: from.sequence + 1,
-                    position: Position::Unordered,
+                    position: Position::Project { position: 100 },
                     content: Content::Full(Arc::new(records::Record::Project(project))),
                 }],
                 removed: Vec::new(),

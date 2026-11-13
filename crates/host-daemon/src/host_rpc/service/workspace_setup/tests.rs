@@ -934,3 +934,187 @@ async fn retry_after_restart_restores_a_deleted_checkout_before_the_first_provid
     assert_eq!(agent.inputs.lock().unwrap().len(), 1);
     assert_eq!(done.id, Some(id));
 }
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn cancellation_between_stages_stops_an_async_script_before_discarding_its_checkout() {
+    use agent_protocol::conversation::{self as decision, Event, OperationId};
+    use agent_protocol::workspace::WorkspaceSetup;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        for args in [
+            &["init", "-b", "main"][..],
+            &["config", "user.name", "fixture"],
+            &["config", "user.email", "fixture@example.test"],
+            &["commit", "--allow-empty", "-m", "initial"],
+        ] {
+            crate::git::text(&repository, args).unwrap();
+        }
+        let host = HostRpcService::new([], directory.path().join("projects.json"));
+        let checkout = host
+            .inner
+            .worktrees
+            .prepare_selected(
+                repository.to_str().unwrap(),
+                "main".into(),
+                false,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let branch = crate::git::text(&checkout, &["branch", "--show-current"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        let generation = Uuid::new_v4();
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let mut setup = WorkspaceSetup::new(Some("main".into()), 0);
+        setup.worktree_path = Some(checkout.to_str().unwrap().into());
+        setup.branch = Some(branch.clone());
+        setup.can_cancel = true;
+        let header = records::Header {
+            state: decision::Thread {
+                name: String::new(),
+                workspace: decision::Workspace::Ready(checkout.to_str().unwrap().into()),
+                provider: ProviderKind::Codex,
+                queue_held: false,
+            },
+            details: records::Details {
+                workspace: Some(Box::new(records::WorkspacePreparation {
+                    project_cwd: repository.to_str().unwrap().into(),
+                    strategy: Some(WorkspaceStrategy::Worktree {
+                        base_ref: "main".into(),
+                        start_from_origin: false,
+                    }),
+                    generation,
+                    created_worktree: true,
+                    setup: Some(setup),
+                    visible: true,
+                })),
+                ..Default::default()
+            },
+        };
+        host.inner
+            .conversation
+            .storage
+            .create(&target, &header)
+            .unwrap();
+        crate::host_rpc::runtime::Runtime::recover(&host, &target, ProviderKind::Codex)
+            .await
+            .unwrap();
+        let input: agent_protocol::ids::ClientInputId = Uuid::new_v4().to_string().into();
+        host.inner
+            .conversation
+            .storage
+            .decide(
+                &target,
+                Event::Command {
+                    id: OperationId::Client(Uuid::parse_str(input.as_str()).unwrap()),
+                    receipt: None,
+                    command: Command::Submit {
+                        id: input.clone(),
+                        content: InputContent {
+                            parts: vec![op::Input::Text {
+                                text: "do work".into(),
+                            }],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: Default::default(),
+                        },
+                    },
+                },
+                decision::Context {preparation:None,rewind_binding:None,external_busy:false,now:100,seed:Uuid::new_v4(),steers:false,steer_ready:true},
+                None,
+            )
+            .unwrap();
+        host.run_setup_script(
+            &target,
+            generation,
+            (checkout.to_str().unwrap(), repository.to_str().unwrap()),
+            Some(SetupScript {
+                name: "async".into(),
+                command: "while test ! -f .released; do sleep 0.05; done".into(),
+                asynchronous: true,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let handle = host
+            .inner
+            .conversation
+            .storage
+            .header(&target)
+            .unwrap()
+            .details
+            .workspace
+            .unwrap()
+            .setup
+            .unwrap()
+            .terminal_handle
+            .unwrap();
+        assert!(host.inner.terminals.is_setup(&handle));
+        let connection = host.open_session();
+        let result: records::Acknowledged = call(
+            &host,
+            connection.id(),
+            Call::ChangeConversation(records::Change {
+                session: target.clone(),
+                operation: Uuid::new_v4(),
+                command: Command::Interrupt {
+                    turn: Some(input.to_string().into()),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.outcome, decision::Outcome::Accepted);
+        let mut changed = host.inner.conversation.storage.changes();
+        loop {
+            let workspace = host
+                .inner
+                .conversation
+                .storage
+                .header(&target)
+                .unwrap()
+                .details
+                .workspace
+                .unwrap();
+            if !workspace.created_worktree {
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+        // Finished setup terminals retain their replay until the card expires,
+        // as on main. Attaching must immediately report the actual PTY exit.
+        let mut viewer=host.open_session();
+        let _:Empty=call(&host,viewer.id(),Call::StartTerminal(op::StartTerminal {
+            handle:handle.clone(),cwd:checkout.to_str().unwrap().into(),command:None,size:op::TerminalSize {rows:24,cols:80},
+        })).await.unwrap();
+        loop {
+            let notification:agent_protocol::protocol::Notification=agent_protocol::protocol::decode(&viewer.recv().await.unwrap()).unwrap();
+            if matches!(notification,agent_protocol::protocol::Notification::Exited {handle:exited,..} if exited==handle) {break}
+        }
+
+        assert!(!checkout.exists());
+        assert!(
+            crate::git::text(&repository, &["branch", "--list", &branch])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            host.inner
+                .conversation
+                .storage
+                .state(&target)
+                .unwrap()
+                .attempts
+                .is_empty()
+        );
+    })
+    .await
+    .unwrap();
+}

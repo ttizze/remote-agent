@@ -216,12 +216,7 @@ pub(super) fn write_history(
                 .error
                 .clone()
                 .filter(|_| native.status == TurnStatus::Running),
-            state: match native.status {
-                TurnStatus::Running => TurnState::Running { interrupt: None },
-                TurnStatus::Completed => TurnState::Completed,
-                TurnStatus::Failed => TurnState::Failed(native.error.clone().unwrap_or_default()),
-                TurnStatus::Interrupted | TurnStatus::Unknown => TurnState::Interrupted,
-            },
+            state: imported_state(native.status, native.error.as_ref()),
         };
         let address = sources.get(&native.id);
         let source_key = address
@@ -526,7 +521,7 @@ impl Storage {
                         &row.position,
                     )
                 });
-                decision::records::summarize(&mut rows, 128 * 1024)?;
+                decision::records::summarize(&mut rows, decision::records::WORK_DETAIL_BYTES)?;
                 messages.push(Message::Extend {
                     cursor: current,
                     window: floor,
@@ -604,5 +599,18 @@ impl Storage {
             .apply(1, message)
             .map_err(failure)?;
         decision::records::project(&replica).ok_or("conversation does not exist".into())
+    }
+}
+
+// Native Running must stay refreshable until a later Idle import finishes it.
+pub(super) fn imported_state(
+    status: TurnStatus,
+    error: Option<&agent_protocol::execution::ExecutionError>,
+) -> TurnState {
+    match status {
+        TurnStatus::Running => TurnState::Running { interrupt: None },
+        TurnStatus::Completed => TurnState::Completed,
+        TurnStatus::Failed => TurnState::Failed(error.cloned().unwrap_or_default()),
+        TurnStatus::Interrupted | TurnStatus::Unknown => TurnState::Interrupted,
     }
 }

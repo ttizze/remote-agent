@@ -27,7 +27,7 @@ pub(super) fn command(
         &state.inputs,
         state.thread.workspace.cwd(),
         state.bindings.is_empty(),
-        state.active_turn().is_some(),
+        state.active_turn().map(|turn| &turn.id),
     ) {
         Ok(workspace) => workspace,
         Err(reason) => return reject(reason),
@@ -180,28 +180,23 @@ fn steer_input(state: &State, id: &ClientInputId, context: Context) -> Step {
     if InputPart::is_compaction(&input.content.parts) {
         return reject("context compaction must run as a separate turn");
     }
-    if let Some(turn) = state.active_turn().filter(|turn| turn.compaction) {
-        let first = state.queued_head().map(|input| &input.id);
-        let mut result = interrupt_turn(state, turn, Some(id.clone()), context);
-        if result.outcome != Outcome::Accepted {
+    let attempt = match state.steer_target(context.steers) {
+        Some(SteerTarget::CompactionTurn(turn)) => {
+            let first = state.queued_head().map(|input| &input.id);
+            let mut result = interrupt_turn(state, turn, Some(id.clone()), context);
+            if result.outcome == Outcome::Accepted {
+                result.changes.extend(move_input(state, id, first).changes);
+            }
             return result;
         }
-        result.changes.extend(move_input(state, id, first).changes);
-        return result;
-    }
-    if let Some(compact) = state.inputs.values().find(|input| {
-        input
-            .live_delivery()
-            .is_some_and(|delivery| !delivery.steer)
-            && InputPart::is_compaction(&input.content.parts)
-    }) {
-        let first = state.queued_head().map(|input| &input.id);
-        let mut result = interrupt_input(state, compact, Some(id.clone()), context);
-        result.changes.extend(move_input(state, id, first).changes);
-        return result;
-    }
-    let Some(attempt) = state.steerable_attempt().filter(|_| context.steers) else {
-        return reject("active steering is unavailable");
+        Some(SteerTarget::CompactionInput(compact)) => {
+            let first = state.queued_head().map(|input| &input.id);
+            let mut result = interrupt_input(state, compact, Some(id.clone()), context);
+            result.changes.extend(move_input(state, id, first).changes);
+            return result;
+        }
+        Some(SteerTarget::Running(attempt)) => attempt,
+        None => return reject("active steering is unavailable"),
     };
     let result = accepted(vec![Change::Input(PendingInput {
         state: InputState::Queued {
@@ -510,6 +505,10 @@ fn submit(
     result
 }
 
+pub(super) fn targets_active(active: Option<&TurnId>, expected: Option<&TurnId>) -> bool {
+    expected.is_some() && expected == active
+}
+
 fn interrupt(state: &State, expected: Option<&TurnId>, context: Context) -> Step {
     let unstarted = state.inputs.values().find(|input| match &input.state {
         InputState::Preparing { .. } => true,
@@ -517,8 +516,7 @@ fn interrupt(state: &State, expected: Option<&TurnId>, context: Context) -> Step
             .live_delivery()
             .is_some_and(|delivery| !delivery.steer),
     });
-    let targeting_active = expected
-        .is_some_and(|expected| state.active_turn().is_some_and(|turn| &turn.id == expected));
+    let targeting_active = targets_active(state.active_turn().map(|turn| &turn.id), expected);
     if !targeting_active && let Some(input) = unstarted {
         if expected.is_some_and(|turn| {
             turn.as_str() != input.id.as_str()

@@ -169,19 +169,16 @@ impl State {
                 self.resolve_selection();
             }
             Update::Presentation { host, value } => {
-                let before = self.publications.get(&host).map(|p| {
-                    let draft = p.context.navigation().draft_key;
-                    (
-                        p.snapshot.panel_scope(host.clone(), draft.clone()),
-                        p.snapshot.welcome_submission(draft),
-                    )
-                });
-                if let Some((before, previous_welcome)) = before {
+                if let Some(previous) = self.publications.get(&host) {
+                    let before = previous
+                        .snapshot
+                        .panel_scope(host.clone(), previous.context.navigation().draft_key);
                     let after = value
                         .snapshot
                         .panel_scope(host.clone(), value.context.navigation().draft_key);
-                    let welcome =
-                        previous_welcome || value.snapshot.welcome_submission(after.draft.clone());
+                    let welcome = value
+                        .snapshot
+                        .welcome_transition(before.draft.clone(), after.draft.clone());
                     self.panels = self.panels.clone().inherit_visibility(
                         before,
                         after,
@@ -963,22 +960,11 @@ mod tests {
     }
 
     #[test]
-    fn welcome_submission_moves_panel_tools_and_rejection_returns_them() {
+    fn welcome_edit_moves_tools_once_and_send_or_rejection_keeps_the_scope() {
         for send in [false, true] {
             let mut snapshot = Snapshot::default();
             snapshot.connection.storage_scope = "storage".into();
             let draft = snapshot.panes.primary().navigation.draft_key.clone();
-            Arc::make_mut(&mut snapshot.input.drafts).insert(
-                draft.clone(),
-                Arc::new(agent_core::state::Draft {
-                    text: "welcome".into(),
-                    model: Some(agent_protocol::models::ModelRef {
-                        provider: ProviderKind::Codex,
-                        id: "fixture".into(),
-                    }),
-                    ..Default::default()
-                }),
-            );
             let host = "host".to_string();
             let before = snapshot.panel_scope(host.clone(), draft);
             let mut state = State::default();
@@ -991,6 +977,32 @@ mod tests {
                 .clone()
                 .open(before.clone(), PanelKind::Browser, None);
             state.panels = opened.panels;
+            snapshot = agent_core::state::reduce(
+                &snapshot,
+                "",
+                agent_core::state::Event::Intent(Intent::SetDraft {
+                    thread_id: before.draft.clone(),
+                    draft: agent_core::state::Draft {
+                        text: "welcome".into(),
+                        model: Some(agent_protocol::models::ModelRef {
+                            provider: ProviderKind::Codex,
+                            id: "fixture".into(),
+                        }),
+                        ..Default::default()
+                    },
+                }),
+            )
+            .0;
+            let stable = snapshot.panel_scope(
+                host.clone(),
+                snapshot.panes.primary().navigation.draft_key.clone(),
+            );
+            state.receive(Update::Presentation {
+                host: host.clone(),
+                value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+            });
+            assert_eq!(state.panels.get(stable.clone()).active, Some(opened.id));
+            assert!(state.panels.get(before.clone()).surfaces.is_empty());
             let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
             let intent = if send {
                 Intent::Submit {
@@ -1015,6 +1027,30 @@ mod tests {
             if send {
                 assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
                 assert!(state.panels.get(before.clone()).surfaces.is_empty());
+                let pending_navigation = snapshot.panes.primary().navigation.clone();
+                snapshot = agent_core::state::reduce(
+                    &snapshot,
+                    "",
+                    agent_core::state::Event::Intent(Intent::ShowThreadList),
+                )
+                .0;
+                state.receive(Update::Presentation {
+                    host: host.clone(),
+                    value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+                });
+                let separate = state
+                    .panels
+                    .clone()
+                    .open(before.clone(), PanelKind::Terminal, None);
+                state.panels = separate.panels;
+                assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
+                Arc::make_mut(snapshot.panes.primary_mut()).navigation = pending_navigation;
+                state.receive(Update::Presentation {
+                    host: host.clone(),
+                    value: Presentation::project(Arc::new(snapshot.clone()), "", None).unwrap(),
+                });
+                assert_eq!(state.panels.get(before.clone()).active, Some(separate.id));
+                assert_eq!(state.panels.get(after.clone()).active, Some(opened.id));
                 snapshot = agent_core::state::reduce(
                     &snapshot,
                     "",
@@ -1025,10 +1061,10 @@ mod tests {
                     host,
                     value: Presentation::project(Arc::new(snapshot), "", None).unwrap(),
                 });
-                assert_eq!(state.panels.get(before).active, Some(opened.id));
-                assert!(state.panels.get(after).surfaces.is_empty());
+                assert_eq!(state.panels.get(after).active, Some(opened.id));
+                assert_eq!(state.panels.get(before).active, Some(separate.id));
             } else {
-                assert_eq!(state.panels.get(before).active, Some(opened.id));
+                assert_eq!(state.panels.get(stable).active, Some(opened.id));
                 assert!(state.panels.get(after).surfaces.is_empty());
             }
         }

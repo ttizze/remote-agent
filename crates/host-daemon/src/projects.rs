@@ -249,7 +249,7 @@ mod tests {
             rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
         connection
             .execute(
-                "INSERT INTO projects(id,seq,body) VALUES ('broken',1,?1)",
+                "INSERT INTO projects(id,position,seq,body) VALUES ('broken',1,1,?1)",
                 [vec![0xc1]],
             )
             .unwrap();

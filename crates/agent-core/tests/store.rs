@@ -2542,6 +2542,11 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/conversation/change");
+    assert!(
+        !store.snapshot().sessions.pending_submissions
+            ["26cd410e-2f6d-5b40-aa3e-902997b896d4"]
+            .queued
+    );
     writer.reply(&request, json!({"result":{}})).await.unwrap();
     assert_eq!(sending.await.unwrap().unwrap(), Outcome::Submitted);
 }
@@ -3135,7 +3140,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
         if navigate {
             new_chat(&store, &mut reader, &mut writer, "/new").await;
         }
-        writer.reply(&request, json!({"result":{"model":{"provider":"codex","id":"fork-model"},"thread":{"id":{"provider":"codex","id":"forked"},"cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"copied","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
+        writer.reply(&request, json!({"result":{"model":{"provider":"codex","id":"fork-model"},"thread":{"cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"copied","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
         if !navigate {
             loop {
                 let opening = read(&mut reader).await;
@@ -3928,6 +3933,7 @@ async fn initial_titles_wait_for_scope_verification_and_use_the_current_query() 
                         }
                         "host/list/search" => {
                             assert_eq!(request["params"]["term"], "new query");
+                            assert_eq!(request["params"]["limit"], 50);
                             titles("fresh")["result"].clone()
                         },
                         "host/model/list" => json!({"data":[],"nextCursor":null}),

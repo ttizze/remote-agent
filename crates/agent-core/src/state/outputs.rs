@@ -48,9 +48,11 @@ pub(super) fn watch(
         }
     }
     if !desired(snapshot, &key) {
-        if snapshot.sessions.live_outputs.contains_key(&key) {
-            Arc::make_mut(&mut snapshot.sessions.live_outputs).remove(&key);
-        }
+        Arc::make_mut(&mut snapshot.sessions.live_outputs).remove(&key);
+        Arc::make_mut(&mut snapshot.operations).remove(&op::OperationKey::CommandOutput {
+            session: key.session,
+            item: key.item,
+        });
         return Vec::new();
     }
     if snapshot.connection.connected && !snapshot.sessions.live_outputs.contains_key(&key) {
@@ -92,6 +94,13 @@ pub(super) fn retire(snapshot: &mut Snapshot) {
         .collect();
     for key in keys {
         Arc::make_mut(&mut snapshot.sessions.live_outputs).remove(&key);
+    }
+    let expired: Vec<_> = snapshot.operations.keys().filter(|key| {
+        matches!(key, op::OperationKey::CommandOutput {session,item}
+            if !desired(snapshot, &records::OutputKey { session:session.clone(),item:item.clone() }))
+    }).cloned().collect();
+    for key in expired {
+        Arc::make_mut(&mut snapshot.operations).remove(&key);
     }
 }
 
@@ -281,6 +290,24 @@ mod tests {
                     message: "could not subscribe".into(),
                 },
             },
+        );
+        let mut finished = state.clone();
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut finished.sessions.conversations)
+                .get_mut(&session)
+                .unwrap(),
+        );
+        let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[0]);
+        Arc::make_mut(&mut turn.items.as_mut().unwrap()[0]).status = ItemStatus::Completed;
+        retire(&mut finished);
+        assert!(
+            finished
+                .operation_error(op::OperationKey::CommandOutput {
+                    session: session.clone(),
+                    item: key.item.clone()
+                })
+                .is_none(),
+            "final output retires a failed watch even when no live subscription was installed"
         );
         assert!(watch(&mut state, "", key.clone(), false).is_empty());
         assert_eq!(

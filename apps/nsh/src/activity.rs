@@ -104,21 +104,7 @@ pub(crate) fn details(
     let error = move || detail.with(|detail| detail.error.clone());
     let load = move || {
         if let Some(read) = request.get_untracked() {
-            if item.with(|item| {
-                item.as_ref()
-                    .is_some_and(|item| item.source.data.kind == "command")
-            }) && error().is_some()
-            {
-                for watching in [false, true] {
-                    connection.dispatch(Intent::WatchCommandOutput {
-                        thread_id: read.thread_id.clone(),
-                        item_id: read.item_id.clone(),
-                        watching,
-                    });
-                }
-            } else {
-                connection.dispatch(Intent::ReadItem(read));
-            }
+            connection.dispatch(Intent::ReadItem(read));
         }
     };
     let toggle = move || {

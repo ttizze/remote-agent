@@ -329,9 +329,9 @@ impl Runtime {
                                 .inner
                                 .conversation
                                 .owners
-                                .import_status(target, Some(error.to_string()), now())
+                                .import_failed(target, claim.id, claim.attempt, error.to_string())
                                 .await?;
-                            return Err(error.to_string());
+                            return Ok(());
                         }
                     };
                     response.thread.project_id = service

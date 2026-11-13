@@ -43,6 +43,9 @@ pub enum Key<C> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Position {
     Unordered,
+    Project {
+        position: u64,
+    },
     Turn {
         ordinal: u64,
     },
@@ -366,15 +369,12 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
 
 fn check_position<C>(key: &Key<C>, position: &Position) -> Result<(), ApplyError> {
     match (key, position) {
+        (Key::Project(_), Position::Project { .. }) => Ok(()),
         (Key::Turn { .. }, Position::Turn { .. }) | (Key::Item { .. }, Position::Item { .. }) => {
             Ok(())
         }
         (
-            Key::Thread(_)
-            | Key::Project(_)
-            | Key::Catalog(_)
-            | Key::Input { .. }
-            | Key::Request { .. },
+            Key::Thread(_) | Key::Catalog(_) | Key::Input { .. } | Key::Request { .. },
             Position::Unordered,
         ) => Ok(()),
         _ => Err(ApplyError::Position),

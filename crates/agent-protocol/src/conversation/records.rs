@@ -54,6 +54,7 @@ pub struct WorkspacePreparation {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Details {
+    pub steerable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<Box<WorkspacePreparation>>,
     pub parent: Option<SessionRef>,
@@ -316,7 +317,9 @@ pub fn validate_message(message: &Message) -> Result<(), crate::sync::ApplyError
         let valid = match (&row.key, &row.position, record) {
             (Key::Thread(_), Position::Unordered, Record::Thread(_))
             | (Key::Catalog(_), Position::Unordered, Record::Catalog(_)) => true,
-            (Key::Project(id), Position::Unordered, Record::Project(project)) => id == &project.id,
+            (Key::Project(id), Position::Project { .. }, Record::Project(project)) => {
+                id == &project.id
+            }
             (Key::Input { id, .. }, Position::Unordered, Record::Input(input)) => id == &input.id,
             (Key::Request { id, .. }, Position::Unordered, Record::Request(request)) => {
                 id == &request.id
@@ -540,8 +543,10 @@ pub fn defer(row: &mut Row) {
     row.content = crate::sync::Content::Summary(std::sync::Arc::new(Record::Item(item)));
 }
 
+pub const WORK_DETAIL_BYTES: usize = 128 * 1024;
+
 pub fn summarize(rows: &mut [Row], mut remaining: usize) -> Result<(), String> {
-    // Keep messages inline within the page budget. Work details spend their
+    // Keep normal messages inline. Work details spend their
     // separate budget newest-first, independent of a database's return order.
     let mut order: Vec<_> = (0..rows.len()).collect();
     order.sort_by_key(|index| match &rows[*index].position {
@@ -594,6 +599,6 @@ pub use outputs::{OpenedOutput, OutputKey, SubscribeOutput};
 
 mod list;
 pub use list::{
-    OpenedList, SearchList, SubscribeList, activity as list_activity, catalog_ready,
-    rows_activity as list_rows_activity, validate as validate_list,
+    DEFAULT_SEARCH_LIMIT, OpenedList, SearchList, SubscribeList, activity as list_activity,
+    catalog_ready, rows_activity as list_rows_activity, validate as validate_list,
 };

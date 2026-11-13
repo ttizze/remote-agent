@@ -43,7 +43,7 @@ fn list() -> Snapshot {
     rows.push(Row {
         key: Key::Project("project".into()),
         version: 10,
-        position: Position::Unordered,
+        position: Position::Project { position: 0 },
         content: Content::Full(Arc::new(Record::Project(crate::models::Project {
             id: "project".into(),
             name: "Project".into(),
@@ -418,7 +418,7 @@ fn search_projects_expand_page_and_collapse_without_changing_normal_disclosures(
     rows.push(Row {
         key: Key::Project("other".into()),
         version: through.sequence,
-        position: Position::Unordered,
+        position: Position::Project { position: 1 },
         content: Content::Full(Arc::new(Record::Project(crate::models::Project {
             id: "other".into(),
             name: "Other".into(),
@@ -430,7 +430,9 @@ fn search_projects_expand_page_and_collapse_without_changing_normal_disclosures(
         rows.push(Row {
             key: Key::Project(id.clone()),
             version: through.sequence,
-            position: Position::Unordered,
+            position: Position::Project {
+                position: index as u64 + 2,
+            },
             content: Content::Full(Arc::new(Record::Project(crate::models::Project {
                 id: id.clone(),
                 name: id.clone(),
@@ -536,4 +538,81 @@ fn an_idle_catalog_update_releases_an_unselected_subscription_after_completion()
         },
     );
     assert!(!next.sessions.subscriptions.contains_key(&id));
+}
+
+#[test]
+fn empty_projects_keep_registration_order_and_child_matches_only_show_in_search() {
+    let mut state = Snapshot::default();
+    let mut rows = Vec::new();
+    for (position, id) in ["z", "project", "m"].into_iter().enumerate() {
+        rows.push(Row {
+            key: Key::Project(id.into()),
+            version: 10,
+            position: Position::Project {
+                position: position as u64,
+            },
+            content: Content::Full(Arc::new(Record::Project(crate::models::Project {
+                id: id.into(),
+                name: id.into(),
+                ..Default::default()
+            }))),
+        });
+    }
+    let mut child = row(99, true, 10);
+    let Content::Full(record) = &mut child.content else {
+        panic!("full record")
+    };
+    let Record::Thread(header) = Arc::make_mut(record) else {
+        panic!("thread")
+    };
+    header.state.name = "needle child".into();
+    header.details.parent = Some(address(0));
+    rows.push(child);
+    state.lists.replica = Some(Arc::new(
+        records::Replica::new(Scope::List, 1)
+            .apply(
+                1,
+                Message::Snapshot {
+                    cursor: Cursor {
+                        store: uuid::Uuid::from_u128(1),
+                        sequence: 10,
+                    },
+                    window: None,
+                    rows,
+                },
+            )
+            .unwrap(),
+    ));
+    state.lists.subscription = Some(uuid::Uuid::new_v4());
+    project(&mut state, false);
+    let page = state.lists.threads.as_ref().unwrap();
+    assert_eq!(
+        page.projects
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["z", "project", "m"]
+    );
+    assert!(page.data.is_empty());
+    assert!(
+        state
+            .lists
+            .project_threads
+            .values()
+            .all(|page| page.data.is_empty())
+    );
+    Arc::make_mut(&mut state.lists.list_query).search_term = "needle".into();
+    project(&mut state, false);
+    let page = state.lists.threads.as_ref().unwrap();
+    assert_eq!(
+        page.projects
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["project"]
+    );
+    assert_eq!(
+        state.lists.project_threads["project"].data[0].id,
+        Some(address(99))
+    );
 }

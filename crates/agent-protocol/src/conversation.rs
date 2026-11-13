@@ -76,6 +76,11 @@ pub struct PendingInput {
 }
 
 impl InputState {
+    pub fn fencing(&self, action: Uuid, attempt: &Attempt) -> bool {
+        matches!(self, Self::Unknown { delivery, status: UnknownState::Resolving { .. } }
+            if delivery.action == action && &delivery.attempt == attempt)
+    }
+
     pub fn preparing(&self, action: Uuid, stage: PreparationStage) -> bool {
         matches!(self, Self::Preparing { action: current, stage: expected, .. } if *current == action && *expected == stage)
     }
@@ -245,6 +250,7 @@ pub enum Binding {
     /// another native source rather than appended a second time.
     Aligning {
         source: String,
+        action: Uuid,
     },
     /// Rebuild the selected prefix in a new native session before delivery.
     Fork {
@@ -283,6 +289,12 @@ pub struct State {
     pub bindings: BTreeMap<ProviderKind, Binding>,
     pub attempts: BTreeMap<TurnId, Attempt>,
     pub counters: Counters,
+}
+
+pub enum SteerTarget<'a> {
+    CompactionTurn(&'a Turn),
+    CompactionInput(&'a PendingInput),
+    Running(&'a Attempt),
 }
 
 impl State {
@@ -363,6 +375,23 @@ impl State {
                 .any(|delivery| other(&delivery.attempt))
     }
 
+    pub fn steer_target(&self, steers: bool) -> Option<SteerTarget<'_>> {
+        if let Some(turn) = self.active_turn().filter(|turn| turn.compaction) {
+            return Some(SteerTarget::CompactionTurn(turn));
+        }
+        if let Some(input) = self.inputs.values().find(|input| {
+            input
+                .live_delivery()
+                .is_some_and(|delivery| !delivery.steer)
+                && InputPart::is_compaction(&input.content.parts)
+        }) {
+            return Some(SteerTarget::CompactionInput(input));
+        }
+        self.steerable_attempt()
+            .filter(|_| steers)
+            .map(SteerTarget::Running)
+    }
+
     fn steerable_attempt(&self) -> Option<&Attempt> {
         self.active_turn()
             .filter(|turn| !turn.compaction && matches!(turn.state, TurnState::Running { interrupt: None }))
@@ -381,8 +410,7 @@ impl State {
             Action::Deliver { id, action, attempt, .. } => self.inputs.get(id).is_some_and(|input|
                 matches!(&input.state, InputState::Delivering(delivery) if delivery.action == *action && &delivery.attempt == attempt)),
             Action::FenceDelivery { id, action, attempt } => self.inputs.get(id).is_some_and(|input|
-                matches!(&input.state, InputState::Unknown { delivery, status: UnknownState::Resolving { .. } }
-                    if delivery.action == *action && &delivery.attempt == attempt)),
+                input.state.fencing(*action, attempt)),
             Action::Interrupt { attempt, action, .. } => self.attempts.get(&attempt.turn) == Some(attempt)
                 && self.turns.get(&attempt.turn).is_some_and(|turn|
                     matches!(&turn.state, TurnState::Running { interrupt: Some(current) } if current.action == *action)),
@@ -569,6 +597,8 @@ pub enum Event {
         id: ClientInputId,
         action: Uuid,
         source: String,
+        provider: ProviderKind,
+        cwd: String,
     },
     /// The resource owner reports a dead execution after fencing callbacks.
     ExecutionLost {

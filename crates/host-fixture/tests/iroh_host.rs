@@ -3770,8 +3770,10 @@ async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without
         catalog.wait_rows(1).await;
         let thread_id = SessionRef::new(ProviderKind::Codex, "oversized".into()).unwrap();
         let mut conversation = conversations::Conversation::open(&mobile.peer, &thread_id).await.unwrap();
-        for _ in 0..2 {
-            conversation = conversations::Conversation::open(&mobile.peer, &thread_id).await.unwrap();
+        for read in 0..2 {
+            if read > 0 {
+                conversation = conversations::Conversation::open(&mobile.peer, &thread_id).await.unwrap();
+            }
             let opened = serde_json::to_value(conversation.view()).unwrap();
             assert!(agent_protocol::protocol::encode(conversation.replica.snapshot().unwrap()).unwrap().len() < 16 * 1024);
             let turn = &opened["thread"]["turns"][0];

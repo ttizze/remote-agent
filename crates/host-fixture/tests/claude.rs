@@ -3272,20 +3272,14 @@ async fn creating_default_claude_chat_does_not_launch_the_cli_or_read_models() {
         conversations::create_request(
             ProviderKind::Claude,
             Some(root.path().to_string_lossy().into()),
-            Some(models::ModelRef {
-                provider: ProviderKind::Claude,
-                id: "default".into(),
-            }),
+            None,
         ),
     )
     .await
     .unwrap();
-    assert_eq!(
-        response.model.unwrap(),
-        models::ModelRef {
-            provider: ProviderKind::Claude,
-            id: "default".into()
-        }
+    assert!(
+        response.model.is_none(),
+        "selection is deferred until the first input"
     );
     assert_eq!(response.thread.id.unwrap().provider, None);
     local.close().await;

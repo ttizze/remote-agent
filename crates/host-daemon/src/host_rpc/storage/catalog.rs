@@ -41,7 +41,7 @@ impl Storage {
         self.with(|connection| {
             connection
                 .query_row(
-                    "SELECT loaded=1 FROM threads WHERE provider IS ?1 AND id=?2",
+                    "SELECT loaded=1 FROM threads WHERE ifnull(provider,'')=ifnull(?1,'') AND id=?2",
                     params![id.provider.map(ProviderKind::key), id.id],
                     |row| row.get(0),
                 )

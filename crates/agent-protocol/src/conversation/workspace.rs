@@ -11,7 +11,7 @@ pub(super) fn command(
     inputs: &std::collections::BTreeMap<ClientInputId, decision::PendingInput>,
     cwd: Option<&str>,
     bindings_empty: bool,
-    active_turn: bool,
+    active_turn: Option<&TurnId>,
 ) -> Result<Option<(Option<crate::workspace::WorkspaceStrategy>, String)>, &'static str> {
     match command {
         decision::Command::RetryInput { id, work_locally } => retry(
@@ -25,7 +25,7 @@ pub(super) fn command(
             let started = saved
                 .and_then(|workspace| workspace.setup.as_ref())
                 .is_some_and(|setup| !setup.can_cancel && setup.phase == SetupPhase::Running);
-            let targeting_preparation = !active_turn || turn.is_some();
+            let targeting_preparation = !commands::targets_active(active_turn, turn.as_ref());
             if started
                 && targeting_preparation
                 && inputs.values().any(|input| {
@@ -124,6 +124,15 @@ pub(super) fn cancelled(
     Some((saved.generation, saved.project_cwd.clone(), checkout))
 }
 
+pub(super) fn retain_root_source(
+    saved: Option<&WorkspacePreparation>,
+    current: Option<&str>,
+    cwd: &str,
+) -> bool {
+    current == Some(cwd)
+        && saved.is_none_or(|saved| !saved.created_worktree && saved.setup.is_none())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,57 +155,189 @@ mod tests {
     }
 
     #[test]
-    fn stop_cannot_cross_agent_start_for_its_matching_preparation() {
-        for phase in [SetupPhase::Running, SetupPhase::Done, SetupPhase::Cancelled] {
-            for can_cancel in [true, false] {
-                for active_turn in [true, false] {
-                    for target in [
-                        None,
-                        Some(TurnId::from("preparing")),
-                        Some(TurnId::from("other")),
-                    ] {
-                        let mut saved = saved();
-                        let setup = saved.setup.as_mut().unwrap();
-                        setup.phase = phase;
-                        setup.can_cancel = can_cancel;
-                        let input = PendingInput {
-                            id: "preparing".into(),
-                            position: 1,
-                            content: InputContent {
-                                parts: vec![],
-                                model: None,
-                                effort: None,
-                                service_tier: None,
-                                follow_up: Default::default(),
-                            },
-                            state: InputState::Preparing {
-                                stage: PreparationStage::Provider,
-                                action: Uuid::nil(),
-                                mode: DeliveryMode::Direct,
-                            },
-                        };
-                        let inputs = [(input.id.clone(), input)].into();
-                        let result = command(
-                            Some(&saved),
-                            &Command::Interrupt {
-                                turn: target.clone(),
-                            },
-                            &inputs,
-                            Some("/project"),
-                            true,
-                            active_turn,
-                        );
-                        let blocked = phase == SetupPhase::Running
-                            && !can_cancel
-                            && (!active_turn || target.is_some())
-                            && target.as_ref().is_none_or(|id| id.as_str() == "preparing");
-                        assert_eq!(
-                            result.is_err(),
-                            blocked,
-                            "{phase:?}, can_cancel={can_cancel}, active={active_turn}, target={target:?}"
-                        );
-                    }
+    fn stop_observes_agent_start_through_the_public_decision() {
+        use crate::execution::ExecutionError;
+        // Expected actions are specified per scenario, not recomputed from the
+        // admission expression. A Stop may target the active turn independently.
+        let cases = [
+            (
+                "untargeted stop prefers preparing input",
+                SetupPhase::Running,
+                false,
+                true,
+                None,
+                "refuse",
+            ),
+            (
+                "cancellable setup",
+                SetupPhase::Running,
+                true,
+                false,
+                None,
+                "cancel",
+            ),
+            (
+                "agent creating",
+                SetupPhase::Running,
+                false,
+                false,
+                None,
+                "refuse",
+            ),
+            (
+                "explicit creating input",
+                SetupPhase::Running,
+                false,
+                false,
+                Some("preparing"),
+                "refuse",
+            ),
+            (
+                "completed card",
+                SetupPhase::Done,
+                false,
+                false,
+                Some("preparing"),
+                "cancel",
+            ),
+            (
+                "cancelled card",
+                SetupPhase::Cancelled,
+                false,
+                false,
+                Some("preparing"),
+                "cancel",
+            ),
+            (
+                "stop active turn",
+                SetupPhase::Running,
+                false,
+                true,
+                Some("running"),
+                "interrupt",
+            ),
+            (
+                "target creating input beside turn",
+                SetupPhase::Running,
+                false,
+                true,
+                Some("preparing"),
+                "refuse",
+            ),
+            (
+                "target cancellable input beside turn",
+                SetupPhase::Running,
+                true,
+                true,
+                Some("preparing"),
+                "cancel",
+            ),
+        ];
+        for (name, phase, can_cancel, active, target, expected) in cases {
+            let mut saved = saved();
+            let setup = saved.setup.as_mut().unwrap();
+            setup.phase = phase;
+            setup.can_cancel = can_cancel;
+            let mut state = State::new(Thread {
+                name: String::new(),
+                workspace: Workspace::Ready("/project".into()),
+                provider: ProviderKind::Codex,
+                queue_held: false,
+            });
+            state.inputs.insert(
+                "preparing".into(),
+                PendingInput {
+                    id: "preparing".into(),
+                    position: 1,
+                    content: InputContent {
+                        parts: vec![],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
+                    state: InputState::Preparing {
+                        stage: PreparationStage::Provider,
+                        action: Uuid::nil(),
+                        mode: DeliveryMode::Direct,
+                    },
+                },
+            );
+            if active {
+                state.turns.insert(
+                    "running".into(),
+                    Turn {
+                        id: "running".into(),
+                        ordinal: 1,
+                        provider: ProviderKind::Codex,
+                        queued: false,
+                        observed: false,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                        retry_count: 0,
+                        compaction: false,
+                        error: None,
+                        state: TurnState::Running { interrupt: None },
+                    },
+                );
+                state.attempts.insert(
+                    "running".into(),
+                    Attempt {
+                        id: Uuid::from_u128(2),
+                        turn: "running".into(),
+                        provider: ProviderKind::Codex,
+                        source: "native".into(),
+                    },
+                );
+            }
+            let result = step(
+                &state,
+                Event::Command {
+                    id: OperationId::Client(Uuid::from_u128(3)),
+                    command: Command::Interrupt {
+                        turn: target.map(TurnId::from),
+                    },
+                    receipt: None,
+                },
+                Context {
+                    preparation: Some(&saved),
+                    rewind_binding: None,
+                    external_busy: false,
+                    now: 100,
+                    seed: Uuid::from_u128(3),
+                    steers: true,
+                    steer_ready: true,
+                },
+            );
+            match expected {
+                "refuse" => {
+                    assert!(matches!(result.outcome, Outcome::Rejected(_)), "{name}");
+                    assert!(result.actions.is_empty(), "{name}");
                 }
+                "cancel" => {
+                    assert_eq!(result.outcome, Outcome::Accepted, "{name}");
+                    assert!(
+                        matches!(&result.actions[..], [Action::CancelPreparation { .. }]),
+                        "{name}"
+                    );
+                    assert!(
+                        matches!(
+                            state.apply(&result.changes).inputs[&ClientInputId::from("preparing")]
+                                .state,
+                            InputState::Failed(ExecutionError { .. })
+                        ),
+                        "{name}"
+                    );
+                }
+                "interrupt" => {
+                    assert_eq!(result.outcome, Outcome::Accepted, "{name}");
+                    assert!(
+                        matches!(&result.actions[..], [Action::Interrupt { .. }]),
+                        "{name}"
+                    );
+                }
+                _ => unreachable!(),
             }
         }
     }

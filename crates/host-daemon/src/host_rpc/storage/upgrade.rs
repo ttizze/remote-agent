@@ -333,6 +333,14 @@ fn backup(path: &Path, connection: Option<&Connection>) -> Result<tempfile::Temp
 }
 
 impl Previous {
+    // Old unqualified IDs belong to the first native binding, not the active one.
+    fn first_source<'a>(&'a self, id: &'a SessionRef) -> &'a SessionRef {
+        self.conversations
+            .iter()
+            .find(|row| &row.id == id)
+            .and_then(|row| row.bindings.first())
+            .map_or(id, |binding| &binding.session)
+    }
     pub(super) fn keep(self) {
         let _ = self.backup.keep();
     }
@@ -441,12 +449,7 @@ impl Previous {
             history::insert_header(transaction, id, &header, &Counters::default(), sequence)?;
         }
         for (id, response) in &history {
-            let source = self
-                .conversations
-                .iter()
-                .find(|row| &row.id == id)
-                .and_then(|row| row.bindings.first())
-                .map_or(id, |binding| &binding.session);
+            let source = self.first_source(id);
             let key = thread_key(transaction, id)?;
             let sources = native_history_sources(response, source)?;
             history::write_history(transaction, id, response, &sources, sequence, process, now)?;
@@ -517,8 +520,12 @@ impl Previous {
                 continue;
             };
             let (mut header, counters) = rows::header(transaction, key)?;
-            header.details.activity.completion = Some(read.turn_id.clone());
-            header.details.read_through = (!read.unread).then(|| read.turn_id.clone());
+            let (source, native) =
+                native_address(read.turn_id.as_str(), self.first_source(&read.session))?;
+            let canonical = canonical_native_turn(transaction, key, &source, &native)?
+                .unwrap_or_else(|| read.turn_id.clone());
+            header.details.activity.completion = Some(canonical.clone());
+            header.details.read_through = (!read.unread).then_some(canonical);
             transaction
                 .execute(
                     "UPDATE threads SET body=?1 WHERE key=?2",
@@ -874,12 +881,10 @@ pub(super) fn recover_update(connection: &Connection, path: &Path) -> Result<(),
             if rows::turn(connection, key, turn)?.is_some() {
                 continue;
             }
-            let canonical: Option<String> = connection.query_row(
-                "SELECT e.turn_id FROM executions e JOIN sources s ON s.id=e.source_id JOIN turns t ON t.thread=e.thread AND t.id=e.turn_id WHERE e.thread=?1 AND s.provider IS ?2 AND s.native_id=?3 AND e.native_turn_id=?4 AND t.state!='rolled_back' ORDER BY t.ordinal DESC LIMIT 1",
-                params![key, task.native_session.provider.map(ProviderKind::key), task.native_session.id, turn.as_str()], |row| row.get(0)
-            ).optional().map_err(failure)?;
-            if let Some(canonical) = canonical {
-                task.last_turn = Some(canonical.into());
+            if let Some(canonical) =
+                canonical_native_turn(connection, key, &task.native_session, turn.as_str())?
+            {
+                task.last_turn = Some(canonical);
             }
         }
     }
@@ -887,4 +892,16 @@ pub(super) fn recover_update(connection: &Connection, path: &Path) -> Result<(),
         agent_local_host::save_private_json(&path, &report).map_err(failure)?;
     }
     Ok(())
+}
+
+fn canonical_native_turn(
+    connection: &Connection,
+    key: i64,
+    source: &SessionRef,
+    native: &str,
+) -> Result<Option<TurnId>, String> {
+    connection.query_row(
+        "SELECT e.turn_id FROM executions e JOIN sources s ON s.id=e.source_id JOIN turns t ON t.thread=e.thread AND t.id=e.turn_id WHERE e.thread=?1 AND s.provider IS ?2 AND s.native_id=?3 AND e.native_turn_id=?4 AND t.state!='rolled_back' ORDER BY t.ordinal DESC LIMIT 1",
+        params![key,source.provider.map(ProviderKind::key),source.id,native],|row|row.get::<_,String>(0)
+    ).optional().map_err(failure).map(|turn|turn.map(Into::into))
 }

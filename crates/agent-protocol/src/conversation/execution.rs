@@ -2,15 +2,50 @@ use super::*;
 
 pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
     match event {
-        Event::AligningProvider { id, action, source } => {
-            if source.is_empty() || state.source_in_use(state.thread.provider,&source,Uuid::nil()) || !state.inputs.get(&id).is_some_and(|input|
-                matches!(input.state, InputState::Preparing { stage: PreparationStage::Provider, action: current, .. } if current == action)) {
+        Event::AligningProvider {
+            id,
+            action,
+            source,
+            provider,
+            cwd,
+        } => {
+            if source.is_empty()
+                || state.thread.provider != provider
+                || state.source_in_use(provider, &source, Uuid::nil())
+            {
+                return Step::default();
+            }
+            if !state
+                .inputs
+                .get(&id)
+                .is_some_and(|input| input.state.preparing(action, PreparationStage::Provider))
+            {
+                // Root creation owns its I/O lock across this result. Stop can
+                // end the input, but the empty native source can serve Retry.
+                // An owned checkout being discarded must never keep a binding.
+                if state.inputs.contains_key(&id)
+                    && !state.bindings.contains_key(&provider)
+                    && workspace::retain_root_source(
+                        context.preparation,
+                        state.thread.workspace.cwd(),
+                        &cwd,
+                    )
+                {
+                    return Step {
+                        changes: vec![Change::Binding {
+                            provider,
+                            value: Some(Binding::Ready { source, covered: 0 }),
+                        }],
+                        outcome: Outcome::Accepted,
+                        ..Default::default()
+                    };
+                }
                 return Step::default();
             }
             Step {
                 changes: vec![Change::Binding {
                     provider: state.thread.provider,
-                    value: Some(Binding::Aligning { source }),
+                    value: Some(Binding::Aligning { source, action }),
                 }],
                 outcome: Outcome::Accepted,
                 ..Step::default()
@@ -320,17 +355,33 @@ fn prepared(
     let Some(input) = state.inputs.get(id) else {
         return Step::default();
     };
-    let InputState::Preparing {
-        stage,
-        action: expected,
-        mode,
-    } = input.state
-    else {
+    let preparing = match input.state {
+        InputState::Preparing {
+            stage,
+            action: current,
+            mode,
+        } if current == action => Some((stage, mode)),
+        _ => None,
+    };
+    let Some((stage, mode)) = preparing else {
+        if let (Some(cwd), Some(source)) = (cwd.as_deref(), source.as_deref())
+            && workspace::retain_root_source(context.preparation, state.thread.workspace.cwd(), cwd)
+            && matches!(state.bindings.get(&state.thread.provider),Some(Binding::Aligning {source:current,action:token}) if current==source && *token==action)
+        {
+            return Step {
+                changes: vec![Change::Binding {
+                    provider: state.thread.provider,
+                    value: Some(Binding::Ready {
+                        source: source.into(),
+                        covered: state.history_end(),
+                    }),
+                }],
+                outcome: Outcome::Accepted,
+                ..Default::default()
+            };
+        }
         return Step::default();
     };
-    if action != expected {
-        return Step::default();
-    }
     if stage == PreparationStage::Provider && source.as_ref().is_none_or(|source| source.is_empty())
     {
         return preparation_failed(

@@ -647,10 +647,7 @@ fn import_candidates(root: &Path) -> Result<()> {
 }
 
 fn write_json(path: PathBuf, value: &impl serde::Serialize) -> Result<()> {
-    let mut file = std::io::BufWriter::new(fs::File::create(path)?);
-    serde_json::to_writer(&mut file, value)?;
-    file.flush()?;
-    Ok(())
+    agent_local_host::save_private_json(&path, value).map_err(Into::into)
 }
 
 #[cfg(test)]

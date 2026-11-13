@@ -212,7 +212,7 @@ pub struct AccountState {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
-    /// The original draft slot for a first input; the empty slot is the welcome composer.
+    /// The original device draft slot for a first input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_draft_slot: Option<String>,
     #[serde(default)]
@@ -487,6 +487,8 @@ group! {
     }
 }
 
+pub(crate) const WELCOME_DRAFT_SLOT: &str = "welcome";
+
 impl Input {
     fn retire_new_chat(&mut self, id: &crate::session::SessionRef) {
         if self.new_drafts.values().any(|draft| draft == id) {
@@ -495,8 +497,12 @@ impl Input {
     }
 
     fn new_chat(&mut self, cwd: &str, slot: u64) -> DraftKey {
+        self.draft_slot(format!("{slot}:{cwd}"))
+    }
+
+    fn draft_slot(&mut self, slot: String) -> DraftKey {
         Arc::make_mut(&mut self.new_drafts)
-            .entry(format!("{slot}:{cwd}"))
+            .entry(slot)
             .or_insert_with(|| crate::session::SessionRef {
                 provider: None,
                 id: uuid::Uuid::new_v4().to_string(),
@@ -651,10 +657,15 @@ impl Snapshot {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
-    pub fn welcome_submission(&self, draft: DraftKey) -> bool {
-        self.sessions.pending_submissions.values().any(|pending| {
-            pending.new_draft_slot.as_deref() == Some("") && pending.draft_key == draft
-        })
+    /// Only the empty welcome placeholder becomes a draft. Sending it and
+    /// restoring a rejected input keep that draft's identity and panel scope.
+    pub fn welcome_transition(&self, before: DraftKey, after: DraftKey) -> bool {
+        before.is_empty()
+            && self
+                .input
+                .new_drafts
+                .get(WELCOME_DRAFT_SLOT)
+                .is_some_and(|id| DraftKey::from(id) == after)
     }
 
     pub fn operation_phase(
@@ -838,11 +849,30 @@ macro_rules! prepare_operations {
     };
 }
 
-fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapshot, Vec<Effect>) {
+fn reduce_intent(
+    previous: &Snapshot,
+    pane_id: &str,
+    mut intent: Intent,
+) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     let Some(pane) = previous.panes.get(pane_id) else {
         return (next, Vec::new());
     };
+    if let Some(key) = intent.editing_draft()
+        && key.is_empty()
+    {
+        let created = next.input.draft_slot(WELCOME_DRAFT_SLOT.into());
+        if let Some(draft) = Arc::make_mut(&mut next.input.drafts).remove(key) {
+            Arc::make_mut(&mut next.input.drafts).insert(created.clone(), draft);
+        }
+        for pane in Arc::make_mut(&mut next.panes.0).values_mut() {
+            if pane.navigation.thread_id.is_none() && pane.navigation.draft_key.is_empty() {
+                Arc::make_mut(&mut Arc::make_mut(pane).navigation).draft_key = created.clone();
+            }
+        }
+        *key = created;
+        return reduce_intent(&next, pane_id, intent);
+    }
     prepare_operations!(intent, next, pane_id, [
         RegisterLiveActivity, UnregisterLiveActivity, ReadHostSoftware,
         ReadPermissionSettings, UpdatePermissionSettings,
@@ -854,7 +884,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         SaveFile, WriteWorkspaceFile, ReviewWorkspace, ChangeWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree,
         ListAgents, AddProject, ScanProjects, ImportProjects, RetryPreparation,
-        ReadThread, OpenRequest, ReadItem, ResizeTerminal,
+        ReadThread, OpenRequest, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
         LoadHostName, LoadHostManagement, LoadModels, ReadModelSettings,
@@ -932,6 +962,17 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         Intent::WatchCommandOutput { thread_id, item_id, watching } => {
             let effects = outputs::watch(&mut next, pane_id, agent_protocol::conversation::records::OutputKey { session: thread_id, item: item_id }, watching);
             return (next, effects);
+        }
+        Intent::ReadItem(read) => {
+            let key = agent_protocol::conversation::records::OutputKey { session: read.thread_id.clone(), item: read.item_id.clone() };
+            if op::item_source(&read, previous).is_some_and(|item| !item.is_deferred())
+                && previous.operation_error(op::OperationKey::CommandOutput { session: key.session.clone(), item: key.item.clone() }).is_some()
+            {
+                outputs::watch(&mut next, pane_id, key.clone(), false);
+                let effects = outputs::watch(&mut next, pane_id, key, true);
+                return (next, effects);
+            }
+            return prepare(next, pane_id, read);
         }
         Intent::CloseTerminal { handle } => {
             if let Some(terminal) = Arc::make_mut(&mut next.terminals).remove(&handle)
@@ -1099,7 +1140,8 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
 
         Intent::ShowThreadList => {
             next.invalidate_pane(pane_id);
-            navigate(&mut next, pane_id, Navigation::default());
+            let draft_key = next.input.new_drafts.get(WELCOME_DRAFT_SLOT).map(DraftKey::from).unwrap_or_default();
+            navigate(&mut next, pane_id, Navigation { draft_key, ..Default::default() });
             return (next, Vec::new());
         }
         Intent::NewChat { cwd } => {
@@ -1683,6 +1725,7 @@ fn has_session_status(thread: &Thread) -> bool {
             .any(|turn| turn.status == agent_protocol::execution::TurnStatus::Running)
 }
 fn clear_session_status(thread: &mut Thread) {
+    thread.steerable = false;
     if crate::models::task_active(None, thread.status) {
         thread.status = crate::models::SessionStatus::Unknown;
     }
@@ -1912,7 +1955,7 @@ fn submission(
     Destination {
         thread_id,
         cwd,
-        mut draft_key,
+        draft_key,
     }: Destination,
     draft: Arc<Draft>,
     client_user_message_id: agent_protocol::ids::ClientInputId,
@@ -1932,10 +1975,7 @@ fn submission(
         );
         return (next, Vec::new());
     }
-    if thread_id.is_none()
-        && !matches!(draft_key, DraftKey::Session { .. })
-        && !draft_key.is_empty()
-    {
+    if thread_id.is_none() && !matches!(draft_key, DraftKey::Session { .. }) {
         let mut next = previous.clone();
         next.fail_operation(
             op::OperationKey::Submission { draft_key },
@@ -1955,22 +1995,6 @@ fn submission(
             reason,
         );
         return (next, Vec::new());
-    }
-    let welcome = thread_id.is_none() && draft_key.is_empty();
-    if welcome {
-        let address = DraftKey::from(crate::session::SessionRef {
-            provider: None,
-            id: uuid::Uuid::new_v4().to_string(),
-        });
-        if let Some(draft) = Arc::make_mut(&mut next.input.drafts).remove(&draft_key) {
-            Arc::make_mut(&mut next.input.drafts).insert(address.clone(), draft);
-        }
-        for pane in Arc::make_mut(&mut next.panes.0).values_mut() {
-            if pane.navigation.thread_id.is_none() && pane.navigation.draft_key == draft_key {
-                Arc::make_mut(&mut Arc::make_mut(pane).navigation).draft_key = address.clone();
-            }
-        }
-        draft_key = address;
     }
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
     if let Some(current) = shared_mut(&mut next.input.drafts, &draft_key) {
@@ -2000,21 +2024,17 @@ fn submission(
     Arc::make_mut(&mut next.sessions.pending_submissions).insert(
         client_user_message_id.clone(),
         Arc::new(PendingSubmission {
-            new_draft_slot: if welcome {
-                Some(String::new())
-            } else {
-                thread_id
-                    .is_none()
-                    .then(|| {
-                        previous
-                            .input
-                            .new_drafts
-                            .iter()
-                            .find(|(_, id)| DraftKey::from(*id) == draft_key)
-                            .map(|(slot, _)| slot.clone())
-                    })
-                    .flatten()
-            },
+            new_draft_slot: thread_id
+                .is_none()
+                .then(|| {
+                    previous
+                        .input
+                        .new_drafts
+                        .iter()
+                        .find(|(_, id)| DraftKey::from(*id) == draft_key)
+                        .map(|(slot, _)| slot.clone())
+                })
+                .flatten(),
             cursor: None,
             sequence,
             submitted_at_ms: None,
@@ -2066,7 +2086,6 @@ impl Snapshot {
         slot: Option<&str>,
     ) {
         let target = match (&original, slot) {
-            (_, Some("")) => DraftKey::Local { key: String::new() },
             (DraftKey::Session { session }, Some(slot))
                 if !self.sessions.conversations.contains_key(session) =>
             {

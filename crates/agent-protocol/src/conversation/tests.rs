@@ -1563,6 +1563,8 @@ fn restarting_during_history_injection_rebuilds_the_source_and_rejects_its_old_r
             id: id.clone(),
             action: *action,
             source: "uncertain-source".into(),
+            provider: ProviderKind::Claude,
+            cwd: "/project".into(),
         },
         context(2),
     );
@@ -1571,7 +1573,8 @@ fn restarting_during_history_injection_rebuilds_the_source_and_rejects_its_old_r
     assert_eq!(
         state.bindings[&ProviderKind::Claude],
         Binding::Aligning {
-            source: "uncertain-source".into()
+            source: "uncertain-source".into(),
+            action: *action,
         }
     );
     let state: State = crate::protocol::decode(&crate::protocol::encode(state).unwrap()).unwrap();
@@ -4356,7 +4359,7 @@ fn editing_the_promoted_queue_position_during_compact_respects_the_original_hold
 
 #[test]
 fn another_compact_promotion_updates_the_selection_without_a_second_native_interrupt() {
-    let (state, input, action, _) = starting_compaction();
+    let (state, input, action, compact) = starting_compaction();
     let mut state = state.apply(
         &step(
             &state,
@@ -4369,6 +4372,7 @@ fn another_compact_promotion_updates_the_selection_without_a_second_native_inter
         )
         .changes,
     );
+    state.thread.queue_held = true;
     for n in [202, 203] {
         state = state.apply(&submit(&state, n, FollowUp::Queue).changes);
     }
@@ -4379,6 +4383,13 @@ fn another_compact_promotion_updates_the_selection_without_a_second_native_inter
     let again = command(&state, 205, Command::SteerInput(selected(203)));
     assert_eq!(again.outcome, Outcome::Accepted);
     assert!(again.actions.is_empty());
+    state = state.apply(&again.changes);
+    let ended = observe(&state, &compact, Observation::Interrupted, 206);
+    assert!(matches!(&ended.actions[..],[Action::Deliver {id,..}] if *id==selected(203)));
+    assert!(matches!(
+        state.apply(&ended.changes).inputs[&selected(202)].state,
+        InputState::Queued { .. }
+    ));
 }
 
 #[test]

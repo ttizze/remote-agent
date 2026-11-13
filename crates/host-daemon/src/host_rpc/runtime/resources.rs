@@ -122,7 +122,7 @@ impl Runtime {
         let state = runtime.storage.state(target)?;
         let retained = match state.bindings.get(&provider) {
             Some(decision::Binding::Ready { source, .. }) => source == id,
-            Some(decision::Binding::Aligning { source }) => {
+            Some(decision::Binding::Aligning { source, .. }) => {
                 source == id
                     && state.thread.provider == provider
                     && state
@@ -433,9 +433,10 @@ impl Runtime {
             .map_err(storage_failure)?;
         drop(catalog);
         let (outcome,_) = Self::event(service,target,Event::AligningProvider {
-            id: id.clone(),action,source:native.id.clone(),
+            id: id.clone(),action,source:native.id.clone(),provider,cwd:cwd.clone(),
         }).await.map_err(storage_failure)?;
-        if outcome!=Outcome::Accepted {
+        if outcome!=Outcome::Accepted || !service.inner.conversation.storage.input(target,id).map_err(storage_failure)?
+            .is_some_and(|input|input.state.preparing(action,PreparationStage::Provider)) {
             return Err(Failure::new("preparation_cancelled","input preparation is no longer current"));
         }
         Self::release_inactive_sources(service,target,id,action,provider).await?;
@@ -481,7 +482,7 @@ impl Runtime {
                 .state(target)
                 .map_err(storage_failure)?;
             let ready = matches!(current.bindings.get(&provider),Some(decision::Binding::Ready {source,..}) if source == &native.id);
-            let aligning = matches!(current.bindings.get(&provider),Some(decision::Binding::Aligning {source}) if source == &native.id);
+            let aligning = matches!(current.bindings.get(&provider),Some(decision::Binding::Aligning {source,..}) if source == &native.id);
             let another_preparation = current.thread.provider == provider && current.inputs.values().any(|input|
                 matches!(input.state,decision::InputState::Preparing {action:token,..} if token != action));
             if !ready
@@ -568,6 +569,7 @@ impl Runtime {
             );
         }
         let result = async {
+            service.require_not_updating()?;
             let reload = service.restore_workspace(&cwd).await?;
             let agent = service.inner.providers.get(attempt.provider)?;
             agent
@@ -602,8 +604,8 @@ impl Runtime {
         if let Some(workspace) = runtime.storage.header(target)?.details.workspace {
             use super::super::storage::workspace::SetupChange;
             use agent_protocol::workspace::{SetupPhase, SetupStageId, SetupStageStatus};
-            let state = runtime.storage.state(target)?;
-            let update = match state.inputs.get(&input).map(|input| &input.state) {
+            let saved = runtime.storage.input(target, &input)?;
+            let update = match saved.as_ref().map(|input| &input.state) {
                 None => Some(SetupChange::Stage {
                     id: SetupStageId::Agent,
                     status: SetupStageStatus::Done,

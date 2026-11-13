@@ -775,8 +775,55 @@ fn repeated_qualified_native_turns_keep_each_deferred_item_address() {
         serde_json::to_vec(&serde_json::json!({"previous":row,"history":response})).unwrap(),
     )
     .unwrap();
+    std::fs::write(
+        directory.path().join("bex-read-state.json"),
+        serde_json::to_vec(&serde_json::json!([
+            {"session":root,"turn_id":turn,"unread":false}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
     let storage = Storage::open(&directory.path().join("bex-conversations.sqlite"));
     storage.check_ready().unwrap();
+    let latest = storage
+        .history(&root, 0)
+        .unwrap()
+        .thread
+        .turns
+        .unwrap()
+        .last()
+        .unwrap()
+        .id
+        .clone();
+    assert_eq!(
+        storage.header(&root).unwrap().details.read_through,
+        Some(latest)
+    );
+    storage
+        .decide(
+            &root,
+            Event::Command {
+                id: decision::OperationId::Client(Uuid::new_v4()),
+                command: decision::Command::Rename("renamed".into()),
+                receipt: None,
+            },
+            Context {
+                preparation: None,
+                rewind_binding: None,
+                external_busy: false,
+                now: 500,
+                seed: Uuid::new_v4(),
+                steers: false,
+                steer_ready: true,
+            },
+            None,
+        )
+        .unwrap();
+    assert!(
+        decision::records::list_activity([(&root, &storage.header(&root).unwrap())])
+            .unread
+            .is_empty()
+    );
     for (id, native) in ids.into_iter().zip(["first", "second"]) {
         let address = storage.native_body(&root, &id.into()).unwrap().unwrap();
         assert_eq!(address.request.thread_id, source);
@@ -785,85 +832,186 @@ fn repeated_qualified_native_turns_keep_each_deferred_item_address() {
     }
 }
 
-#[test]
-fn the_first_update_keeps_the_detached_workers_journal_and_schedules_recovery_once() {
-    use agent_local_host::update::{
-        ContinuationDelivery, InterruptedTask, RECOVERY_FILE, Recovery,
-    };
-    let directory = tempfile::tempdir().unwrap();
-    previous(&directory.path().join("bex-transcripts.sqlite"), false);
-    let connection = Connection::open(directory.path().join("bex-transcripts.sqlite")).unwrap();
-    let mut turn: Turn = protocol::decode(
-        &connection
-            .query_row("SELECT body FROM turns", [], |row| row.get::<_, Vec<u8>>(0))
-            .unwrap(),
-    )
-    .unwrap();
-    turn.status = TurnStatus::Running;
-    connection
-        .execute(
-            "UPDATE turns SET body=?1",
-            [protocol::encode(turn).unwrap()],
+#[tokio::test]
+async fn the_first_update_keeps_the_detached_workers_journal_and_schedules_recovery_once() {
+    for sending in [false, true] {
+        use agent_local_host::update::{
+            ContinuationDelivery, InterruptedTask, RECOVERY_FILE, Recovery,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        previous(&directory.path().join("bex-transcripts.sqlite"), false);
+        let cwd = directory.path().to_str().unwrap().to_owned();
+        let connection = Connection::open(directory.path().join("bex-transcripts.sqlite")).unwrap();
+        let mut turn: Turn = protocol::decode(
+            &connection
+                .query_row("SELECT body FROM turns", [], |row| row.get::<_, Vec<u8>>(0))
+                .unwrap(),
         )
         .unwrap();
-    let journal = Recovery {
-        tasks: vec![InterruptedTask {
-            native_session: address(),
-            submission: input(Uuid::new_v4()),
-            cwd: Some("/kept/workspace".into()),
-            last_turn: Some("original-turn".into()),
-            delivery: ContinuationDelivery::Pending,
-        }],
-    };
-    let report = directory.path().join(RECOVERY_FILE);
-    agent_local_host::save_private_json(&report, &journal).unwrap();
-    let path = directory.path().join("bex-conversations.sqlite");
-    let storage = Storage::open(&path);
-    storage.check_ready().unwrap();
-    assert!(storage.updating().unwrap());
-    // The old updater requires these exact fields while reading only delivery.
-    let saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
-    assert_eq!(
-        saved["tasks"][0]["native_session"],
-        serde_json::json!(address())
-    );
-    assert!(saved["tasks"][0].get("submission").is_some());
-    let context = Context {
-        now: 1000,
-        seed: Uuid::new_v4(),
-        steers: true,
-        preparation: None,
-        rewind_binding: None,
-        external_busy: false,
-        steer_ready: true,
-    };
-    let restarted = storage
-        .decide(
-            &address(),
-            Event::Restart {
-                updating: true,
-                continue_after_restart: true,
+        use base64::Engine;
+        let native = SessionRef::new(ProviderKind::Claude, "second-native".into()).unwrap();
+        let qualified = |id: &str| {
+            format!(
+                "bex:{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&(&native, id)).unwrap())
+            )
+        };
+        let canonical = qualified("original-turn");
+        let mut recorded_native = turn.clone();
+        recorded_native.status = TurnStatus::Completed;
+        turn.id = canonical.clone().into();
+        for item in turn.items.iter_mut().flatten() {
+            let item = Arc::make_mut(item);
+            item.id = qualified(item.id.as_str()).into();
+        }
+        let bindings = serde_json::json!([{"id":address(),"active":native,"cwd":cwd,"bindings":[{"session":address(),"covered":0},{"session":native,"covered":1}],"handoffs":[],"startup":null}]);
+        connection
+            .execute(
+                "UPDATE host_state SET body=?1 WHERE name='bindings'",
+                [serde_json::to_vec(&bindings).unwrap()],
+            )
+            .unwrap();
+        let mut metadata: ThreadResponse = protocol::decode(
+            &connection
+                .query_row("SELECT metadata FROM conversations", [], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        metadata.thread.cwd = Some(cwd.clone());
+        connection
+            .execute(
+                "UPDATE conversations SET cwd=?1,metadata=?2",
+                params![cwd, protocol::encode(metadata).unwrap()],
+            )
+            .unwrap();
+        turn.status = TurnStatus::Running;
+        connection
+            .execute(
+                "UPDATE turns SET body=?1",
+                [protocol::encode(turn).unwrap()],
+            )
+            .unwrap();
+        let journal = Recovery {
+            tasks: vec![InterruptedTask {
+                native_session: native.clone(),
+                submission: input(Uuid::new_v4()),
+                cwd: Some(cwd.clone()),
+                last_turn: Some("original-turn".into()),
+                delivery: if sending {
+                    ContinuationDelivery::Sending
+                } else {
+                    ContinuationDelivery::Pending
+                },
+            }],
+        };
+        let report = directory.path().join(RECOVERY_FILE);
+        agent_local_host::save_private_json(&report, &journal).unwrap();
+        let path = directory.path().join("bex-conversations.sqlite");
+        let storage = Storage::open(&path);
+        storage.check_ready().unwrap();
+        assert_eq!(storage.updating().unwrap(), !sending);
+        // The old updater requires these exact fields while reading only delivery.
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+        assert_eq!(
+            saved["tasks"][0]["native_session"],
+            serde_json::json!(native)
+        );
+        assert!(saved["tasks"][0].get("submission").is_some());
+        assert_eq!(saved["tasks"][0]["last_turn"], canonical);
+        let context = Context {
+            now: 1000,
+            seed: Uuid::new_v4(),
+            steers: true,
+            preparation: None,
+            rewind_binding: None,
+            external_busy: false,
+            steer_ready: true,
+        };
+        if !sending {
+            let restarted = storage
+                .decide(
+                    &address(),
+                    Event::Restart {
+                        updating: true,
+                        continue_after_restart: true,
+                    },
+                    context,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(restarted.step.continuations.len(), 1);
+            let again = storage
+                .decide(
+                    &address(),
+                    Event::Restart {
+                        updating: true,
+                        continue_after_restart: true,
+                    },
+                    context,
+                    None,
+                )
+                .unwrap();
+            assert!(again.step.continuations.is_empty());
+        }
+        drop(storage);
+        let agent = crate::host_rpc::runtime::native_fixture::NativeAgent::new(
+            ProviderKind::Claude,
+            directory.path().join("claude"),
+        );
+        agent.records.lock().unwrap().insert(
+            native.id.clone(),
+            ThreadResponse {
+                thread: Thread {
+                    id: Some(native.clone()),
+                    cwd: Some(cwd.clone()),
+                    status: agent_protocol::models::SessionStatus::Idle,
+                    turns: Some(vec![Arc::new(recorded_native)]),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
-            context,
-            None,
+        );
+        let service = crate::HostRpcService::new(
+            [agent.backend()],
+            directory.path().join("bex-projects.json"),
+        );
+        service.set_history_scope(directory.path().to_owned(), true);
+        let _connection = service.open_session();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            service.resume_after_update(directory.path()),
         )
+        .await
+        .unwrap()
         .unwrap();
-    assert_eq!(restarted.step.continuations.len(), 1);
-    let again = storage
-        .decide(
-            &address(),
-            Event::Restart {
-                updating: true,
-                continue_after_restart: true,
-            },
-            context,
-            None,
-        )
-        .unwrap();
-    assert!(again.step.continuations.is_empty());
-    drop(storage);
-    Storage::open(&path).check_ready().unwrap();
+        let recovered: Recovery = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+        if sending {
+            assert!(matches!(
+                recovered.tasks[0].delivery,
+                ContinuationDelivery::Failed(_)
+            ));
+            assert!(
+                agent.inputs.lock().unwrap().is_empty(),
+                "an uncertain continuation must never be resent"
+            );
+        } else {
+            assert!(
+                matches!(
+                    recovered.tasks[0].delivery,
+                    ContinuationDelivery::Accepted(_)
+                ),
+                "{:?}",
+                recovered.tasks[0].delivery
+            );
+            assert_eq!(agent.inputs.lock().unwrap().len(), 1);
+        }
+
+        drop(service);
+    }
 }
 
 #[test]

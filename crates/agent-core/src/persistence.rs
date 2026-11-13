@@ -56,13 +56,11 @@ mod tests {
         Arc::make_mut(&mut snapshot.input.drafts).insert(new, second.clone());
         let restored = decode(&encode(&snapshot).unwrap()).unwrap();
         assert_eq!(restored.input.drafts.len(), 2);
+        let welcome = DraftKey::from(&restored.input.new_drafts[crate::state::WELCOME_DRAFT_SLOT]);
         assert_eq!(restored.input.drafts[&welcome], first);
         let id = &restored.input.new_drafts["0:"];
         assert_eq!(restored.input.drafts[&DraftKey::from(id)], second);
-        assert_eq!(
-            restored.panes.primary().navigation,
-            snapshot.panes.primary().navigation
-        );
+        assert_eq!(restored.panes.primary().navigation.draft_key, welcome);
         let again = decode(&encode(&restored).unwrap()).unwrap();
         assert_eq!(again.input.drafts, restored.input.drafts);
         assert_eq!(again.input.new_drafts, restored.input.new_drafts);
@@ -248,20 +246,27 @@ fn assign_draft_addresses(
         .chain(std::iter::once(&navigation.draft_key))
         .chain(pending.values().map(|input| &input.draft_key))
         .filter_map(|key| match key {
-            DraftKey::Local { key: value } => value
-                .strip_prefix("new:")
-                .map(|suffix| (key.clone(), suffix.to_owned())),
+            DraftKey::Local { key: value }
+                if value.is_empty()
+                    && (drafts.contains_key(key)
+                        || pending.values().any(|input| input.draft_key == *key)) =>
+            {
+                Some((key.clone(), crate::state::WELCOME_DRAFT_SLOT.to_owned()))
+            }
+            DraftKey::Local { key: value } => value.strip_prefix("new:").map(|suffix| {
+                let slot = suffix
+                    .split_once(':')
+                    .filter(|(slot, _)| slot.parse::<u64>().is_ok())
+                    .map_or_else(
+                        || format!("0:{suffix}"),
+                        |(slot, cwd)| format!("{slot}:{cwd}"),
+                    );
+                (key.clone(), slot)
+            }),
             _ => None,
         })
         .collect();
-    for (old, suffix) in keys {
-        let project = suffix
-            .split_once(':')
-            .filter(|(slot, _)| slot.parse::<u64>().is_ok())
-            .map_or_else(
-                || format!("0:{suffix}"),
-                |(slot, cwd)| format!("{slot}:{cwd}"),
-            );
+    for (old, project) in keys {
         let session = Arc::make_mut(new_drafts)
             .entry(project.clone())
             .or_insert_with(|| crate::session::SessionRef {

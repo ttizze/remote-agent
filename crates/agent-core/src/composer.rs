@@ -555,6 +555,7 @@ mod tests {
                 cursor: 1,
             }),
         );
+        let key = snapshot.panes.primary().navigation.draft_key.clone();
         assert_eq!(effects.len(), 1);
         assert!(
             snapshot

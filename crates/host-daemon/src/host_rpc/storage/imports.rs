@@ -2,9 +2,22 @@
 use super::*;
 use agent_protocol::{
     conversation::{Item, Turn, TurnState},
-    models::{ThreadResponse, TurnStatus},
+    models::ThreadResponse,
 };
 use std::collections::HashMap;
+
+fn source_matches(
+    connection: &Connection,
+    key: i64,
+    active: ProviderKind,
+    source: &SessionRef,
+) -> Result<bool, String> {
+    if Some(active) != source.provider {
+        return Ok(false);
+    }
+    connection.query_row("SELECT loaded!=1 OR EXISTS(SELECT 1 FROM bindings b JOIN sources s ON s.id=b.source_id WHERE b.thread=?1 AND b.provider=?2 AND b.state='ready' AND s.native_id=?3) FROM threads WHERE key=?1",
+        params![key,active.key(),source.id],|row|row.get(0)).map_err(failure)
+}
 
 pub(super) fn queue(
     transaction: &Transaction<'_>,
@@ -13,23 +26,42 @@ pub(super) fn queue(
     now: i64,
 ) -> Result<(), String> {
     let lane = format!("import:{target}");
-    let pending = {
+    let (pending, obsolete) = {
         let mut statement = transaction
-            .prepare("SELECT kind,body FROM jobs WHERE lane=?1 AND state='pending'")
+            .prepare("SELECT id,attempts,kind,body,state FROM jobs WHERE lane=?1")
             .map_err(failure)?;
         let mut rows = statement.query([&lane]).map_err(failure)?;
         let mut same_source = false;
+        let mut obsolete = Vec::new();
         while let Some(row) = rows.next().map_err(failure)? {
-            let kind: String = row.get(0).map_err(failure)?;
-            let body: Vec<u8> = row.get(1).map_err(failure)?;
-            if matches!(codec::enum_record(&kind,&body)?, jobs::Work::Import { source: saved, .. } if saved == *source)
-            {
-                same_source = true;
-                break;
+            let id: String = row.get(0).map_err(failure)?;
+            let attempt: i64 = row.get(1).map_err(failure)?;
+            let kind: String = row.get(2).map_err(failure)?;
+            let body: Vec<u8> = row.get(3).map_err(failure)?;
+            let state: String = row.get(4).map_err(failure)?;
+            if let jobs::Work::Import { source: saved, .. } = codec::enum_record(&kind, &body)? {
+                if saved == *source {
+                    same_source |= state == "pending";
+                } else {
+                    obsolete.push((
+                        Uuid::parse_str(&id).map_err(failure)?,
+                        u64::try_from(attempt).map_err(failure)?,
+                    ));
+                }
             }
         }
-        same_source
+        (same_source, obsolete)
     };
+    for (id, attempt) in obsolete {
+        settle(
+            transaction,
+            target,
+            id,
+            attempt,
+            cursor(transaction)?,
+            &Outcome::Rejected("native import source changed".into()),
+        )?;
+    }
     if !pending {
         jobs::enqueue(
             transaction,
@@ -46,6 +78,87 @@ pub(super) fn queue(
 }
 
 impl Storage {
+    pub(in crate::host_rpc) fn import_failed(
+        &self,
+        target: &SessionRef,
+        operation: Uuid,
+        claim: u64,
+        error: String,
+    ) -> Result<Committed, String> {
+        use agent_protocol::session::{HistoryReadKind, HistoryReadState};
+        self.with(|connection| {
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            let saved: Option<(String, Vec<u8>)> = transaction
+                .query_row(
+                    "SELECT kind,body FROM jobs WHERE id=?1 AND state='running' AND attempts=?2",
+                    params![operation.to_string(), integer(claim)?],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(failure)?;
+            let Some((kind, body)) = saved else {
+                return Ok(Committed {
+                    step: Step::default(),
+                    cursor: cursor(&transaction)?,
+                    rows: vec![],
+                    removed: vec![],
+                    reset: false,
+                });
+            };
+            let jobs::Work::Import {
+                target: owner,
+                source,
+            } = codec::enum_record(&kind, &body)?
+            else {
+                return Err("job is not a native import".into());
+            };
+            if owner != *target {
+                return Err("native import belongs to another conversation".into());
+            }
+            let key = thread_key(&transaction, target)?;
+            let (mut header, counters) = rows::header(&transaction, key)?;
+            let current = source_matches(&transaction, key, header.state.provider, &source)?;
+            let read = HistoryReadState::new(HistoryReadKind::Unavailable, vec![error.clone()]);
+            let mut sequence = cursor(&transaction)?;
+            let mut rows = Vec::new();
+            if current && header.details.history_read_state.as_ref() != Some(&read) {
+                sequence = Self::advance(&transaction)?;
+                header.details.history_read_state = Some(read);
+                transaction
+                    .execute(
+                        "UPDATE threads SET seq=?1,body=?2 WHERE key=?3",
+                        params![
+                            integer(sequence.sequence)?,
+                            codec::header(&header, &counters)?,
+                            key
+                        ],
+                    )
+                    .map_err(failure)?;
+                rows.push(Row {
+                    key: Key::Thread(target.clone()),
+                    version: sequence.sequence,
+                    position: Position::Unordered,
+                    content: Content::Full(Arc::new(Record::Thread(header))),
+                });
+            }
+            let outcome = Outcome::Rejected(error);
+            settle(&transaction, target, operation, claim, sequence, &outcome)?;
+            transaction.commit().map_err(failure)?;
+            Ok(Committed {
+                step: Step {
+                    outcome,
+                    ..Default::default()
+                },
+                cursor: sequence,
+                rows,
+                removed: vec![],
+                reset: false,
+            })
+        })
+    }
+
     pub(in crate::host_rpc) fn discover(
         &self,
         target: &SessionRef,
@@ -302,8 +415,7 @@ impl Storage {
             }
             let mut state = rows::load(&transaction, key, self.process)?;
             if state.thread.name.is_empty() { state.thread.name = response.thread.name.clone().unwrap_or_default(); }
-            let binding: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM bindings b JOIN sources s ON s.id=b.source_id WHERE b.thread=?1 AND b.provider=?2 AND b.state='ready' AND s.native_id=?3)", params![key,source.native_provider().map_err(failure)?.key(),source.id], |row| row.get(0)).map_err(failure)?;
-            if !binding || Some(state.thread.provider) != source.provider {
+            if !source_matches(&transaction,key,state.thread.provider,source)? {
                 let sequence = Self::advance(&transaction)?;
                 let outcome = Outcome::Rejected("native import source changed".into());
                 let (mut header, counters) = rows::header(&transaction, key)?;
@@ -519,11 +631,7 @@ fn import_turn(
         )
     });
     let turn = if let Some(mut turn) = existing {
-        turn.state = match native.status {
-            TurnStatus::Completed => TurnState::Completed,
-            TurnStatus::Failed => TurnState::Failed(native.error.clone().unwrap_or_default()),
-            _ => TurnState::Interrupted,
-        };
+        turn.state = history::imported_state(native.status, native.error.as_ref());
         turn
     } else {
         state.counters.turn += 1;
@@ -551,11 +659,7 @@ fn import_turn(
             retry_count: 0,
             compaction: false,
             error: None,
-            state: match native.status {
-                TurnStatus::Completed => TurnState::Completed,
-                TurnStatus::Failed => TurnState::Failed(native.error.clone().unwrap_or_default()),
-                _ => TurnState::Interrupted,
-            },
+            state: history::imported_state(native.status, native.error.as_ref()),
         }
     };
     state.turns.insert(turn.id.clone(), turn.clone());
@@ -676,7 +780,7 @@ fn settle(
         .map_err(failure)?;
     let deleted = transaction
         .execute(
-            "DELETE FROM jobs WHERE id=?1 AND state='running' AND attempts=?2",
+            "DELETE FROM jobs WHERE id=?1 AND attempts=?2",
             params![operation.to_string(), integer(claim)?],
         )
         .map_err(failure)?;

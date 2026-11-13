@@ -69,7 +69,7 @@ extension ConversationModel {
     func migrateWorkbench(to next: AgentCore.Snapshot, navigation: AgentCore.Navigation) {
         let before = snapshot.panelScope(host: host, draft: coreDraftKey)
         let after = next.panelScope(host: host, draft: navigation.draftKey)
-        let welcome = snapshot.welcomeSubmission(draft: coreDraftKey) || next.welcomeSubmission(draft: navigation.draftKey)
+        let welcome = next.welcomeTransition(before: coreDraftKey, after: navigation.draftKey)
         panels = panels.inheritVisibility(before: before, after: after, newDraft: navigation.threadId == nil, welcome: welcome)
     }
 

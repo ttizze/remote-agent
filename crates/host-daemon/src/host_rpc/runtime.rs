@@ -30,6 +30,8 @@ pub(in crate::host_rpc) mod native_fixture;
 pub(in crate::host_rpc) mod output;
 mod preparation;
 pub(in crate::host_rpc) mod recovery;
+#[cfg(test)]
+mod replay;
 mod resources;
 mod rpc;
 #[cfg(test)]
@@ -359,8 +361,10 @@ impl Runtime {
     async fn execute(service: &HostRpcService, effect: Effect) -> Result<(), String> {
         let Effect { target, action } = effect;
         let runtime = &service.inner.conversation;
-        if !runtime.storage.state(&target)?.permits(&action)
-            && !matches!(action, Action::Resume { .. })
+        if !matches!(
+            action,
+            Action::Resume { .. } | Action::CancelPreparation { .. } | Action::WaitUntil(_)
+        ) && !runtime.storage.state(&target)?.permits(&action)
         {
             return Ok(());
         }
@@ -470,6 +474,13 @@ impl Runtime {
                 // Callback and write owners are locked until the fence commits.
                 // Save their last buffered data while callbacks are still valid.
                 let _updates = source.updates.lock().await;
+                if !runtime
+                    .storage
+                    .input(&target, id)?
+                    .is_some_and(|input| input.state.fencing(token, attempt))
+                {
+                    return Ok(());
+                }
                 Self::flush_text(service, &source).await?;
                 Self::settle_command_outputs(
                     service,
@@ -539,11 +550,26 @@ impl Runtime {
                 // The same lock covers the gap between preparation stages and
                 // prevents cleanup from racing checkout creation or setup I/O.
                 let _io = preparation.io.lock().await;
+                let workspace = runtime.storage.header(&target)?.details.workspace;
+                let terminal = workspace
+                    .as_ref()
+                    .filter(|workspace| {
+                        discard
+                            .as_ref()
+                            .is_none_or(|(generation, _)| workspace.generation == *generation)
+                            && workspace.setup.as_ref().is_some_and(|setup| {
+                                setup.phase == agent_protocol::workspace::SetupPhase::Cancelled
+                            })
+                    })
+                    .and_then(|workspace| workspace.setup.as_ref())
+                    .and_then(|setup| setup.terminal_handle.as_deref());
                 if let Some((generation, checkout)) = discard {
                     service
-                        .inner
-                        .worktrees
-                        .discard(checkout.path, Some(checkout.branch))
+                        .cleanup_setup_resources(
+                            Some(checkout.path),
+                            Some(checkout.branch),
+                            terminal,
+                        )
                         .await
                         .map_err(|error| error.to_string())?;
                     service
@@ -554,11 +580,21 @@ impl Runtime {
                         )
                         .await
                         .map_err(|error| error.to_string())?;
-                } else if let Some(workspace) = runtime.storage.header(&target)?.details.workspace
+                } else if let Some(workspace) = workspace
                     && workspace.setup.as_ref().is_some_and(|setup| {
                         setup.phase == agent_protocol::workspace::SetupPhase::Cancelled
                     })
                 {
+                    if let Some(handle) = workspace
+                        .setup
+                        .as_ref()
+                        .and_then(|setup| setup.terminal_handle.as_deref())
+                    {
+                        service
+                            .cleanup_setup_resources(None, None, Some(handle))
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
                     service.schedule_setup_expiry(target.clone(), *workspace);
                 }
             }

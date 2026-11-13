@@ -101,8 +101,6 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
     tokio::time::timeout(Duration::from_secs(10), async {
         let fixture = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(fixture.path()).unwrap();
-        let original = b"[]\n";
-        fs::write(root.join("bex-projects.json"), original).unwrap();
         let host = HostFixture::start(
             &root,
             codex_fixture::config(&root),
@@ -145,6 +143,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
         let threads: Vec<Value> =
             serde_json::from_slice(&fs::read(root.join("list-fixture.json")).unwrap()).unwrap();
         assert!(!threads.is_empty());
+        assert_eq!(host.projects.fixture_projects().unwrap().len(), 16);
         assert!(
             threads
                 .iter()
@@ -159,7 +158,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
                 .status(),
             204
         );
-        assert_eq!(fs::read(root.join("bex-projects.json")).unwrap(), original);
+        assert!(host.projects.fixture_projects().unwrap().is_empty());
         assert!(!root.join("list-fixture.json").exists());
         assert!(!root.join("projects-before-list-fixture.json").exists());
         assert_eq!(

@@ -81,7 +81,7 @@ fn explicit_codex_model_survives_selection_and_catalog_refresh() {
         },
         ..Default::default()
     };
-    let key = snapshot.panes.primary().navigation.draft_key.clone();
+    let (snapshot, key) = welcome_draft(snapshot);
     let model = ModelRef {
         provider: ProviderKind::Codex,
         id: "gpt-6.1-sol".into(),
@@ -172,7 +172,7 @@ fn chatgpt_catalog_repairs_unavailable_saved_model_but_api_keeps_explicit_ids() 
         }))
         .unwrap();
         Arc::make_mut(&mut snapshot.catalog.account).accounts = Some(Arc::new(accounts));
-        let key = snapshot.panes.primary().navigation.draft_key.clone();
+        let (mut snapshot, key) = welcome_draft(snapshot);
         let unsupported = ModelRef {
             provider: ProviderKind::Codex,
             id: "gpt-6.1-sol".into(),
@@ -293,6 +293,20 @@ fn catalog_failures_only_preserve_the_affected_providers_saved_model(
     );
 }
 
+fn welcome_draft(snapshot: Snapshot) -> (Snapshot, DraftKey) {
+    let snapshot = crate::state::reduce(
+        &snapshot,
+        "",
+        crate::state::Event::Intent(Intent::SetDraft {
+            thread_id: DraftKey::default(),
+            draft: Draft::default(),
+        }),
+    )
+    .0;
+    let key = snapshot.panes.primary().navigation.draft_key.clone();
+    (snapshot, key)
+}
+
 fn apply(snapshot: &Snapshot, intent: Intent) -> Snapshot {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -368,7 +382,7 @@ fn existing_conversation_can_choose_another_provider_without_losing_its_draft() 
 }
 
 fn fixture() -> Snapshot {
-    Snapshot {
+    let snapshot = Snapshot {
         catalog: crate::state::Catalog {
             models: Arc::new(catalog()),
             account: Arc::new(agent_core::state::AccountState {
@@ -384,7 +398,8 @@ fn fixture() -> Snapshot {
             ..Default::default()
         },
         ..Default::default()
-    }
+    };
+    welcome_draft(snapshot).0
 }
 
 fn select(

@@ -926,6 +926,16 @@ impl Store {
                     }
                 };
                 let update = if let Some((thread, choice)) = choice {
+                    let thread = if thread.is_empty() {
+                        candidate
+                            .input
+                            .new_drafts
+                            .get(crate::state::WELCOME_DRAFT_SLOT)
+                            .map(crate::state::DraftKey::from)
+                            .unwrap_or(thread)
+                    } else {
+                        thread
+                    };
                     candidate.input.drafts.get(&thread).and_then(|draft| {
                         draft.model.clone().map(|model| {
                             self.preferences.apply_model(
@@ -3282,15 +3292,93 @@ mod model_reconnection_tests {
         assert_eq!(
             effects
                 .iter()
-                .filter(|effect| effect.operation.key()
-                    == Some(op::OperationKey::ListDecorations {
-                        scope: agent_protocol::operations::ListDecorationScope::Project {
-                            project_id: "p".into()
-                        }
-                    }))
+                .filter(|effect| matches!(
+                    effect.operation.key(),
+                    Some(
+                        op::OperationKey::SessionList
+                            | op::OperationKey::ListSearch
+                            | op::OperationKey::ListDecorations { .. }
+                    )
+                ))
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn retrying_details_reads_a_deferred_item_and_reopens_only_a_failed_live_output() {
+        use crate::models::{Item, ItemBody, ItemStatus, Turn, TurnStatus};
+        for deferred in [false, true] {
+            let session =
+                crate::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+            let read = op::ReadItem {
+                thread_id: session.clone(),
+                turn_id: "turn".into(),
+                item_id: "command".into(),
+            };
+            let mut item = Item::new(
+                read.item_id.clone(),
+                ItemStatus::Running,
+                ItemBody::CommandExecution {
+                    command: "pwd".into(),
+                    cwd: None,
+                    output: String::new(),
+                    output_omitted: false,
+                    exit_code: None,
+                },
+            );
+            if deferred {
+                item.defer();
+            }
+            let mut state = Snapshot::default();
+            state.connection.connected = true;
+            crate::test_conversations::open(
+                &mut state,
+                crate::models::ThreadResponse {
+                    thread: crate::models::Thread {
+                        id: Some(session.clone()),
+                        active_provider: Some(crate::session::ProviderKind::Codex),
+                        turns: Some(vec![Arc::new(Turn {
+                            id: read.turn_id.clone(),
+                            status: TurnStatus::Running,
+                            items: Some(vec![Arc::new(item)]),
+                            ..Default::default()
+                        })]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            let output = op::OperationKey::CommandOutput {
+                session,
+                item: read.item_id.clone(),
+            };
+            let detail = op::OperationKey::Item { item: read.clone() };
+            for key in [output.clone(), detail.clone()] {
+                Arc::make_mut(&mut state.operations).insert(
+                    key,
+                    op::OperationState {
+                        generation: 1,
+                        phase: op::OperationPhase::Failed {
+                            message: "temporarily unavailable".into(),
+                        },
+                    },
+                );
+            }
+            let (_, effects) = reduce(&state, "", Event::Intent(Intent::ReadItem(read)));
+            let keys: Vec<_> = effects
+                .iter()
+                .filter_map(|effect| effect.operation.key())
+                .collect();
+            assert_eq!(
+                keys.iter().filter(|key| **key == detail).count(),
+                usize::from(deferred)
+            );
+            assert_eq!(
+                keys.iter().filter(|key| **key == output).count(),
+                usize::from(!deferred)
+            );
+        }
     }
 
     #[test]

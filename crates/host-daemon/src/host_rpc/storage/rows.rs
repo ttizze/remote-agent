@@ -445,7 +445,10 @@ fn load_bindings(connection: &Connection, key: i64, state: &mut State) -> Result
                 source,
                 covered: u64::try_from(row.get::<_, i64>(4).map_err(failure)?).map_err(failure)?,
             },
-            "aligning" => Binding::Aligning { source },
+            "aligning" => Binding::Aligning {
+                source,
+                action: protocol::decode(&body).map_err(failure)?,
+            },
             "fork" => Binding::Fork {
                 source,
                 through: protocol::decode(&body).map_err(failure)?,
@@ -731,11 +734,11 @@ pub(super) fn write(
                         Some(integer(*covered)?),
                         protocol::encode(()).map_err(failure)?,
                     ),
-                    Binding::Aligning { source } => (
+                    Binding::Aligning { source, action } => (
                         source,
                         "aligning",
                         None,
-                        protocol::encode(()).map_err(failure)?,
+                        protocol::encode(action).map_err(failure)?,
                     ),
                     Binding::Fork { source, through } => (
                         source,
@@ -816,6 +819,9 @@ pub(super) fn write_header(
             )))
     .then_some(header.details.activity.status);
     header.state = state.thread.clone();
+    header.details.steerable = state
+        .steer_target(header.details.capabilities.steer)
+        .is_some();
     if let Some((selection, preview)) = admitted {
         header.details.selection = selection;
         if header.details.preview.is_none() {
@@ -917,9 +923,16 @@ pub(super) fn write_header(
     {
         header.details.activity.completion = None;
     }
-    // T3 ProjectionStore advances thread.updatedAt for committed work events
-    // too. Keep that ordering; skip only an identical projection and timestamp.
-    header.details.updated_at = at;
+    // T3 ShellStream suppresses timestamp-only thread updates for five seconds.
+    // Keep one row/version for list and conversation consumers in that window.
+    if let Some(previous) = previous
+        && previous == &header
+        && at.saturating_sub(previous.details.updated_at) < 5_000
+    {
+        header.details.updated_at = previous.details.updated_at;
+    } else {
+        header.details.updated_at = at;
+    }
     if previous == Some(&header) {
         // Counters belong to the writer, but aren't part of the public header.
         if counters != state.counters {

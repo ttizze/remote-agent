@@ -86,9 +86,15 @@ async fn side_chat_retries_creation_and_initializes_its_quote_once(
     );
     tokio::pin!(concurrent);
     assert!(futures_util::poll!(concurrent.as_mut()).is_pending());
-    writer.reply(&request, json!({"result":{"thread":{
-        "id":{"provider":expected_provider,"id":"side"},"cwd":"/fixture","turns":[],"status":"idle"
-    }}})).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"thread":{
+                "cwd":"/fixture","turns":[],"status":"idle"
+            }}}),
+        )
+        .await
+        .unwrap();
     if abandon_waiter {
         assert!(retry.await.unwrap_err().is_cancelled());
     } else {
@@ -162,12 +168,11 @@ async fn explaining_a_selection_starts_a_conversation_that_asks_at_once(#[case] 
         assert!(request["params"]["initial"].is_null());
         let target: SessionRef =
             serde_json::from_value(request["params"]["session"].clone()).unwrap();
-        let id = target.id.clone();
         writer
             .reply(
                 &request,
                 json!({"result":{"thread":{
-                    "id":{"provider":"codex","id":id},"cwd":"/fixture","turns":[],"status":"idle"
+                    "cwd":"/fixture","turns":[],"status":"idle"
                 }}}),
             )
             .await
@@ -243,9 +248,15 @@ async fn abandoning_side_chat_creation_does_not_keep_its_pane_alive() {
     drop(pane);
     assert!(weak.upgrade().is_none());
     assert!(store.snapshot().panes.get(&id).is_none());
-    writer.reply(&request, json!({"result":{"thread":{
-        "id":{"provider":"codex","id":"abandoned-side"},"cwd":"/fixture","turns":[],"status":"idle"
-    }}})).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"thread":{
+                "cwd":"/fixture","turns":[],"status":"idle"
+            }}}),
+        )
+        .await
+        .unwrap();
     store.close().await.unwrap();
 }
 
@@ -282,9 +293,15 @@ async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_p
     assert_eq!(request["method"], "host/conversation/create");
     let primary = store.snapshot().panes.primary().clone();
     pane.close();
-    writer.reply(&request, json!({"result":{"thread":{
-        "id":{"provider":"codex","id":"closed-side"},"cwd":"/fixture","turns":[],"status":"idle"
-    }}})).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"thread":{
+                "cwd":"/fixture","turns":[],"status":"idle"
+            }}}),
+        )
+        .await
+        .unwrap();
     assert!(preparing.await.unwrap().is_err());
     let snapshot = store.snapshot();
     assert_eq!(

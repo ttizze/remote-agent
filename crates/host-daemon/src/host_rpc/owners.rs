@@ -82,6 +82,11 @@ enum Write {
         error: Option<String>,
         now: i64,
     },
+    ImportFailure {
+        operation: Uuid,
+        claim: u64,
+        error: String,
+    },
     Event(
         Event,
         Context<'static>,
@@ -351,6 +356,30 @@ impl Owners {
             .map_err(|_| "conversation owner stopped during import".to_owned())??;
         Ok(())
     }
+    pub(super) async fn import_failed(
+        self: &Arc<Self>,
+        target: &SessionRef,
+        operation: Uuid,
+        claim: u64,
+        error: String,
+    ) -> Result<(), String> {
+        let (reply, result) = oneshot::channel();
+        self.send(
+            target,
+            Input::Write {
+                write: Box::new(Write::ImportFailure {
+                    operation,
+                    claim,
+                    error,
+                }),
+                reply,
+            },
+        )?;
+        result
+            .await
+            .map_err(|_| "conversation owner stopped during import".to_owned())??;
+        Ok(())
+    }
     pub(super) async fn workspace(
         self: &Arc<Self>,
         target: &SessionRef,
@@ -504,6 +533,11 @@ async fn run(
                         records.decide(&scope, event, context, create.as_ref())
                     }
                     Write::ImportStatus { error, now } => records.import_status(&scope, error, now),
+                    Write::ImportFailure {
+                        operation,
+                        claim,
+                        error,
+                    } => records.import_failed(&scope, operation, claim, error),
                     Write::Read(turn) => records.mark_read(&scope, &turn),
                     Write::Workspace { cwd, membership } => {
                         records.workspace_membership(&scope, &cwd, membership)
@@ -754,7 +788,10 @@ async fn publish(
                     })
                     .cloned()
                     .collect();
-                agent_protocol::conversation::records::summarize(&mut rows, 128 * 1024)?;
+                agent_protocol::conversation::records::summarize(
+                    &mut rows,
+                    agent_protocol::conversation::records::WORK_DETAIL_BYTES,
+                )?;
                 Message::Changes {
                     from: subscriber.cursor,
                     through: committed.cursor,

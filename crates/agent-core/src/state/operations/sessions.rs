@@ -70,7 +70,7 @@ pub(crate) fn item_details(
         .collect()
 }
 
-fn item_source<'a>(request: &ReadItem, snapshot: &'a Snapshot) -> Option<&'a Arc<Item>> {
+pub(crate) fn item_source<'a>(request: &ReadItem, snapshot: &'a Snapshot) -> Option<&'a Arc<Item>> {
     let turns = snapshot
         .sessions
         .conversations
@@ -780,7 +780,7 @@ impl Operation for OpenRequest {
         context.client.call(self).await
     }
     fn apply(self, _snapshot: &mut Snapshot, _pane_id: &str, id: Self::Output) -> Vec<Effect> {
-        vec![Effect::execute(ReadThread::open(id))]
+        vec![Effect::execute(ReadThread::new(id))]
     }
 }
 

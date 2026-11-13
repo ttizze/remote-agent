@@ -77,17 +77,6 @@ impl Runtime {
         let result = Self::prepare(service, target, &id, action, stage, cwd, provider).await;
         match result {
             Ok((cwd, source, created)) => {
-                Self::event(
-                    service,
-                    target,
-                    Event::Prepared {
-                        id,
-                        action,
-                        cwd: Some(cwd.clone()),
-                        source: source.clone(),
-                    },
-                )
-                .await?;
                 if let Ok(projects) = service.project_snapshot().await {
                     runtime
                         .owners
@@ -177,7 +166,7 @@ impl Runtime {
                 "Preparation cancelled",
             ));
         }
-        async {
+        let result = async {
             match stage {
                 PreparationStage::Workspace => {
                     let directory = cwd
@@ -256,6 +245,21 @@ impl Runtime {
                 }
             }
         }
-        .await
+        .await;
+        if let Ok((cwd, source, _)) = &result {
+            Self::event(
+                service,
+                target,
+                Event::Prepared {
+                    id: id.clone(),
+                    action,
+                    cwd: Some(cwd.clone()),
+                    source: source.clone(),
+                },
+            )
+            .await
+            .map_err(storage_failure)?;
+        }
+        result
     }
 }

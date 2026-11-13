@@ -250,7 +250,7 @@
                     )) {
                         if isExpanded {
                             let body = item.data.deferred ? "" : item.source.expandedBody()
-                            if let error = detail.error {
+                            if let error = detail.error, !item.data.deferred {
                                 ErrorTextView(text: error).font(.caption).foregroundStyle(.red)
                             } else if detail.loading && !item.data.deferred {
                                 ProgressView("詳細を読み込み中…")

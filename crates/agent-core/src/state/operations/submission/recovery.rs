@@ -501,7 +501,7 @@ mod tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             input.clone(),
             Arc::new(PendingSubmission {
-                new_draft_slot: welcome.then(String::new),
+                new_draft_slot: welcome.then(|| WELCOME_DRAFT_SLOT.into()),
                 draft_key: key.clone(),
                 draft: Arc::new(Draft {
                     text: "uncertain input".into(),

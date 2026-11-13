@@ -506,7 +506,7 @@ fn a_rejected_welcome_send_restores_reachable_user_work_and_newer_typing() {
     use crate::state::{Event, Intent, reduce};
     for occupied in [false, true] {
         let mut first = Snapshot::default();
-        let key = first.panes.primary().navigation.draft_key.clone();
+        let placeholder = first.panes.primary().navigation.draft_key.clone();
         let draft = Arc::new(Draft {
             text: "welcome work".into(),
             model: Some(crate::models::ModelRef {
@@ -526,7 +526,16 @@ fn a_rejected_welcome_send_restores_reachable_user_work_and_newer_typing() {
             }],
             ..Default::default()
         });
-        Arc::make_mut(&mut first.input.drafts).insert(key.clone(), draft.clone());
+        first = reduce(
+            &first,
+            "",
+            Event::Intent(Intent::SetDraft {
+                thread_id: placeholder,
+                draft: (*draft).clone(),
+            }),
+        )
+        .0;
+        let key = first.panes.primary().navigation.draft_key.clone();
         let input: agent_protocol::ids::ClientInputId = uuid::Uuid::new_v4().to_string().into();
         let (mut pending, _) = super::super::submission(
             &first,
@@ -540,7 +549,7 @@ fn a_rejected_welcome_send_restores_reachable_user_work_and_newer_typing() {
             None,
             Default::default(),
         );
-        assert!(pending.welcome_submission(pending.panes.primary().navigation.draft_key.clone()));
+        assert_eq!(pending.panes.primary().navigation.draft_key, key);
         if occupied {
             Arc::make_mut(&mut pending.input.drafts).insert(
                 key.clone(),

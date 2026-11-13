@@ -1,8 +1,8 @@
-//! T3 terminalOutput.ts semantics, using the existing VTE parser for escapes.
+//! T3 terminalOutput.ts semantics. Its deliberately small escape grammar and
+//! SGR rules differ from a full terminal emulator (for example SGR 21 is ignored).
 //! Only 64 live lines are addressable; output is bounded in UTF-16 code units.
 use super::TAIL_CHARS;
 use std::{collections::VecDeque, sync::Arc};
-use vte::ansi::{self, Attr, Color, Handler, NamedColor};
 
 #[cfg(test)]
 std::thread_local! { pub(super) static PRINTED_UNITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
@@ -43,55 +43,161 @@ impl Style {
         codes.join(";")
     }
 }
-fn color(color: Color, background: bool) -> String {
-    let prefix = if background { 48 } else { 38 };
-    match color {
-        Color::Spec(rgb) => format!("{prefix};2;{};{};{}", rgb.r, rgb.g, rgb.b),
-        Color::Indexed(index) => format!("{prefix};5;{index}"),
-        Color::Named(NamedColor::Foreground | NamedColor::Background) => String::new(),
-        Color::Named(color) => {
-            let index = color as usize;
-            match index {
-                0..8 => (if background { 40 + index } else { 30 + index }).to_string(),
-                8..16 => (if background {
-                    100 + index - 8
-                } else {
-                    90 + index - 8
-                })
-                .to_string(),
-                _ => String::new(),
+impl Style {
+    fn attribute(&mut self, code: u32) {
+        match code {
+            0 => *self = Self::default(),
+            1 => self.bold = true,
+            2 => self.dim = true,
+            3 => self.italic = true,
+            4 => self.underline = true,
+            7 => self.inverse = true,
+            9 => self.strike = true,
+            22 => {
+                self.bold = false;
+                self.dim = false;
+            }
+            23 => self.italic = false,
+            24 => self.underline = false,
+            27 => self.inverse = false,
+            29 => self.strike = false,
+            30..=37 | 90..=97 => self.fg = code.to_string(),
+            40..=47 | 100..=107 => self.bg = code.to_string(),
+            39 => self.fg.clear(),
+            49 => self.bg.clear(),
+            _ => {}
+        }
+    }
+    fn apply(&mut self, params: &[f64]) {
+        let mut index = 0;
+        while index < params.len() {
+            let code = params[index] as u32;
+            if matches!(code, 38 | 48 | 58) {
+                let (color, next) = extended_color(code, params, index);
+                if let Some(color) = color {
+                    match code {
+                        38 => self.fg = color,
+                        48 => self.bg = color,
+                        _ => {}
+                    }
+                }
+                index = next;
+            } else {
+                self.attribute(code);
+                index += 1;
             }
         }
     }
 }
-impl Handler for Style {
-    fn terminal_attribute(&mut self, attr: Attr) {
-        match attr {
-            Attr::Reset => *self = Self::default(),
-            Attr::Bold => self.bold = true,
-            Attr::Dim => self.dim = true,
-            Attr::Italic => self.italic = true,
-            Attr::Underline
-            | Attr::DoubleUnderline
-            | Attr::Undercurl
-            | Attr::DottedUnderline
-            | Attr::DashedUnderline => self.underline = true,
-            Attr::Reverse => self.inverse = true,
-            Attr::Strike => self.strike = true,
-            Attr::CancelBoldDim => {
-                self.bold = false;
-                self.dim = false;
+
+fn extended_color(code: u32, params: &[f64], index: usize) -> (Option<String>, usize) {
+    match params.get(index + 1).copied() {
+        Some(5.0) => (
+            params
+                .get(index + 2)
+                .filter(|n| **n <= 255.0)
+                .map(|n| format!("{code};5;{n}")),
+            index + 3,
+        ),
+        Some(2.0) => (
+            params.get(index + 2..index + 5).map(|rgb| {
+                // JS bitwise colour conversion keeps the low eight bits.
+                let channel = |value: f64| {
+                    if value.is_finite() {
+                        value.rem_euclid(256.0) as u8
+                    } else {
+                        0
+                    }
+                };
+                format!(
+                    "{code};2;{};{};{}",
+                    channel(rgb[0]),
+                    channel(rgb[1]),
+                    channel(rgb[2])
+                )
+            }),
+            index + 5,
+        ),
+        _ => (None, index + 2),
+    }
+}
+
+fn csi_params(params: &str) -> Vec<f64> {
+    enum Pending {
+        Code,
+        Mode,
+        Values(usize),
+    }
+    let mut pending = Pending::Code;
+    let mut numbers = Vec::new();
+    for part in params.split(';') {
+        let mut sub: Vec<f64> = part
+            .split(':')
+            .map(|n| {
+                if n.is_empty() {
+                    0.0
+                } else {
+                    n.parse().unwrap_or(f64::INFINITY)
+                }
+            })
+            .collect();
+        let head = sub[0];
+        match pending {
+            Pending::Values(count) => {
+                numbers.push(head);
+                pending = if count > 1 {
+                    Pending::Values(count - 1)
+                } else {
+                    Pending::Code
+                };
             }
-            Attr::CancelBold => self.bold = false,
-            Attr::CancelItalic => self.italic = false,
-            Attr::CancelUnderline => self.underline = false,
-            Attr::CancelReverse => self.inverse = false,
-            Attr::CancelStrike => self.strike = false,
-            Attr::Foreground(value) => self.fg = color(value, false),
-            Attr::Background(value) => self.bg = color(value, true),
-            _ => {}
+            Pending::Mode => {
+                pending = Pending::Code;
+                if sub.len() == 1 {
+                    numbers.push(head);
+                    pending = match head {
+                        5.0 => Pending::Values(1),
+                        2.0 => Pending::Values(3),
+                        _ => Pending::Code,
+                    };
+                } else {
+                    if head == 2.0 && sub.len() >= 5 {
+                        sub.remove(1);
+                    }
+                    numbers.extend(sub.into_iter().take(match head {
+                        5.0 => 2,
+                        2.0 => 4,
+                        _ => 1,
+                    }));
+                }
+            }
+            Pending::Code if sub.len() == 1 => {
+                numbers.push(head);
+                if matches!(head, 38.0 | 48.0 | 58.0) {
+                    pending = Pending::Mode;
+                }
+            }
+            Pending::Code if !matches!(head, 38.0 | 48.0 | 58.0) => {
+                numbers.push(if head == 4.0 && sub[1] == 0.0 {
+                    24.0
+                } else {
+                    head
+                })
+            }
+            Pending::Code => {
+                if sub[1] == 2.0 && sub.len() >= 6 {
+                    sub.remove(2);
+                }
+                let keep = match sub[1] {
+                    5.0 => 3,
+                    2.0 => 5,
+                    _ => 2,
+                };
+                numbers.extend(sub.into_iter().take(keep));
+            }
         }
     }
+    numbers
 }
 
 #[derive(Debug, Clone)]
@@ -103,9 +209,23 @@ struct Cell {
 struct Line {
     cells: VecDeque<Cell>,
     runs: usize,
+    style_units: usize,
+}
+fn style_cost(previous: Option<&Style>, next: Option<&Style>) -> usize {
+    let Some(next) = next else { return 0 };
+    let default = Style::default();
+    if previous.unwrap_or(&default) == next {
+        0
+    } else {
+        sgr(&next.pen()).len()
+    }
 }
 impl Line {
     fn push(&mut self, cell: Cell) {
+        self.style_units += style_cost(
+            self.cells.back().map(|last| last.style.as_ref()),
+            Some(&cell.style),
+        );
         if self
             .cells
             .back()
@@ -116,6 +236,16 @@ impl Line {
         self.cells.push_back(cell);
     }
     fn replace(&mut self, index: usize, cell: Cell) {
+        let costs = |style: &Style| {
+            style_cost(
+                index.checked_sub(1).map(|at| self.cells[at].style.as_ref()),
+                Some(style),
+            ) + style_cost(
+                Some(style),
+                self.cells.get(index + 1).map(|next| next.style.as_ref()),
+            )
+        };
+        self.style_units = self.style_units + costs(&cell.style) - costs(&self.cells[index].style);
         let edges = |style: &Arc<Style>| {
             usize::from(index > 0 && self.cells[index - 1].style != *style)
                 + usize::from(index + 1 < self.cells.len() && self.cells[index + 1].style != *style)
@@ -126,7 +256,9 @@ impl Line {
     fn recount(&mut self) {
         let mut previous = None;
         self.runs = 0;
+        self.style_units = 0;
         for cell in &self.cells {
+            self.style_units += style_cost(previous.map(Arc::as_ref), Some(&cell.style));
             if previous.is_none_or(|previous: &Arc<Style>| previous != &cell.style) {
                 self.runs += 1;
             }
@@ -134,14 +266,28 @@ impl Line {
         }
     }
     fn pop_front(&mut self) {
-        if let Some(old) = self.cells.pop_front()
-            && self
+        if let Some(old) = self.cells.pop_front() {
+            let next = self.cells.front().map(|next| next.style.as_ref());
+            self.style_units = self.style_units + style_cost(None, next)
+                - style_cost(None, Some(&old.style))
+                - style_cost(Some(&old.style), next);
+            if self
                 .cells
                 .front()
                 .is_none_or(|next| old.style != next.style)
-        {
-            self.runs = self.runs.saturating_sub(1);
+            {
+                self.runs = self.runs.saturating_sub(1);
+            }
         }
+    }
+    fn serialized_units(&self) -> usize {
+        self.cells.len()
+            + self.style_units
+            + usize::from(
+                self.cells
+                    .back()
+                    .is_some_and(|cell| *cell.style != Style::default()),
+            ) * 4
     }
     fn bound_styles(&mut self) {
         if self.runs <= 2048 {
@@ -269,7 +415,7 @@ impl Screen {
             *col = col.saturating_sub(dropped);
         }
     }
-    fn erase(&mut self, mode: u16) {
+    fn erase(&mut self, mode: u32) {
         let line = &mut self.lines[self.row];
         match mode {
             0 => line.cells.truncate(self.col),
@@ -285,7 +431,7 @@ impl Screen {
         }
         line.recount();
     }
-    fn clear(&mut self, mode: u16) {
+    fn clear(&mut self, mode: u32) {
         match mode {
             0 => {
                 self.erase(0);
@@ -311,7 +457,7 @@ impl Screen {
         }
     }
 }
-impl vte::Perform for Screen {
+impl Screen {
     fn print(&mut self, ch: char) {
         #[cfg(test)]
         PRINTED_UNITS.set(PRINTED_UNITS.get() + ch.len_utf16());
@@ -359,68 +505,54 @@ impl vte::Perform for Screen {
             _ => {}
         }
     }
-    fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
-        if ignore || !intermediates.is_empty() {
-            return;
-        }
-        match byte {
-            b'7' => self.saved = Some((self.row, self.col)),
-            b'8' => {
-                if let Some((row, col)) = self.saved {
-                    self.move_to(row, col);
+    fn escape(&mut self, sequence: &str) {
+        if sequence.starts_with("\x1b[") {
+            let final_byte = sequence.as_bytes()[sequence.len() - 1];
+            self.csi(&sequence[2..sequence.len() - 1], final_byte);
+        } else {
+            match sequence {
+                "\x1b7" => self.saved = Some((self.row, self.col)),
+                "\x1b8" => {
+                    if let Some((row, col)) = self.saved {
+                        self.move_to(row, col);
+                    }
                 }
+                "\x1bM" => self.row = self.row.saturating_sub(1),
+                _ => {}
             }
-            b'M' => self.row = self.row.saturating_sub(1),
-            _ => {}
         }
     }
-    fn csi_dispatch(
-        &mut self,
-        params: &vte::Params,
-        intermediates: &[u8],
-        ignore: bool,
-        action: char,
-    ) {
-        if ignore || !intermediates.is_empty() {
+    fn csi(&mut self, params: &str, action: u8) {
+        if !params
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b';' | b':'))
+            || action != b'm' && params.contains(':')
+        {
             return;
         }
-        if action == 'm' {
-            let params = params
-                .iter()
-                .map(|group| {
-                    group
-                        .iter()
-                        .map(u16::to_string)
-                        .collect::<Vec<_>>()
-                        .join(":")
-                })
-                .collect::<Vec<_>>()
-                .join(";");
-            ansi::Processor::<ansi::StdSyncHandler>::new().advance(
-                Arc::make_mut(&mut self.pen),
-                format!("{ESC}[{params}m").as_bytes(),
-            );
+        let values = csi_params(params);
+        if action == b'm' {
+            Arc::make_mut(&mut self.pen).apply(&values);
             return;
         }
-        if params.iter().any(|group| group.len() > 1) {
-            return;
-        }
-        let mut values = params.iter().map(|group| group[0]);
-        let first = values.next().unwrap_or(0);
-        let count = first.max(1) as usize;
+        let first = values.first().copied().unwrap_or(0.0);
+        let count = first.max(1.0) as usize;
         match action {
-            'A' => self.row = self.row.saturating_sub(count),
-            'B' => self.move_to(self.row.saturating_add(count), self.col),
-            'C' => self.move_to(self.row, self.col.saturating_add(count)),
-            'D' => self.col = self.col.saturating_sub(count),
-            'E' => self.move_to(self.row.saturating_add(count), 0),
-            'F' => self.move_to(self.row.saturating_sub(count), 0),
-            'G' => self.move_to(self.row, count - 1),
-            'H' | 'f' => self.move_to(count - 1, values.next().unwrap_or(1).max(1) as usize - 1),
-            'K' => self.erase(first),
-            'J' => self.clear(first),
-            's' => self.saved = Some((self.row, self.col)),
-            'u' => {
+            b'A' => self.row = self.row.saturating_sub(count),
+            b'B' => self.move_to(self.row.saturating_add(count), self.col),
+            b'C' => self.move_to(self.row, self.col.saturating_add(count)),
+            b'D' => self.col = self.col.saturating_sub(count),
+            b'E' => self.move_to(self.row.saturating_add(count), 0),
+            b'F' => self.move_to(self.row.saturating_sub(count), 0),
+            b'G' => self.move_to(self.row, count - 1),
+            b'H' | b'f' => self.move_to(
+                count - 1,
+                values.get(1).copied().unwrap_or(1.0).max(1.0) as usize - 1,
+            ),
+            b'K' => self.erase(first as u32),
+            b'J' => self.clear(first as u32),
+            b's' => self.saved = Some((self.row, self.col)),
+            b'u' => {
                 if let Some((row, col)) = self.saved {
                     self.move_to(row, col);
                 }
@@ -466,40 +598,88 @@ fn tail(text: &str) -> (String, bool) {
     (format!("{prefix}{}", &text[start..]), true)
 }
 
+/// Complete escape length in bytes. ASCII control delimiters are UTF-8 boundaries.
+fn escape_length(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let next = *bytes.get(1)?;
+    match next {
+        27 => Some(1),
+        b'[' => bytes
+            .iter()
+            .enumerate()
+            .skip(2)
+            .find(|(_, b)| (0x40..=0x7e).contains(*b))
+            .map(|(at, _)| at + 1),
+        b']' | b'P' | b'X' | b'_' | b'^' => {
+            for (at, byte) in bytes.iter().copied().enumerate().skip(2) {
+                match byte {
+                    7 => return Some(at + 1),
+                    b'\n' => return Some(at),
+                    27 => {
+                        return Some(if *bytes.get(at + 1)? == b'\\' {
+                            at + 2
+                        } else {
+                            at
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        _ => {
+            let mut at = 1;
+            while bytes.get(at).is_some_and(|b| (0x20..=0x2f).contains(b)) {
+                at += 1;
+            }
+            let byte = *bytes.get(at)?;
+            if at > 1 && !(0x30..=0x7e).contains(&byte) {
+                Some(at)
+            } else {
+                Some(at + input[at..].chars().next()?.len_utf8())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct Buffer {
     screen: Screen,
-    pending: Vec<u8>,
+    pending: String,
 }
 impl Buffer {
     pub fn append(&mut self, input: &str) {
+        let input = std::mem::take(&mut self.pending) + input;
         let screen = &mut self.screen;
-        let mut parser = vte::Parser::new();
-        parser.advance(screen, &self.pending);
-        // T3 terminates otherwise-hidden string escapes at a newline too.
-        for part in input.split_inclusive('\n') {
-            let text = part.strip_suffix('\n').unwrap_or(part);
-            parser.advance(screen, text.as_bytes());
-            if part.ends_with('\n') {
-                let pending = parser.pending_input();
-                if pending.starts_with(b"\x1b")
-                    && pending.get(1).is_some_and(|byte| b"]PX_^".contains(byte))
-                {
-                    parser.advance(screen, b"\x1b\\");
+        let mut cursor = 0;
+        while cursor < input.len() {
+            let ch = input[cursor..].chars().next().expect("character");
+            if ch == '\x1b' {
+                let Some(length) = escape_length(&input[cursor..]) else {
+                    let fragment = &input[cursor..];
+                    if fragment.encode_utf16().count() <= 64 {
+                        self.pending = fragment.into();
+                    } else if fragment
+                        .as_bytes()
+                        .get(1)
+                        .is_some_and(|b| b"]PX_^".contains(b))
+                    {
+                        self.pending = fragment[..2].to_owned();
+                        if fragment.ends_with('\x1b') {
+                            self.pending.push('\x1b');
+                        }
+                    }
+                    break;
+                };
+                screen.escape(&input[cursor..cursor + length]);
+                cursor += length;
+            } else {
+                if ch == '\t' || ch >= ' ' && ch != '\x7f' && !('\u{80}'..='\u{9f}').contains(&ch) {
+                    screen.print(ch);
+                } else if ch.is_ascii() {
+                    screen.execute(ch as u8);
                 }
-                parser.advance(screen, b"\n");
-            }
-        }
-        self.pending = parser.pending_input();
-        if self.pending.len() > 64 {
-            let hidden = self
-                .pending
-                .get(1)
-                .is_some_and(|byte| b"]PX_^".contains(byte));
-            let escaped = self.pending.ends_with(b"\x1b");
-            self.pending.truncate(if hidden { 2 } else { 0 });
-            if hidden && escaped {
-                self.pending.push(27);
+                cursor += ch.len_utf8();
             }
         }
         let mut columns: usize = screen.lines.iter().map(|line| line.cells.len()).sum();
@@ -512,6 +692,17 @@ impl Buffer {
             screen.trim_line(row, keep);
             budget -= keep;
         }
+        // T3 keeps this sticky, including cuts caused only by SGR serialization
+        // or a partial first line rather than by screen scrollback.
+        screen.dropped |= screen.settled_units
+            + screen
+                .lines
+                .iter()
+                .map(Line::serialized_units)
+                .sum::<usize>()
+            + screen.lines.len()
+            - 1
+            > TAIL_CHARS;
     }
     pub fn display(&self) -> (String, bool) {
         let screen = &self.screen;
@@ -561,7 +752,7 @@ impl Buffer {
         if !pen.is_empty() {
             resume.push_str(&sgr(&pen));
         }
-        resume.push_str(std::str::from_utf8(&self.pending).unwrap_or(""));
+        resume.push_str(&self.pending);
         resume
     }
 }

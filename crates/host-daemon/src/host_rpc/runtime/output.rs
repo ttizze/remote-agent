@@ -18,7 +18,8 @@ pub(super) enum Change<'a> {
 pub(super) struct Outputs(Mutex<HashMap<records::OutputKey, Live>>);
 struct Live {
     execution: Uuid,
-    tail: OutputStream,
+    tail: Option<OutputStream>,
+    sequence: u64,
     published: watch::Sender<Publication>,
     recent: Arc<std::collections::VecDeque<Append>>,
     recent_units: usize,
@@ -90,6 +91,12 @@ impl Subscription {
     }
 }
 impl Live {
+    fn checkpoint(&self) -> Output {
+        self.tail
+            .as_ref()
+            .map(OutputStream::checkpoint)
+            .unwrap_or_else(|| Output::new(self.sequence, ""))
+    }
     fn new(execution: Uuid, tail: Output) -> Self {
         let published = watch::channel(Publication {
             tail: tail.clone(),
@@ -99,7 +106,8 @@ impl Live {
         .0;
         Self {
             execution,
-            tail: tail.into(),
+            sequence: tail.sequence,
+            tail: Some(tail.into()),
             published,
             recent: Arc::default(),
             recent_units: 0,
@@ -123,24 +131,31 @@ impl Outputs {
         let live = streams
             .entry(key.clone())
             .or_insert_with(|| Live::new(execution, Output::default()));
-        let through = live
-            .tail
-            .sequence()
+        let from = live.sequence;
+        let through = from
             .checked_add(1)
             .ok_or("command output sequence overflow")?;
+        let replaced = live.tail.is_none();
         match change {
             Change::Append(text) => {
-                let from = live.tail.sequence();
-                live.tail.append(through, text);
+                let tail = live
+                    .tail
+                    .get_or_insert_with(|| Output::new(from, "").into());
+                tail.append(through, text);
                 let units = text.encode_utf16().count();
                 let recent = Arc::make_mut(&mut live.recent);
-                recent.push_back(Append {
-                    from,
-                    through,
-                    text: Arc::from(text),
-                    units,
-                });
-                live.recent_units += units;
+                // After eviction the first chunk starts a new terminal tail.
+                // Omitting it from the append ring forces every older viewer
+                // to replace its checkpoint, as T3's needsReplace does.
+                if !replaced {
+                    recent.push_back(Append {
+                        from,
+                        through,
+                        text: Arc::from(text),
+                        units,
+                    });
+                    live.recent_units += units;
+                }
                 while live.recent_units > 16 * 1024 {
                     let removed = recent.pop_front().expect("pending append budget exceeded");
                     live.recent_units -= removed.units;
@@ -150,18 +165,20 @@ impl Outputs {
             Change::Replace { text, truncated } => {
                 let mut tail = Output::new(through, text);
                 tail.truncated |= truncated;
-                live.tail = tail.into();
+                live.tail = Some(tail.into());
                 live.recent = Arc::default();
                 live.recent_units = 0;
                 live.overflowed_through = 0;
             }
         }
+        live.sequence = through;
         live.written = Instant::now();
-        if live.scheduled {
-            return Ok(());
-        }
+        let scheduled = live.scheduled;
         live.scheduled = true;
         Self::cap(&mut streams);
+        if scheduled {
+            return Ok(());
+        }
         let owner = Arc::downgrade(self);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -170,7 +187,7 @@ impl Outputs {
             {
                 live.scheduled = false;
                 live.published.send_replace(Publication {
-                    tail: live.tail.checkpoint(),
+                    tail: live.checkpoint(),
                     recent: live.recent.clone(),
                     overflowed_through: live.overflowed_through,
                 });
@@ -179,13 +196,35 @@ impl Outputs {
         Ok(())
     }
     fn cap(streams: &mut HashMap<records::OutputKey, Live>) {
-        while streams.len() > 64 {
+        streams.retain(|_, live| live.tail.is_some() || live.published.receiver_count() > 0);
+        while streams.values().filter(|live| live.tail.is_some()).count() > 64 {
             let oldest = streams
                 .iter()
+                .filter(|(_, live)| live.tail.is_some())
                 .min_by_key(|(_, live)| live.written)
                 .map(|(key, _)| key.clone())
                 .expect("live command limit exceeded");
-            streams.remove(&oldest);
+            if streams[&oldest].published.receiver_count() == 0 {
+                streams.remove(&oldest);
+            } else {
+                let live = streams.get_mut(&oldest).expect("selected live output");
+                live.tail = None;
+                live.recent = Arc::default();
+                live.recent_units = 0;
+                live.overflowed_through = 0;
+                // A watch is a resource independent of the bounded tail cache.
+                // Release its old checkpoint without waking it; the next write
+                // publishes a replacement with the continuing sequence.
+                let empty = Publication {
+                    tail: live.checkpoint(),
+                    recent: Arc::default(),
+                    overflowed_through: 0,
+                };
+                live.published.send_if_modified(|value| {
+                    *value = empty;
+                    false
+                });
+            }
         }
     }
     pub(super) fn finish(&self, key: &records::OutputKey, final_text: &str) -> Output {
@@ -193,7 +232,7 @@ impl Outputs {
         if final_text.is_empty()
             && let Some(live) = live
         {
-            return live.tail.checkpoint();
+            return live.checkpoint();
         }
         Output::persisted(final_text)
     }
@@ -211,7 +250,7 @@ impl Outputs {
         keys.into_iter()
             .map(|key| {
                 let live = streams.remove(&key).expect("selected live output");
-                (key, live.tail.checkpoint())
+                (key, live.checkpoint())
             })
             .collect()
     }
@@ -229,10 +268,10 @@ impl Outputs {
         Self::cap(&mut streams);
         let live = streams.get(key)?;
         Some((
-            live.tail.checkpoint(),
+            live.checkpoint(),
             Subscription {
                 receiver: live.published.subscribe(),
-                sequence: live.tail.sequence(),
+                sequence: live.sequence,
                 next_frame: None,
             },
         ))
@@ -311,7 +350,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn live_limit_evicts_the_least_recently_written_command_and_ends_its_stream() {
+    async fn live_limit_evicts_the_tail_and_resynchronizes_its_existing_viewer() {
         let outputs = Arc::new(Outputs::default());
         let execution = Uuid::new_v4();
         let key = |n| records::OutputKey {
@@ -336,12 +375,33 @@ mod tests {
                     .unwrap();
             }
         }
-        assert!(oldest.recv().await.is_none());
-        assert!(outputs.subscribe(&key(0), None).is_none());
+        assert!(outputs.subscribe(&key(0), None).is_some());
+        outputs
+            .write(execution, key(0), Change::Append("resumed"))
+            .unwrap();
         assert!(outputs.subscribe(&key(1), None).is_some());
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(100)).await;
         assert!(touched.recv().await.is_some());
+        let resumed: OutputUpdate = protocol::decode(&oldest.recv().await.unwrap()).unwrap();
+        assert!(matches!(resumed,OutputUpdate::Tail(tail) if tail.text == "resumed"));
+        outputs
+            .write(execution, key(0), Change::Append("!"))
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let append: OutputUpdate = protocol::decode(&oldest.recv().await.unwrap()).unwrap();
+        assert!(matches!(append,OutputUpdate::Append {text,..} if text == "!"));
+        assert!(
+            outputs
+                .0
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|live| live.tail.is_some())
+                .count()
+                <= 64
+        );
     }
     #[tokio::test(start_paused = true)]
     async fn append_budget_counts_utf16_and_only_overflow_uses_the_longer_pause() {

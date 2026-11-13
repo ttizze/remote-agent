@@ -267,10 +267,23 @@ mod tests {
     }
     #[test]
     fn terminal_output_matches_the_t3_reference_corpus_after_each_chunk_and_reconnect() {
+        fn unpack(runs: &serde_json::Value) -> String {
+            runs.as_array()
+                .unwrap()
+                .iter()
+                .map(|run| {
+                    run[0]
+                        .as_str()
+                        .unwrap()
+                        .repeat(run[1].as_u64().unwrap() as usize)
+                })
+                .collect()
+        }
         let corpus: serde_json::Value =
             serde_json::from_str(include_str!("output/terminal-cases.json")).unwrap();
         for case in corpus["cases"].as_array().unwrap() {
             let mut output = Output::default();
+            let mut stream = OutputStream::default();
             for step in case["steps"].as_array().unwrap() {
                 let text = step["text"]
                     .as_str()
@@ -280,15 +293,17 @@ mod tests {
                     .apply(OutputUpdate::Append {
                         from: output.sequence,
                         through: output.sequence + 1,
-                        text,
+                        text: text.clone(),
                     })
                     .unwrap();
+                stream.append(output.sequence, &text);
                 assert_eq!(
-                    output.text,
-                    step["expected"].as_str().unwrap(),
-                    "{}",
+                    stream.checkpoint(),
+                    output,
+                    "{} host checkpoint",
                     case["name"]
                 );
+                assert_eq!(output.text, unpack(&step["expected"]), "{}", case["name"]);
                 assert_eq!(
                     output.truncated,
                     step["truncated"].as_bool().unwrap(),
@@ -308,10 +323,15 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 after.text,
-                case["after"].as_str().unwrap(),
+                unpack(&case["after"]),
                 "{} after reconnect",
                 case["name"]
             );
+        }
+        for case in corpus["persisted"].as_array().unwrap() {
+            let output = Output::persisted(&unpack(&case["chunks"]));
+            assert_eq!(output.text, unpack(&case["expected"]));
+            assert_eq!(output.truncated, case["truncated"].as_bool().unwrap());
         }
     }
     #[test]

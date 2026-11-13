@@ -2,6 +2,20 @@
 //! execution. Runtime resources retain only active I/O and buffered output.
 use super::*;
 
+impl Storage {
+    pub(in crate::host_rpc) fn has_bindings(&self, target: &SessionRef) -> Result<bool, String> {
+        self.with(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM bindings WHERE thread=?1)",
+                    [thread_key(connection, target)?],
+                    |row| row.get(0),
+                )
+                .map_err(failure)
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(in crate::host_rpc) struct NativeExecution {
     pub attempt: decision::Attempt,

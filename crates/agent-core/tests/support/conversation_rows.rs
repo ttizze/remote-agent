@@ -29,14 +29,16 @@ pub fn catalog(list: agent_protocol::models::ThreadList, cursor: Cursor) -> reco
         row.version = cursor.sequence;
         rows.insert(row.key.clone(), row);
     }
-    for project in list.projects {
+    for (position, project) in list.projects.into_iter().enumerate() {
         let key = Key::Project(project.id.clone());
         rows.insert(
             key.clone(),
             records::Row {
                 key,
                 version: cursor.sequence,
-                position: Position::Unordered,
+                position: Position::Project {
+                    position: position as u64,
+                },
                 content: Content::Full(Arc::new(records::Record::Project(project))),
             },
         );
@@ -75,6 +77,7 @@ pub fn replica_at(response: ThreadResponse, generation: u64, sequence: u64) -> r
             queue_held: thread.queue.held,
         },
         details: records::Details {
+            steerable: thread.steerable,
             parent: thread.parent_id,
             selection: records::Selection {
                 model: response.model,

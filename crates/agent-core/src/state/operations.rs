@@ -292,6 +292,28 @@ pub enum StalePolicy {
     Apply,
 }
 
+impl Intent {
+    pub(super) fn editing_draft(&mut self) -> Option<&mut DraftKey> {
+        match self {
+            Self::SetDraft { thread_id, .. }
+            | Self::SelectWorkspace { thread_id, .. }
+            | Self::EditComposer { thread_id, .. }
+            | Self::AppendTranscript { thread_id, .. }
+            | Self::InsertInvocation { thread_id, .. }
+            | Self::SetDraftText { thread_id, .. }
+            | Self::QuoteSelection { thread_id, .. }
+            | Self::SelectModel { thread_id, .. }
+            | Self::SelectEffort { thread_id, .. }
+            | Self::SelectServiceTier { thread_id, .. } => Some(thread_id),
+            Self::UploadAttachment(upload) => Some(&mut upload.draft_key),
+            Self::Transcribe(dictate) => Some(&mut dictate.draft_key),
+            Self::SelectAccountForDraft(account) => Some(&mut account.thread_id),
+            Self::StartAccountLogin(login) => login.thread_id.as_mut(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {

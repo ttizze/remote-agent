@@ -1,0 +1,15 @@
+{"type":"transcript_start","provider":"deepseek","protocol":"acp","version":"1","scenario":"deepseek_simple","metadata":{"source":"deterministic local ACP v1 conversation fixture; no network inference or credentials","expectedReply":"recorded deepseek ok"}}
+{"type":"expect_outbound","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"bex","version":"<version>"}}}}
+{"type":"emit_inbound","frame":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}}
+{"type":"expect_outbound","frame":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"<workspace>","mcpServers":[]}}}
+{"type":"emit_inbound","frame":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"recorded-deepseek","configOptions":[{"id":"model","currentValue":"[\"deepseek-official\",\"deepseek-flash\"]","options":[{"value":"[\"deepseek-official\",\"deepseek-flash\"]","name":"DeepSeek Flash"}]}]}}}
+{"type":"expect_outbound","frame":{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"recorded-deepseek","configId":"model","value":"[\"deepseek-official\",\"deepseek-flash\"]"}}}
+{"type":"emit_inbound","frame":{"jsonrpc":"2.0","id":3,"result":{"configOptions":[{"id":"model","currentValue":"[\"deepseek-official\",\"deepseek-flash\"]","options":[{"value":"[\"deepseek-official\",\"deepseek-flash\"]","name":"DeepSeek Flash"}]}]}}}
+{"type":"expect_outbound","frame":{"jsonrpc":"2.0","id":4,"method":"session/set_config_option","params":{"sessionId":"recorded-deepseek","configId":"model","value":"[\"deepseek-official\",\"deepseek-flash\"]"}}}
+{"type":"emit_inbound","frame":{"jsonrpc":"2.0","id":4,"result":{"configOptions":[{"id":"model","currentValue":"[\"deepseek-official\",\"deepseek-flash\"]","options":[{"value":"[\"deepseek-official\",\"deepseek-flash\"]","name":"DeepSeek Flash"}]}]}}}
+{"type":"expect_outbound","frame":{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":"recorded-deepseek","prompt":[{"type":"text","text":"Reply exactly: recorded deepseek ok"}]}}}
+{"type":"emit_inbound","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"recorded-deepseek","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"recorded deepseek ok"}}}}}
+{"type":"emit_inbound","frame":{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}}
+{"type":"expect_outbound","frame":{"jsonrpc":"2.0","id":6,"method":"session/close","params":{"sessionId":"recorded-deepseek"}}}
+{"type":"emit_inbound","frame":{"jsonrpc":"2.0","id":6,"result":{}}}
+{"type":"runtime_exit","status":"success"}

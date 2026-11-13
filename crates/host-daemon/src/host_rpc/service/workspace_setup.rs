@@ -16,6 +16,25 @@ mod script;
 mod tests;
 
 impl HostRpcService {
+    pub(in crate::host_rpc) async fn cleanup_setup_resources(
+        &self,
+        path: Option<String>,
+        branch: Option<String>,
+        terminal: Option<&str>,
+    ) -> Result<(), Failure> {
+        if let Some(handle) = terminal {
+            self.inner.terminals.stop_setup(handle).await;
+        }
+        if let Some(path) = path {
+            self.inner
+                .worktrees
+                .discard(path, branch)
+                .await
+                .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
+        }
+        Ok(())
+    }
+
     pub(in crate::host_rpc) async fn workspace_preparation(
         &self,
         project_cwd: String,
@@ -192,6 +211,7 @@ impl HostRpcService {
             .and_then(|setup| setup.worktree_path.clone())
             .filter(|path| Path::new(path).exists());
         if matches!(strategy, WorkspaceStrategy::Root)
+            && workspace.created_worktree
             && let Some(path) = previous
                 .as_ref()
                 .and_then(|setup| setup.worktree_path.as_ref())
@@ -200,24 +220,21 @@ impl HostRpcService {
                 .and_then(|setup| setup.branch.as_ref())
                 .is_some_and(|branch| !branch.is_empty())
             && path != &workspace.project_cwd
-            && Path::new(path).exists()
-            && self
+            && !self
                 .inner
                 .conversation
                 .storage
-                .state(target)
+                .has_bindings(target)
                 .map_err(super::super::runtime::storage_failure)?
-                .bindings
-                .is_empty()
         {
-            self.inner
-                .worktrees
-                .discard(
-                    path.clone(),
-                    previous.as_ref().and_then(|setup| setup.branch.clone()),
-                )
-                .await
-                .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
+            self.cleanup_setup_resources(
+                Some(path.clone()),
+                previous.as_ref().and_then(|setup| setup.branch.clone()),
+                previous
+                    .as_ref()
+                    .and_then(|setup| setup.terminal_handle.as_deref()),
+            )
+            .await?;
         }
         if workspace.created_worktree
             && previous
@@ -226,16 +243,15 @@ impl HostRpcService {
             && let Some(path) = previous
                 .as_ref()
                 .and_then(|setup| setup.worktree_path.clone())
-            && Path::new(&path).exists()
         {
-            self.inner
-                .worktrees
-                .discard(
-                    path,
-                    previous.as_ref().and_then(|setup| setup.branch.clone()),
-                )
-                .await
-                .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
+            self.cleanup_setup_resources(
+                Some(path),
+                previous.as_ref().and_then(|setup| setup.branch.clone()),
+                previous
+                    .as_ref()
+                    .and_then(|setup| setup.terminal_handle.as_deref()),
+            )
+            .await?;
         }
         workspace.created_worktree =
             matches!(strategy, WorkspaceStrategy::Worktree { .. }) && retained.is_none();

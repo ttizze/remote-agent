@@ -1,5 +1,6 @@
 //! Search queries native catalogs; ordinary list reads come from storage.
 use super::*;
+use agent_protocol::conversation::records;
 
 impl HostRpcService {
     pub(in crate::host_rpc) async fn project_snapshot(
@@ -15,7 +16,10 @@ impl HostRpcService {
         &self,
         request: &agent_protocol::conversation::records::SearchList,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
-        let limit = request.limit.map(|limit| limit.max(1) as usize);
+        let limit = request
+            .limit
+            .unwrap_or(records::DEFAULT_SEARCH_LIMIT)
+            .max(1) as usize;
         let owned = self
             .inner
             .conversation
@@ -70,7 +74,7 @@ impl HostRpcService {
                                 thread.capabilities.unwrap_or_else(|| agent.capabilities()),
                             ));
                         rows.insert(id, thread);
-                        if limit.is_some_and(|limit| rows.len() > limit) {
+                        if rows.len() > limit {
                             break 'pages;
                         }
                     }
@@ -135,10 +139,8 @@ impl HostRpcService {
                 .total_cmp(&a.updated_at.unwrap_or_default())
                 .then_with(|| a.id.cmp(&b.id))
         });
-        let has_more = limit.is_some_and(|limit| data.len() > limit);
-        if let Some(limit) = limit {
-            data.truncate(limit);
-        }
+        let has_more = data.len() > limit;
+        data.truncate(limit);
         let projects = snapshot
             .projects
             .into_iter()
@@ -150,9 +152,7 @@ impl HostRpcService {
             })
             .collect();
         Ok(agent_protocol::models::ThreadList {
-            limit: request
-                .limit
-                .unwrap_or_else(|| data.len().try_into().unwrap_or(u32::MAX)),
+            limit: limit as u32,
             data,
             projects,
             has_more,
@@ -202,7 +202,7 @@ impl HostRpcService {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn a_full_search_does_not_truncate_later_conversations_at_an_arbitrary_catalog_limit() {
+    async fn search_defaults_to_the_t3_bound_and_accepts_an_explicit_limit() {
         use super::*;
         use crate::host_rpc::runtime::native_fixture::NativeAgent;
         use agent_protocol::{
@@ -234,8 +234,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(all.data.len(), 10_005);
-        assert!(!all.has_more);
+        assert_eq!(all.data.len(), 50);
+        assert!(all.has_more);
         let first = service
             .search_list(&agent_protocol::conversation::records::SearchList {
                 term: "matches".into(),

@@ -84,7 +84,7 @@ fn thread_key(connection: &Connection, id: &SessionRef) -> Result<i64, String> {
 fn existing_key(connection: &Connection, id: &SessionRef) -> Result<Option<i64>, String> {
     connection
         .query_row(
-            "SELECT key FROM threads WHERE provider IS ?1 AND id = ?2",
+            "SELECT key FROM threads WHERE ifnull(provider,'')=ifnull(?1,'') AND id=?2",
             params![id.provider.map(ProviderKind::key), id.id],
             |row| row.get(0),
         )
@@ -724,7 +724,7 @@ change,
         let message = if resume && window == Some(floor) {
             let from = cached.expect("resumable cursor");
             saved.retain(|row| row.version > from.sequence);
-            decision::records::summarize(&mut saved, 128 * 1024)?;
+            decision::records::summarize(&mut saved, decision::records::WORK_DETAIL_BYTES)?;
             let removed = rows::removals(connection, key, id, from.sequence)?;
             Message::Changes {
                 from,
@@ -733,7 +733,7 @@ change,
                 removed,
             }
         } else {
-            decision::records::summarize(&mut saved, 128 * 1024)?;
+            decision::records::summarize(&mut saved, decision::records::WORK_DETAIL_BYTES)?;
             Message::Snapshot {
                 cursor: current,
                 window: Some(floor),
