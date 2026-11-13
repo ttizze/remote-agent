@@ -432,7 +432,10 @@ mod tests {
     #[test]
     fn route_membership_waits_for_history_or_catalog_and_recognizes_project_drafts() {
         let mut snapshot = Snapshot::default();
-        let default_route = snapshot.sidebar_route("host".into(), &Navigation::default());
+        let default_route = snapshot.sidebar_route(
+            "host".into(),
+            &crate::state::Snapshot::default().panes.primary().navigation,
+        );
         assert_eq!(default_route.project, ProjectMembership::Unknown {});
         let navigation = Navigation {
             cwd: "/repo".into(),

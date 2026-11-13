@@ -44,7 +44,6 @@ pub(crate) struct Storage {
 
 #[derive(Debug)]
 pub(super) struct Committed {
-    pub state: Option<State>,
     pub step: Step,
     pub cursor: Cursor,
     pub rows: Vec<Row>,
@@ -421,7 +420,7 @@ impl Storage {
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
-            let mut event = self.receipted(&transaction, id, event)?;
+            let event = self.receipted(&transaction, id, event)?;
             let (key, created) = match existing_key(&transaction, id)? {
                 Some(key) => (key, false),
                 None => {
@@ -435,7 +434,7 @@ impl Storage {
             if let Event::Provider {attempt,..}=&event
                 && !executions::read(&transaction,"e.thread=?2 AND e.attempt=?3",params![self.process.to_string(),key,attempt.to_string()])?.first().is_some_and(|execution|execution.accepting)
             {
-                return Ok(Committed {state:Some(state),step:Step::default(),cursor:cursor(&transaction)?,rows:vec![],removed:vec![],reset:false});
+                return Ok(Committed {step:Step::default(),cursor:cursor(&transaction)?,rows:vec![],removed:vec![],reset:false});
             }
             state = rows::hydrate(&transaction, key, self.process, state, &event)?;
             let native_turn = match &event {
@@ -455,23 +454,17 @@ impl Storage {
                 if changed { transaction.execute("UPDATE threads SET body=?1 WHERE key=?2", params![codec::header(&header,&counters)?,key]).map_err(failure)?; }
                 changed
             } else { false };
-            let retry = if let Event::Command { id, command, receipt: None } = &event {
-                match workspace::command(header.details.workspace.as_deref(), command, &state.inputs, state.thread.workspace.cwd(), state.bindings.is_empty(), state.active_turn().is_some()) {
-                    Ok(retry) => retry,
-                    Err(reason) => { event = Event::RejectedCommand { id: *id, reason: reason.into(), receipt: None }; None }
-                }
-            } else { None };
-            if let Some((_, cwd)) = &retry { state.thread.workspace = decision::Workspace::Folder(cwd.clone()); }
             let steer_ready = executions::steering_ready(&transaction, key, self.process,
                 state.active_turn().and_then(|turn| state.attempts.get(&turn.id)).map(|attempt| attempt.id),
                 native_turn.as_ref().map(|(attempt, _)| *attempt))?;
-            let context=Context {steer_ready, external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
+            let rewind_binding = if let Event::Command { command: decision::Command::Rewind(turn), receipt: None, .. } = &event {
+                let retained: Option<String> = transaction.query_row("SELECT id FROM turns WHERE thread=?1 AND state!='rolled_back' AND ordinal<(SELECT ordinal FROM turns WHERE thread=?1 AND id=?2) ORDER BY ordinal DESC LIMIT 1", params![key, turn.as_str()], |row| row.get(0)).optional().map_err(failure)?;
+                retained.map(|turn| history::fork_hint(&transaction, key, &TurnId::from(turn), state.thread.provider)).transpose()?.flatten().map(|(source, through)| {
+                    transaction.query_row("SELECT native_id FROM sources WHERE id=?1", [source], |row| row.get(0)).map(|source| decision::Binding::Fork { source, through: through.into() }).map_err(failure)
+                }).transpose()?
+            } else { None };
+            let context=Context {preparation: header.details.workspace.as_deref(), rewind_binding: rewind_binding.as_ref(), steer_ready, external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
             let mut step = decision::step(&state, event, context);
-            if let Some((workspace, _)) = retry.filter(|_| step.outcome == Outcome::Accepted) {
-                header.details.workspace = Some(Box::new(workspace));
-                transaction.execute("UPDATE threads SET body=?1 WHERE key=?2", params![codec::header(&header,&counters)?, key]).map_err(failure)?;
-            }
-            let reset = step.changes.iter().any(|change| matches!(change, Change::Turn(turn) if turn.state == decision::TurnState::RolledBack));
             let from = cursor(&transaction)?;
             let changed = status_changed || !step.changes.is_empty()
                 || step.receipt.is_some()
@@ -481,9 +474,6 @@ impl Storage {
             } else {
                 from
             };
-            if reset {
-                transaction.execute("UPDATE threads SET history_seq=?1 WHERE key=?2", params![integer(through.sequence)?, key]).map_err(failure)?;
-            }
             let admitted = step.changes.iter().find_map(|change| {
                 let Change::Item(item) = change else { return None; };
                 if !matches!(item.body, agent_protocol::items::ItemBody::UserMessage { .. }) { return None; }
@@ -510,7 +500,7 @@ impl Storage {
                     content.effort.as_deref(),
                     content.service_tier.as_deref(),
                 );
-                transaction.execute("UPDATE sources SET context=NULL,options=?1 WHERE thread=?2 AND provider=?3 AND native_id=?4", params![protocol::encode(&selected).map_err(failure)?, key, attempt.provider.key(), attempt.source]).map_err(failure)?;
+                transaction.execute("UPDATE sources SET context=CASE WHEN ?5 THEN context ELSE NULL END,options=?1 WHERE thread=?2 AND provider=?3 AND native_id=?4", params![protocol::encode(&selected).map_err(failure)?, key, attempt.provider.key(), attempt.source, agent_protocol::operations::Input::is_compaction(&content.parts)]).map_err(failure)?;
                 let preview = content.parts.iter().find_map(|part| match part {
                     agent_protocol::operations::Input::Text { text } => Some(text.chars().take(200).collect()),
                     _ => None,
@@ -525,7 +515,7 @@ impl Storage {
                 rows::write(&transaction,
 &scope,
 change,
-&state,
+&state.turns,
 &mut updated,
 &mut removed)?;
             }
@@ -536,14 +526,6 @@ change,
             }
             if let Some((attempt, items)) = native_items {
                 rows::bind_items(&transaction, key, attempt, self.process, &items)?;
-            }
-            if reset {
-                // Rewind retains private executions, so the last confirmed
-                // native turn can recreate exactly the retained prefix.
-                if let Some((turn, ordinal)) = transaction.query_row("SELECT id,ordinal FROM turns WHERE thread=?1 AND state!='rolled_back' ORDER BY ordinal DESC LIMIT 1", [key], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?))).optional().map_err(failure)?
-                    && let Some((source, through)) = history::fork_hint(&transaction,key,&TurnId::from(turn),state.thread.provider)? {
-                    transaction.execute("INSERT INTO bindings(thread,provider,source_id,covered,state,body) VALUES (?1,?2,?3,?4,'fork',?5)", params![key,state.thread.provider.key(),source,ordinal,protocol::encode(TurnId::from(through)).map_err(failure)?]).map_err(failure)?;
-                }
             }
             if created || status_changed || !step.changes.is_empty() {
                 updated.push(rows::write_header(
@@ -584,12 +566,11 @@ change,
             }
             transaction.commit().map_err(failure)?;
             Ok(Committed {
-                state: Some(state),
                 step,
                 cursor: through,
                 rows: updated,
                 removed,
-                reset,
+                reset: false,
             })
         })
     }
@@ -637,7 +618,6 @@ change,
         };
         transaction.commit().map_err(failure)?;
         Ok(Committed {
-            state: None,
             step,
             cursor: sequence,
             rows: Vec::new(),

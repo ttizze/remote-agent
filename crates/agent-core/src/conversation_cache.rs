@@ -14,11 +14,11 @@ use crate::{
 };
 use agent_protocol::{
     conversation::records,
-    sync::{Message, Position, Scope, Window},
+    sync::{Message, Position, Scope},
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -46,7 +46,7 @@ struct ListCopy {
     format: u32,
     storage_scope: String,
     snapshot: records::Message,
-    expanded_projects: BTreeMap<String, u32>,
+    expanded_projects: BTreeSet<String>,
 }
 
 impl ListCopy {
@@ -92,34 +92,12 @@ fn file(directory: &Path, id: &SessionRef) -> PathBuf {
 fn copy(storage_scope: &str, id: &SessionRef, replica: &records::Replica) -> Option<Copy> {
     let Message::Snapshot {
         cursor,
-        mut window,
+        window,
         mut rows,
     } = replica.snapshot()?
     else {
         return None;
     };
-    let mut turns: Vec<_> = rows
-        .iter()
-        .filter_map(|row| match row.position {
-            Position::Turn { ordinal } => Some(ordinal),
-            _ => None,
-        })
-        .collect();
-    turns.sort_unstable();
-    if turns.len() > HISTORY_WINDOW_TURNS as usize {
-        window = Some(Window {
-            turn: turns[turns.len() - HISTORY_WINDOW_TURNS as usize],
-            item: 0,
-        });
-        rows.retain(|row| {
-            agent_protocol::sync::contains(
-                &Scope::Conversation(id.clone()),
-                window,
-                &row.key,
-                &row.position,
-            )
-        });
-    }
     // Tool bodies and media are loaded on demand; offline copies retain their
     // row identity/version and metadata without retaining their large bodies.
     for row in &mut rows {
@@ -152,8 +130,14 @@ fn copy(storage_scope: &str, id: &SessionRef, replica: &records::Replica) -> Opt
 fn read(path: &Path, storage_scope: &str) -> Option<(SessionRef, records::Replica)> {
     let copy = std::fs::read(path)
         .ok()
-        .and_then(|bytes| agent_protocol::protocol::decode::<Copy>(&bytes).ok())
-        .filter(|copy| copy.format == FORMAT && copy.storage_scope == storage_scope);
+        .and_then(|bytes| agent_protocol::protocol::decode::<Copy>(&bytes).ok());
+    if copy
+        .as_ref()
+        .is_some_and(|copy| copy.format == FORMAT && copy.storage_scope != storage_scope)
+    {
+        return None;
+    }
+    let copy = copy.filter(|copy| copy.format == FORMAT);
     let loaded = copy.and_then(|copy| {
         let replica = records::Replica::new(Scope::Conversation(copy.session.clone()), 0)
             .apply(0, copy.snapshot)
@@ -193,7 +177,12 @@ pub fn restore(directory: &Path, snapshot: &mut Snapshot) {
         && let Some(list) = read_list(directory, &snapshot.connection.storage_scope)
         && let Ok(replica) = records::Replica::new(Scope::List, 0).apply(0, list.snapshot)
     {
-        snapshot.lists.expanded_projects = Arc::new(list.expanded_projects);
+        snapshot.lists.expanded_projects = Arc::new(
+            list.expanded_projects
+                .into_iter()
+                .map(|id| (id, ListQuery::default().limit))
+                .collect(),
+        );
         snapshot.lists.list_query = Arc::new(ListQuery::default());
         snapshot.lists.replica = Some(Arc::new(replica));
         crate::state::list_sync::project(snapshot, false);
@@ -228,12 +217,6 @@ pub fn restore(directory: &Path, snapshot: &mut Snapshot) {
             thread.preparations.clear();
             thread.background.clear();
             thread.queue = Default::default();
-            for turn in thread.turns.iter_mut().flatten() {
-                let turn = Arc::make_mut(turn);
-                if turn.status == crate::models::TurnStatus::Running {
-                    turn.status = crate::models::TurnStatus::Unknown;
-                }
-            }
             Arc::make_mut(&mut snapshot.sessions.conversations)
                 .insert(id.clone(), Arc::new(thread));
             Arc::make_mut(&mut snapshot.sessions.replicas).insert(id, Arc::new(replica));
@@ -267,7 +250,7 @@ impl Saved {
                 format: LIST_FORMAT,
                 storage_scope: snapshot.connection.storage_scope.clone(),
                 snapshot: message,
-                expanded_projects: snapshot.lists.expanded_projects.as_ref().clone(),
+                expanded_projects: snapshot.lists.expanded_projects.keys().cloned().collect(),
             };
             if self
                 .list
@@ -294,6 +277,15 @@ impl Saved {
                     .get(*id)
                     .is_none_or(|previous| !Arc::ptr_eq(previous, thread))
                     && thread.cursor().is_some()
+                    && !thread.expanded()
+                    && thread.rows().values().filter(|row| matches!(row.position, Position::Turn { .. })).count() <= HISTORY_WINDOW_TURNS as usize
+                    // As T3 shouldPersistThread, keep the last settled copy while
+                    // active work runs. A cold client resumes its durable cursor.
+                    && !thread.rows().values().any(|row| {
+                        let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = &row.content;
+                        matches!(value.as_ref(), records::Record::Turn(turn) if matches!(turn.state, records::Execution::Running { .. } | records::Execution::Waiting(agent_protocol::conversation::Wait::Retry { .. })))
+                            || matches!(value.as_ref(), records::Record::Input(input) if matches!(input.state, records::Delivery::Preparing(_) | records::Delivery::Delivering))
+                    })
             })
             .map(|(id, thread)| (id.clone(), thread.clone()))
             .collect();
@@ -385,7 +377,6 @@ mod tests {
             id: Some(SessionRef::new(ProviderKind::Claude, id.into()).unwrap()),
             name: Some(id.into()),
             status: SessionStatus::Running,
-            transcript_version: Some(7),
             turns: Some(
                 (0..turns)
                     .map(|index| {
@@ -513,6 +504,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_project_disclosure_keeps_its_choice_but_restarts_at_five_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut source = listed();
+        let mut list = source.lists.threads.as_deref().unwrap().clone();
+        // Seed all canonical rows, not the initial five-row presentation.
+        list.data = source
+            .lists
+            .replica
+            .as_ref()
+            .unwrap()
+            .rows()
+            .values()
+            .filter_map(|row| {
+                let value = match &row.content {
+                    agent_protocol::sync::Content::Full(value)
+                    | agent_protocol::sync::Content::Summary(value) => value,
+                };
+                match (&row.key, value.as_ref()) {
+                    (agent_protocol::sync::Key::Thread(id), records::Record::Thread(header)) => {
+                        Some(records::summary(id, header))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        for thread in &mut list.data {
+            thread.project_id = crate::models::ProjectMembership::Assigned("project".into());
+        }
+        list.projects = vec![crate::models::Project {
+            id: "project".into(),
+            name: "Project".into(),
+            ..Default::default()
+        }];
+        crate::state::list_sync::seed(&mut source, list);
+        Arc::make_mut(&mut source.lists.expanded_projects).insert("project".into(), 15);
+        crate::state::list_sync::project(&mut source, false);
+        assert_eq!(source.lists.project_threads["project"].data.len(), 15);
+        assert!(
+            Saved::default()
+                .write_changes(directory.path(), &source)
+                .await
+        );
+        let mut restored = Snapshot::default();
+        restored.connection.storage_scope = "volume".into();
+        restore(directory.path(), &mut restored);
+        assert_eq!(restored.lists.expanded_projects["project"], 5);
+        assert_eq!(restored.lists.project_threads["project"].data.len(), 5);
+        assert!(restored.lists.project_threads["project"].has_more);
+        let (expanded, effects) = reduce(
+            &restored,
+            "",
+            Event::Intent(Intent::ExpandThreadList {
+                project_id: Some("project".into()),
+            }),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(expanded.lists.project_threads["project"].data.len(), 15);
+    }
+
+    #[tokio::test]
     async fn search_results_never_replace_the_saved_canonical_list_and_damage_is_discarded() {
         let directory = tempfile::tempdir().unwrap();
         let mut source = listed();
@@ -628,43 +679,21 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         written(&directory, "settled").await;
         let copies = restored(&directory);
-        assert_eq!(copies.len(), 3);
-        let running = copies
-            .values()
-            .find(|thread| thread.name.as_deref() == Some("running"))
-            .unwrap();
-        assert_eq!(running.status, SessionStatus::Unknown);
-        assert!(
-            running
-                .turns
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|turn| turn.status == TurnStatus::Unknown)
+        assert_eq!(
+            copies.len(),
+            1,
+            "active and expanded conversations retain their previous settled cache"
         );
         assert!(
-            running.requests.is_empty()
-                && running.submissions.is_empty()
-                && running.preparations.is_empty()
-                && running.background.is_empty()
-                && running.queue.inputs.is_empty()
+            copies
+                .values()
+                .all(|thread| thread.name.as_deref() == Some("settled"))
         );
         let copy = copies
             .values()
             .find(|thread| thread.name.as_deref() == Some("settled"))
             .unwrap();
         assert_eq!(copy.name.as_deref(), Some("settled"));
-        assert_eq!(
-            copies
-                .values()
-                .find(|thread| thread.name.as_deref() == Some("expanded"))
-                .unwrap()
-                .turns
-                .as_ref()
-                .unwrap()
-                .len(),
-            10
-        );
         assert_eq!(
             copy.status,
             SessionStatus::Unknown,

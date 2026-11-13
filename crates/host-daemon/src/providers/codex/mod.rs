@@ -202,6 +202,36 @@ impl Codex {
         reply.value.outcome.map_err(|error| native_failure(&error))
     }
 
+    async fn request_execution<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &Value,
+        thread: &str,
+        execution: uuid::Uuid,
+    ) -> Result<T, Failure> {
+        let reply = self
+            .server()?
+            .request_sequenced::<_, T>(method, params)
+            .await;
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(error) => {
+                let error = Failure::from(error);
+                if error.delivery == agent_protocol::error::Delivery::NotSent {
+                    self.scopes.cancel(thread, execution);
+                }
+                return Err(error);
+            }
+        };
+        self.wait_for_events(reply.sequence).await?;
+        if reply.value.outcome.is_err() {
+            // All notifications preceding this explicit rejection are settled.
+            // Keep any bound turn, but do not let a later wake adopt its reservation.
+            self.scopes.cancel(thread, execution);
+        }
+        reply.value.outcome.map_err(|error| native_failure(&error))
+    }
+
     async fn thread_response<P: Serialize>(
         &self,
         method: &str,
@@ -1036,19 +1066,24 @@ impl Agent for Codex {
         });
         let turn_id = match route {
             SubmissionTarget::Steer(turn) => {
+                if op::Input::is_compaction(&input.input) {
+                    return Err(Failure::new(
+                        "invalid_submission",
+                        "Context compaction must run as a separate turn.",
+                    ));
+                }
                 self.scopes.reserve(&input.thread_id.id, execution);
                 self.scopes
                     .bind(&input.thread_id.id, turn.into(), execution);
                 params["expectedTurnId"] = turn.into();
                 let result = self
-                    .request::<_, agent_protocol::models::Empty>("turn/steer", &params)
+                    .request_execution::<agent_protocol::models::Empty>(
+                        "turn/steer",
+                        &params,
+                        &input.thread_id.id,
+                        execution,
+                    )
                     .await;
-                if result
-                    .as_ref()
-                    .is_err_and(|error| error.delivery == agent_protocol::error::Delivery::NotSent)
-                {
-                    self.scopes.cancel(&input.thread_id.id, execution);
-                }
                 result?;
                 Some(turn.into())
             }
@@ -1060,15 +1095,26 @@ impl Agent for Codex {
                 params["effort"] = serde_json::json!(input.effort);
                 params["serviceTierForTurn"] = serde_json::json!(input.service_tier);
                 params["summary"] = REASONING_SUMMARY.into();
-                let result = self.request::<_, Value>("turn/start", &params).await;
-                if result
-                    .as_ref()
-                    .is_err_and(|error| error.delivery == agent_protocol::error::Delivery::NotSent)
-                {
-                    self.scopes.cancel(&input.thread_id.id, execution);
-                }
+                // Codex compacts through a dedicated RPC; `/compact` is not a prompt.
+                let compact = op::Input::is_compaction(&input.input);
+                let (method, params) = if compact {
+                    (
+                        "thread/compact/start",
+                        serde_json::json!({"threadId": input.thread_id.id}),
+                    )
+                } else {
+                    ("turn/start", params)
+                };
+                let result = self
+                    .request_execution::<Value>(method, &params, &input.thread_id.id, execution)
+                    .await;
                 let reply = result?;
-                Some(native_turn_id(reply["turn"]["id"].as_str())?)
+                if compact {
+                    // This RPC returns Empty. The reserved execution adopts turn/started.
+                    None
+                } else {
+                    Some(native_turn_id(reply["turn"]["id"].as_str())?)
+                }
             }
         };
         if let Some(turn) = &turn_id {
@@ -1087,14 +1133,8 @@ impl Agent for Codex {
     ) -> Result<op::SubmissionReceipt, Failure> {
         self.scopes.reserve(id, execution);
         let result = self
-            .request::<_,Value>("turn/start", &serde_json::json!({"threadId":id,"input":[],"model":model,"effort":effort,"serviceTierForTurn":service_tier,"summary":REASONING_SUMMARY}))
+            .request_execution::<Value>("turn/start", &serde_json::json!({"threadId":id,"input":[],"model":model,"effort":effort,"serviceTierForTurn":service_tier,"summary":REASONING_SUMMARY}), id, execution)
             .await;
-        if result
-            .as_ref()
-            .is_err_and(|error| error.delivery == agent_protocol::error::Delivery::NotSent)
-        {
-            self.scopes.cancel(id, execution);
-        }
         let reply = result?;
         let turn = native_turn_id(reply["turn"]["id"].as_str())?;
         self.scopes.bind(id, turn.clone(), execution);
@@ -1374,6 +1414,69 @@ async fn admit_request(
 mod tests {
     #[cfg(unix)]
     #[tokio::test]
+    async fn explicit_native_rejection_does_not_adopt_a_later_background_turn() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("codex-fixture");
+        std::fs::write(&program, r##"#!/usr/bin/env node
+const rl = require('node:readline').createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  if (message.method === 'initialize') {
+    process.stdout.write(JSON.stringify({id:message.id,result:{userAgent:'reject-fixture',codexHome:process.env.CODEX_HOME}})+'\n');
+  } else if (message.method === 'turn/start') {
+    process.stdout.write(JSON.stringify({id:message.id,error:{code:-32000,message:'explicit rejection'}})+'\n');
+  } else if (message.method === 'fixture/wake') {
+    process.stdout.write(JSON.stringify({method:'turn/started',params:{threadId:'thread',turn:{id:'background',status:'inProgress',items:[]}}})+'\n');
+    process.stdout.write(JSON.stringify({id:message.id,result:{}})+'\n');
+  } else process.exit(2);
+});
+"##).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(Config {
+                program,
+                codex_home: Some(directory.path().join("codex")),
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let agent = Codex::new(Ok(server));
+        let mut events = agent.event_stream().unwrap();
+        let rejected = uuid::Uuid::new_v4();
+        agent.scopes.reserve("thread", rejected);
+        assert!(
+            agent
+                .request_execution::<Value>(
+                    "turn/start",
+                    &serde_json::json!({"threadId":"thread"}),
+                    "thread",
+                    rejected
+                )
+                .await
+                .is_err()
+        );
+        let params = serde_json::json!({});
+        let (result, background) =
+            tokio::join!(agent.request::<_, Value>("fixture/wake", &params), async {
+                let mut event = events.recv().await.unwrap();
+                event.applied.take().unwrap().send(Ok(())).unwrap();
+                event
+            });
+        result.unwrap();
+        assert!(background.execution.is_some());
+        assert_ne!(background.execution, Some(rejected));
+        assert!(
+            matches!(background.change, AgentChange::Session { change: SessionChange::Turn { ref turn, completed: false, .. }, .. } if turn.id.as_str() == "background")
+        );
+        agent.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn restart_snapshot_checks_loaded_codex_even_after_connection_closes() {
         use std::{os::unix::fs::PermissionsExt, sync::Arc};
         let directory = tempfile::tempdir().unwrap();
@@ -1420,6 +1523,111 @@ rl.on('line', line => {
         service("healthy.json").prepare_update().await.unwrap();
         server.shutdown().await.unwrap();
         assert!(service("broken.json").prepare_update().await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standalone_compact_uses_the_native_rpc_and_adopts_its_started_turn() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("codex-fixture");
+        std::fs::write(&program, r##"#!/usr/bin/env node
+const rl = require('node:readline').createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  let result;
+  switch (message.method) {
+    case 'initialize': result = {userAgent:'compact-fixture',codexHome:process.env.CODEX_HOME}; break;
+    case 'thread/resume': result = {thread:{id:'thread',turns:[]}}; break;
+    case 'thread/compact/start':
+      if (JSON.stringify(message.params) !== JSON.stringify({threadId:'thread'})) process.exit(2);
+      process.stdout.write(JSON.stringify({method:'turn/started',params:{threadId:'thread',turn:{id:'compact-turn',status:'inProgress',items:[]}}})+'\n');
+      result = {}; break;
+    case 'turn/start':
+      if (message.params.input[0].text.trim().toLowerCase() === '/compact' && message.params.input.length === 1) process.exit(3);
+      result = {turn:{id:'normal-turn'}}; break;
+    default: process.exit(4);
+  }
+  process.stdout.write(JSON.stringify({id:message.id,result})+'\n');
+});
+"##).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(Config {
+                program,
+                codex_home: Some(directory.path().join("codex")),
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let agent = Codex::new(Ok(server));
+        let mut events = agent.event_stream().unwrap();
+        let mut input = op::Submission {
+            thread_id: SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap(),
+            client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+            input: vec![op::Input::Text {
+                text: "  /CoMpAcT\n".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+            follow_up: Default::default(),
+        };
+        let execution = uuid::Uuid::new_v4();
+        let (receipt, started) = tokio::join!(
+            agent.submit(
+                &input,
+                crate::providers::SubmissionTarget::Start { cwd: "/fixture" },
+                false,
+                None,
+                execution
+            ),
+            async {
+                let mut started = events.recv().await.unwrap();
+                started.applied.take().unwrap().send(Ok(())).unwrap();
+                started
+            }
+        );
+        assert!(receipt.unwrap().turn_id.is_none());
+        assert_eq!(started.execution, Some(execution));
+        assert!(
+            matches!(started.change, AgentChange::Session { change: SessionChange::Turn { ref turn, completed: false, .. }, .. } if turn.id.as_str() == "compact-turn")
+        );
+        for parts in [
+            vec![op::Input::Text {
+                text: "/compact please".into(),
+            }],
+            vec![
+                op::Input::Text {
+                    text: "/compact".into(),
+                },
+                op::Input::LocalImage {
+                    path: "/image.png".into(),
+                },
+            ],
+        ] {
+            input.input = parts;
+            assert_eq!(
+                agent
+                    .submit(
+                        &input,
+                        crate::providers::SubmissionTarget::Start { cwd: "/fixture" },
+                        false,
+                        None,
+                        uuid::Uuid::new_v4()
+                    )
+                    .await
+                    .unwrap()
+                    .turn_id
+                    .unwrap()
+                    .as_str(),
+                "normal-turn"
+            );
+        }
+        agent.shutdown().await;
     }
 
     #[cfg(unix)]

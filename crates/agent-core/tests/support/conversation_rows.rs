@@ -45,6 +45,10 @@ pub fn catalog(list: agent_protocol::models::ThreadList, cursor: Cursor) -> reco
 }
 
 pub fn replica(response: ThreadResponse, generation: u64) -> records::Replica {
+    replica_at(response, generation, 7)
+}
+
+pub fn replica_at(response: ThreadResponse, generation: u64, sequence: u64) -> records::Replica {
     let thread = response.thread;
     let id = thread.id.clone().unwrap();
     let provider = thread
@@ -53,7 +57,7 @@ pub fn replica(response: ThreadResponse, generation: u64) -> records::Replica {
         .expect("fixture declares the active provider");
     let cursor = Cursor {
         store: uuid::Uuid::from_u128(1),
-        sequence: thread.transcript_version.unwrap_or(7),
+        sequence,
     };
     let header = records::Header {
         state: decision::Thread {

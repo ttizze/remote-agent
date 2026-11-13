@@ -1224,17 +1224,19 @@ async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_r
         before.iter().all(|entry| entry["method"] == "thread/list"),
         "catalog discovery must not import bodies"
     );
-    let (expanded, _) = reduce(
-        &initial,
-        "",
-        Event::Intent(Intent::ListProjectSessions(op::ListProjectSessions {
-            project_id: "project-0".into(),
-            limit: 150,
-            search_term: String::new(),
-        })),
-    );
+    let mut expanded = initial.clone();
+    for _ in 0..15 {
+        expanded = reduce(
+            &expanded,
+            "",
+            Event::Intent(Intent::ExpandThreadList {
+                project_id: Some("project-0".into()),
+            }),
+        )
+        .0;
+    }
     let project = &expanded.lists.project_threads["project-0"];
-    assert_eq!(project.data.len(), 150);
+    assert_eq!(project.data.len(), 155);
     assert_eq!(project.data[149].id.as_ref().unwrap().id, "scoped-1400");
     assert!(project.has_more);
     let (shown, _) = reduce(&expanded, "", Event::Intent(Intent::ExpandProjects));

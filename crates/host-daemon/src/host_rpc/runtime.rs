@@ -47,7 +47,9 @@ pub(super) struct Runtime {
     outputs: Arc<output::Outputs>,
     recovered: Mutex<HashMap<SessionRef, Arc<tokio::sync::OnceCell<()>>>>,
     updating_recovery: bool,
-    pub(in crate::host_rpc) update_report: AsyncMutex<()>,
+    /// A report committed by a newer update in this process supersedes old readers.
+    /// The persisted updating marker also covers startup recovery and has a different lifetime.
+    pub(in crate::host_rpc) update_report: AsyncMutex<bool>,
 }
 
 pub(super) fn now() -> i64 {
@@ -194,8 +196,10 @@ impl Runtime {
         });
     }
 
-    fn context(service: &HostRpcService, provider: Option<ProviderKind>) -> Context {
+    fn context(service: &HostRpcService, provider: Option<ProviderKind>) -> Context<'static> {
         Context {
+            preparation: None,
+            rewind_binding: None,
             external_busy: false,
             now: now(),
             seed: Uuid::new_v4(),

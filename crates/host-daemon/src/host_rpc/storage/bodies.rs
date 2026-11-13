@@ -47,9 +47,7 @@ impl Storage {
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
             let key = thread_key(&transaction, target)?;
-            let mut state = rows::load(&transaction, key, self.process)?;
             let mut committed = Committed {
-                state: None,
                 step: Step::default(),
                 cursor: cursor(&transaction)?,
                 rows: vec![],
@@ -70,7 +68,7 @@ impl Storage {
             {
                 let turn =
                     rows::turn(&transaction, key, &item.turn)?.ok_or("item turn is missing")?;
-                state.turns.insert(turn.id.clone(), turn);
+                let turns = [(turn.id.clone(), turn)].into();
                 item.body = body;
                 item.deferred = false;
                 committed.cursor = Self::advance(&transaction)?;
@@ -84,13 +82,12 @@ impl Storage {
                         process: self.process,
                     },
                     &Change::Item(item),
-                    &state,
+                    &turns,
                     &mut committed.rows,
                     &mut committed.removed,
                 )?;
                 committed.step.outcome = Outcome::Accepted;
             }
-            committed.state = Some(state);
             transaction.commit().map_err(failure)?;
             Ok(committed)
         })

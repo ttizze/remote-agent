@@ -23,6 +23,7 @@ pub mod records;
 mod recovery;
 #[cfg(test)]
 mod tests;
+mod workspace;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
@@ -121,7 +122,7 @@ pub struct PendingDelivery {
     pub action: Uuid,
     pub attempt: Attempt,
     pub ordinal: u64,
-    pub interrupt: Option<Uuid>,
+    pub interrupt: Option<Interruption>,
     pub steer: bool,
     pub queued: bool,
 }
@@ -168,14 +169,23 @@ pub struct Turn {
     pub completed_at: Option<i64>,
     pub duration_ms: Option<u64>,
     pub retry_count: u8,
+    /// A compact control command cannot resume the preceding task on capacity failure.
+    pub compaction: bool,
     pub error: Option<ExecutionError>,
     pub state: TurnState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Interruption {
+    pub action: Uuid,
+    /// Only this queued input may bypass compaction. Stop replaces this with None.
+    pub next_input: Option<ClientInputId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnState {
-    Running { interrupt: Option<Uuid> },
+    Running { interrupt: Option<Interruption> },
     Waiting(Wait),
     Completed,
     Interrupted,
@@ -342,7 +352,7 @@ impl State {
 
     fn steerable_attempt(&self) -> Option<&Attempt> {
         self.active_turn()
-            .filter(|turn| matches!(turn.state, TurnState::Running { interrupt: None }))
+            .filter(|turn| !turn.compaction && matches!(turn.state, TurnState::Running { interrupt: None }))
             .and_then(|turn| self.attempts.get(&turn.id))
             .filter(|attempt| !self.inputs.values().any(|input|
                 matches!(&input.state, InputState::Unknown { delivery, status: UnknownState::Resolving { .. } }
@@ -362,7 +372,7 @@ impl State {
                     if delivery.action == *action && &delivery.attempt == attempt)),
             Action::Interrupt { attempt, action, .. } => self.attempts.get(&attempt.turn) == Some(attempt)
                 && self.turns.get(&attempt.turn).is_some_and(|turn|
-                    matches!(turn.state, TurnState::Running { interrupt: Some(current) } if current == *action)),
+                    matches!(&turn.state, TurnState::Running { interrupt: Some(current) } if current.action == *action)),
             Action::Resume { attempt, .. } => self.attempts.get(&attempt.turn) == Some(attempt)
                 && self.turns.get(&attempt.turn).is_some_and(|turn| turn.state == TurnState::Running { interrupt: None }),
             Action::Answer { attempt, id, action, .. } => self.attempts.get(&attempt.turn) == Some(attempt)
@@ -416,6 +426,9 @@ impl State {
                     }
                 }
                 Change::Counters(counters) => next.counters = counters.clone(),
+                // Workspace strategy is owned by the resource metadata supplied
+                // in Context, and committed by the same writer as these changes.
+                Change::WorkspaceStrategy(_) => {}
             }
         }
         next
@@ -425,6 +438,7 @@ impl State {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Change {
     Thread(Thread),
+    WorkspaceStrategy(crate::workspace::WorkspaceStrategy),
     Input(PendingInput),
     RemoveInput(ClientInputId),
     Turn(Turn),
@@ -446,6 +460,7 @@ pub enum Change {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum ChangeKey {
     Thread,
+    WorkspaceStrategy,
     Input(ClientInputId),
     Turn(TurnId),
     Item(ItemId),
@@ -459,6 +474,7 @@ impl Change {
     fn key(&self) -> ChangeKey {
         match self {
             Self::Thread(_) => ChangeKey::Thread,
+            Self::WorkspaceStrategy(_) => ChangeKey::WorkspaceStrategy,
             Self::Input(input) => ChangeKey::Input(input.id.clone()),
             Self::RemoveInput(id) => ChangeKey::Input(id.clone()),
             Self::Turn(turn) => ChangeKey::Turn(turn.id.clone()),
@@ -652,9 +668,6 @@ pub enum Observation {
     Notice(ExecutionError),
     Failed(Option<ExecutionError>),
     Interrupted,
-    Retry {
-        at: i64,
-    },
     Background {
         tasks: Vec<BackgroundTask>,
     },
@@ -746,7 +759,9 @@ impl Default for Step {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Context {
+pub struct Context<'a> {
+    pub preparation: Option<&'a records::WorkspacePreparation>,
+    pub rewind_binding: Option<&'a Binding>,
     /// Native work is active before its first turn can be materialized.
     pub external_busy: bool,
     pub now: i64,
@@ -771,8 +786,8 @@ fn allocate(seed: Uuid, label: &str) -> Uuid {
     Uuid::new_v5(&seed, label.as_bytes())
 }
 
-/// Allocate a new item after looking up the persisted native mapping first.
-/// Existing mapped IDs take precedence, including IDs retained by migration.
+/// Allocate an ID for a new native item within this attempt.
+/// Callers retain a persisted mapping when the native item already exists.
 pub fn provider_item_id(attempt: Uuid, native: &str) -> ItemId {
     allocate(attempt, &format!("item:{native}"))
         .to_string()

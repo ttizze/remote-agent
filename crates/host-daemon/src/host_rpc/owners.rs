@@ -18,7 +18,8 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-const QUEUED_MESSAGES: usize = 1024;
+const QUEUED_MESSAGES: usize = 1000;
+const STREAM_QUEUED_BYTES: usize = 8 * 1024 * 1024;
 
 pub(super) struct Owners {
     storage: Arc<Storage>,
@@ -47,9 +48,14 @@ enum Input {
     Read {
         session: u64,
         subscription: Uuid,
-        cached: Cursor,
         item: Option<agent_protocol::ids::ItemId>,
-        reply: oneshot::Sender<Result<Vec<Message>, String>>,
+        reply: oneshot::Sender<Result<Read, String>>,
+    },
+    Fork {
+        target: SessionRef,
+        through: agent_protocol::ids::TurnId,
+        now: i64,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Unsubscribe(Uuid),
     Disconnect(u64),
@@ -78,7 +84,7 @@ enum Write {
     },
     Event(
         Event,
-        Context,
+        Context<'static>,
         Option<agent_protocol::conversation::records::Header>,
     ),
     Read(agent_protocol::ids::TurnId),
@@ -101,6 +107,12 @@ struct Subscriber {
     window: Window,
     messages: mpsc::Sender<Vec<u8>>,
     bytes: Arc<AtomicUsize>,
+    queued_bytes: Arc<AtomicUsize>,
+}
+
+pub(super) struct Read {
+    pub cursor: Cursor,
+    pub item: Option<agent_protocol::conversation::records::Row>,
 }
 
 pub(super) struct Opened {
@@ -113,11 +125,14 @@ pub struct Subscription {
     owner: mpsc::UnboundedSender<Input>,
     receiver: mpsc::Receiver<Vec<u8>>,
     bytes: Arc<AtomicUsize>,
+    queued_bytes: Arc<AtomicUsize>,
 }
 impl Subscription {
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
         let frame = self.receiver.recv().await?;
         self.bytes.fetch_sub(frame_cost(frame.capacity()), Relaxed);
+        self.queued_bytes
+            .fetch_sub(frame_cost(frame.capacity()), Relaxed);
         Some(frame)
     }
 }
@@ -126,6 +141,8 @@ impl Drop for Subscription {
         let _ = self.owner.send(Input::Unsubscribe(self.id));
         while let Ok(frame) = self.receiver.try_recv() {
             self.bytes.fetch_sub(frame_cost(frame.capacity()), Relaxed);
+            self.queued_bytes
+                .fetch_sub(frame_cost(frame.capacity()), Relaxed);
         }
     }
 }
@@ -225,7 +242,7 @@ impl Owners {
         self: &Arc<Self>,
         target: &SessionRef,
         event: Event,
-        context: Context,
+        context: Context<'static>,
         create: Option<agent_protocol::conversation::records::Header>,
     ) -> Result<(Outcome, Cursor), String> {
         let (reply, result) = oneshot::channel();
@@ -409,21 +426,41 @@ impl Owners {
         }
     }
 
+    pub(super) async fn fork(
+        self: &Arc<Self>,
+        source: &SessionRef,
+        target: SessionRef,
+        through: agent_protocol::ids::TurnId,
+        now: i64,
+    ) -> Result<(), String> {
+        let (reply, result) = oneshot::channel();
+        self.send(
+            source,
+            Input::Fork {
+                target,
+                through,
+                now,
+                reply,
+            },
+        )?;
+        result
+            .await
+            .map_err(|_| "conversation owner stopped during fork".to_owned())?
+    }
+
     pub(super) async fn read(
         self: &Arc<Self>,
         target: &SessionRef,
         session: u64,
         subscription: Uuid,
-        cached: Cursor,
         item: Option<agent_protocol::ids::ItemId>,
-    ) -> Result<Vec<Message>, String> {
+    ) -> Result<Read, String> {
         let (reply, result) = oneshot::channel();
         self.send(
             target,
             Input::Read {
                 session,
                 subscription,
-                cached,
                 item,
                 reply,
             },
@@ -535,6 +572,7 @@ async fn run(
                                 return Err("subscription ID is missing or already in use".into());
                             }
                             let (messages, receiver) = mpsc::channel(QUEUED_MESSAGES);
+                            let queued_bytes = Arc::new(AtomicUsize::new(0));
                             subscribers.insert(
                                 id,
                                 Subscriber {
@@ -543,6 +581,7 @@ async fn run(
                                     window: floor,
                                     messages,
                                     bytes: bytes.clone(),
+                                    queued_bytes: queued_bytes.clone(),
                                 },
                             );
                             Ok(Opened {
@@ -552,16 +591,32 @@ async fn run(
                                     owner: sender.clone(),
                                     receiver,
                                     bytes,
+                                    queued_bytes,
                                 },
                             })
                         });
+                let _ = reply.send(result);
+            }
+            Input::Fork {
+                target: destination,
+                through,
+                now,
+                reply,
+            } => {
+                let store = storage.clone();
+                let source = target.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    store.fork(&source, &destination, &through, now)
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
                 let _ = reply.send(result);
             }
             Input::Shutdown => break,
             Input::Read {
                 session,
                 subscription,
-                cached,
                 item,
                 reply,
             } => {
@@ -573,26 +628,32 @@ async fn run(
                         let store = storage.clone();
                         let thread = target.clone();
                         let window = subscriber.window;
-                        let extend = item.is_none();
+                        let cached = subscriber.cursor;
                         match tokio::task::spawn_blocking(move || {
                             store.read_page(&thread, cached, window, item.as_ref())
                         })
                         .await
                         {
-                            Ok(Ok((messages, window, cursor))) => {
+                            Ok(Ok((mut messages, window, cursor))) => {
                                 subscriber.window = window;
                                 subscriber.cursor = cursor;
-                                // Extend is ordered with the stream before a later
-                                // commit can update rows outside the previous window.
-                                if extend {
-                                    for message in &messages {
-                                        subscriber.send(
-                                            protocol::encode(message)
-                                                .map_err(|error| error.to_string())?,
+                                let item = messages.iter().find_map(|message| match message {
+                                    Message::Hydrate { row, .. } => Some(row.clone()),
+                                    _ => None,
+                                });
+                                for message in &mut messages {
+                                    if let Message::Hydrate { row, .. } = message {
+                                        agent_protocol::conversation::records::summarize(
+                                            std::slice::from_mut(row),
+                                            agent_protocol::models::MAX_INLINE_ITEM_BYTES,
                                         )?;
                                     }
+                                    subscriber.send(
+                                        protocol::encode(message)
+                                            .map_err(|error| error.to_string())?,
+                                    )?;
                                 }
-                                Ok(messages)
+                                Ok(Read { cursor, item })
                             }
                             Ok(Err(error)) => Err(error),
                             Err(error) => Err(error.to_string()),
@@ -666,21 +727,7 @@ async fn publish(
         if subscriber.cursor.sequence >= committed.cursor.sequence {
             continue;
         }
-        let mut rows: Vec<_> = committed
-            .rows
-            .iter()
-            .filter(|row| {
-                agent_protocol::sync::contains(
-                    &scope,
-                    Some(subscriber.window),
-                    &row.key,
-                    &row.position,
-                )
-            })
-            .cloned()
-            .collect();
         let frame = (|| -> Result<Vec<u8>, String> {
-            agent_protocol::conversation::records::summarize(&mut rows, 128 * 1024)?;
             let message = if committed.reset {
                 let snapshot = reset.as_ref().expect("reset frame").clone()?;
                 if let Message::Snapshot {
@@ -694,6 +741,20 @@ async fn publish(
                 }
                 snapshot
             } else {
+                let mut rows: Vec<_> = committed
+                    .rows
+                    .iter()
+                    .filter(|row| {
+                        agent_protocol::sync::contains(
+                            &scope,
+                            Some(subscriber.window),
+                            &row.key,
+                            &row.position,
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                agent_protocol::conversation::records::summarize(&mut rows, 128 * 1024)?;
                 Message::Changes {
                     from: subscriber.cursor,
                     through: committed.cursor,
@@ -744,6 +805,17 @@ impl Subscriber {
     fn send(&mut self, frame: Vec<u8>) -> Result<(), String> {
         let cost = frame_cost(frame.capacity());
         if self
+            .queued_bytes
+            .fetch_update(Relaxed, Relaxed, |bytes| {
+                bytes
+                    .checked_add(cost)
+                    .filter(|bytes| *bytes <= STREAM_QUEUED_BYTES)
+            })
+            .is_err()
+        {
+            return Err("conversation stream byte budget exceeded".into());
+        }
+        if self
             .bytes
             .fetch_update(Relaxed, Relaxed, |bytes| {
                 bytes
@@ -752,10 +824,12 @@ impl Subscriber {
             })
             .is_err()
         {
+            self.queued_bytes.fetch_sub(cost, Relaxed);
             return Err("conversation subscription byte budget exceeded".into());
         }
         if self.messages.try_send(frame).is_err() {
             self.bytes.fetch_sub(cost, Relaxed);
+            self.queued_bytes.fetch_sub(cost, Relaxed);
             return Err("conversation subscription closed".into());
         }
         Ok(())

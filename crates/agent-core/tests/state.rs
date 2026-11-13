@@ -27,26 +27,25 @@ fn fixture_change(previous: &Snapshot, params: Value) -> (Snapshot, Vec<Effect>)
     if previous.sessions.conversations.contains_key(&id) {
         let subscription = uuid::Uuid::nil();
         Arc::make_mut(&mut next.sessions.subscriptions).insert(id.clone(), subscription);
-        let mut thread = change.apply(&previous.sessions.conversations[&id]).unwrap();
-        thread.transcript_version = Some(
-            previous
-                .sessions
-                .replicas
-                .get(&id)
-                .and_then(|replica| replica.cursor())
-                .map_or(8, |cursor| cursor.sequence + 1),
-        );
+        let thread = change.apply(&previous.sessions.conversations[&id]).unwrap();
+        let sequence = previous
+            .sessions
+            .replicas
+            .get(&id)
+            .and_then(|replica| replica.cursor())
+            .map_or(8, |cursor| cursor.sequence + 1);
         let generation = previous
             .sessions
             .replicas
             .get(&id)
             .map_or(1, |replica| replica.subscription());
-        let replica = rows::replica(
+        let replica = rows::replica_at(
             ThreadResponse {
                 thread,
                 ..Default::default()
             },
             generation,
+            sequence,
         );
         Arc::make_mut(&mut next.sessions.replicas)
             .entry(id.clone())
@@ -1558,7 +1557,7 @@ fn unresolved_submission_actions_ignore_known_delivery_states() {
                     }
                     .into(),
                     draft: Arc::new(Draft {
-                        text: "192867ea-8fe3-5a20-bf00-78605e31a020".into(),
+                        text: "sending".into(),
                         ..Default::default()
                     }),
                     turn_id: None,

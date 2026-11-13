@@ -27,6 +27,48 @@ mod tests {
     use agent_protocol::editors::EditorId;
 
     #[test]
+    fn welcome_and_folderless_new_chat_restore_independent_user_work() {
+        use crate::state::{Attachment, DraftKey};
+        use agent_protocol::composer::{Invocation, InvocationKind};
+        let mut snapshot = Snapshot::default();
+        let welcome = DraftKey::Local { key: String::new() };
+        let new = DraftKey::Local { key: "new:".into() };
+        let draft = |name: &str| {
+            Arc::new(Draft {
+                text: name.into(),
+                attachments: vec![Attachment {
+                    path: format!("/{name}.png"),
+                    name: format!("{name}.png"),
+                    is_image: true,
+                }],
+                invocations: vec![Invocation {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    kind: InvocationKind::Skill,
+                    name: name.into(),
+                    path: format!("/{name}/SKILL.md"),
+                }],
+                ..Default::default()
+            })
+        };
+        let first = draft("welcome");
+        let second = draft("new-chat");
+        Arc::make_mut(&mut snapshot.input.drafts).insert(welcome.clone(), first.clone());
+        Arc::make_mut(&mut snapshot.input.drafts).insert(new, second.clone());
+        let restored = decode(&encode(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.input.drafts.len(), 2);
+        assert_eq!(restored.input.drafts[&welcome], first);
+        let id = &restored.input.new_drafts["0:"];
+        assert_eq!(restored.input.drafts[&DraftKey::from(id)], second);
+        assert_eq!(
+            restored.panes.primary().navigation,
+            snapshot.panes.primary().navigation
+        );
+        let again = decode(&encode(&restored).unwrap()).unwrap();
+        assert_eq!(again.input.drafts, restored.input.drafts);
+        assert_eq!(again.input.new_drafts, restored.input.new_drafts);
+    }
+
+    #[test]
     fn host_state_excludes_device_model_preferences() {
         let mut snapshot = Snapshot::default();
         snapshot.catalog.model_preferences.provider =

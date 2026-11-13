@@ -70,7 +70,16 @@ impl HostRpcService {
             },
         ))
         .await;
-        let mut headers = std::collections::BTreeMap::new();
+        let mut headers: std::collections::BTreeMap<_, _> = self
+            .inner
+            .conversation
+            .storage
+            .headers(true)
+            .map_err(super::super::runtime::storage_failure)?
+            .into_iter()
+            .map(|(id, header, _)| (id, header))
+            .collect();
+        let mut observed = std::collections::HashSet::new();
         let mut inspected = std::collections::HashSet::new();
         for (provider, result) in listings {
             let pages = result.ok().and_then(Result::ok).ok_or_else(incomplete)?;
@@ -92,51 +101,39 @@ impl HostRpcService {
                 let Some(id) = thread.id.clone() else {
                     continue;
                 };
-                let mut header = self
-                    .inner
-                    .conversation
-                    .storage
-                    .lookup(&id)
-                    .map_err(super::super::runtime::storage_failure)?
-                    .unwrap_or_else(|| {
-                        super::super::storage::history::header(
-                            &agent_protocol::models::ThreadResponse {
-                                thread,
-                                ..Default::default()
-                            },
-                            super::super::runtime::now(),
-                        )
-                    });
-                header.details.activity.status = native_status;
-                header.details.activity.stale = false;
-                headers.insert(id, header);
-            }
-        }
-        for (id, mut header, _) in self
-            .inner
-            .conversation
-            .storage
-            .headers(true)
-            .map_err(super::super::runtime::storage_failure)?
-        {
-            // A complete native loaded-list is also evidence about absent
-            // sources: they have no live provider-owned work. Keep this fact
-            // local to restart admission; it never rewrites the saved header.
-            if let Some(native) = headers.get(&id) {
-                header.details.activity.stale = false;
+                let header = headers.entry(id.clone()).or_insert_with(|| {
+                    super::super::storage::history::header(
+                        &agent_protocol::models::ThreadResponse {
+                            thread,
+                            ..Default::default()
+                        },
+                        super::super::runtime::now(),
+                    )
+                });
+                // A live source cannot be hidden by another binding's idle list entry.
+                let first = observed.insert(id);
                 if header.details.activity.latest
                     != Some(agent_protocol::models::TurnStatus::Running)
+                    && (first
+                        || !agent_protocol::models::task_active(
+                            None,
+                            header.details.activity.status,
+                        ))
                 {
-                    header.details.activity.status = native.details.activity.status;
+                    header.details.activity.status = native_status;
                 }
-            } else if inspected.contains(&header.state.provider)
+            }
+        }
+        for (id, header) in &mut headers {
+            // A complete loaded-list is evidence that absent sources have no
+            // provider-owned work. This is local to restart admission.
+            if !observed.contains(id)
+                && inspected.contains(&header.state.provider)
                 && header.details.activity.latest
                     != Some(agent_protocol::models::TurnStatus::Running)
             {
                 header.details.activity.status = agent_protocol::models::SessionStatus::Idle;
-                header.details.activity.stale = false;
             }
-            headers.insert(id, header);
         }
         Ok(agent_protocol::conversation::records::list_activity(
             headers.iter(),
@@ -261,8 +258,8 @@ rl.on('line', line => {
       cwd:process.env.CODEX_HOME,status:{type:'active'}}};
   }
   if (m.method === 'thread/list') {
-    result = {data:['running','native-root'].map(id => ({id,name:id,cwd:process.env.CODEX_HOME,
-      status:{type:id === 'running' ? 'active' : 'idle'}})),nextCursor:null};
+    result = {data:['native-root'].map(id => ({id,name:id,cwd:process.env.CODEX_HOME,
+      status:{type:'idle'}})),nextCursor:null};
   }
   send({id:m.id,result});
 });

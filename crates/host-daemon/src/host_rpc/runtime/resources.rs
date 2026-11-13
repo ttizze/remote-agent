@@ -554,10 +554,11 @@ impl Runtime {
             service_tier: content.service_tier,
             follow_up: content.follow_up,
         };
-        if let Some(context) =
-            runtime
-                .storage
-                .source_context(target, attempt.provider, &attempt.source)?
+        if !op::Input::is_compaction(&input.input)
+            && let Some(context) =
+                runtime
+                    .storage
+                    .source_context(target, attempt.provider, &attempt.source)?
         {
             input.input.insert(
                 0,

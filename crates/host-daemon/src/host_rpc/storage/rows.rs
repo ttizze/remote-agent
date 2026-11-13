@@ -131,6 +131,24 @@ pub(super) fn read<T: DeserializeOwned>(
     Ok(records)
 }
 
+pub(super) fn input(
+    connection: &Connection,
+    key: i64,
+    id: ClientInputId,
+) -> Result<Option<PendingInput>, String> {
+    Ok(read(
+        connection,
+        "inputs",
+        "thread=?1 AND id=?2",
+        vec![key.into(), id.to_string().into()],
+        INPUT,
+        true,
+    )?
+    .into_iter()
+    .next()
+    .map(|(_, input)| input))
+}
+
 pub(super) fn turn(connection: &Connection, key: i64, id: &TurnId) -> Result<Option<Turn>, String> {
     Ok(read(
         connection,
@@ -208,18 +226,80 @@ pub(super) fn older_window(
     key: i64,
     current: Window,
 ) -> Result<Window, String> {
-    let (floor, more): (Option<i64>, bool) = connection.query_row("SELECT min(ordinal),(SELECT count(*) FROM turns WHERE thread=?1 AND state!='rolled_back' AND ordinal<?2)>10 FROM (SELECT ordinal FROM turns WHERE thread=?1 AND state!='rolled_back' AND ordinal<?2 ORDER BY ordinal DESC LIMIT 10)", params![key, integer(current.turn)?], |row| Ok((row.get(0)?, row.get(1)?))).map_err(failure)?;
-    Ok(Window {
-        turn: if more {
-            floor
-                .map(u64::try_from)
-                .transpose()
-                .map_err(failure)?
-                .unwrap_or(0)
-        } else {
-            0
-        },
+    page_floor(connection, key, Some(current))
+}
+
+// T3 threadHistoryPaging: ten user turns, 500 items when a user turn is
+// present, otherwise 75 items inside a long turn, and at most 1 MiB per page.
+fn page_floor(connection: &Connection, key: i64, before: Option<Window>) -> Result<Window, String> {
+    let end = before.unwrap_or(Window {
+        turn: i64::MAX as u64,
+        item: i64::MAX as u64,
+    });
+    let raw_floor: Option<i64> = connection.query_row("SELECT min(ordinal) FROM (SELECT ordinal FROM turns WHERE thread=?1 AND state!='rolled_back' AND ordinal<=?2 ORDER BY ordinal DESC LIMIT 150)", params![key, integer(end.turn)?], |row| row.get(0)).map_err(failure)?;
+    let Some(raw_floor) = raw_floor else {
+        return Ok(Window { turn: 0, item: 0 });
+    };
+    let mut statement = connection.prepare("SELECT i.id,i.turn_id,i.position,i.status,i.body,t.ordinal FROM items i JOIN turns t ON t.thread=i.thread AND t.id=i.turn_id WHERE i.thread=?1 AND t.state!='rolled_back' AND t.ordinal>=?2 AND (t.ordinal<?3 OR (t.ordinal=?3 AND i.position<?4)) ORDER BY t.ordinal DESC,i.position DESC LIMIT 500").map_err(failure)?;
+    let mut saved = statement
+        .query(params![
+            key,
+            raw_floor,
+            integer(end.turn)?,
+            integer(end.item)?
+        ])
+        .map_err(failure)?;
+    let mut selected = Vec::new();
+    let mut bytes = 0usize;
+    let mut user_turns = BTreeSet::new();
+    while let Some(row) = saved.next().map_err(failure)? {
+        if user_turns.len() >= 10 {
+            break;
+        }
+        let id: String = row.get(0).map_err(failure)?;
+        let turn: String = row.get(1).map_err(failure)?;
+        let position: i64 = row.get(2).map_err(failure)?;
+        let status: String = row.get(3).map_err(failure)?;
+        let body: Vec<u8> = row.get(4).map_err(failure)?;
+        let ordinal: i64 = row.get(5).map_err(failure)?;
+        let item: Item = codec::unpack(
+            &body,
+            vec![
+                ("id", Value::String(id)),
+                ("turn", Value::String(turn.clone())),
+                ("position", position.into()),
+                ("status", Value::String(status)),
+            ],
+            None,
+        )?;
+        let cost = protocol::encode(&item).map_err(failure)?.len();
+        if !selected.is_empty() && bytes.saturating_add(cost) > 1_048_576 {
+            break;
+        }
+        bytes = bytes.saturating_add(cost);
+        if matches!(
+            item.body,
+            agent_protocol::items::ItemBody::UserMessage { .. }
+        ) {
+            user_turns.insert(turn);
+        }
+        selected.push(Window {
+            turn: u64::try_from(ordinal).map_err(failure)?,
+            item: u64::try_from(position).map_err(failure)?,
+        });
+    }
+    if user_turns.is_empty() {
+        selected.truncate(75);
+    }
+    let floor = selected.last().copied().unwrap_or(Window {
+        turn: u64::try_from(raw_floor).map_err(failure)?,
         item: 0,
+    });
+    let older: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE thread=?1 AND state!='rolled_back' AND ordinal<?2) OR EXISTS(SELECT 1 FROM items i JOIN turns t ON t.thread=i.thread AND t.id=i.turn_id WHERE i.thread=?1 AND t.state!='rolled_back' AND t.ordinal=?2 AND i.position<?3)", params![key, integer(floor.turn)?, integer(floor.item)?], |row| row.get(0)).map_err(failure)?;
+    Ok(if older {
+        floor
+    } else {
+        Window { turn: 0, item: 0 }
     })
 }
 
@@ -456,7 +536,7 @@ pub(super) fn write(
     transaction: &Transaction<'_>,
     scope: &WriteScope<'_>,
     change: &Change,
-    state: &State,
+    turns: &std::collections::BTreeMap<TurnId, Turn>,
     updated: &mut Vec<Row>,
     removed: &mut Vec<Removal<SessionRef>>,
 ) -> Result<(), String> {
@@ -498,7 +578,7 @@ pub(super) fn write(
                 ..
             },
         )) = previous
-            && !state.turns.contains_key(&delivery.attempt.turn)
+            && !turns.contains_key(&delivery.attempt.turn)
         {
             transaction
                 .execute(
@@ -523,6 +603,22 @@ pub(super) fn write(
         }
         Change::Turn(value) => {
             save(transaction, key, "turns", value, TURN, true, sequence)?;
+            if value.state == decision::TurnState::RolledBack {
+                transaction
+                    .execute(
+                        "INSERT INTO removals(seq,kind,id,thread,at) VALUES (?1,'turn',?2,?3,?4)",
+                        params![integer(sequence)?, value.id.as_str(), key, scope.at],
+                    )
+                    .map_err(failure)?;
+                removed.push(Removal {
+                    key: Key::Turn {
+                        thread: id.clone(),
+                        id: value.id.clone(),
+                    },
+                    version: sequence,
+                });
+                return Ok(());
+            }
             (
                 Key::Turn {
                     thread: id.clone(),
@@ -536,7 +632,7 @@ pub(super) fn write(
         }
         Change::Item(value) => {
             save(transaction, key, "items", value, ITEM, false, sequence)?;
-            let turn = state.turns.get(&value.turn).ok_or("item turn is missing")?;
+            let turn = turns.get(&value.turn).ok_or("item turn is missing")?;
             (
                 Key::Item {
                     thread: id.clone(),
@@ -584,6 +680,22 @@ pub(super) fn write(
                 value.as_str(),
                 removed,
             );
+        }
+        Change::WorkspaceStrategy(strategy) => {
+            let (mut header, counters) = header(transaction, key)?;
+            let workspace = header
+                .details
+                .workspace
+                .as_mut()
+                .ok_or("workspace setup is unavailable")?;
+            workspace.strategy = Some(strategy.clone());
+            transaction
+                .execute(
+                    "UPDATE threads SET body=?1 WHERE key=?2",
+                    params![codec::header(&header, &counters)?, key],
+                )
+                .map_err(failure)?;
+            return Ok(());
         }
         Change::Binding { provider, value } => {
             if let Some(value) = value {
@@ -966,15 +1078,7 @@ pub(super) fn window(
             return Ok(requested);
         }
     }
-    let floor:Option<i64>=connection.query_row("SELECT CASE WHEN (SELECT count(*) FROM turns WHERE thread=?1 AND state!='rolled_back')<=10 THEN 0 ELSE min(ordinal) END FROM (SELECT ordinal FROM turns WHERE thread=?1 AND state!='rolled_back' ORDER BY ordinal DESC LIMIT 10)",[key],|row|row.get(0)).map_err(failure)?;
-    Ok(Window {
-        turn: floor
-            .map(u64::try_from)
-            .transpose()
-            .map_err(failure)?
-            .unwrap_or(0),
-        item: 0,
-    })
+    page_floor(connection, key, None)
 }
 
 pub(super) fn snapshot(
@@ -1020,15 +1124,16 @@ pub(super) fn snapshot(
     for (version, item) in read::<Item>(
         connection,
         "items",
-        "thread=?1 AND turn_id IN (SELECT id FROM turns WHERE thread=?1 AND ordinal>=?2 AND state!='rolled_back')",
-        vec![key.into(), integer(window.turn)?.into()],
+        "thread=?1 AND turn_id IN (SELECT id FROM turns WHERE thread=?1 AND ordinal>=?2 AND state!='rolled_back') AND (position>=?3 OR turn_id IN (SELECT id FROM turns WHERE thread=?1 AND ordinal>?2))",
+        vec![
+            key.into(),
+            integer(window.turn)?.into(),
+            integer(window.item)?.into(),
+        ],
         ITEM,
         false,
     )? {
         let ordinal = *ordinals.get(&item.turn).ok_or("item turn is missing")?;
-        if ordinal == window.turn && item.position < window.item {
-            continue;
-        }
         rows.push(Row {
             key: Key::Item {
                 thread: id.clone(),

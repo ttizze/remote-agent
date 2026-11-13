@@ -69,6 +69,37 @@ pub(crate) fn resolve_saved_input(
     Some(Effect::execute(operation))
 }
 
+impl ResolveSavedInput {
+    fn unresolved<'a>(
+        &self,
+        snapshot: &'a Snapshot,
+    ) -> Result<
+        (
+            Option<agent_protocol::session::ProviderKind>,
+            &'a [agent_protocol::operations::Input],
+        ),
+        PeerError,
+    > {
+        let thread = snapshot
+            .sessions
+            .conversations
+            .get(&self.session)
+            .ok_or_else(|| PeerError::InvalidMessage("conversation is no longer open".into()))?;
+        let input = thread
+            .preparations
+            .iter()
+            .find(|preparation| {
+                preparation.submission.client_user_message_id == self.input
+                    && preparation.status == PreparationStatus::Unknown
+            })
+            .ok_or_else(|| PeerError::InvalidMessage("input is no longer unresolved".into()))?;
+        Ok((
+            thread.active_provider.or(self.session.provider),
+            &input.submission.input,
+        ))
+    }
+}
+
 impl Operation for ResolveSavedInput {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::InputRecovery {
@@ -84,33 +115,33 @@ impl Operation for ResolveSavedInput {
             if let Some(recovery) = snapshot.input.input_recoveries.get(&self.input) {
                 self.operation = recovery.operation;
             } else {
-                let (_, draft, store) = self
+                let (_, store) = self
                     .capture(snapshot, pane)
                     .map_err(|error| error.to_string())?;
-                if let Some(draft) = draft {
-                    Arc::make_mut(&mut snapshot.input.input_recoveries).insert(
-                        self.input.clone(),
-                        Arc::new(InputRecovery {
-                            restore: true,
-                            store,
-                            session: self.session.clone(),
-                            operation: self.operation,
-                            draft: Arc::new(draft),
-                        }),
-                    );
-                }
+                let (provider, input) = self
+                    .unresolved(snapshot)
+                    .map_err(|error| error.to_string())?;
+                let provider =
+                    provider.ok_or_else(|| "conversation provider is missing".to_string())?;
+                let draft = recover_draft(input, provider);
+                Arc::make_mut(&mut snapshot.input.input_recoveries).insert(
+                    self.input.clone(),
+                    Arc::new(InputRecovery {
+                        restore: true,
+                        store,
+                        session: self.session.clone(),
+                        operation: self.operation,
+                        draft: Arc::new(draft),
+                    }),
+                );
             }
         }
         Ok(())
     }
-    type Input = (String, Option<Draft>, uuid::Uuid);
+    type Input = (String, uuid::Uuid);
     fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
         if let Some(recovery) = snapshot.input.input_recoveries.get(&self.input) {
-            return Ok((
-                snapshot.connection.storage_scope.clone(),
-                recovery.restore.then(|| (*recovery.draft).clone()),
-                recovery.store,
-            ));
+            return Ok((snapshot.connection.storage_scope.clone(), recovery.store));
         }
         let store = snapshot
             .sessions
@@ -121,33 +152,11 @@ impl Operation for ResolveSavedInput {
             .ok_or_else(|| {
                 PeerError::InvalidMessage("conversation store identity is missing".into())
             })?;
-        let thread = snapshot
-            .sessions
-            .conversations
-            .get(&self.session)
-            .ok_or_else(|| PeerError::InvalidMessage("conversation is no longer open".into()))?;
-        let input = thread
-            .preparations
-            .iter()
-            .find(|preparation| {
-                preparation.submission.client_user_message_id == self.input
-                    && preparation.status == PreparationStatus::Unknown
-            })
-            .ok_or_else(|| PeerError::InvalidMessage("input is no longer unresolved".into()))?;
-        if !self.restore {
-            return Ok((snapshot.connection.storage_scope.clone(), None, store));
-        }
-        let provider = thread
-            .active_provider
-            .or(self.session.provider)
-            .ok_or_else(|| PeerError::InvalidMessage("conversation provider is missing".into()))?;
-        Ok((
-            snapshot.connection.storage_scope.clone(),
-            Some(recover_draft(&input.submission.input, provider)),
-            store,
-        ))
+        self.unresolved(snapshot)?;
+        Ok((snapshot.connection.storage_scope.clone(), store))
     }
-    type Output = (Self::Input, records::Acknowledged);
+
+    type Output = ((String, uuid::Uuid), records::Acknowledged);
     async fn run(
         &self,
         recovered: Self::Input,
@@ -171,7 +180,7 @@ impl Operation for ResolveSavedInput {
         self,
         snapshot: &mut Snapshot,
         _pane: &str,
-        ((scope, recovered, store), acknowledged): Self::Output,
+        ((scope, store), acknowledged): Self::Output,
         _current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
         if snapshot.connection.storage_scope != scope {
@@ -193,7 +202,7 @@ impl Operation for ResolveSavedInput {
         let recovered =
             match Arc::make_mut(&mut snapshot.input.input_recoveries).remove(&self.input) {
                 Some(saved) => saved.restore.then(|| (*saved.draft).clone()),
-                None => recovered,
+                None => None,
             };
         crate::client::command_result(acknowledged)?;
         if let Some(recovered) = recovered {
@@ -431,7 +440,12 @@ mod tests {
         wrong_store.cursor.store = uuid::Uuid::new_v4();
         assert!(
             make_operation()
-                .complete(&mut reopened, "", (captured.clone(), wrong_store), true)
+                .complete(
+                    &mut reopened,
+                    "",
+                    ((captured.0.clone(), captured.1), wrong_store),
+                    true
+                )
                 .is_err()
         );
         assert!(reopened.input.input_recoveries.contains_key(&input));
@@ -444,12 +458,17 @@ mod tests {
             .complete(
                 &mut reopened,
                 "",
-                (captured.clone(), acknowledged.clone()),
+                ((captured.0.clone(), captured.1), acknowledged.clone()),
                 true,
             )
             .unwrap();
         make_operation()
-            .complete(&mut reopened, "", (captured, acknowledged), true)
+            .complete(
+                &mut reopened,
+                "",
+                ((captured.0, captured.1), acknowledged),
+                true,
+            )
             .unwrap();
         assert_eq!(
             reopened.input.drafts[&DraftKey::from(&session)].text,
@@ -627,7 +646,7 @@ mod tests {
                     &mut snapshot,
                     "",
                     (
-                        captured,
+                        (captured.0, captured.1),
                         records::Acknowledged {
                             outcome: agent_protocol::conversation::Outcome::Accepted,
                             cursor: agent_protocol::sync::Cursor {

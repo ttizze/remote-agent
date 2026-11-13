@@ -2625,6 +2625,69 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
 }
 
 #[tokio::test]
+async fn gallery_drains_live_frames_while_image_hydration_waits_for_the_host() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let id = SessionRef::new(ProviderKind::Codex, "gallery".into()).unwrap();
+    let server_id = id.clone();
+    let server = tokio::spawn(async move {
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/conversation/subscribe");
+        let subscription =
+            serde_json::from_value(request["params"]["subscription"].clone()).unwrap();
+        writer.reply(&request, json!({"result":{"thread":{"id":server_id,"turns":[{"id":"image-turn","status":"completed","items":[{"id":"image","status":"completed","body":{"deferred":{"summary":{"imageGeneration":{"savedPath":"/image.png","data":null,"revisedPrompt":null}}}}}]}]}}})).await.unwrap();
+        let hydrate = read(&mut reader).await;
+        assert_eq!(hydrate["method"], "host/conversation/hydrate");
+        // Enough incompressible live rows to exceed QUIC's stream receive window.
+        // Hydration cannot finish until the client consumes the pending frames.
+        let mut seed = 1u64;
+        let text: String = (0..256 * 1024)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (b'!' + (seed % 90) as u8) as char
+            })
+            .collect();
+        let mut message = writer.replica(&server_id).snapshot().unwrap();
+        let agent_protocol::sync::Message::Snapshot { cursor, rows, .. } = &mut message else {
+            unreachable!()
+        };
+        cursor.sequence += 1;
+        for row in rows {
+            if let agent_protocol::sync::Content::Full(record) = &mut row.content
+                && let agent_protocol::conversation::records::Record::Thread(header) =
+                    Arc::make_mut(record)
+            {
+                header.state.name = text.clone();
+                row.version = cursor.sequence;
+            }
+        }
+        for _ in 0..64 {
+            writer
+                .send_rows(subscription, message.clone())
+                .await
+                .unwrap();
+        }
+        writer.reply(&hydrate, json!({"result":{"item":{"id":"image","status":"completed","body":{"inline":{"body":{"imageGeneration":{"savedPath":"/image.png","data":null,"revisedPrompt":null}}}}}}})).await.unwrap();
+        (reader, writer)
+    });
+    let operation = store.dispatch(Intent::LoadSessionImages(op::LoadSessionImages {
+        thread_id: id,
+    }));
+    let result = tokio::time::timeout(Duration::from_secs(10), operation)
+        .await
+        .unwrap()
+        .unwrap();
+    let Outcome::SessionImages { images } = result else {
+        panic!("expected images")
+    };
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].source, "/image.png");
+    let _host = server.await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
     use agent_core::state::TerminalPhase;
     use agent_protocol::operations::TerminalSize;
@@ -2898,7 +2961,7 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
             let request = read(&mut reader).await;
             assert_eq!(request["method"], "host/conversation/extend");
             assert_eq!(request["params"]["session"]["id"], "thread");
-            assert!(request["params"]["cached"]["sequence"].is_number());
+            assert!(request["params"]["subscription"].is_string());
             let response = if failed {
                 json!({"error":{"code":"request_failed","message":"temporary history failure"}})
             } else {
@@ -2985,7 +3048,7 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
         for (limit, complete) in [(20, false), (30, true)] {
             let request = read(&mut reader).await;
             assert_eq!(request["method"], "host/conversation/extend");
-            assert!(request["params"]["cached"]["sequence"].is_number());
+            assert!(request["params"]["subscription"].is_string());
             let items = if complete {
                 json!([{"id":"first-old","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"head","phase":"unknown"}}}}},{"id":"last-old","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"tail","phase":"unknown"}}}}}])
             } else {
@@ -3234,18 +3297,18 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
     assert_eq!(subscription.is_some(), !navigate);
     if let Some(subscription) = subscription {
         let current = store.snapshot();
-        let mut response: agent_protocol::models::ThreadResponse = serde_json::from_value(
+        let response: agent_protocol::models::ThreadResponse = serde_json::from_value(
             json!({"thread": {"id":source,"cwd":"/fixture","turns":[kept.clone()]}}),
         )
         .unwrap();
-        response.thread.transcript_version = Some(
-            current.sessions.replicas[&source]
-                .cursor()
-                .unwrap()
-                .sequence
-                + 1,
-        );
-        let replacement = host_fixture::rows::replica(response, 1).snapshot().unwrap();
+        let sequence = current.sessions.replicas[&source]
+            .cursor()
+            .unwrap()
+            .sequence
+            + 1;
+        let replacement = host_fixture::rows::replica_at(response, 1, sequence)
+            .snapshot()
+            .unwrap();
         writer.send_rows(subscription, replacement).await.unwrap();
     }
     writer
@@ -3274,20 +3337,20 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
                 .unwrap();
         };
         let current = store.snapshot();
-        let mut response: agent_protocol::models::ThreadResponse =
+        let response: agent_protocol::models::ThreadResponse =
             serde_json::from_value(json!({"thread":{"id":source,"cwd":"/fixture","turns":[kept]}}))
                 .unwrap();
-        response.thread.transcript_version = Some(
-            current.sessions.replicas[&source]
-                .cursor()
-                .unwrap()
-                .sequence
-                + 1,
-        );
+        let sequence = current.sessions.replicas[&source]
+            .cursor()
+            .unwrap()
+            .sequence
+            + 1;
         let opened = agent_protocol::conversation::records::Opened {
             session: source.clone(),
             subscription_id: uuid::Uuid::nil(),
-            initial: host_fixture::rows::replica(response, 1).snapshot().unwrap(),
+            initial: host_fixture::rows::replica_at(response, 1, sequence)
+                .snapshot()
+                .unwrap(),
         };
         writer
             .reply(&refresh, json!({"result":opened}))

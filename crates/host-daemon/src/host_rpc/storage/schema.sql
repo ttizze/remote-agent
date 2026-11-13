@@ -12,7 +12,7 @@ CREATE TABLE threads (
     provider TEXT,                  -- 会話の識別子。Bex で作った会話は provider を持たない
     id TEXT NOT NULL,
     seq INTEGER NOT NULL,
-    loaded INTEGER NOT NULL DEFAULT 1 CHECK (loaded IN (-1, 0, 1)), -- -1: unlisted parent, 0: catalog only, 1: imported
+    loaded INTEGER NOT NULL DEFAULT 1 CHECK (loaded IN (-1, 0, 1)), -- -1: retained but unlisted source or parent, 0: catalog only, 1: imported
     parent INTEGER,                 -- サブエージェントの親の行のキー
     cwd TEXT,                       -- 取り込んだ会話では不明なことがある
     updated_at INTEGER NOT NULL,    -- 一覧の順
@@ -167,7 +167,7 @@ CREATE TABLE jobs (
     attempts INTEGER NOT NULL,
     last_error TEXT,
     seq INTEGER NOT NULL DEFAULT 0, -- catalog progress shares the list cursor
-    body BLOB NOT NULL              -- 対象の SessionRef、要求・試行など、種類ごとの値
+    body BLOB NOT NULL              -- 対象の SessionRef、仕事の種類ごとの内容、種類ごとの値
 ) STRICT;
 CREATE INDEX jobs_due ON jobs (run_after, position) WHERE state = 'pending';
 CREATE INDEX jobs_lane ON jobs (lane, position);

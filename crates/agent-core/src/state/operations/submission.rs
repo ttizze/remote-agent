@@ -114,15 +114,8 @@ impl Operation for Respond {
     type Input = (crate::session::SessionRef, Arc<Request>);
     fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
         snapshot
-            .sessions
-            .conversations
-            .iter()
-            .find_map(|(id, thread)| {
-                thread
-                    .requests
-                    .get(&self.request_id)
-                    .map(|request| (id.clone(), request.clone()))
-            })
+            .request_with_session(&self.request_id)
+            .map(|(id, request)| (id.clone(), request.clone()))
             .ok_or_else(|| PeerError::InvalidMessage("server request is no longer pending".into()))
     }
     type Output = ();

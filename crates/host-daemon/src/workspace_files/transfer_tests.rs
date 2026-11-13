@@ -579,6 +579,14 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
         for iteration in 0..=12 {
             let request = fixture.requests.recv().await.unwrap();
             assert_eq!(request["method"], "host/conversation/hydrate");
+            let target = serde_json::from_value(request["params"]["session"].clone()).unwrap();
+            let replica = fixture.output.lock().await.replica(&target);
+            let version = replica.rows()[&agent_protocol::sync::Key::Item {
+                thread: target,
+                id: "item-0".into(),
+            }]
+                .version;
+            let cursor = replica.cursor().unwrap();
             let body = command(&format!("complete-{iteration}:{}", "x".repeat(BODY_SIZE)));
             let grant = fixture
                 .files
@@ -624,7 +632,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
                 .await
                 .reply(
                     &request,
-                    json!({"result":{"item":command(""),"transfer":grant}}),
+                    json!({"result":{"cursor":cursor,"version":version,"transfer":grant}}),
                 )
                 .await
                 .unwrap();

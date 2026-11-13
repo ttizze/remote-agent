@@ -92,7 +92,7 @@ async fn unreadable_details_keep_other_history_and_can_be_retried_individually()
         own(&service, &public, &imported);
         let connection = service.open_session();
         let subscription = Uuid::new_v4();
-        let opened = service
+        let mut opened = service
             .inner
             .conversation
             .owners
@@ -106,13 +106,9 @@ async fn unreadable_details_keep_other_history_and_can_be_retried_individually()
             )
             .await
             .unwrap();
-        let records::Message::Snapshot { cursor, .. } = opened.initial else {
-            panic!("snapshot")
-        };
         let request = Call::HydrateConversation(records::Hydrate {
             session: public.clone(),
             subscription,
-            cached: cursor,
             item: "answer".into(),
         });
         assert!(
@@ -133,19 +129,16 @@ async fn unreadable_details_keep_other_history_and_can_be_retried_individually()
         agent.unreadable.lock().unwrap().clear();
         let response: records::Hydrated = call(&service, connection.id(), request).await.unwrap();
         assert!(response.transfer.is_none());
-        let records::Message::Hydrate { row, .. } = response.messages.last().unwrap() else {
-            panic!("hydrated item")
-        };
-        let agent_protocol::sync::Content::Full(record) = &row.content else {
-            panic!("full body")
-        };
-        let records::Record::Item(item) = record.as_ref() else {
-            panic!("item")
-        };
-        assert!(!item.content.is_deferred());
-        assert!(
-            matches!(item.content.body(), ItemBody::AssistantText { text, .. } if text == &body)
-        );
+        let mut found = false;
+        while !found {
+            let message: records::Message = agent_protocol::protocol::decode(&opened.subscription.recv().await.unwrap()).unwrap();
+            if let records::Message::Hydrate { row, .. } = message {
+                let (agent_protocol::sync::Content::Full(record) | agent_protocol::sync::Content::Summary(record)) = row.content;
+                if let records::Record::Item(item) = record.as_ref() {
+                    found = !item.content.is_deferred() && matches!(item.content.body(), ItemBody::AssistantText { text, .. } if text == &body);
+                }
+            }
+        }
         // Once canonical, reading no longer needs the native body.
         agent.unreadable.lock().unwrap().insert("answer".into());
         Runtime::hydrate_native(&service, &public, &"answer".into())

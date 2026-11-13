@@ -199,13 +199,13 @@ fn a_preparing_task_reviews_no_changes_until_its_turn_starts() {
         let current = &previous.sessions.replicas[&id];
         let mut thread = previous.sessions.conversations[&id].as_ref().clone();
         thread.preparations.clear();
-        thread.transcript_version = Some(current.cursor().unwrap().sequence + 1);
-        let replica = crate::test_conversations::replica(
+        let replica = crate::test_conversations::replica_at(
             crate::models::ThreadResponse {
                 thread,
                 ..Default::default()
             },
             current.subscription(),
+            current.cursor().unwrap().sequence + 1,
         );
         super::super::conversations::received(previous, subscription, replica.snapshot().unwrap())
     };
@@ -253,13 +253,11 @@ fn replacing_history_drops_removed_turns_pages_and_late_reads_without_losing_the
                 .get_mut(&id)
                 .unwrap(),
         );
-        thread.transcript_version = Some(1);
         thread.history_cursor = Some("10".into());
         thread.history_has_more = Some(true);
         let before = thread.clone();
         let mut replacement = before.clone();
         replacement.turns = Some(Vec::new());
-        replacement.transcript_version = Some(2);
         replacement.history_cursor = None;
         replacement.history_has_more = Some(false);
         Arc::make_mut(&mut state.input.drafts).insert(
@@ -269,20 +267,22 @@ fn replacing_history_drops_removed_turns_pages_and_late_reads_without_losing_the
                 ..Default::default()
             }),
         );
-        let replica = crate::test_conversations::replica(
+        let replica = crate::test_conversations::replica_at(
             crate::models::ThreadResponse {
                 thread: before.clone(),
                 ..Default::default()
             },
             1,
+            1,
         );
         Arc::make_mut(&mut state.sessions.replicas).insert(id.clone(), Arc::new(replica));
-        let replacement = crate::test_conversations::replica(
+        let replacement = crate::test_conversations::replica_at(
             crate::models::ThreadResponse {
                 thread: replacement,
                 ..Default::default()
             },
             1,
+            2,
         )
         .snapshot()
         .unwrap();
@@ -301,12 +301,13 @@ fn replacing_history_drops_removed_turns_pages_and_late_reads_without_losing_the
         assert_eq!(next.sessions.subscriptions, state.sessions.subscriptions);
         assert_eq!(next.input.drafts, state.input.drafts);
         let late = crate::test_conversations::Opened {
-            replica: crate::test_conversations::replica(
+            replica: crate::test_conversations::replica_at(
                 crate::models::ThreadResponse {
                     thread: before,
                     ..Default::default()
                 },
                 0,
+                1,
             ),
             subscription: uuid::Uuid::new_v4(),
         };

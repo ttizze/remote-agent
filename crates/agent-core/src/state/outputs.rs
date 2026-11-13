@@ -160,7 +160,7 @@ pub(super) fn overlay(
             } = Arc::make_mut(item).body_mut()
             {
                 *output = tail.text.clone();
-                *output_omitted = tail.offset != 0;
+                *output_omitted = tail.truncated;
             }
         }
     }
@@ -284,7 +284,8 @@ mod tests {
             &state,
             subscription,
             OutputUpdate::Append {
-                offset: 0,
+                from: 0,
+                through: 1,
                 text: "live command bytes".into(),
             },
         );
@@ -314,10 +315,7 @@ mod tests {
         let (unchanged, _) = received(
             &live,
             uuid::Uuid::new_v4(),
-            OutputUpdate::Tail(Output {
-                offset: 0,
-                text: "foreign".into(),
-            }),
+            OutputUpdate::Tail(Output::new(0, "foreign")),
         );
         assert_eq!(unchanged, live);
         live.open_pane("side".into(), "/project".into());
@@ -333,7 +331,8 @@ mod tests {
             &live,
             subscription,
             OutputUpdate::Append {
-                offset: 1000,
+                from: 1000,
+                through: 1001,
                 text: "missing".into(),
             },
         );

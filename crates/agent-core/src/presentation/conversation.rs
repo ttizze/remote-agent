@@ -1369,6 +1369,50 @@ mod preparation_tests {
     }
 
     #[test]
+    fn a_running_turn_hides_only_startup_rows_and_keeps_recovery_rows() {
+        for (status, recovery) in [
+            (PreparationStatus::Preparing, false),
+            (PreparationStatus::Sending, false),
+            (
+                PreparationStatus::Failed {
+                    error: Default::default(),
+                },
+                true,
+            ),
+            (PreparationStatus::Unknown, true),
+        ] {
+            let mut thread = preparing_thread();
+            thread.preparations[0].status = status;
+            thread.turns = Some(vec![Arc::new(models::Turn {
+                id: "running".into(),
+                status: models::TurnStatus::Running,
+                ..Default::default()
+            })]);
+            let projected = project_conversation(
+                UiLanguage::Japanese,
+                &Default::default(),
+                &Default::default(),
+                Arc::new(thread),
+                &None,
+            );
+            assert_eq!(
+                projected
+                    .session_rows
+                    .iter()
+                    .any(|row| row.id == "preparation:input"),
+                recovery
+            );
+            assert!(
+                projected
+                    .turns
+                    .iter()
+                    .flat_map(|turn| turn.rows.iter())
+                    .any(|row| matches!(row.content, ConversationRowContent::InProgress { .. }))
+            );
+        }
+    }
+
+    #[test]
     fn pending_input_edits_do_not_change_saved_turn_rows() {
         let mut thread = preparing_thread();
         thread.turns = Some(vec![Arc::new(models::Turn {
@@ -4553,6 +4597,7 @@ mod history_notice_tests {
     #[test]
     fn history_headings_translate_without_changing_issue_identifiers() {
         for (kind, expected) in [
+            (HistoryReadKind::Loading, "Loading history."),
             (HistoryReadKind::Partial, "Some history is shown."),
             (
                 HistoryReadKind::Incomplete,

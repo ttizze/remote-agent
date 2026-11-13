@@ -25,8 +25,16 @@ impl Operation for AddProject {
 }
 
 pub use agent_protocol::operations::ListAgents;
-pub use agent_protocol::operations::ListProjectSessions;
-pub use agent_protocol::operations::ListSessions;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ListSessions {
+    pub query: crate::models::ListQuery,
+}
+impl ListSessions {
+    pub fn new(query: crate::models::ListQuery) -> Self {
+        Self { query }
+    }
+}
 
 pub use agent_protocol::operations::ReadListDecorations;
 

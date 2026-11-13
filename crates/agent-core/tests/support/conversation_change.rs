@@ -1,5 +1,5 @@
 //! Convert native test facts into the complete rows a Host publishes.
-use super::rows::replica;
+use super::rows::{replica, replica_at};
 use agent_core::state::Snapshot;
 use agent_protocol::{conversation::records, models::ThreadResponse};
 use std::sync::Arc;
@@ -35,14 +35,14 @@ pub fn changed(
             ))
         });
     let sequence = snapshot.sessions.replicas[&id].cursor().unwrap().sequence + 1;
-    let mut thread = change.apply(&current).expect("valid native fixture");
-    thread.transcript_version = Some(sequence);
-    let rows = replica(
+    let thread = change.apply(&current).expect("valid native fixture");
+    let rows = replica_at(
         ThreadResponse {
             thread,
             ..Default::default()
         },
         generation,
+        sequence,
     )
     .snapshot()
     .unwrap();

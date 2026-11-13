@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod output;
-pub use output::{Output, OutputError, OutputUpdate, TAIL_BYTES};
+pub use output::{Output, OutputError, OutputUpdate, TAIL_CHARS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -129,6 +129,7 @@ pub enum ApplyError {
 pub struct Replica<C: Ord, T> {
     scope: Scope<C>,
     window: Option<Window>,
+    expanded: bool,
     cursor: Option<Cursor>,
     rows: BTreeMap<Key<C>, Row<C, T>>,
     subscription: u64,
@@ -148,6 +149,7 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
         Self {
             scope,
             window: None,
+            expanded: false,
             cursor: None,
             rows: BTreeMap::new(),
             subscription,
@@ -169,6 +171,9 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
     }
     pub fn window(&self) -> Option<Window> {
         self.window
+    }
+    pub fn expanded(&self) -> bool {
+        self.expanded
     }
     pub fn cursor(&self) -> Option<Cursor> {
         self.cursor
@@ -210,6 +215,7 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
                 }
                 next.rows.clear();
                 next.window = window;
+                next.expanded = false;
                 next.insert(rows, 0, cursor.sequence)?;
                 next.cursor = Some(cursor);
             }
@@ -255,6 +261,7 @@ impl<C: Ord + Clone, T: Clone> Replica<C, T> {
                     return Err(ApplyError::Window);
                 }
                 next.window = Some(window);
+                next.expanded |= window != old;
                 next.insert(rows, 0, cursor.sequence)?;
             }
             Message::Hydrate { cursor, row } => {

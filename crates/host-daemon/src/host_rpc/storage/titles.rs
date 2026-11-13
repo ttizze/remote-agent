@@ -118,7 +118,6 @@ impl Storage {
             let key = thread_key(&transaction, id)?;
             let (mut header, counters) = rows::header(&transaction, key)?;
             let mut committed = Committed {
-                state: Some(rows::load(&transaction, key, self.process)?),
                 step: Step::default(),
                 cursor: cursor(&transaction)?,
                 rows: vec![],

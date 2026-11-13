@@ -88,7 +88,6 @@ impl HostRpcService {
                 thread.status,
                 thread.turns.as_deref().unwrap_or_default(),
                 !thread.requests.is_empty(),
-                thread.submissions.values(),
             );
             let Some(cwd) = thread.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) else {
                 if active {
@@ -344,31 +343,16 @@ impl HostRpcService {
     }
 }
 
-pub(super) fn worktree_active<'a>(
+pub(super) fn worktree_active(
     status: agent_protocol::models::SessionStatus,
     turns: &[Arc<agent_protocol::models::Turn>],
     has_requests: bool,
-    mut submissions: impl Iterator<Item = &'a agent_protocol::session::SubmissionDelivery>,
 ) -> bool {
-    use agent_protocol::{execution::TurnStatus, session::SubmissionDelivery};
     agent_protocol::models::task_active(None, status)
         || has_requests
-        || turns.iter().any(|turn| turn.status == TurnStatus::Running)
-        || submissions.any(|delivery| match delivery {
-            SubmissionDelivery::Rejected => false,
-            SubmissionDelivery::Accepted { turn_id: Some(id) } => {
-                // Completed receipts can remain for replay after interruption.
-                // Only a known finished turn proves that input no longer owns work.
-                !turns.iter().any(|turn| {
-                    &turn.id == id
-                        && matches!(
-                            turn.status,
-                            TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
-                        )
-                })
-            }
-            _ => true,
-        })
+        || turns
+            .iter()
+            .any(|turn| turn.status == agent_protocol::execution::TurnStatus::Running)
 }
 
 #[cfg(test)]
@@ -472,7 +456,7 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn worktree_occupancy_uses_live_state_when_source_history_is_incomplete() {
+    async fn worktree_occupancy_uses_the_imported_status_when_source_history_is_incomplete() {
         use super::*;
         use crate::host_rpc::runtime::native_fixture::{NativeAgent, own};
         use agent_protocol::{
@@ -715,14 +699,8 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn worktree_activity_requires_finished_delivery_and_no_other_live_work() {
-        use super::worktree_active;
-        use agent_protocol::{
-            execution::TurnStatus, models::SessionStatus, session::SubmissionDelivery,
-        };
-        let receipt = SubmissionDelivery::Accepted {
-            turn_id: Some("accepted".into()),
-        };
+    fn worktree_activity_includes_running_turns_and_unanswered_requests() {
+        use agent_protocol::{execution::TurnStatus, models::SessionStatus};
         for status in [
             TurnStatus::Running,
             TurnStatus::Unknown,
@@ -731,50 +709,25 @@ pub(super) mod tests {
             TurnStatus::Interrupted,
         ] {
             let turns = [std::sync::Arc::new(agent_protocol::models::Turn {
-                id: "accepted".into(),
                 status,
                 ..Default::default()
             })];
-            let busy = |session, requests, deliveries: &[SubmissionDelivery]| {
-                worktree_active(session, &turns, requests, deliveries.iter())
-            };
             assert_eq!(
-                busy(SessionStatus::Idle, false, &[]),
+                super::worktree_active(SessionStatus::Idle, &turns, false),
                 status == TurnStatus::Running
             );
-            assert_eq!(
-                busy(SessionStatus::Idle, false, std::slice::from_ref(&receipt)),
-                matches!(status, TurnStatus::Running | TurnStatus::Unknown)
-            );
-            assert!(busy(SessionStatus::Running, false, &[]));
-            assert!(busy(SessionStatus::Idle, true, &[]));
-            for unresolved in [
-                SubmissionDelivery::Sending,
-                SubmissionDelivery::Unknown,
-                SubmissionDelivery::Accepted { turn_id: None },
-                SubmissionDelivery::Accepted {
-                    turn_id: Some("other".into()),
-                },
-            ] {
-                assert!(busy(
-                    SessionStatus::Idle,
-                    false,
-                    &[receipt.clone(), unresolved]
-                ));
-            }
+            assert!(super::worktree_active(
+                SessionStatus::Running,
+                &turns,
+                false
+            ));
+            assert!(super::worktree_active(
+                SessionStatus::Preparing,
+                &turns,
+                false
+            ));
+            assert!(super::worktree_active(SessionStatus::Idle, &turns, true));
         }
-        assert!(!worktree_active(
-            SessionStatus::Idle,
-            &[],
-            false,
-            [SubmissionDelivery::Rejected].iter()
-        ));
-        assert!(worktree_active(
-            SessionStatus::Idle,
-            &[],
-            false,
-            [receipt].iter()
-        ));
     }
 
     #[tokio::test]

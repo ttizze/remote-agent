@@ -531,10 +531,15 @@ macro_rules! snapshot {
             pub any: bool,
             $(pub $field: bool,)*
         }
-        #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
         #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
         pub struct Snapshot {
             $($(#[$meta])* pub $field: $type,)*
+        }
+        impl Default for Snapshot {
+            fn default() -> Self {
+                Self { $($field: Default::default(),)* }
+            }
         }
         impl Changed {
             pub(crate) fn selected_pane(mut self, changed: bool) -> Self {
@@ -630,10 +635,17 @@ impl Snapshot {
     }
 
     pub fn request(&self, id: &str) -> Option<&Arc<Request>> {
+        self.request_with_session(id).map(|(_, request)| request)
+    }
+
+    pub(crate) fn request_with_session(
+        &self,
+        id: &str,
+    ) -> Option<(&crate::session::SessionRef, &Arc<Request>)> {
         self.sessions
             .conversations
-            .values()
-            .find_map(|thread| thread.requests.get(id))
+            .iter()
+            .find_map(|(session, thread)| thread.requests.get(id).map(|request| (session, request)))
     }
 }
 
@@ -1002,14 +1014,6 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         }
 
         Intent::ListSessions(operation) => return list_sync::query(next, operation.query, true),
-        Intent::ListProjectSessions(operation) => {
-            let projects = if next.lists.list_query.search_term.trim().is_empty() { &mut next.lists.expanded_projects } else { &mut next.lists.search_expanded_projects };
-            if projects.contains_key(&operation.project_id) {
-                Arc::make_mut(projects).insert(operation.project_id, operation.limit);
-            }
-            let effects = list_sync::project(&mut next, false);
-            return (next, effects);
-        }
         Intent::SetWorkspaceComparison { cwd, base_ref } => {
             if cwd.is_empty() || next.selected_directory(next.panes.get(pane_id).expect("admitted pane exists")) != cwd {
                 return (next, Vec::new());
@@ -1020,14 +1024,13 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             return (next, effects);
         }
         Intent::RefreshProject { project_id } => {
-            let effects=list_sync::refresh_project(&next,&project_id);
+            let effects = list_sync::refresh_project(&next, &project_id);
             return (next, effects);
         }
         Intent::SetProjectPinned { project_id, pinned } => projects::update(&mut next, &project_id, |p| p.pinned = pinned),
         Intent::ReorderProject { project_id, target_id, after } => projects::reorder(&mut next, &project_id, &target_id, after),
         Intent::MoveChatToProject { thread_id, project_id } => {
             projects::move_chat(&mut next, &thread_id, &project_id);
-
         },
         Intent::EditProject { project_id, name, section } => {
             match projects::validate_project_labels(&name, &section) {
@@ -1083,9 +1086,9 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             return (next, effects);
         }
         Intent::ExpandProjects => {
-            let mut query=(*next.lists.list_query).clone();
-            query.project_limit=query.project_limit.saturating_add(10);
-            return list_sync::query(next,query,false);
+            let mut query = (*next.lists.list_query).clone();
+            query.project_limit = query.project_limit.saturating_add(10);
+            return list_sync::query(next, query, false);
         }
 
         Intent::ShowThreadList => {
@@ -1903,7 +1906,7 @@ fn submission(
     Destination {
         thread_id,
         cwd,
-        draft_key,
+        mut draft_key,
     }: Destination,
     draft: Arc<Draft>,
     client_user_message_id: agent_protocol::ids::ClientInputId,
@@ -1923,7 +1926,10 @@ fn submission(
         );
         return (next, Vec::new());
     }
-    if thread_id.is_none() && !matches!(draft_key, DraftKey::Session { .. }) {
+    if thread_id.is_none()
+        && !matches!(draft_key, DraftKey::Session { .. })
+        && !draft_key.is_empty()
+    {
         let mut next = previous.clone();
         next.fail_operation(
             op::OperationKey::Submission { draft_key },
@@ -1943,6 +1949,21 @@ fn submission(
             reason,
         );
         return (next, Vec::new());
+    }
+    if thread_id.is_none() && draft_key.is_empty() {
+        let address = DraftKey::from(crate::session::SessionRef {
+            provider: None,
+            id: uuid::Uuid::new_v4().to_string(),
+        });
+        if let Some(draft) = Arc::make_mut(&mut next.input.drafts).remove(&draft_key) {
+            Arc::make_mut(&mut next.input.drafts).insert(address.clone(), draft);
+        }
+        for pane in Arc::make_mut(&mut next.panes.0).values_mut() {
+            if pane.navigation.thread_id.is_none() && pane.navigation.draft_key == draft_key {
+                Arc::make_mut(&mut Arc::make_mut(pane).navigation).draft_key = address.clone();
+            }
+        }
+        draft_key = address;
     }
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
     if let Some(current) = shared_mut(&mut next.input.drafts, &draft_key) {

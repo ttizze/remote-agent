@@ -1485,25 +1485,26 @@ async fn run(
     let mut introduction = connection.introduction.take();
     let mut held = Vec::new();
     loop {
-        let unused: Vec<_> = subscriptions
-            .keys()
-            .filter(|id| {
-                !updates
-                    .borrow()
-                    .sessions
-                    .subscriptions
-                    .values()
-                    .any(|current| current == *id)
-                    && updates.borrow().lists.subscription.as_ref() != Some(*id)
-                    && !updates
-                        .borrow()
+        let unused: Vec<_> = {
+            let snapshot = updates.borrow().clone();
+            subscriptions
+                .keys()
+                .filter(|id| {
+                    !snapshot
                         .sessions
-                        .live_outputs
+                        .subscriptions
                         .values()
-                        .any(|(current, _)| current == *id)
-            })
-            .copied()
-            .collect();
+                        .any(|current| current == *id)
+                        && snapshot.lists.subscription.as_ref() != Some(*id)
+                        && !snapshot
+                            .sessions
+                            .live_outputs
+                            .values()
+                            .any(|(current, _)| current == *id)
+                })
+                .copied()
+                .collect()
+        };
         for id in unused {
             subscriptions.remove(&id);
         }
@@ -2542,7 +2543,6 @@ mod tests {
                     "new typing"
                 }
             );
-            assert!(snapshot.sessions.pending_submissions.is_empty());
             assert_eq!(
                 snapshot.sessions.conversations[&session].preparations.len(),
                 1,

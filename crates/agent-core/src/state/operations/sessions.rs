@@ -18,47 +18,19 @@ impl Operation for ReadHistory {
             session: self.session.clone(),
         })
     }
-    type Input = super::super::conversations::ReadScope;
+    type Input = uuid::Uuid;
     fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
         super::super::conversations::read_scope(snapshot, &self.session)
     }
-    type Output = super::super::conversations::ReadRows;
-    async fn run(
-        &self,
-        scope: Self::Input,
-        context: &mut Execution<'_>,
-    ) -> Result<Self::Output, PeerError> {
-        let result = context
+    type Output = ();
+    async fn run(&self, scope: Self::Input, context: &mut Execution<'_>) -> Result<(), PeerError> {
+        context
             .call(&agent_protocol::conversation::records::Extend {
                 session: self.session.clone(),
-                subscription: scope.subscription,
-                cached: scope.cursor,
+                subscription: scope,
             })
-            .await;
-        Ok(super::super::conversations::ReadRows { scope, result })
-    }
-    fn complete(
-        self,
-        snapshot: &mut Snapshot,
-        _pane: &str,
-        output: Self::Output,
-        current: bool,
-    ) -> Result<Vec<Effect>, PeerError> {
-        use super::super::conversations::ReadResult;
-        match super::super::conversations::finish_read(snapshot, &self.session, output, current)? {
-            ReadResult::Applied(effects) => Ok(effects),
-            ReadResult::Retry
-                if snapshot
-                    .sessions
-                    .replicas
-                    .get(&self.session)
-                    .and_then(|replica| replica.window())
-                    .is_some_and(|window| window.turn != 0 || window.item != 0) =>
-            {
-                Ok(vec![Effect::continuation(self)])
-            }
-            _ => Ok(Vec::new()),
-        }
+            .await?;
+        Ok(())
     }
 }
 
@@ -115,7 +87,7 @@ impl Operation for ReadItem {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::Item { item: self.clone() })
     }
-    type Input = super::super::conversations::ReadScope;
+    type Input = uuid::Uuid;
     fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
         if item_source(self, snapshot).is_none() {
             return Err(PeerError::InvalidMessage(
@@ -127,46 +99,58 @@ impl Operation for ReadItem {
     fn scheduling(&self) -> Scheduling {
         Scheduling::Item(self.clone())
     }
-    type Output = super::super::conversations::ReadRows;
+    type Output = (uuid::Uuid, Option<(u64, crate::models::Item)>);
     async fn run(
         &self,
         scope: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        let result = context
+        let response = context
             .call(&agent_protocol::conversation::records::Hydrate {
                 session: self.thread_id.clone(),
-                subscription: scope.subscription,
-                cached: scope.cursor,
+                subscription: scope,
                 item: self.item_id.clone(),
             })
-            .await;
-        let result = match result {
-            Ok(response) => {
-                crate::client::resolve_hydration(response, &self.item_id, context.session).await
-            }
-            Err(error) => Err(error),
-        };
-        Ok(super::super::conversations::ReadRows { scope, result })
+            .await?;
+        let body =
+            crate::client::resolve_hydration(response, &self.item_id, context.session).await?;
+        Ok((scope, body))
     }
     fn complete(
         self,
         snapshot: &mut Snapshot,
         _pane: &str,
-        output: Self::Output,
+        (subscription, body): Self::Output,
         current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
-        use super::super::conversations::ReadResult;
-        match super::super::conversations::finish_read(snapshot, &self.thread_id, output, current)?
-        {
-            ReadResult::Applied(effects) => Ok(effects),
-            ReadResult::Retry
-                if item_source(&self, snapshot).is_some_and(|item| item.is_deferred()) =>
-            {
-                Ok(vec![Effect::continuation(self)])
-            }
-            _ => Ok(Vec::new()),
+        if !current || snapshot.sessions.subscriptions.get(&self.thread_id) != Some(&subscription) {
+            return Ok(Vec::new());
         }
+        if let Some((version, item)) = body {
+            let valid = snapshot
+                .sessions
+                .replicas
+                .get(&self.thread_id)
+                .and_then(|replica| {
+                    replica.rows().get(&agent_protocol::sync::Key::Item {
+                        thread: self.thread_id.clone(),
+                        id: self.item_id.clone(),
+                    })
+                })
+                .is_some_and(|row| row.version == version);
+            if !valid && item_source(&self, snapshot).is_some_and(|item| item.is_deferred()) {
+                // This only retries invalidated large body bytes, never state
+                // frames: metadata and paging arrive once on the subscription.
+                return Ok(vec![Effect::continuation(self)]);
+            }
+            return super::super::conversations::hydrate_body(
+                snapshot,
+                &self.thread_id,
+                version,
+                item,
+            );
+        }
+        Ok(Vec::new())
     }
 }
 

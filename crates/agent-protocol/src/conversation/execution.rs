@@ -81,9 +81,10 @@ pub(super) fn event(state: &State, event: Event, context: Context) -> Step {
             else {
                 return Step::default();
             };
-            let Some(turn) = state.turns.get(&attempt.turn).filter(|turn| matches!(turn.state, TurnState::Running { interrupt: Some(current) } if current == action)) else { return Step::default(); };
+            let Some(turn) = state.turns.get(&attempt.turn).filter(|turn| matches!(&turn.state, TurnState::Running { interrupt: Some(current) } if current.action == action)) else { return Step::default(); };
             if error.is_none() && background.is_empty() {
-                return finish(state, turn, TurnState::Completed, context.now);
+                let result = finish(state, turn, TurnState::Completed, context.now);
+                return after_completion(state, turn, result, context);
             }
             Step {
                 changes: vec![Change::Turn(Turn {
@@ -458,9 +459,10 @@ fn delivered(state: &State, id: &ClientInputId, action: Uuid, context: Context) 
             completed_at: None,
             duration_ms: None,
             retry_count: 0,
+            compaction: InputPart::is_compaction(&input.content.parts),
             error: None,
             state: TurnState::Running {
-                interrupt: delivery.interrupt,
+                interrupt: delivery.interrupt.clone(),
             },
         }));
         changes.push(Change::Attempt {
@@ -479,9 +481,10 @@ fn delivered(state: &State, id: &ClientInputId, action: Uuid, context: Context) 
         changes,
         actions: delivery
             .interrupt
-            .map(|action| Action::Interrupt {
+            .as_ref()
+            .map(|interrupt| Action::Interrupt {
                 attempt: attempt.clone(),
-                action,
+                action: interrupt.action,
                 background: false,
             })
             .into_iter()
@@ -592,7 +595,10 @@ fn observe(state: &State, turn: &Turn, observation: Observation, context: Contex
     {
         return Step::default();
     }
-    let completed = matches!(observation, Observation::Completed);
+    let ending = matches!(
+        observation,
+        Observation::Completed | Observation::Interrupted | Observation::Failed(_)
+    );
     let stopping = matches!(turn.state, TurnState::Running { interrupt: Some(_) });
     let result = match observation {
         Observation::Timing {
@@ -609,9 +615,6 @@ fn observe(state: &State, turn: &Turn, observation: Observation, context: Contex
             outcome: Outcome::Accepted,
             ..Step::default()
         },
-        Observation::Retry { .. } if stopping => {
-            finish(state, turn, TurnState::Interrupted, context.now)
-        }
         Observation::Background { tasks }
             if stopping && crate::execution::background_holds_completion(&tasks) =>
         {
@@ -628,7 +631,6 @@ fn observe(state: &State, turn: &Turn, observation: Observation, context: Contex
             ..Default::default()
         },
         Observation::Interrupted => finish(state, turn, TurnState::Interrupted, context.now),
-        Observation::Retry { at } => retry(state, turn, at, turn.error.clone()),
         Observation::Background { tasks } => {
             if tasks.is_empty() {
                 return commands::append_advance(
@@ -685,7 +687,33 @@ fn observe(state: &State, turn: &Turn, observation: Observation, context: Contex
             unreachable!("resolved requests are independent of the active attempt")
         }
     };
-    if completed {
+    if ending {
+        return after_completion(state, turn, result, context);
+    }
+    result
+}
+
+fn after_completion(state: &State, turn: &Turn, mut result: Step, context: Context) -> Step {
+    if let TurnState::Running {
+        interrupt: Some(interrupt),
+    } = &turn.state
+        && let Some(id) = &interrupt.next_input
+    {
+        // Finishing an interrupted turn normally holds the queue. A promotion
+        // preserves its previous hold and grants a bypass only to the chosen input.
+        result.changes.push(Change::Thread(state.thread.clone()));
+        let next = state.apply(&result.changes);
+        let delivery = commands::dispatch(&next, id, context, DeliveryMode::Direct);
+        result.changes.extend(delivery.changes);
+        result.actions.extend(delivery.actions);
+        return result;
+    }
+    if state
+        .apply(&result.changes)
+        .turns
+        .get(&turn.id)
+        .is_some_and(|turn| turn.state == TurnState::Completed)
+    {
         return commands::append_advance(state, result, context);
     }
     result
@@ -875,11 +903,6 @@ fn retry(state: &State, turn: &Turn, at: i64, error: Option<ExecutionError>) -> 
     }
 }
 
-fn is_compaction(body: &ItemBody) -> bool {
-    matches!(body, ItemBody::UserMessage { content, .. }
-        if matches!(&content[..], [crate::items::MessagePart::Text { text }] if text.trim().eq_ignore_ascii_case("/compact")))
-}
-
 fn failed(state: &State, turn: &Turn, error: Option<ExecutionError>, context: Context) -> Step {
     let error = error.or_else(|| turn.error.clone()).unwrap_or_default();
     const DELAYS: [i64; 5] = [2_000, 4_000, 8_000, 16_000, 30_000];
@@ -887,10 +910,7 @@ fn failed(state: &State, turn: &Turn, error: Option<ExecutionError>, context: Co
         return finish(state, turn, TurnState::Interrupted, context.now);
     }
     if turn.provider == ProviderKind::Codex
-        && !state
-            .items
-            .values()
-            .any(|item| item.turn == turn.id && is_compaction(&item.body))
+        && !turn.compaction
         && error.provider_code.as_deref() == Some("serverOverloaded")
         && !error.retry.as_ref().is_some_and(|retry| retry.retrying)
         && let Some(delay) = DELAYS.get(usize::from(turn.retry_count))
@@ -943,6 +963,7 @@ fn observed_start(
                 completed_at: None,
                 duration_ms: None,
                 retry_count: 0,
+                compaction: false,
                 error: None,
                 state: TurnState::Running { interrupt: None },
             }),

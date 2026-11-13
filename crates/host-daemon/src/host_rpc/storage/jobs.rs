@@ -116,15 +116,6 @@ impl Storage {
                 }
                 claims
             };
-            let mut claims=claims;
-            for claim in &mut claims {
-                if let Work::Catalog {progress,..} = &mut claim.work {
-                    if *progress==CatalogProgress::Ready {*progress=CatalogProgress::Scanning;}
-                    let sequence=Self::advance(&transaction)?;
-                    let (_,body)=codec::enum_parts(&claim.work)?;
-                    transaction.execute("UPDATE jobs SET seq=?1,body=?2 WHERE id=?3",params![integer(sequence.sequence)?,body,claim.id.to_string()]).map_err(failure)?;
-                }
-            }
             transaction.commit().map_err(failure)?;
             Ok(claims)
         })
@@ -139,9 +130,10 @@ impl Storage {
     ) -> Result<bool, String> {
         self.with(|connection| {
             let transaction=connection.transaction().map_err(failure)?;
-            let kind: Option<String> = transaction.query_row("SELECT kind FROM jobs WHERE id=?1 AND state='running' AND attempts=?2",params![id.to_string(),integer(attempt)?],|row|row.get(0)).optional().map_err(failure)?;
-            let sequence=if kind.as_deref()==Some("catalog") {Self::advance(&transaction)?.sequence} else {0};
-            let changed=transaction.execute("UPDATE jobs SET state='pending',run_after=?1,last_error=?2,seq=?5 WHERE id=?3 AND state='running' AND attempts=?4",params![at,error,id.to_string(),integer(attempt)?,integer(sequence)?]).map_err(failure)?==1;
+            let previous: Option<(String, Option<String>, i64)> = transaction.query_row("SELECT kind,last_error,seq FROM jobs WHERE id=?1 AND state='running' AND attempts=?2",params![id.to_string(),integer(attempt)?],|row|Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(failure)?;
+            let Some((kind, previous_error, previous_sequence)) = previous else { return Ok(false); };
+            let sequence=if kind == "catalog" && previous_error.as_deref() != Some(error) {integer(Self::advance(&transaction)?.sequence)?} else {previous_sequence};
+            let changed=transaction.execute("UPDATE jobs SET state='pending',run_after=?1,last_error=?2,seq=?5 WHERE id=?3 AND state='running' AND attempts=?4",params![at,error,id.to_string(),integer(attempt)?,sequence]).map_err(failure)?==1;
             transaction.commit().map_err(failure)?;
             Ok(changed)
         })

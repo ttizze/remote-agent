@@ -1,0 +1,305 @@
+{
+  "reference": "T3 Code 4c361199f4 packages/shared/src/terminalOutput.ts",
+  "cases": [
+    {
+      "name": "progress",
+      "steps": [
+        {
+          "text": "fixed\nloading 10%\rloading 99%\u001b[K",
+          "repeat": 1,
+          "expected": "fixed\nloading 99%",
+          "truncated": false
+        }
+      ],
+      "after": "fixed\nloading 99%!"
+    },
+    {
+      "name": "backspace",
+      "steps": [
+        {
+          "text": "abcdef\u001b[3D!?",
+          "repeat": 1,
+          "expected": "abc!?f",
+          "truncated": false
+        },
+        {
+          "text": "\b#",
+          "repeat": 1,
+          "expected": "abc!#f",
+          "truncated": false
+        }
+      ],
+      "after": "abc!#!"
+    },
+    {
+      "name": "cursor",
+      "steps": [
+        {
+          "text": "one\ntwo\nthree\u001b[2A\u001b[1GONE",
+          "repeat": 1,
+          "expected": "ONE\ntwo\nthree",
+          "truncated": false
+        },
+        {
+          "text": "\u001b[2B\u001b[6G!",
+          "repeat": 1,
+          "expected": "ONE\ntwo\nthree!",
+          "truncated": false
+        }
+      ],
+      "after": "ONE\ntwo\nthree!!"
+    },
+    {
+      "name": "saved cursor",
+      "steps": [
+        {
+          "text": "abcdef\u001b[3D\u001b7\nnext",
+          "repeat": 1,
+          "expected": "abcdef\nnext",
+          "truncated": false
+        },
+        {
+          "text": "\u001b8!",
+          "repeat": 1,
+          "expected": "abc!ef\nnext",
+          "truncated": false
+        }
+      ],
+      "after": "abc!!f\nnext"
+    },
+    {
+      "name": "saved CSI",
+      "steps": [
+        {
+          "text": "abcdef\u001b[2D\u001b[s\nnext",
+          "repeat": 1,
+          "expected": "abcdef\nnext",
+          "truncated": false
+        },
+        {
+          "text": "\u001b[u!",
+          "repeat": 1,
+          "expected": "abcd!f\nnext",
+          "truncated": false
+        }
+      ],
+      "after": "abcd!!\nnext"
+    },
+    {
+      "name": "line clear",
+      "steps": [
+        {
+          "text": "abcdef\r\u001b[3C\u001b[1K!",
+          "repeat": 1,
+          "expected": "   !ef",
+          "truncated": false
+        }
+      ],
+      "after": "   !!f"
+    },
+    {
+      "name": "display clear",
+      "steps": [
+        {
+          "text": "one\ntwo\nthree\u001b[1A\u001b[1J",
+          "repeat": 1,
+          "expected": "\n   \nthree",
+          "truncated": false
+        },
+        {
+          "text": "x",
+          "repeat": 1,
+          "expected": "\n     x\nthree",
+          "truncated": false
+        }
+      ],
+      "after": "\n     x!\nthree"
+    },
+    {
+      "name": "clear all",
+      "steps": [
+        {
+          "text": "one\n\u001b[2Jx",
+          "repeat": 1,
+          "expected": "x",
+          "truncated": false
+        }
+      ],
+      "after": "x!"
+    },
+    {
+      "name": "tab",
+      "steps": [
+        {
+          "text": "a\tb\rc",
+          "repeat": 1,
+          "expected": "c\tb",
+          "truncated": false
+        }
+      ],
+      "after": "c!b"
+    },
+    {
+      "name": "colors",
+      "steps": [
+        {
+          "text": "\u001b[31mred\u001b[0m plain\u001b[38;2;12;34;56mcolor",
+          "repeat": 1,
+          "expected": "\u001b[0;31mred\u001b[0m plain\u001b[0;38;2;12;34;56mcolor\u001b[0m",
+          "truncated": false
+        },
+        {
+          "text": "\nnext",
+          "repeat": 1,
+          "expected": "\u001b[0;31mred\u001b[0m plain\u001b[0;38;2;12;34;56mcolor\u001b[0m\n\u001b[0;38;2;12;34;56mnext\u001b[0m",
+          "truncated": false
+        }
+      ],
+      "after": "\u001b[0;31mred\u001b[0m plain\u001b[0;38;2;12;34;56mcolor\u001b[0m\n\u001b[0;38;2;12;34;56mnext!\u001b[0m"
+    },
+    {
+      "name": "style resets",
+      "steps": [
+        {
+          "text": "\u001b[1;2;3;4;7;9mstyle\u001b[22;23;24;27;29mnormal",
+          "repeat": 1,
+          "expected": "\u001b[0;1;2;3;4;7;9mstyle\u001b[0mnormal",
+          "truncated": false
+        }
+      ],
+      "after": "\u001b[0;1;2;3;4;7;9mstyle\u001b[0mnormal!"
+    },
+    {
+      "name": "colon colors",
+      "steps": [
+        {
+          "text": "\u001b[38:2::12:34:56;48:5:123mcolor\u001b[0m",
+          "repeat": 1,
+          "expected": "\u001b[0;38;2;12;34;56;48;5;123mcolor\u001b[0m",
+          "truncated": false
+        }
+      ],
+      "after": "\u001b[0;38;2;12;34;56;48;5;123mcolor\u001b[0m!"
+    },
+    {
+      "name": "partial escape",
+      "steps": [
+        {
+          "text": "begin\u001b[3",
+          "repeat": 1,
+          "expected": "begin",
+          "truncated": false
+        },
+        {
+          "text": "1mred\u001b[",
+          "repeat": 1,
+          "expected": "begin\u001b[0;31mred\u001b[0m",
+          "truncated": false
+        },
+        {
+          "text": "0mend",
+          "repeat": 1,
+          "expected": "begin\u001b[0;31mred\u001b[0mend",
+          "truncated": false
+        }
+      ],
+      "after": "begin\u001b[0;31mred\u001b[0mend!"
+    },
+    {
+      "name": "hidden strings",
+      "steps": [
+        {
+          "text": "a\u001b]8;;https://example.invalid\u001b\\link\u001b]8;;\u001b\\b",
+          "repeat": 1,
+          "expected": "alinkb",
+          "truncated": false
+        }
+      ],
+      "after": "alinkb!"
+    },
+    {
+      "name": "string newline",
+      "steps": [
+        {
+          "text": "a\u001b]hidden\nvisible",
+          "repeat": 1,
+          "expected": "a\nvisible",
+          "truncated": false
+        }
+      ],
+      "after": "a\nvisible!"
+    },
+    {
+      "name": "split hidden string",
+      "steps": [
+        {
+          "text": "a\u001b]hidden",
+          "repeat": 1,
+          "expected": "a",
+          "truncated": false
+        },
+        {
+          "text": "\u001b",
+          "repeat": 1,
+          "expected": "a",
+          "truncated": false
+        },
+        {
+          "text": "\\b",
+          "repeat": 1,
+          "expected": "ab",
+          "truncated": false
+        }
+      ],
+      "after": "ab!"
+    },
+    {
+      "name": "style run budget",
+      "steps": [
+        {
+          "text": "\u001b[31mx\u001b[32my",
+          "repeat": 1051,
+          "expected": "xyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0m",
+          "truncated": false
+        }
+      ],
+      "after": "xyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my\u001b[0;31mx\u001b[0;32my!\u001b[0m"
+    },
+    {
+      "name": "scrolling",
+      "steps": [
+        {
+          "text": "\u001b[31mred\u001b[0m\n",
+          "repeat": 70,
+          "expected": "\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n",
+          "truncated": false
+        },
+        {
+          "text": "\u001b[63A\u001b[1Gtop",
+          "repeat": 1,
+          "expected": "\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\ntop\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n",
+          "truncated": false
+        }
+      ],
+      "after": "\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\ntop!\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n\u001b[0;31mred\u001b[0m\n"
+    },
+    {
+      "name": "partial title escape",
+      "steps": [
+        {
+          "text": "a\u001b]titlexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "repeat": 1,
+          "expected": "a",
+          "truncated": false
+        },
+        {
+          "text": "\u0007b",
+          "repeat": 1,
+          "expected": "ab",
+          "truncated": false
+        }
+      ],
+      "after": "ab!"
+    }
+  ]
+}

@@ -81,7 +81,7 @@ pub(super) fn bind_turn(
     };
     Ok(Some(decision::Action::Interrupt {
         attempt: previous.attempt,
-        action: *action,
+        action: action.action,
         background: false,
     }))
 }

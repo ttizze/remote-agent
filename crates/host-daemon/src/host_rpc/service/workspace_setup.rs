@@ -60,6 +60,7 @@ impl HostRpcService {
             project_cwd,
             strategy: Some(strategy),
             generation: Uuid::nil(),
+            created_worktree: false,
             visible: setup.is_some(),
             setup,
         })
@@ -181,9 +182,11 @@ impl HostRpcService {
             .as_ref()
             .filter(|setup| {
                 !matches!(strategy, WorkspaceStrategy::Root)
-                    && matches!(setup.phase, SetupPhase::Failed | SetupPhase::Cancelled)
+                    && (setup.phase == SetupPhase::Failed
+                        || setup.phase == SetupPhase::Cancelled && !workspace.created_worktree)
             })
-            .and_then(|setup| setup.worktree_path.clone());
+            .and_then(|setup| setup.worktree_path.clone())
+            .filter(|path| Path::new(path).exists());
         if matches!(strategy, WorkspaceStrategy::Root)
             && let Some(path) = previous
                 .as_ref()
@@ -193,6 +196,7 @@ impl HostRpcService {
                 .and_then(|setup| setup.branch.as_ref())
                 .is_some_and(|branch| !branch.is_empty())
             && path != &workspace.project_cwd
+            && Path::new(path).exists()
             && self
                 .inner
                 .conversation
@@ -208,6 +212,23 @@ impl HostRpcService {
                 .await
                 .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
         }
+        if workspace.created_worktree
+            && previous
+                .as_ref()
+                .is_some_and(|setup| setup.phase == SetupPhase::Cancelled)
+            && let Some(path) = previous
+                .as_ref()
+                .and_then(|setup| setup.worktree_path.clone())
+            && Path::new(&path).exists()
+        {
+            self.inner
+                .worktrees
+                .discard(path)
+                .await
+                .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
+        }
+        workspace.created_worktree =
+            matches!(strategy, WorkspaceStrategy::Worktree { .. }) && retained.is_none();
         let mut setup = match &strategy {
             WorkspaceStrategy::Root => None,
             WorkspaceStrategy::Worktree { base_ref, .. } => Some(WorkspaceSetup::new(
@@ -248,7 +269,7 @@ impl HostRpcService {
                 }),
             }
         };
-        if let Some(path) = retained.filter(|path| Path::new(path).exists()) {
+        if let Some(path) = retained {
             let branch = previous
                 .as_ref()
                 .and_then(|setup| setup.branch.clone())
@@ -265,7 +286,11 @@ impl HostRpcService {
                     action,
                     SetupChange::Stage {
                         id,
-                        status: SetupStageStatus::Done,
+                        status: if matches!(strategy, WorkspaceStrategy::ExistingWorktree { .. }) {
+                            SetupStageStatus::Skipped
+                        } else {
+                            SetupStageStatus::Done
+                        },
                         exit_code: None,
                         error: None,
                     },

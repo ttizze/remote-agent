@@ -876,7 +876,7 @@ async fn read_tool_output(path: &str) -> Result<String, String> {
 }
 
 async fn read_tool_output_tail(path: &str) -> Result<agent_protocol::sync::Output, String> {
-    use agent_protocol::sync::{Output, TAIL_BYTES};
+    use agent_protocol::sync::{Output, TAIL_CHARS};
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut file = tokio::fs::File::open(path)
         .await
@@ -886,7 +886,7 @@ async fn read_tool_output_tail(path: &str) -> Result<agent_protocol::sync::Outpu
         .await
         .map_err(|error| error.to_string())?
         .len();
-    let offset = length.saturating_sub(TAIL_BYTES as u64);
+    let offset = length.saturating_sub((TAIL_CHARS * 4 * 3) as u64);
     file.seek(std::io::SeekFrom::Start(offset))
         .await
         .map_err(|error| error.to_string())?;
@@ -906,10 +906,9 @@ async fn read_tool_output_tail(path: &str) -> Result<agent_protocol::sync::Outpu
     let text = std::str::from_utf8(&bytes[boundary..])
         .map_err(|error| error.to_string())?
         .to_owned();
-    Ok(Output {
-        offset: offset + boundary as u64,
-        text,
-    })
+    let mut output = Output::persisted(&text);
+    output.truncated |= offset != 0;
+    Ok(output)
 }
 
 impl Worker {
@@ -1513,7 +1512,7 @@ impl Worker {
         if let Some(path) = outcome.output_path
             && let Ok(output) = read_tool_output_tail(path).await
         {
-            let omitted = output.offset != 0;
+            let omitted = output.sequence != 0;
             let mut body =
                 native::tool_result_body(item.body(), &Value::String(output.text), &Value::Null);
             if let ItemBody::CommandExecution { output_omitted, .. } = &mut body {
@@ -4114,17 +4113,14 @@ async fn background_output_reads_only_a_bounded_utf8_tail_of_large_files() {
     let output = read_tool_output_tail(file.path().to_str().unwrap())
         .await
         .unwrap();
-    assert!(output.text.len() <= agent_protocol::sync::TAIL_BYTES);
+    assert!(output.text.encode_utf16().count() <= agent_protocol::sync::TAIL_CHARS);
     assert!(suffix.ends_with(&output.text));
-    assert_eq!(
-        output.offset + output.text.len() as u64,
-        history::MAX_FILE_BYTES + 1 + suffix.len() as u64
-    );
-    assert!(output.offset > 0);
+    assert_eq!(output.text, suffix);
+    assert!(output.truncated);
     std::fs::write(file.path(), "short 日").unwrap();
     let small = read_tool_output_tail(file.path().to_str().unwrap())
         .await
         .unwrap();
-    assert_eq!(small.offset, 0);
+    assert!(!small.truncated);
     assert_eq!(small.text, "short 日");
 }

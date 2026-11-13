@@ -84,44 +84,56 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         }
         "readItem" => {
             let session: SessionRef = serde_json::from_value(command["threadId"].clone()).unwrap();
-            let opened = client
-                .call(&records::Subscribe {
-                    session: session.clone(),
-                    subscription: uuid::Uuid::from_u128(2),
-                    cached: None,
-                    window: None,
-                })
+            let (opened, mut stream) = client
+                .request_stream::<records::Opened>(
+                    &agent_protocol::protocol::Call::SubscribeConversation(records::Subscribe {
+                        session: session.clone(),
+                        subscription: uuid::Uuid::from_u128(2),
+                        cached: None,
+                        window: None,
+                    }),
+                )
                 .await?;
-            let records::Message::Snapshot { cursor: cached, .. } = opened.initial else {
-                return Err(PeerError::InvalidMessage(
-                    "initial conversation snapshot is missing".into(),
-                ));
-            };
-            let response = client
+            let mut replica = records::Replica::new(
+                agent_protocol::sync::Scope::Conversation(session.clone()),
+                1,
+            )
+            .apply(1, opened.initial)
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            let reply = client
                 .call(&records::Hydrate {
                     session,
                     subscription: uuid::Uuid::from_u128(2),
-                    cached,
                     item: text(command, "itemId").into(),
                 })
                 .await?;
-            let item = response
-                .messages
-                .into_iter()
-                .find_map(|message| {
-                    let agent_protocol::sync::Message::Hydrate { row, .. } = message else {
-                        return None;
-                    };
-                    let record = match row.content {
-                        agent_protocol::sync::Content::Full(record)
-                        | agent_protocol::sync::Content::Summary(record) => record,
-                    };
-                    match record.as_ref() {
-                        records::Record::Item(item) => Some(item.content.as_ref().clone()),
-                        _ => None,
-                    }
-                })
-                .ok_or_else(|| PeerError::InvalidMessage("item is missing".into()))?;
+            assert!(
+                reply.transfer.is_none(),
+                "this corpus covers inline item bodies"
+            );
+            let item = loop {
+                let response = records::project(&replica).unwrap();
+                if let Some(item) = response
+                    .thread
+                    .turns
+                    .iter()
+                    .flatten()
+                    .flat_map(|turn| turn.items.iter().flatten())
+                    .find(|item| item.id.as_str() == text(command, "itemId") && !item.is_deferred())
+                {
+                    break item.as_ref().clone();
+                }
+                let message: records::Message = stream
+                    .read()
+                    .await
+                    .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?
+                    .ok_or_else(|| {
+                        PeerError::ConnectionClosed("item subscription closed".into())
+                    })?;
+                replica = replica
+                    .apply(1, message)
+                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            };
             json!(ItemResponse {
                 item,
                 transfer: None

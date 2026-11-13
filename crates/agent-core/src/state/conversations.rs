@@ -52,24 +52,6 @@ pub(crate) fn opened(
     })
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ReadScope {
-    pub subscription: uuid::Uuid,
-    pub cursor: agent_protocol::sync::Cursor,
-}
-
-#[derive(Debug)]
-pub struct ReadRows {
-    pub scope: ReadScope,
-    pub result: Result<Vec<records::Message>, PeerError>,
-}
-
-pub enum ReadResult {
-    Applied(Vec<Effect>),
-    Obsolete,
-    Retry,
-}
-
 #[derive(Debug)]
 struct CheckReceipts {
     session: crate::session::SessionRef,
@@ -102,11 +84,11 @@ impl op::Operation for CheckReceipts {
     fn navigation_bound(&self) -> bool {
         false
     }
-    type Input = ReadScope;
+    type Input = uuid::Uuid;
     fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
         read_scope(snapshot, &self.session)
     }
-    type Output = (ReadScope, records::Receipts);
+    type Output = (uuid::Uuid, records::Receipts);
     async fn run(
         &self,
         scope: Self::Input,
@@ -134,7 +116,7 @@ impl op::Operation for CheckReceipts {
         _pane: &str,
         (scope, receipts): Self::Output,
     ) -> Vec<Effect> {
-        if snapshot.sessions.subscriptions.get(&self.session) != Some(&scope.subscription) {
+        if snapshot.sessions.subscriptions.get(&self.session) != Some(&scope) {
             return Vec::new();
         }
         let key = DraftKey::from(&self.session);
@@ -179,88 +161,44 @@ impl op::Operation for CheckReceipts {
 pub(crate) fn read_scope(
     snapshot: &Snapshot,
     id: &crate::session::SessionRef,
-) -> Result<ReadScope, PeerError> {
+) -> Result<uuid::Uuid, PeerError> {
     let subscription = snapshot
         .sessions
         .subscriptions
         .get(id)
         .copied()
         .ok_or_else(|| PeerError::InvalidMessage("conversation is not subscribed".into()))?;
-    let cursor = snapshot
+    snapshot
         .sessions
         .replicas
         .get(id)
         .and_then(|replica| replica.cursor())
         .ok_or_else(|| PeerError::InvalidMessage("conversation cursor is missing".into()))?;
-    Ok(ReadScope {
-        subscription,
-        cursor,
-    })
+    Ok(subscription)
 }
 
-pub(crate) fn finish_read(
+pub(crate) fn hydrate_body(
     snapshot: &mut Snapshot,
-    id: &crate::session::SessionRef,
-    output: ReadRows,
-    current: bool,
-) -> Result<ReadResult, PeerError> {
-    if !current || snapshot.sessions.subscriptions.get(id) != Some(&output.scope.subscription) {
-        return Ok(ReadResult::Obsolete);
-    }
-    let cursor = snapshot
-        .sessions
-        .replicas
-        .get(id)
-        .and_then(|replica| replica.cursor());
-    let messages = if cursor != Some(output.scope.cursor) {
-        let Ok(mut messages) = output.result else {
-            return Ok(ReadResult::Retry);
-        };
-        if let Some(records::Message::Extend { window, .. }) = messages.last()
-            && snapshot
-                .sessions
-                .replicas
-                .get(id)
-                .and_then(|replica| replica.window())
-                .is_some_and(|current| (current.turn, current.item) <= (window.turn, window.item))
-        {
-            // The owner orders the extension on the live stream before any
-            // later transaction, so this response has already been applied.
-            return Ok(ReadResult::Applied(Vec::new()));
-        }
-        let Some(records::Message::Hydrate {
-            cursor: read_at,
-            row,
-        }) = messages.pop()
-        else {
-            return Ok(ReadResult::Retry);
-        };
-        if !cursor.is_some_and(|current| {
-            current.store == read_at.store && read_at.sequence <= current.sequence
-        }) || !snapshot
-            .sessions
-            .replicas
-            .get(id)
-            .and_then(|replica| replica.rows().get(&row.key))
-            .is_some_and(|held| held.version == row.version)
-        {
-            return Ok(ReadResult::Retry);
-        }
-        vec![records::Message::Hydrate {
-            cursor: read_at,
-            row,
-        }]
-    } else {
-        output.result?
+    id: &SessionRef,
+    version: u64,
+    item: crate::models::Item,
+) -> Result<Vec<Effect>, PeerError> {
+    let Some(replica) = snapshot.sessions.replicas.get(id) else {
+        return Ok(Vec::new());
     };
-    match apply(snapshot, id, messages) {
-        Ok(effects) => Ok(ReadResult::Applied(effects)),
-        Err(
-            agent_protocol::sync::ApplyError::Discontinuity
-            | agent_protocol::sync::ApplyError::Window,
-        ) => Ok(ReadResult::Retry),
-        Err(error) => Err(PeerError::InvalidMessage(error.to_string())),
-    }
+    let Some(row) = agent_protocol::conversation::records::hydrate_body(replica, version, item)
+    else {
+        return Ok(Vec::new());
+    };
+    let cursor = replica
+        .cursor()
+        .ok_or_else(|| PeerError::InvalidMessage("body has no conversation cursor".into()))?;
+    apply(
+        snapshot,
+        id,
+        vec![records::Message::Hydrate { cursor, row }],
+    )
+    .map_err(|error| PeerError::InvalidMessage(error.to_string()))
 }
 
 pub(super) fn promote_draft(snapshot: &mut Snapshot, id: &SessionRef, cwd: Option<&str>) {

@@ -1,6 +1,6 @@
 //! Canonical conversation fixtures for core's colocated tests.
 use crate::test_host::rows;
-pub use rows::{catalog, replica};
+pub use rows::{catalog, replica, replica_at};
 #[path = "conversation_open.rs"]
 mod opening;
 pub use opening::{Opened, opened};

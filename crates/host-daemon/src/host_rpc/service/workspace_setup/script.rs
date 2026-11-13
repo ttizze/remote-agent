@@ -145,7 +145,7 @@ impl HostRpcService {
                                 id: SetupStageId::SetupScript,
                                 status: if code == 0 { SetupStageStatus::Done } else { SetupStageStatus::Failed },
                                 exit_code: Some(code),
-                                error: (code != 0).then(|| format!("Setup script exited with {code}")),
+                                error: None,
                             }).await?;
                             if code != 0 && !script.asynchronous { return Err(Failure::new("setup_script_failed", format!("Setup script exited with {code}"))); }
                             return Ok(());

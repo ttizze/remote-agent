@@ -238,6 +238,37 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
 }
 
 #[tokio::test]
+async fn compact_keeps_inline_provider_handoff_until_the_next_ordinary_input() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let directory = tempfile::tempdir().unwrap();
+        let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+        let service = HostRpcService::new([codex.backend(), claude.backend()], ProjectStore::new(directory.path().join("projects.json")));
+        let connection = service.open_session();
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let text = |text: &str| decision::InputContent { parts: vec![op::Input::Text { text: text.into() }], ..content() };
+        let _: records::Opened = call(&service, connection.id(), Call::CreateConversation(records::Create {
+            workspace: None, provider: ProviderKind::Codex, session: target.clone(), subscription: Uuid::new_v4(), cwd: Some(directory.path().to_str().unwrap().into()), selection: Default::default(), initial: Some((Uuid::new_v4().to_string().into(), text("first-provider-marker"))),
+        })).await.unwrap();
+        completed(&service, &target, 1).await;
+        for (count, message) in [(2, "/compact"), (3, "ordinary-input"), (4, "later-input")] {
+            let operation = Uuid::new_v4();
+            let mut input = text(message);
+            input.model = Some(agent_protocol::models::ModelRef { provider: ProviderKind::Claude, id: "fixture".into() });
+            let receipt: records::Acknowledged = call(&service, connection.id(), Call::ChangeConversation(records::Change { session: target.clone(), operation, command: Command::Submit { id: operation.to_string().into(), content: input } })).await.unwrap();
+            assert_eq!(receipt.outcome, Outcome::Accepted);
+            completed(&service, &target, count).await;
+        }
+        let inputs = claude.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[0].input, vec![op::Input::Text { text: "/compact".into() }]);
+        assert!(matches!(&inputs[1].input[0], op::Input::Text { text } if text.contains("first-provider-marker")));
+        assert!(matches!(&inputs[1].input[1], op::Input::Text { text } if text == "ordinary-input"));
+        assert_eq!(inputs[2].input, vec![op::Input::Text { text: "later-input".into() }]);
+    }).await.expect("inline handoff settles after compact");
+}
+
+#[tokio::test]
 async fn missing_providerless_conversations_keep_durable_rejections_without_a_provider() {
     let directory = tempfile::tempdir().unwrap();
     let service = HostRpcService::new(
@@ -316,7 +347,7 @@ async fn command_output_case(case: &str) {
     use agent_protocol::{
         execution::{ItemStatus, TurnStatus},
         items::{Item, ItemBody},
-        sync::{Output, OutputUpdate},
+        sync::OutputUpdate,
     };
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
@@ -421,7 +452,7 @@ async fn command_output_case(case: &str) {
         turn_id: "tools".into(),
         item_id: "command".into(),
         field: agent_protocol::session::TextField::CommandOutput,
-        delta: "日".repeat(30_000),
+        delta: "日".repeat(100_000),
     })
     .await
     .unwrap();
@@ -440,8 +471,8 @@ async fn command_output_case(case: &str) {
         "a subscriber behind the retained range receives the new tail"
     );
     let tail = opened.initial.apply(update).unwrap();
-    assert!(tail.offset > 0);
-    assert!(tail.text.len() <= 64 * 1024);
+    assert!(tail.truncated);
+    assert!(tail.text.encode_utf16().count() <= 64 * 1024);
     assert_eq!(
         service
             .inner
@@ -615,13 +646,7 @@ async fn command_output_case(case: &str) {
     else {
         panic!("command missing")
     };
-    assert_eq!(
-        Output {
-            offset: tail.offset,
-            text: output
-        },
-        tail
-    );
+    assert_eq!(output, tail.text);
     assert!(output_omitted);
     assert_eq!(
         stored.status,
@@ -1387,6 +1412,14 @@ async fn opening_native_history_subscribes_before_import_and_publishes_the_lates
                             Arc::new(Turn {
                                 id: format!("native-{index}").into(),
                                 status: agent_protocol::models::TurnStatus::Completed,
+                                items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                                    format!("user-{index}").into(),
+                                    agent_protocol::execution::ItemStatus::Completed,
+                                    agent_protocol::items::ItemBody::UserMessage {
+                                        text: Some("question".into()),
+                                        content: vec![],
+                                    },
+                                ))]),
                                 ..Default::default()
                             })
                         })

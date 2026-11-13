@@ -73,7 +73,14 @@ pub(super) fn restart(state: &State, continue_running: bool, context: Context) -
             TurnState::Running { interrupt } => {
                 let finished = execution::finish(state, turn, TurnState::Interrupted, context.now);
                 result.changes.extend(finished.changes);
-                if continue_running && interrupt.is_none() {
+                if continue_running
+                    && interrupt.is_none()
+                    && !turn.compaction
+                    && !state
+                        .requests
+                        .values()
+                        .any(|request| request.turn == turn.id)
+                {
                     result.continuations.push(Continuation {
                         id: allocate(context.seed, &format!("continue:{}", turn.id)),
                         source: turn.id.clone(),

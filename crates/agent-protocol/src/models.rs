@@ -128,8 +128,6 @@ pub struct Thread {
     pub history_limit: Option<u64>,
     pub list_stale: Option<bool>,
     pub agent_id: Option<String>,
-    /// Host transcript version of these turns; absent for native reads.
-    pub transcript_version: Option<u64>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

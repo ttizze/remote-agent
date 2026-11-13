@@ -38,53 +38,6 @@ fn conversation() -> Thread {
     serde_json::from_value(json!({"id":{"provider":"codex","id":"native"},"turns":[{"id":"run","status":"running","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"partial","phase":"unknown"}}}}}]}]})).unwrap()
 }
 
-#[rstest::rstest]
-#[case::one_turn(None, 1)]
-#[case::cached_list_limit(Some(24), 8)]
-#[case::large_list_limit(Some(u64::MAX), 8)]
-fn history_refresh_keeps_the_canonical_window_independent_of_cached_list_metadata(
-    #[case] history_limit: Option<u64>,
-    #[case] loaded_turns: usize,
-) {
-    use agent_core::state::{
-        Snapshot,
-        operations::{Operation, ReadThread},
-    };
-    let id = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
-    let mut cached = conversation();
-    cached.history_limit = history_limit;
-    cached.history_cursor = Some("older".into());
-    cached.turns = Some(
-        (0..loaded_turns)
-            .map(|index| {
-                Arc::new(Turn {
-                    id: format!("turn-{index}").into(),
-                    ..Default::default()
-                })
-            })
-            .collect(),
-    );
-    let replica = rows::replica(
-        agent_protocol::models::ThreadResponse {
-            thread: cached.clone(),
-            ..Default::default()
-        },
-        1,
-    );
-    let cursor = replica.cursor();
-    let mut snapshot = Snapshot::default();
-    Arc::make_mut(&mut snapshot.sessions.replicas).insert(id.clone(), Arc::new(replica));
-    Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), Arc::new(cached));
-    let mut read = ReadThread::new(id);
-    read.prepare(&mut snapshot, "").unwrap();
-    let captured = read.capture(&snapshot, "").unwrap();
-    assert_eq!(captured.cursor(), cursor);
-    assert_eq!(
-        captured.window(),
-        Some(agent_protocol::sync::Window { turn: 1, item: 0 })
-    );
-}
-
 #[test]
 fn session_error_survives_binary_transport_and_updates_the_turn() {
     for retrying in [false, true] {
@@ -154,14 +107,14 @@ fn canonical_snapshot_and_later_rows_preserve_the_hosts_confirmed_history_and_re
         delta: " updated".into(),
     };
     let id = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
-    let mut changed = change.apply(&snapshot.sessions.conversations[&id]).unwrap();
-    changed.transcript_version = Some(8);
-    let replica = rows::replica(
+    let changed = change.apply(&snapshot.sessions.conversations[&id]).unwrap();
+    let replica = rows::replica_at(
         agent_protocol::models::ThreadResponse {
             thread: changed,
             ..Default::default()
         },
         1,
+        8,
     );
     let (snapshot, _) = reduce(
         &snapshot,

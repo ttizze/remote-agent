@@ -21,6 +21,40 @@ pub(super) fn command(
     command: Command,
     context: Context,
 ) -> Step {
+    let workspace = match workspace::command(
+        context.preparation,
+        &command,
+        &state.inputs,
+        state.thread.workspace.cwd(),
+        state.bindings.is_empty(),
+        state.active_turn().is_some(),
+    ) {
+        Ok(workspace) => workspace,
+        Err(reason) => return reject(reason),
+    };
+    let Some((strategy, cwd)) = workspace else {
+        return execute_command(state, operation, command, context);
+    };
+    let mut changes = vec![Change::Thread(Thread {
+        workspace: Workspace::Folder(cwd),
+        ..state.thread.clone()
+    })];
+    changes.extend(strategy.map(Change::WorkspaceStrategy));
+    let prepared = state.apply(&changes);
+    let mut result = execute_command(&prepared, operation, command, context);
+    if result.outcome == Outcome::Accepted {
+        changes.extend(result.changes);
+        result.changes = changes;
+    }
+    result
+}
+
+fn execute_command(
+    state: &State,
+    operation: OperationId,
+    command: Command,
+    context: Context,
+) -> Step {
     match command {
         Command::Submit { id, content } => submit(state, operation, id, content, context),
         Command::Rename(name) => {
@@ -68,7 +102,7 @@ pub(super) fn command(
         Command::EditInput { id, parts } => edit_input(state, &id, parts),
         Command::MoveInput { id, before } => move_input(state, &id, before.as_ref()),
         Command::SteerInput(id) => steer_input(state, &id, context),
-        Command::Rewind(id) => rewind(state, &id, context.external_busy),
+        Command::Rewind(id) => rewind(state, &id, context),
     }
 }
 
@@ -87,6 +121,11 @@ fn edit_input(state: &State, id: &ClientInputId, parts: Vec<InputPart>) -> Step 
         return reject("input is empty");
     }
     accepted(vec![Change::Input(PendingInput {
+        state: if InputPart::is_compaction(&parts) {
+            InputState::Queued { steer: None }
+        } else {
+            input.state.clone()
+        },
         content: InputContent {
             parts,
             ..input.content.clone()
@@ -138,6 +177,39 @@ fn steer_input(state: &State, id: &ClientInputId, context: Context) -> Step {
     let Some(input) = queued(state, id) else {
         return reject("input is no longer queued");
     };
+    if InputPart::is_compaction(&input.content.parts) {
+        return reject("context compaction must run as a separate turn");
+    }
+    if let Some(turn) = state.active_turn().filter(|turn| turn.compaction) {
+        let first = state
+            .inputs
+            .values()
+            .filter(|input| matches!(input.state, InputState::Queued { .. }))
+            .min_by_key(|input| input.position)
+            .map(|input| &input.id);
+        let mut result = interrupt_turn(state, turn, Some(id.clone()), context);
+        if result.outcome != Outcome::Accepted {
+            return result;
+        }
+        result.changes.extend(move_input(state, id, first).changes);
+        return result;
+    }
+    if let Some(compact) = state.inputs.values().find(|input| {
+        input
+            .live_delivery()
+            .is_some_and(|delivery| !delivery.steer)
+            && InputPart::is_compaction(&input.content.parts)
+    }) {
+        let first = state
+            .inputs
+            .values()
+            .filter(|input| matches!(input.state, InputState::Queued { .. }))
+            .min_by_key(|input| input.position)
+            .map(|input| &input.id);
+        let mut result = interrupt_input(state, compact, Some(id.clone()), context);
+        result.changes.extend(move_input(state, id, first).changes);
+        return result;
+    }
     let Some(attempt) = state.steerable_attempt().filter(|_| context.steers) else {
         return reject("active steering is unavailable");
     };
@@ -150,8 +222,8 @@ fn steer_input(state: &State, id: &ClientInputId, context: Context) -> Step {
     append_advance(state, result, context)
 }
 
-fn rewind(state: &State, id: &TurnId, external_busy: bool) -> Step {
-    if external_busy
+fn rewind(state: &State, id: &TurnId, context: Context) -> Step {
+    if context.external_busy
         || state.active_turn().is_some()
         || !state.requests.is_empty()
         || state.inputs.values().any(|input| {
@@ -183,9 +255,19 @@ fn rewind(state: &State, id: &TurnId, external_busy: bool) -> Step {
             })
         })
         .collect();
-    changes.extend(state.bindings.keys().map(|provider| Change::Binding {
-        provider: *provider,
-        value: None,
+    let providers: std::collections::BTreeSet<_> = state
+        .bindings
+        .keys()
+        .chain(context.rewind_binding.map(|_| &state.thread.provider))
+        .copied()
+        .collect();
+    changes.extend(providers.into_iter().map(|provider| Change::Binding {
+        provider,
+        value: if provider == state.thread.provider {
+            context.rewind_binding.cloned()
+        } else {
+            None
+        },
     }));
     changes.extend(state.attempts.keys().map(|turn| Change::Attempt {
         turn: turn.clone(),
@@ -276,7 +358,9 @@ fn continue_after_restart(
             .turns
             .values()
             .max_by_key(|turn| turn.ordinal)
-            .is_none_or(|turn| &turn.id != source || turn.state != TurnState::Interrupted)
+            .is_none_or(|turn| {
+                &turn.id != source || turn.compaction || turn.state != TurnState::Interrupted
+            })
         || state.inputs.values().any(|input| match &input.state {
             InputState::Delivering(_) | InputState::Preparing { .. } => true,
             // Restart fenced steers; their inputs remain for user disposition
@@ -332,15 +416,7 @@ fn submit(
         let mut ended = execution::finish(
             state,
             turn,
-            TurnState::Failed(
-                turn.error
-                    .clone()
-                    .map(|mut error| {
-                        error.retry = None;
-                        error
-                    })
-                    .unwrap_or_default(),
-            ),
+            TurnState::Failed(ExecutionError::default()),
             context.now,
         );
         let next = state.apply(&ended.changes);
@@ -388,6 +464,13 @@ fn submit(
     let Some(position) = state.counters.input.checked_add(1) else {
         return reject("input positions exhausted");
     };
+    // T3 rejects steering a maintenance command into another execution.
+    if content.follow_up == FollowUp::Steer
+        && state.active_turn().is_some()
+        && InputPart::is_compaction(&content.parts)
+    {
+        return reject("context compaction must run as a separate turn");
+    }
     let steer = if context.steers && content.follow_up == FollowUp::Steer {
         state.steerable_attempt().map(|attempt| attempt.id)
     } else {
@@ -406,7 +489,18 @@ fn submit(
             ..state.counters.clone()
         }),
     ]);
-    if state.thread.queue_held && !state.has_queued_inputs() {
+    if state.thread.queue_held
+        && !state.has_queued_inputs()
+        && !state.active_turn().is_some_and(|turn| {
+            turn.compaction && matches!(turn.state, TurnState::Running { interrupt: Some(_) })
+        })
+        && !state.inputs.values().any(|input| {
+            InputPart::is_compaction(&input.content.parts)
+                && input
+                    .live_delivery()
+                    .is_some_and(|delivery| delivery.interrupt.is_some())
+        })
+    {
         result.changes.push(Change::Thread(Thread {
             queue_held: false,
             ..state.thread.clone()
@@ -437,7 +531,7 @@ fn interrupt(state: &State, expected: Option<&TurnId>, context: Context) -> Step
         }) {
             return reject("interrupt target has changed");
         }
-        return interrupt_input(state, input, context);
+        return interrupt_input(state, input, None, context);
     }
     let Some(turn) = state.active_turn() else {
         return reject("no active turn");
@@ -445,6 +539,15 @@ fn interrupt(state: &State, expected: Option<&TurnId>, context: Context) -> Step
     if expected.is_some_and(|expected| expected != &turn.id) {
         return reject("interrupt target has changed");
     }
+    interrupt_turn(state, turn, None, context)
+}
+
+fn interrupt_turn(
+    state: &State,
+    turn: &Turn,
+    next_input: Option<ClientInputId>,
+    context: Context,
+) -> Step {
     match &turn.state {
         TurnState::Running { .. } | TurnState::Waiting(Wait::Background { .. }) => {
             let Some(attempt) = state.attempts.get(&turn.id) else {
@@ -455,12 +558,19 @@ fn interrupt(state: &State, expected: Option<&TurnId>, context: Context) -> Step
                 changes: vec![
                     Change::Turn(Turn {
                         state: TurnState::Running {
-                            interrupt: Some(action),
+                            interrupt: Some(Interruption {
+                                action,
+                                next_input: next_input.clone(),
+                            }),
                         },
                         ..turn.clone()
                     }),
                     Change::Thread(Thread {
-                        queue_held: state.has_queued_inputs(),
+                        queue_held: if next_input.is_some() {
+                            state.thread.queue_held
+                        } else {
+                            turn.compaction || state.has_queued_inputs()
+                        },
                         ..state.thread.clone()
                     }),
                 ],
@@ -480,7 +590,12 @@ fn interrupt(state: &State, expected: Option<&TurnId>, context: Context) -> Step
     }
 }
 
-fn interrupt_input(state: &State, input: &PendingInput, context: Context) -> Step {
+fn interrupt_input(
+    state: &State,
+    input: &PendingInput,
+    next_input: Option<ClientInputId>,
+    context: Context,
+) -> Step {
     let (next, actions) = match &input.state {
         InputState::Preparing { action, .. } => (
             InputState::Failed(ExecutionError {
@@ -492,11 +607,13 @@ fn interrupt_input(state: &State, input: &PendingInput, context: Context) -> Ste
         _ => {
             let delivery = input.live_delivery().expect("selected live delivery");
             let delivery = PendingDelivery {
-                interrupt: Some(
-                    delivery
-                        .interrupt
-                        .unwrap_or_else(|| allocate(context.seed, "interrupt")),
-                ),
+                interrupt: Some(Interruption {
+                    action: delivery.interrupt.as_ref().map_or_else(
+                        || allocate(context.seed, "interrupt"),
+                        |interrupt| interrupt.action,
+                    ),
+                    next_input: next_input.clone(),
+                }),
                 ..delivery.clone()
             };
             let next = if let InputState::Unknown { status, .. } = input.state {
@@ -514,7 +631,11 @@ fn interrupt_input(state: &State, input: &PendingInput, context: Context) -> Ste
                 ..input.clone()
             }),
             Change::Thread(Thread {
-                queue_held: state.has_queued_inputs(),
+                queue_held: if next_input.is_some() {
+                    state.thread.queue_held
+                } else {
+                    InputPart::is_compaction(&input.content.parts) || state.has_queued_inputs()
+                },
                 ..state.thread.clone()
             }),
         ],

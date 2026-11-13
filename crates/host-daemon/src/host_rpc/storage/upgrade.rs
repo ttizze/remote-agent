@@ -10,7 +10,11 @@ use agent_protocol::{
     session::{PreparationStatus, SessionPreparation},
 };
 use serde::Deserialize;
-use std::{collections::BTreeMap, fs, io::ErrorKind};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::ErrorKind,
+};
 
 const FILES: [&str; 5] = [
     "bex-conversations.json",
@@ -71,6 +75,7 @@ struct Rewind {
 
 pub(super) struct Previous {
     history: BTreeMap<SessionRef, ThreadResponse>,
+    unimported: BTreeSet<SessionRef>,
     conversations: Vec<Conversation>,
     queues: BTreeMap<SessionRef, InputQueue>,
     reads: Vec<Read>,
@@ -155,6 +160,7 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
         })
         .transpose()?;
     let mut history = BTreeMap::new();
+    let mut unimported = BTreeSet::new();
     let mut queues = BTreeMap::new();
     if let Some(connection) = &connection {
         let version: u32 = connection
@@ -181,6 +187,9 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
                 let id = SessionRef::new(provider(&kind)?, entry.get(1).map_err(failure)?)
                     .map_err(str::to_owned)?;
                 let body: Option<Vec<u8>> = entry.get(3).map_err(failure)?;
+                if body.is_none() {
+                    unimported.insert(id.clone());
+                }
                 let mut response: ThreadResponse = body
                     .map(|body| protocol::decode(&body).map_err(failure))
                     .transpose()?
@@ -245,6 +254,7 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
             }
             conversations.push(previous);
         }
+        unimported.remove(&id);
         history.insert(id, rewind.history);
     }
     let reads = state(connection.as_ref(), path, "reads", FILES[1])?;
@@ -261,12 +271,28 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
     }
     projects.retain(|project| !project.roots.is_empty());
     let workspace_scripts = read_workspace_scripts(connection.as_ref())?;
+    let backup = backup(path, connection.as_ref())?;
+    Ok(Some(Previous {
+        history,
+        unimported,
+        conversations,
+        queues,
+        reads,
+        models,
+        projects,
+        workspace_scripts,
+        backup,
+    }))
+}
+
+/// Retain an independently durable copy before the destination transaction starts.
+fn backup(path: &Path, connection: Option<&Connection>) -> Result<tempfile::TempDir, String> {
     let parent = path.parent().ok_or("missing storage directory")?;
     let backup = tempfile::Builder::new()
         .prefix("before-conversation-rows-")
         .tempdir_in(parent)
         .map_err(failure)?;
-    if let Some(connection) = &connection {
+    if let Some(connection) = connection {
         let destination = backup.path().join("bex-transcripts.sqlite");
         connection
             .execute(
@@ -293,16 +319,7 @@ pub(super) fn prepare(path: &Path) -> Result<Option<Previous>, String> {
             .and_then(|file| file.sync_all())
             .map_err(failure)?;
     }
-    Ok(Some(Previous {
-        history,
-        conversations,
-        queues,
-        reads,
-        models,
-        projects,
-        workspace_scripts,
-        backup,
-    }))
+    Ok(backup)
 }
 
 impl Previous {
@@ -392,11 +409,19 @@ impl Previous {
                             .as_ref()
                             .and_then(|startup| startup.workspace.clone()),
                         generation: Uuid::new_v4(),
+                        created_worktree: false,
                         visible: setup
                             .as_ref()
                             .is_some_and(|setup| setup.visible_at(now.max(0) as u64)),
                         setup,
                     }));
+            }
+            if self.unimported.contains(id) {
+                header.details.history_read_state =
+                    Some(agent_protocol::session::HistoryReadState::new(
+                        agent_protocol::session::HistoryReadKind::Loading,
+                        Vec::new(),
+                    ));
             }
             history::insert_header(transaction, id, &header, &Counters::default(), sequence)?;
         }
@@ -407,11 +432,26 @@ impl Previous {
                 .find(|row| &row.id == id)
                 .and_then(|row| row.bindings.first())
                 .map_or(id, |binding| &binding.session);
-            let sources = native_history_sources(response, source)?;
-            history::write_history(transaction, id, response, &sources, sequence, process, now)?;
-            restore_user_receipts(transaction, id, response, sequence)?;
-
             let key = thread_key(transaction, id)?;
+            if self.unimported.contains(id) && !self.conversations.iter().any(|row| &row.id == id) {
+                // A recorded native fragment was hidden on main until its first
+                // import. Keep it discoverable and importable rather than certifying it complete.
+                transaction
+                    .execute("UPDATE threads SET loaded=0 WHERE key=?1", [key])
+                    .map_err(failure)?;
+            } else {
+                let sources = native_history_sources(response, source)?;
+                history::write_history(
+                    transaction,
+                    id,
+                    response,
+                    &sources,
+                    sequence,
+                    process,
+                    now,
+                )?;
+                restore_user_receipts(transaction, id, response, sequence)?;
+            }
             if let Some(queue) = self.queues.get(id) {
                 for input in &queue.inputs {
                     Self::input(
@@ -431,6 +471,14 @@ impl Previous {
         }
         for row in &self.conversations {
             row.restore(transaction, sequence, process, now)?;
+        }
+        for id in &self.unimported {
+            let source = self
+                .conversations
+                .iter()
+                .find(|row| &row.id == id)
+                .map_or(id, |row| &row.active);
+            super::imports::queue(transaction, id, source, now)?;
         }
         for (id, response) in &history {
             history::link_parent(
@@ -499,7 +547,7 @@ impl Previous {
             transaction,
             scope,
             &Change::Input(pending),
-            &state,
+            &state.turns,
             &mut Vec::new(),
             &mut Vec::new(),
         )?;
@@ -572,7 +620,7 @@ impl Conversation {
                             source: binding.session.id.clone(),
                         }),
                     },
-                    &state,
+                    &state.turns,
                     &mut Vec::new(),
                     &mut Vec::new(),
                 )?;
@@ -732,33 +780,23 @@ fn native_history_sources(
     response: &ThreadResponse,
     first: &SessionRef,
 ) -> Result<BTreeMap<TurnId, history::NativeTurn>, String> {
-    response
-        .thread
-        .turns
-        .iter()
-        .flatten()
-        .map(|turn| {
-            let (source, native) = native_address(turn.id.as_str(), first)?;
-            let items = turn
-                .items
-                .iter()
-                .flatten()
-                .map(|item| {
-                    let (owner, native) = native_address(item.id.as_str(), &source)?;
-                    if owner != source {
-                        return Err("previous item belongs to another native source".into());
-                    }
-                    Ok((item.id.clone(), native.into()))
-                })
-                .collect::<Result<_, String>>()?;
-            Ok((
-                turn.id.clone(),
-                history::NativeTurn {
-                    source,
-                    id: native.into(),
-                    items,
-                },
-            ))
-        })
-        .collect()
+    let mut sources: BTreeMap<TurnId, history::NativeTurn> = BTreeMap::new();
+    for turn in response.thread.turns.iter().flatten() {
+        let (source, native) = native_address(turn.id.as_str(), first)?;
+        let entry = sources
+            .entry(turn.id.clone())
+            .or_insert_with(|| history::NativeTurn {
+                source: source.clone(),
+                id: native.into(),
+                items: BTreeMap::new(),
+            });
+        for item in turn.items.iter().flatten() {
+            let (owner, native) = native_address(item.id.as_str(), &source)?;
+            if owner != source {
+                return Err("previous item belongs to another native source".into());
+            }
+            entry.items.insert(item.id.clone(), native.into());
+        }
+    }
+    Ok(sources)
 }

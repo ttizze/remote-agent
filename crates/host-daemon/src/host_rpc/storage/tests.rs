@@ -13,8 +13,10 @@ use decision::{
 fn address(name: &str) -> SessionRef {
     SessionRef::new(ProviderKind::Claude, name.into()).unwrap()
 }
-fn context(seed: u128) -> Context {
+fn context(seed: u128) -> Context<'static> {
     Context {
+        preparation: None,
+        rewind_binding: None,
         external_busy: false,
         now: 100,
         seed: Uuid::from_u128(seed),
@@ -316,7 +318,7 @@ fn ready(storage: &Storage, id: &SessionRef) {
             let key = thread_key(&transaction, id)?;
             let mut state = rows::load(&transaction, key, storage.process)?;
             let binding = Change::Binding {
-                provider: ProviderKind::Claude,
+                provider: state.thread.provider,
                 value: Some(Binding::Ready {
                     covered: state.history_end(),
                     source: format!("native-{}", id.id),
@@ -333,7 +335,7 @@ fn ready(storage: &Storage, id: &SessionRef) {
                     process: storage.process,
                 },
                 &binding,
-                &state,
+                &state.turns,
                 &mut Vec::new(),
                 &mut Vec::new(),
             )?;
@@ -351,8 +353,9 @@ fn admission_receipt_and_rows_commit_together_and_replay_does_not_allocate_again
     ready(&storage, &id);
     let first = storage.decide(&id, submit(1), context(1), None).unwrap();
     assert_eq!(first.step.outcome, Outcome::Accepted);
-    assert_eq!(first.state.as_ref().unwrap().inputs.len(), 1);
-    assert!(first.state.as_ref().unwrap().turns.is_empty());
+    let admitted_state = storage.state(&id).unwrap();
+    assert_eq!(admitted_state.inputs.len(), 1);
+    assert!(admitted_state.turns.is_empty());
     let keys = first
         .rows
         .iter()
@@ -361,7 +364,7 @@ fn admission_receipt_and_rows_commit_together_and_replay_does_not_allocate_again
     assert_eq!(keys.len(), first.rows.len());
     let replay = storage.decide(&id, submit(1), context(2), None).unwrap();
     assert_eq!(replay.cursor, first.cursor);
-    assert_eq!(replay.state, first.state);
+    assert_eq!(storage.state(&id).unwrap(), admitted_state);
     assert!(replay.step.actions.is_empty());
     assert!(replay.rows.is_empty());
     assert!(replay.removed.is_empty());
@@ -471,7 +474,7 @@ fn creation_and_first_input_are_one_recoverable_transaction() {
         .decide(&id, submit(800), context(800), Some(&header()))
         .unwrap();
     assert_eq!(created.step.outcome, Outcome::Accepted);
-    assert_eq!(created.state.as_ref().unwrap().inputs.len(), 1);
+    assert_eq!(storage.state(&id).unwrap().inputs.len(), 1);
     assert!(
         created
             .rows
@@ -567,11 +570,10 @@ fn a_reopened_store_fences_in_flight_delivery_without_replaying_the_native_write
         )
         .unwrap();
     assert!(recovery.step.actions.is_empty());
-    assert!(!recovery.state.as_ref().unwrap().permits(&action));
+    assert!(!reopened.state(&id).unwrap().permits(&action));
     assert!(matches!(
-        recovery
-            .state
-            .as_ref()
+        reopened
+            .state(&id)
             .unwrap()
             .inputs
             .values()
@@ -631,7 +633,7 @@ fn a_late_item_update_keeps_its_original_position_and_does_not_reopen_the_turn()
             phase: AssistantPhase::Final,
         },
     };
-    let updated = storage
+    storage
         .decide(
             &id,
             Event::Provider {
@@ -644,7 +646,11 @@ fn a_late_item_update_keeps_its_original_position_and_does_not_reopen_the_turn()
             None,
         )
         .unwrap();
-    let position = updated.state.as_ref().unwrap().items["reply"].position;
+    let position = storage
+        .item(&id, &"reply".into())
+        .unwrap()
+        .unwrap()
+        .position;
     storage
         .decide(
             &id,
@@ -658,7 +664,7 @@ fn a_late_item_update_keeps_its_original_position_and_does_not_reopen_the_turn()
             None,
         )
         .unwrap();
-    let late = storage
+    storage
         .decide(
             &id,
             Event::Provider {
@@ -672,11 +678,15 @@ fn a_late_item_update_keeps_its_original_position_and_does_not_reopen_the_turn()
         )
         .unwrap();
     assert_eq!(
-        late.state.as_ref().unwrap().items["reply"].position,
+        storage
+            .item(&id, &"reply".into())
+            .unwrap()
+            .unwrap()
+            .position,
         position
     );
     assert_eq!(
-        late.state.as_ref().unwrap().turns[&attempt.turn].state,
+        storage.state(&id).unwrap().turns[&attempt.turn].state,
         TurnState::Completed
     );
     let removal = Event::Provider {
@@ -964,7 +974,7 @@ fn a_failed_receipt_write_rolls_back_admission_and_its_sequence() {
         .unwrap();
     let admitted = storage.decide(&id, submit(1), context(2), None).unwrap();
     assert_eq!(admitted.step.outcome, Outcome::Accepted);
-    assert_eq!(admitted.state.unwrap().inputs.len(), 1);
+    assert_eq!(storage.state(&id).unwrap().inputs.len(), 1);
 }
 
 #[test]
@@ -988,7 +998,7 @@ fn receipts_survive_conversation_deletion_and_rejections_are_also_replayed() {
         .unwrap();
     let replay = storage.decide(&id, submit(1), context(2), None).unwrap();
     assert_eq!(replay.step.outcome, Outcome::Accepted);
-    assert!(replay.state.is_none());
+    assert!(storage.state(&id).is_err());
     assert!(replay.step.actions.is_empty());
     let rejected = storage.decide(&id, submit(3), context(3), None).unwrap();
     assert!(matches!(rejected.step.outcome, Outcome::Rejected(_)));
@@ -1295,8 +1305,8 @@ fn unmaterialized_native_work_queues_input_until_the_same_source_becomes_idle() 
     assert_eq!(admitted.step.outcome, Outcome::Accepted);
     assert!(admitted.step.actions.is_empty());
     assert!(matches!(
-        admitted
-            .state
+        storage
+            .state(&id)
             .unwrap()
             .inputs
             .values()
@@ -1462,7 +1472,13 @@ fn catalog_refresh_during_a_claim_is_retained_and_empty_failures_are_replicated(
     };
     assert!(rows.iter().any(|row|matches!(&row.content,Content::Full(record) if matches!(record.as_ref(),Record::Catalog(decision::records::Catalog::Failed(error)) if error=="native catalog unavailable"))));
     let retry = storage.claim(1000, 1).unwrap().pop().unwrap();
-    storage.catalog_page(&retry, &[], None, 1001).unwrap();
+    let before = storage.list(None).unwrap();
+    storage
+        .retry(retry.id, retry.attempt, 2000, "native catalog unavailable")
+        .unwrap();
+    assert_eq!(storage.list(None).unwrap(), before);
+    let retry = storage.claim(2000, 1).unwrap().pop().unwrap();
+    storage.catalog_page(&retry, &[], None, 2001).unwrap();
     assert!(ready(&storage));
 }
 
@@ -1801,10 +1817,16 @@ fn repeated_catalog_native_parent_does_not_version_an_unchanged_public_child() {
     let key = Key::Thread(child.clone());
     let before = replica.rows()[&key].clone();
     let again = storage.claim(60_100, 1).unwrap().pop().unwrap();
+    assert!(
+        matches!(storage.list(replica.cursor()).unwrap(), Message::Changes { from, through, ref rows, ref removed } if from == through && rows.is_empty() && removed.is_empty())
+    );
     storage
         .catalog_page(&again, &[(child, child_header)], None, 60_100)
         .unwrap();
     let message = storage.list(replica.cursor()).unwrap();
+    assert!(
+        matches!(&message, Message::Changes { from, through, rows, removed } if from == through && rows.is_empty() && removed.is_empty())
+    );
     let replica = replica.apply(1, message).unwrap();
     assert_eq!(replica.rows()[&key], before);
 }
@@ -1968,7 +1990,7 @@ fn steering_waits_for_the_first_native_turn_and_dispatches_once_after_it_is_boun
     assert_eq!(waiting.step.outcome, Outcome::Accepted);
     assert!(waiting.step.actions.is_empty());
     assert!(
-        matches!(waiting.state.unwrap().inputs[Uuid::from_u128(102).to_string().as_str()].state, InputState::Queued { steer: Some(current) } if current == attempt.id)
+        matches!(storage.state(&target).unwrap().inputs[Uuid::from_u128(102).to_string().as_str()].state, InputState::Queued { steer: Some(current) } if current == attempt.id)
     );
     assert!(
         storage
@@ -2012,7 +2034,7 @@ fn steering_waits_for_the_first_native_turn_and_dispatches_once_after_it_is_boun
 }
 
 #[test]
-fn rewind_resets_old_cursors_retains_the_prefix_and_reimport_cannot_resurrect_removed_turns() {
+fn rewind_removes_the_suffix_without_resetting_loaded_pages_and_reimport_cannot_resurrect_it() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Storage::open(&directory.path().join("state.sqlite"));
     let target = address("rewind");
@@ -2074,13 +2096,13 @@ fn rewind_resets_old_cursors_retains_the_prefix_and_reimport_cannot_resurrect_re
         .unwrap();
     assert_eq!(rewind.step.outcome, Outcome::Accepted);
     let snapshot = storage.snapshot(&target, replica.cursor(), window).unwrap();
-    assert!(matches!(snapshot, Message::Snapshot { .. }));
-    let after = decision::records::Replica::new(
-        agent_protocol::sync::Scope::Conversation(target.clone()),
-        1,
-    )
-    .apply(1, snapshot)
-    .unwrap();
+    assert!(matches!(&snapshot, Message::Changes { removed, .. } if !removed.is_empty()));
+    let after = replica.apply(1, snapshot).unwrap();
+    assert_eq!(
+        after.window(),
+        window,
+        "rewind preserves already loaded page boundaries"
+    );
     assert_eq!(
         decision::records::project(&after)
             .unwrap()
@@ -2127,7 +2149,7 @@ fn rewind_resets_old_cursors_retains_the_prefix_and_reimport_cannot_resurrect_re
                     process: storage.process,
                 },
                 &binding,
-                &state,
+                &state.turns,
                 &mut Vec::new(),
                 &mut Vec::new(),
             )?;
@@ -2154,10 +2176,10 @@ fn setup_stop_is_rejected_by_the_storage_transaction_after_agent_creation_starte
     let target = address("setup-stop");
     storage.create(&target, &header()).unwrap();
     let input: ClientInputId = Uuid::from_u128(1).to_string().into();
-    let admitted = storage
+    storage
         .decide(&target, submit(1), context(1), None)
         .unwrap();
-    let state = admitted.state.unwrap();
+    let state = storage.state(&target).unwrap();
     let InputState::Preparing { action, .. } = state.inputs[&input].state else {
         panic!("not preparing")
     };
@@ -2171,6 +2193,7 @@ fn setup_stop_is_rejected_by_the_storage_transaction_after_agent_creation_starte
                     project_cwd: "/project".into(),
                     strategy: None,
                     generation: action,
+                    created_worktree: false,
                     setup: Some(agent_protocol::workspace::WorkspaceSetup::new(None, 100)),
                     visible: true,
                 }),
@@ -2263,14 +2286,24 @@ fn a_cached_loading_window_resets_to_the_latest_ten_turns_after_import() {
                         Arc::new(agent_protocol::models::Turn {
                             id: format!("native-{index}").into(),
                             status: agent_protocol::models::TurnStatus::Completed,
-                            items: Some(vec![Arc::new(agent_protocol::items::Item::new(
-                                format!("answer-{index}").into(),
-                                ItemStatus::Completed,
-                                ItemBody::AssistantText {
-                                    text: format!("answer {index}"),
-                                    phase: Default::default(),
-                                },
-                            ))]),
+                            items: Some(vec![
+                                Arc::new(agent_protocol::items::Item::new(
+                                    format!("user-{index}").into(),
+                                    ItemStatus::Completed,
+                                    ItemBody::UserMessage {
+                                        text: Some(format!("question {index}")),
+                                        content: vec![],
+                                    },
+                                )),
+                                Arc::new(agent_protocol::items::Item::new(
+                                    format!("answer-{index}").into(),
+                                    ItemStatus::Completed,
+                                    ItemBody::AssistantText {
+                                        text: format!("answer {index}"),
+                                        phase: Default::default(),
+                                    },
+                                )),
+                            ]),
                             ..Default::default()
                         })
                     })
@@ -2291,4 +2324,154 @@ fn a_cached_loading_window_resets_to_the_latest_ten_turns_after_import() {
     let thread = decision::records::project(&next).unwrap().thread;
     assert_eq!(thread.turns.as_ref().unwrap().len(), 10);
     assert_eq!(thread.history_has_more, Some(true));
+}
+
+#[test]
+fn compact_capacity_failure_is_not_resumed_after_loading_the_durable_decision_state() {
+    for lost in [false, true] {
+        for (text, compact) in [
+            ("/compact", true),
+            ("  /CoMpAcT\n", true),
+            ("/compact please", false),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&directory.path().join("state.sqlite"));
+            let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+            let mut header = header();
+            header.state.provider = ProviderKind::Codex;
+            storage.create(&target, &header).unwrap();
+            ready(&storage, &target);
+            let mut event = submit(1);
+            let Event::Command {
+                command: Command::Submit { content, .. },
+                ..
+            } = &mut event
+            else {
+                unreachable!()
+            };
+            content.parts = vec![Input::Text { text: text.into() }];
+            let admitted = storage.decide(&target, event, context(1), None).unwrap();
+            let [
+                decision::Action::Deliver {
+                    id,
+                    action,
+                    attempt,
+                    ..
+                },
+            ] = &admitted.step.actions[..]
+            else {
+                panic!("delivery")
+            };
+            storage
+                .decide(
+                    &target,
+                    Event::Delivered {
+                        id: id.clone(),
+                        action: *action,
+                        native_turn: Some("native-turn".into()),
+                    },
+                    context(2),
+                    None,
+                )
+                .unwrap();
+            let error = agent_protocol::execution::ExecutionError {
+                message: "capacity".into(),
+                provider_code: Some("serverOverloaded".into()),
+                ..Default::default()
+            };
+            let event = if lost {
+                Event::ExecutionLost {
+                    attempt: attempt.id,
+                    error,
+                }
+            } else {
+                Event::Provider {
+                    native_items: Vec::new(),
+                    native_turn: None,
+                    attempt: attempt.id,
+                    observation: Observation::Failed(Some(error)),
+                }
+            };
+            let failed = storage.decide(&target, event, context(3), None).unwrap();
+            assert_eq!(
+                failed.step.actions.is_empty(),
+                compact,
+                "lost={lost}, text={text:?}"
+            );
+            if compact {
+                assert!(
+                    matches!(&storage.state(&target).unwrap().turns[&attempt.turn].state, TurnState::Failed(error) if error.message == "capacity")
+                );
+            } else {
+                assert_eq!(failed.step.actions, [decision::Action::WaitUntil(2100)]);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_managed_legacy_history_failure_leaves_loading_and_can_be_retried() {
+    use agent_protocol::session::{HistoryReadKind, HistoryReadState};
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let target = address("managed-history-failure");
+    let mut header = header();
+    header.details.history_read_state =
+        Some(HistoryReadState::new(HistoryReadKind::Loading, vec![]));
+    storage.create(&target, &header).unwrap();
+    assert!(storage.loaded(&target).unwrap());
+    storage
+        .import_status(&target, Some("native unavailable".into()), 100)
+        .unwrap();
+    let failed = storage
+        .header(&target)
+        .unwrap()
+        .details
+        .history_read_state
+        .unwrap();
+    assert_eq!(failed.kind, HistoryReadKind::Unavailable);
+    storage.import_status(&target, None, 101).unwrap();
+    assert_eq!(
+        storage
+            .header(&target)
+            .unwrap()
+            .details
+            .history_read_state
+            .unwrap()
+            .kind,
+        HistoryReadKind::Loading
+    );
+    let claim = storage
+        .claim(101, 16)
+        .unwrap()
+        .into_iter()
+        .find(|claim| matches!(&claim.work, jobs::Work::Import { target: id, .. } if id == &target))
+        .unwrap();
+    let rejected = storage
+        .reimport(
+            &target,
+            &target,
+            claim.id,
+            claim.attempt,
+            &agent_protocol::models::ThreadResponse {
+                thread: agent_protocol::models::Thread {
+                    id: Some(target.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            102,
+        )
+        .unwrap();
+    assert!(matches!(rejected.step.outcome, Outcome::Rejected(_)));
+    assert_eq!(
+        storage
+            .header(&target)
+            .unwrap()
+            .details
+            .history_read_state
+            .unwrap()
+            .kind,
+        HistoryReadKind::Unavailable
+    );
 }

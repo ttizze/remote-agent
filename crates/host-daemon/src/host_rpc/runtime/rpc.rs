@@ -82,14 +82,7 @@ impl Runtime {
                     } else {
                         None
                     };
-                    let tail = agent_protocol::sync::Output::default()
-                        .apply(agent_protocol::sync::OutputUpdate::Tail(
-                            agent_protocol::sync::Output {
-                                offset: 0,
-                                text: output,
-                            },
-                        ))
-                        .map_err(|error| Failure::new("invalid_output", error.to_string()))?;
+                    let tail = agent_protocol::sync::Output::new(0, &output);
                     let (initial, updates) = match service.inner.conversation.outputs.subscribe(
                         &request.key,
                         seed.map(|execution| (execution, tail.clone())),
@@ -176,8 +169,14 @@ impl Runtime {
                     service
                         .inner
                         .conversation
-                        .storage
-                        .fork(&request.source, &request.target, &request.through, now())
+                        .owners
+                        .fork(
+                            &request.source,
+                            request.target.clone(),
+                            request.through.clone(),
+                            now(),
+                        )
+                        .await
                         .map_err(storage_failure)?;
                     Ok::<_, Failure>(request.target.clone())
                 }
@@ -201,67 +200,38 @@ impl Runtime {
                     .inner
                     .conversation
                     .owners
-                    .read(
-                        &request.session,
-                        session,
-                        request.subscription,
-                        request.cached,
-                        None,
-                    )
+                    .read(&request.session, session, request.subscription, None)
                     .await
+                    .map(|_| agent_protocol::models::Empty {})
                     .map_err(storage_failure),
             )
             .into(),
             Call::HydrateConversation(request) => {
                 let result = async {
-                    let mut messages = service
-                        .inner
-                        .conversation
-                        .owners
-                        .read(
-                            &request.session,
-                            session,
-                            request.subscription,
-                            request.cached,
-                            Some(request.item.clone()),
-                        )
-                        .await
-                        .map_err(storage_failure)?;
-                    if messages.last().is_some_and(|message| matches!(message,
-                        records::Message::Hydrate { row, .. } if matches!(&row.content,
-                            agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)
-                            if matches!(value.as_ref(), records::Record::Item(item) if item.content.is_deferred()))))
-                    {
+                    let mut read = service.inner.conversation.owners.read(
+                        &request.session, session, request.subscription, Some(request.item.clone()),
+                    ).await.map_err(storage_failure)?;
+                    if read.item.as_ref().is_some_and(|row| {
+                        let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = &row.content;
+                        matches!(value.as_ref(), records::Record::Item(item) if item.content.is_deferred())
+                    }) {
                         Self::hydrate_native(service, &request.session, &request.item).await?;
-                        messages = service.inner.conversation.owners.read(
-                            &request.session, session, request.subscription, request.cached,
-                            Some(request.item.clone()),
+                        read = service.inner.conversation.owners.read(
+                            &request.session, session, request.subscription, Some(request.item.clone()),
                         ).await.map_err(storage_failure)?;
                     }
                     let mut transfer = None;
-                    if let Some(records::Message::Hydrate { row, .. }) = messages.last_mut() {
-                        let value = match &row.content {
-                            agent_protocol::sync::Content::Full(value)
-                            | agent_protocol::sync::Content::Summary(value) => value,
-                        };
+                    let version = read.item.as_ref().map(|row| row.version);
+                    if let Some(row) = read.item {
+                        let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = row.content;
                         if let records::Record::Item(item) = value.as_ref() {
-                            let bytes = protocol::encode(item.content.as_ref())
-                                .map_err(|error| storage_failure(error.to_string()))?;
+                            let bytes = protocol::encode(item.content.as_ref()).map_err(|error| storage_failure(error.to_string()))?;
                             if bytes.len() > agent_protocol::models::MAX_INLINE_ITEM_BYTES {
-                                transfer = Some(
-                                    service
-                                        .files()
-                                        .download_bytes(session, bytes)
-                                        .await
-                                        .map_err(|error| {
-                                            Failure::new("item_transfer_failed", error)
-                                        })?,
-                                );
-                                records::defer(row);
+                                transfer = Some(service.files().download_bytes(session, bytes).await.map_err(|error| Failure::new("item_transfer_failed", error))?);
                             }
                         }
                     }
-                    Ok::<_, Failure>(records::Hydrated { messages, transfer })
+                    Ok::<_, Failure>(records::Hydrated { cursor: read.cursor, version, transfer })
                 }
                 .await;
                 Response::from_result(result).into()

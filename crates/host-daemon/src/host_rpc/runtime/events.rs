@@ -608,7 +608,7 @@ impl Runtime {
                 } = body
                 {
                     *output = tail.text;
-                    *output_omitted = tail.offset != 0;
+                    *output_omitted = tail.truncated;
                     *status = item_status;
                 }
             } else if let Some(mut item) = self.storage.item(target, &key.item)? {
@@ -619,7 +619,7 @@ impl Runtime {
                 } = &mut item.body
                 {
                     *output = tail.text;
-                    *output_omitted = tail.offset != 0;
+                    *output_omitted = tail.truncated;
                 }
                 observations.push(Observation::Item {
                     deferred: false,
@@ -675,18 +675,19 @@ impl Runtime {
                 item: id.clone(),
             };
             if matches!(item.status, ItemStatus::Running | ItemStatus::Unknown) {
-                outputs.update(
+                outputs.write(
                     execution,
                     key,
-                    agent_protocol::sync::OutputUpdate::Tail(agent_protocol::sync::Output {
-                        offset: 0,
-                        text: std::mem::take(output),
-                    }),
+                    super::output::Change::Replace {
+                        text: output,
+                        truncated: *output_omitted,
+                    },
                 )?;
+                output.clear();
                 *output_omitted = true;
             } else {
                 let tail = outputs.finish(&key, output);
-                *output_omitted = tail.offset != 0;
+                *output_omitted = tail.truncated;
                 *output = tail.text;
             }
         }

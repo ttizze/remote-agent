@@ -1,6 +1,22 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "会話の下書きを開いてから送信してください。": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会話の下書きを開いてから送信してください。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open a conversation draft before sending."
+          }
+        }
+      }
+    },
     "検索をクリア": {
       "localizations": {
         "ja": {

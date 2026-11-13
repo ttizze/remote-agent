@@ -22,7 +22,6 @@ impl Storage {
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
             let key = thread_key(&transaction, id)?;
-            let state = rows::load(&transaction, key, self.process)?;
             let (mut header, counters) = rows::header(&transaction, key)?;
             let mut current = cursor(&transaction)?;
             let mut changed = Vec::new();
@@ -50,7 +49,6 @@ impl Storage {
             }
             transaction.commit().map_err(failure)?;
             Ok(Committed {
-                state: Some(state),
                 step: Step {
                     outcome: Outcome::Accepted,
                     ..Default::default()

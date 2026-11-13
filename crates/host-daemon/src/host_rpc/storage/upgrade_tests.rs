@@ -596,3 +596,175 @@ fn storage_uses_durable_wal_and_reports_an_invalid_path_to_every_consumer() {
     assert!(invalid.list(None).is_err());
     assert!(invalid.state(&address()).is_err());
 }
+
+#[test]
+fn recorded_native_fragments_without_metadata_are_imported_after_upgrade() {
+    for managed in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("bex-transcripts.sqlite");
+        let (_, queued) = previous(&old, false);
+        let connection = Connection::open(&old).unwrap();
+        connection
+            .execute("UPDATE conversations SET metadata=NULL", [])
+            .unwrap();
+        if managed {
+            connection.execute("UPDATE host_state SET body=?1 WHERE name='bindings'", [serde_json::to_vec(&serde_json::json!([{"id":address(),"active":address(),"cwd":"/kept/workspace","name":"Saved conversation","preview":null,"bindings":[{"session":address()}],"handoffs":[],"startup":null}])).unwrap()]).unwrap();
+        } else {
+            connection
+                .execute("DELETE FROM host_state WHERE name='bindings'", [])
+                .unwrap();
+        }
+        drop(connection);
+        let storage = Storage::open(&directory.path().join("bex-conversations.sqlite"));
+        storage.check_ready().unwrap();
+        assert_eq!(storage.loaded(&address()).unwrap(), managed);
+        let before = storage.state(&address()).unwrap();
+        assert!(before.thread.queue_held);
+        assert!(before.inputs.contains_key(queued.to_string().as_str()));
+        let turn = |id: &str, text: &str| {
+            Arc::new(Turn {
+                id: id.into(),
+                status: TurnStatus::Completed,
+                items: Some(vec![Arc::new(Item::new(
+                    format!("{id}-item").into(),
+                    agent_protocol::execution::ItemStatus::Completed,
+                    ItemBody::AssistantText {
+                        text: text.into(),
+                        phase: Default::default(),
+                    },
+                ))]),
+                ..Default::default()
+            })
+        };
+        let response = ThreadResponse {
+            thread: Thread {
+                id: Some(address()),
+                name: Some("Recovered conversation".into()),
+                cwd: Some("/kept/workspace".into()),
+                turns: Some(vec![
+                    turn("older-turn", "older answer"),
+                    Arc::new(Turn {
+                        id: "original-turn".into(),
+                        status: TurnStatus::Completed,
+                        items: Some(vec![Arc::new(Item::new(
+                            "original-item".into(),
+                            agent_protocol::execution::ItemStatus::Completed,
+                            ItemBody::AssistantText {
+                                text: "kept answer".into(),
+                                phase: Default::default(),
+                            },
+                        ))]),
+                        ..Default::default()
+                    }),
+                ]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let claim = storage.claim(i64::MAX / 2, 16).unwrap().into_iter().find(|claim| matches!(&claim.work, jobs::Work::Import { target, .. } if target == &address())).unwrap();
+        let imported = storage
+            .reimport(
+                &address(),
+                &address(),
+                claim.id,
+                claim.attempt,
+                &response,
+                100,
+            )
+            .unwrap();
+        assert_eq!(imported.step.outcome, Outcome::Accepted);
+        assert!(storage.loaded(&address()).unwrap());
+        let after = storage.state(&address()).unwrap();
+        assert!(after.thread.queue_held);
+        assert_eq!(after.inputs, before.inputs);
+        assert_eq!(after.counters.input, before.counters.input);
+        let history = storage.history(&address(), 0).unwrap().thread;
+        let turns = history.turns.unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            turns
+                .iter()
+                .filter(|turn| turn.id.as_str() == "original-turn")
+                .count(),
+            1
+        );
+        for expected in ["older answer", "kept answer"] {
+            assert_eq!(turns.iter().flat_map(|turn| turn.items.iter().flatten()).filter(|item| matches!(item.body(), ItemBody::AssistantText { text, .. } if text == expected)).count(), 1);
+        }
+        let details = storage.header(&address()).unwrap().details;
+        assert_eq!(
+            details.read_through.as_ref().map(|id| id.as_str()),
+            Some("original-turn")
+        );
+        assert_eq!(details.selection.effort.as_deref(), Some("high"));
+        assert_eq!(details.selection.service_tier.as_deref(), Some("priority"));
+        assert!(details.history_read_state.is_none());
+        assert!(
+            matches!(turns[0].items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == "older answer")
+        );
+        assert_eq!(turns[1].id.as_str(), "original-turn");
+        if !managed {
+            assert_eq!(history.name.as_deref(), Some("Recovered conversation"));
+            assert_eq!(turns[0].id.as_str(), "older-turn");
+        }
+    }
+}
+
+#[test]
+fn repeated_qualified_native_turns_keep_each_deferred_item_address() {
+    use base64::Engine;
+    let directory = tempfile::tempdir().unwrap();
+    let root = SessionRef::new(ProviderKind::Claude, "bex-task:repeated".into()).unwrap();
+    let source = address();
+    let qualified = |native: &str| {
+        format!(
+            "bex:{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&(&source, native)).unwrap())
+        )
+    };
+    let turn = qualified("repeated");
+    let ids = [qualified("first"), qualified("second")];
+    let response = ThreadResponse {
+        thread: Thread {
+            id: Some(root.clone()),
+            turns: Some(
+                ids.iter()
+                    .map(|id| {
+                        let mut item = Item::new(
+                            id.clone().into(),
+                            agent_protocol::execution::ItemStatus::Completed,
+                            ItemBody::AssistantText {
+                                text: "deferred".into(),
+                                phase: Default::default(),
+                            },
+                        );
+                        item.defer();
+                        Arc::new(Turn {
+                            id: turn.clone().into(),
+                            status: TurnStatus::Completed,
+                            items: Some(vec![Arc::new(item)]),
+                            ..Default::default()
+                        })
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let row = serde_json::json!({"id":root,"active":source,"cwd":"/workspace","bindings":[{"session":source}],"handoffs":[]});
+    std::fs::write(
+        directory.path().join("bex-conversations.rewind"),
+        serde_json::to_vec(&serde_json::json!({"previous":row,"history":response})).unwrap(),
+    )
+    .unwrap();
+    let storage = Storage::open(&directory.path().join("bex-conversations.sqlite"));
+    storage.check_ready().unwrap();
+    for (id, native) in ids.into_iter().zip(["first", "second"]) {
+        let address = storage.native_body(&root, &id.into()).unwrap().unwrap();
+        assert_eq!(address.request.thread_id, source);
+        assert_eq!(address.request.turn_id.as_str(), "repeated");
+        assert_eq!(address.request.item_id.as_str(), native);
+    }
+}

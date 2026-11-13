@@ -130,6 +130,11 @@ pub enum Input {
     Mention { path: String, name: String },
 }
 impl Input {
+    /// T3's isCompactionCommandMessage: a standalone command without attachments.
+    pub fn is_compaction(input: &[Self]) -> bool {
+        matches!(input, [Self::Text { text }] if text.trim().eq_ignore_ascii_case("/compact"))
+    }
+
     pub fn message_parts(input: &[Self]) -> Vec<crate::items::MessagePart> {
         use crate::items::MessagePart;
         input
@@ -376,20 +381,6 @@ pub struct AddProject {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ListSessions {
-    pub query: crate::models::ListQuery,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListProjectSessions {
-    pub project_id: String,
-    pub limit: u32,
-    pub search_term: String,
-}
-
 /// Values already obtained by the title read; decorating them must not list
 /// provider sessions or read conversation bodies again.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -606,7 +597,7 @@ impl RewindSession {
     }
 }
 
-/// Creating a task admits its first input before workspace/provider preparation.
+/// Retry a failed input; `work_locally` selects the project folder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryPreparation {
@@ -668,12 +659,6 @@ pub struct ReadAccountUsage {
     pub provider: crate::session::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
-}
-
-impl ListSessions {
-    pub fn new(query: crate::models::ListQuery) -> Self {
-        Self { query }
-    }
 }
 
 /// Input intent. The Host starts a turn or, while one runs, steers it or queues

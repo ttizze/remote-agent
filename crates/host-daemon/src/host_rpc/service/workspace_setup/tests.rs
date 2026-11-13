@@ -82,7 +82,12 @@ async fn until(updates: &mut Updates, predicate: impl Fn(&Thread) -> bool) -> Th
         }
     })
     .await
-    .expect("preparation transition must arrive")
+    .unwrap_or_else(|error| {
+        panic!(
+            "preparation transition must arrive: {error}; {:?}",
+            updates.view()
+        )
+    })
 }
 fn retry(id: SessionRef, work_locally: bool) -> Call {
     Call::ChangeConversation(records::Change {
@@ -376,88 +381,113 @@ async fn local_base_skips_fetch_and_root_selection_overrides_automatic_worktrees
 #[cfg(unix)]
 #[tokio::test]
 async fn project_script_failure_has_real_terminal_output_and_retries_in_the_same_checkout() {
-    let fixture = Fixture::new(script("exit 99", false)).await;
-    fixture
-        .host
-        .inner
-        .projects
-        .register(&fixture.repository)
-        .await
-        .unwrap();
-    let project = fixture.host.project_snapshot().await.unwrap().projects[0]
-        .id
-        .clone();
-    let mut settings = fixture.host.inner.worktrees.settings(None).await.unwrap();
-    settings.project_setup_scripts.insert(project, script("if [ ! -f .attempted ]; then touch .attempted; printf 'setup failed here\\n'; exit 7; fi; printf 'recovered\\n'", false).unwrap());
-    fixture
-        .host
-        .inner
-        .worktrees
-        .settings(Some(settings))
-        .await
-        .unwrap();
-    let client = fixture.host.open_session();
-    let (opened, mut updates) =
-        admit(&fixture.host, client.id(), &fixture.request("main", false)).await;
-    let failed = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Failed).await;
-    assert_eq!(failed.stages[2].exit_code, Some(7));
-    assert!(
-        failed.stages[2]
-            .tail
-            .iter()
-            .any(|line| line.contains("setup failed here"))
-    );
-    assert_eq!(fixture.agent.next.load(Ordering::SeqCst), 0);
-    let viewer = fixture.host.open_session();
-    let handle = failed.terminal_handle.clone().unwrap();
-    let _: Empty = call(
-        &fixture.host,
-        viewer.id(),
-        Call::StartTerminal(op::StartTerminal {
-            handle: handle.clone(),
-            cwd: failed.worktree_path.clone().unwrap(),
-            command: None,
-            size: op::TerminalSize { cols: 80, rows: 24 },
-        }),
-    )
-    .await
-    .unwrap();
-    assert!(fixture.host.inner.terminals.is_setup(&handle));
-    until(&mut updates, |thread| {
-        thread
-            .preparations
-            .iter()
-            .any(|preparation| matches!(preparation.status, PreparationStatus::Failed { .. }))
-    })
-    .await;
-    tokio::task::yield_now().await;
-    tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(31)).await;
-    until(&mut updates, |change| change.workspace_setup.is_none()).await;
-    tokio::time::resume();
-    let retained = fixture
-        .host
-        .inner
-        .conversation
-        .storage
-        .header(&opened)
-        .unwrap()
-        .details
-        .workspace
-        .unwrap()
-        .setup
-        .unwrap();
-    assert_eq!(retained.script, failed.script);
-    let retried: records::Acknowledged =
-        call(&fixture.host, client.id(), retry(opened.clone(), false))
+    for existing in [false, true] {
+        let fixture = Fixture::new(script("exit 99", false)).await;
+        fixture
+            .host
+            .inner
+            .projects
+            .register(&fixture.repository)
             .await
             .unwrap();
-    retried.accepted().unwrap();
-    let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
-    assert_eq!(done.worktree_path, failed.worktree_path);
-    assert_eq!(done.branch, failed.branch);
-    assert_eq!(done.stages[2].exit_code, Some(0));
-    assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
+        let project = fixture.host.project_snapshot().await.unwrap().projects[0]
+            .id
+            .clone();
+        let mut settings = fixture.host.inner.worktrees.settings(None).await.unwrap();
+        settings.project_setup_scripts.insert(project, script("if [ ! -f .attempted ]; then touch .attempted; printf 'setup failed here\\n'; exit 7; fi; printf 'recovered\\n'", false).unwrap());
+        fixture
+            .host
+            .inner
+            .worktrees
+            .settings(Some(settings))
+            .await
+            .unwrap();
+        let client = fixture.host.open_session();
+        let mut request = fixture.request("main", false);
+        if existing {
+            let Call::CreateConversation(params) = &mut request else {
+                unreachable!()
+            };
+            params.workspace = Some(WorkspaceStrategy::ExistingWorktree {
+                path: fixture.repository.to_string_lossy().into_owned(),
+            });
+        }
+        let (opened, mut updates) = admit(&fixture.host, client.id(), &request).await;
+        let failed = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Failed).await;
+        assert_eq!(failed.stages[2].exit_code, Some(7));
+        assert!(
+            failed.stages[2]
+                .tail
+                .iter()
+                .any(|line| line.contains("setup failed here"))
+        );
+        assert_eq!(fixture.agent.next.load(Ordering::SeqCst), 0);
+        let viewer = fixture.host.open_session();
+        let handle = failed.terminal_handle.clone().unwrap();
+        let _: Empty = call(
+            &fixture.host,
+            viewer.id(),
+            Call::StartTerminal(op::StartTerminal {
+                handle: handle.clone(),
+                cwd: failed.worktree_path.clone().unwrap(),
+                command: None,
+                size: op::TerminalSize { cols: 80, rows: 24 },
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(fixture.host.inner.terminals.is_setup(&handle));
+        until(&mut updates, |thread| {
+            thread
+                .preparations
+                .iter()
+                .any(|preparation| matches!(preparation.status, PreparationStatus::Failed { .. }))
+        })
+        .await;
+        tokio::task::yield_now().await;
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(31)).await;
+        until(&mut updates, |change| change.workspace_setup.is_none()).await;
+        tokio::time::resume();
+        let retained = fixture
+            .host
+            .inner
+            .conversation
+            .storage
+            .header(&opened)
+            .unwrap()
+            .details
+            .workspace
+            .unwrap()
+            .setup
+            .unwrap();
+        assert_eq!(retained.script, failed.script);
+        let retried: records::Acknowledged =
+            call(&fixture.host, client.id(), retry(opened.clone(), false))
+                .await
+                .unwrap();
+        retried.accepted().unwrap();
+        let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
+        assert_eq!(done.worktree_path, failed.worktree_path);
+        assert_eq!(done.branch, failed.branch);
+        assert_eq!(done.stages[2].exit_code, Some(0));
+        assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
+        let expected = if existing {
+            SetupStageStatus::Skipped
+        } else {
+            SetupStageStatus::Done
+        };
+        for id in [SetupStageId::Fetch, SetupStageId::Checkout] {
+            assert_eq!(
+                done.stages
+                    .iter()
+                    .find(|stage| stage.id == id)
+                    .unwrap()
+                    .status,
+                expected
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -519,7 +549,7 @@ async fn asynchronous_failure_does_not_block_or_resend_the_initial_input() {
     let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
     assert_eq!(done.stages[2].status, SetupStageStatus::Failed);
     assert_eq!(done.stages[2].exit_code, Some(9));
-    assert_eq!(done.error.as_deref(), Some("Setup script exited with 9"));
+    assert!(done.error.is_none());
     assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
 }
 
@@ -680,8 +710,10 @@ async fn automatic_workspace_preference_selects_the_initial_checkout() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn stopping_a_running_setup_then_retrying_reruns_the_script_in_the_same_checkout() {
-    let fixture = Fixture::new(script("if [ ! -f .attempted ]; then touch .attempted; printf 'waiting\\n'; sleep 120; fi; printf 'retried\\n'", false)).await;
+async fn stopping_a_new_checkout_removes_it_and_retry_creates_a_fresh_checkout() {
+    let marker = tempfile::tempdir().unwrap();
+    let flag = marker.path().join("attempted");
+    let fixture = Fixture::new(script(&format!("if [ ! -f '{}' ]; then touch '{}'; printf 'waiting\\n'; sleep 120; fi; printf 'retried\\n'", flag.display(), flag.display()), false)).await;
     let client = fixture.host.open_session();
     let (id, mut updates) =
         admit(&fixture.host, client.id(), &fixture.request("main", false)).await;
@@ -717,8 +749,9 @@ async fn stopping_a_running_setup_then_retrying_reruns_the_script_in_the_same_ch
         .unwrap();
     retried.accepted().unwrap();
     let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
-    assert_eq!(done.worktree_path, running.worktree_path);
-    assert_eq!(done.branch, running.branch);
+    assert!(!Path::new(running.worktree_path.as_deref().unwrap()).exists());
+    assert_ne!(done.worktree_path, running.worktree_path);
+    assert_ne!(done.branch, running.branch);
     assert_eq!(done.stages[2].exit_code, Some(0));
     assert!(
         done.stages[2]
@@ -758,6 +791,7 @@ async fn restarted_host_restores_the_remaining_setup_card_lifetime() {
                         project_cwd: "/project".into(),
                         strategy: None,
                         generation,
+                        created_worktree: false,
                         setup: Some(setup),
                         visible: true,
                     })),

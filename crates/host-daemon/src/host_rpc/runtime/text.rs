@@ -7,67 +7,73 @@ use tokio::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone)]
 struct Buffered {
     attempt: Attempt,
     item: Item,
+    delivered: agent_protocol::items::ItemBody,
     changed: Instant,
+    last_flush: Option<Instant>,
     boundary: bool,
 }
 #[derive(Default)]
 pub(super) struct Text {
     pending: HashMap<ItemId, Buffered>,
-    last_flush: Option<Instant>,
     worker: Option<Uuid>,
     wake: Arc<Notify>,
 }
 impl Text {
     pub(super) fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-    fn deadline(&self, token: Uuid) -> Option<Instant> {
-        if self.worker != Some(token) {
-            return None;
-        }
         self.pending
             .values()
-            .map(|entry| {
-                let due = if entry.boundary {
-                    entry.changed
-                } else {
-                    entry.changed + Duration::from_millis(800)
-                };
-                self.last_flush
-                    .map_or(due, |last| due.max(last + Duration::from_millis(400)))
+            .all(|entry| entry.item.body == entry.delivered)
+    }
+    fn deadline(&self, token: Uuid) -> Option<Instant> {
+        (self.worker == Some(token))
+            .then(|| {
+                self.pending
+                    .values()
+                    .filter(|entry| entry.item.body != entry.delivered)
+                    .map(|entry| {
+                        if entry.boundary {
+                            entry.changed
+                        } else {
+                            entry.changed + Duration::from_millis(800)
+                        }
+                    })
+                    .min()
             })
-            .min()
+            .flatten()
     }
     fn ready(&mut self, token: Uuid) -> Option<Vec<Buffered>> {
         if self.worker != Some(token) {
             return None;
         }
         let now = Instant::now();
-        if self
-            .last_flush
-            .is_some_and(|last| now < last + Duration::from_millis(400))
-        {
-            return Some(Vec::new());
-        }
-        let ids: Vec<_> = self
+        let mut ready = Vec::new();
+        for entry in self
             .pending
-            .iter()
-            .filter(|(_, entry)| {
-                entry.boundary || now >= entry.changed + Duration::from_millis(800)
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        let ready: Vec<_> = ids
-            .into_iter()
-            .map(|id| self.pending.remove(&id).expect("selected buffer"))
-            .collect();
-        if !ready.is_empty() {
-            self.last_flush = Some(now);
+            .values_mut()
+            .filter(|entry| entry.item.body != entry.delivered)
+        {
+            let body = if now >= entry.changed + Duration::from_millis(800) {
+                entry.item.body.clone()
+            } else if entry.boundary {
+                paragraph_body(&entry.item.body, &entry.delivered)
+            } else {
+                continue;
+            };
+            entry.boundary = false;
+            if body == entry.delivered {
+                continue;
+            }
+            entry.last_flush = Some(now);
+            entry.delivered = body.clone();
+            let mut publication = entry.clone();
+            publication.item.body = body;
+            ready.push(publication);
         }
-        if self.pending.is_empty() {
+        if self.is_empty() {
             self.worker = None;
         }
         Some(ready)
@@ -76,10 +82,8 @@ impl Text {
 impl resources::Source {
     pub(super) fn replace_text(&self, id: &ItemId) {
         let mut text = self.text.lock().unwrap();
-        if text.pending.remove(id).is_some() {
-            text.last_flush = Some(Instant::now());
-        }
-        if text.pending.is_empty() {
+        text.pending.remove(id);
+        if text.is_empty() {
             text.worker = None;
         }
         text.wake.notify_one();
@@ -87,12 +91,10 @@ impl resources::Source {
     pub(super) fn take_text(&self) -> Vec<(Attempt, Observation)> {
         let mut text = self.text.lock().unwrap();
         text.worker = None;
-        if !text.pending.is_empty() {
-            text.last_flush = Some(Instant::now());
-        }
         text.wake.notify_one();
         std::mem::take(&mut text.pending)
             .into_values()
+            .filter(|entry| entry.item.body != entry.delivered)
             .map(|entry| {
                 (
                     entry.attempt,
@@ -108,20 +110,134 @@ impl resources::Source {
     }
 }
 
-fn boundary(body: &agent_protocol::items::ItemBody, field: TextField, delta: &str) -> bool {
+// T3 Code splitBufferedAssistantText: only complete Markdown blocks are ready.
+fn paragraph_boundary(text: &str) -> usize {
+    use std::sync::LazyLock;
+    static FENCE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^( *)(`{3,}|~{3,})").unwrap());
+    static LIST: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^[ \t]*(?:[-*+]|[0-9]{1,9}[.)])[ \t]").unwrap());
+    static HEADING: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^#{1,6}(?:[ \t]|$)").unwrap());
+    let mut fence: Option<(char, usize, usize)> = None;
+    let mut boundary = 0;
+    let mut start = 0;
+    let mut title = false;
+    loop {
+        let newline = text[start..].find('\n').map(|offset| start + offset);
+        let line = text[start..newline.unwrap_or(text.len())].trim_end_matches([' ', '\t', '\r']);
+        if fence.is_none() && start > 0 && !title && LIST.is_match(line) {
+            boundary = start;
+        }
+        let Some(newline) = newline else {
+            break;
+        };
+        if let Some(marker) = FENCE.captures(line) {
+            let indent = marker[1].len();
+            let marker = &marker[2];
+            let ch = marker.chars().next().unwrap();
+            match fence {
+                None => {
+                    fence = Some((ch, marker.len(), indent));
+                    title = false;
+                }
+                Some((open, length, depth))
+                    if ch == open
+                        && marker.len() >= length
+                        && indent <= depth + 3
+                        && line.len() == indent + marker.len() =>
+                {
+                    fence = None;
+                    boundary = newline + 1;
+                }
+                _ => {}
+            }
+        } else if fence.is_none() && line.chars().all(|ch| ch == ' ' || ch == '\t') && start > 0 {
+            if !title {
+                boundary = newline + 1;
+            }
+        } else if fence.is_none() {
+            if start > 0 && !title && HEADING.is_match(line) {
+                boundary = start;
+            }
+            let trimmed = line.trim_start_matches(' ');
+            let section = line.len() - trimmed.len() <= 3
+                && (HEADING.is_match(trimmed)
+                    || trimmed
+                        .strip_suffix(':')
+                        .unwrap_or(trimmed)
+                        .strip_prefix("**")
+                        .and_then(|value| value.strip_suffix("**"))
+                        .is_some_and(|value| !value.is_empty() && !value.contains("**")));
+            title = section;
+        }
+        start = newline + 1;
+    }
+    boundary
+}
+
+fn has_paragraph(
+    body: &agent_protocol::items::ItemBody,
+    delivered: &agent_protocol::items::ItemBody,
+) -> bool {
     use agent_protocol::items::ItemBody;
-    let previous = match (body, field) {
-        (ItemBody::AssistantText { text, .. }, TextField::AssistantText) => Some(text.as_str()),
-        (ItemBody::Reasoning { content, .. }, TextField::ReasoningContent { index }) => {
-            content.get(index as usize).map(String::as_str)
+    let advanced = |text: &str, old: &str| paragraph_boundary(text) > old.len();
+    match (body, delivered) {
+        (ItemBody::AssistantText { text, .. }, ItemBody::AssistantText { text: old, .. }) => {
+            advanced(text, old)
         }
-        (ItemBody::Reasoning { summary, .. }, TextField::ReasoningSummary { index }) => {
-            summary.get(index as usize).map(String::as_str)
+        (
+            ItemBody::Reasoning { content, summary },
+            ItemBody::Reasoning {
+                content: old_content,
+                summary: old_summary,
+            },
+        ) => [(content, old_content), (summary, old_summary)]
+            .into_iter()
+            .any(|(values, old)| {
+                values
+                    .iter()
+                    .enumerate()
+                    .any(|(i, text)| advanced(text, old.get(i).map_or("", String::as_str)))
+            }),
+        _ => false,
+    }
+}
+
+fn paragraph_body(
+    body: &agent_protocol::items::ItemBody,
+    delivered: &agent_protocol::items::ItemBody,
+) -> agent_protocol::items::ItemBody {
+    use agent_protocol::items::ItemBody;
+    fn trim(text: &mut String, delivered: &str) {
+        let floor = if text.starts_with(delivered) {
+            delivered.len()
+        } else {
+            0
+        };
+        text.truncate(paragraph_boundary(text).max(floor));
+    }
+    let mut body = body.clone();
+    match (&mut body, delivered) {
+        (ItemBody::AssistantText { text, .. }, ItemBody::AssistantText { text: old, .. }) => {
+            trim(text, old)
         }
-        _ => None,
-    };
-    delta.contains("\n\n")
-        || delta.starts_with('\n') && previous.is_some_and(|text| text.ends_with('\n'))
+        (
+            ItemBody::Reasoning { content, summary },
+            ItemBody::Reasoning {
+                content: old_content,
+                summary: old_summary,
+            },
+        ) => {
+            for (values, old) in [(content, old_content), (summary, old_summary)] {
+                for (index, value) in values.iter_mut().enumerate() {
+                    trim(value, old.get(index).map_or("", String::as_str));
+                }
+            }
+        }
+        _ => {}
+    }
+    body
 }
 
 impl Runtime {
@@ -135,58 +251,50 @@ impl Runtime {
     ) -> Result<(), String> {
         let id = decision::provider_item_id(attempt.id, native);
         if field == TextField::CommandOutput {
-            return service.inner.conversation.outputs.append(
+            return service.inner.conversation.outputs.write(
                 attempt.id,
                 records::OutputKey {
                     session: source.target.clone(),
                     item: id,
                 },
-                delta,
+                super::output::Change::Append(delta),
             );
         }
         // The resource update lock serializes producers and its flush worker.
         // Move an existing body instead of copying all earlier text per delta.
         let pending = source.text.lock().unwrap().pending.remove(&id);
-        let pending_changed = pending.as_ref().map(|entry| entry.changed);
-        let (item, had_boundary) = match pending {
-            Some(entry) => (Some(entry.item), entry.boundary),
-            None => (
-                service
+        let mut entry = match pending {
+            Some(entry) => entry,
+            None => {
+                let Some(item) = service
                     .inner
                     .conversation
                     .storage
-                    .item(&source.target, &id)?,
-                false,
-            ),
-        };
-        let Some(mut item) = item else {
-            return Ok(());
-        };
-        let boundary = had_boundary || boundary(&item.body, field, delta);
-        if let Err(error) = agent_protocol::session::text_delta(&mut item.body, field, delta) {
-            if let Some(changed) = pending_changed {
-                source.text.lock().unwrap().pending.insert(
-                    id,
-                    Buffered {
-                        attempt: attempt.clone(),
-                        item,
-                        changed,
-                        boundary: had_boundary,
-                    },
-                );
+                    .item(&source.target, &id)?
+                else {
+                    return Ok(());
+                };
+                Buffered {
+                    attempt: attempt.clone(),
+                    delivered: item.body.clone(),
+                    item,
+                    changed: Instant::now(),
+                    last_flush: None,
+                    boundary: false,
+                }
             }
-            return Err(error.to_string());
+        };
+        let result = agent_protocol::session::text_delta(&mut entry.item.body, field, delta);
+        if result.is_ok() {
+            entry.changed = Instant::now();
+            entry.boundary = entry
+                .last_flush
+                .is_none_or(|last| entry.changed >= last + Duration::from_millis(400))
+                && has_paragraph(&entry.item.body, &entry.delivered);
         }
         let mut text = source.text.lock().unwrap();
-        text.pending.insert(
-            id.clone(),
-            Buffered {
-                attempt: attempt.clone(),
-                item: Item { id, ..item },
-                changed: Instant::now(),
-                boundary,
-            },
-        );
+        text.pending.insert(id, entry);
+        result.map_err(|error| error.to_string())?;
         text.wake.notify_one();
         if text.worker.is_some() {
             return Ok(());
@@ -241,16 +349,23 @@ impl Runtime {
                     .await;
                     if let Err(error) = result {
                         tracing::error!(target: "agent", operation="conversation.text", %error);
+                        let delivered = service
+                            .inner
+                            .conversation
+                            .storage
+                            .item(&source.target, &entry.item.id)
+                            .ok()
+                            .flatten()
+                            .map(|item| item.body);
                         let mut text = source.text.lock().unwrap();
                         text.worker = Some(token);
-                        text.pending.insert(
-                            entry.item.id.clone(),
-                            Buffered {
-                                boundary: false,
-                                changed: Instant::now(),
-                                ..entry
-                            },
-                        );
+                        if let Some(pending) = text.pending.get_mut(&entry.item.id) {
+                            pending.boundary = false;
+                            pending.changed = Instant::now();
+                            if let Some(delivered) = delivered {
+                                pending.delivered = delivered;
+                            }
+                        }
                     }
                 }
             }
@@ -260,5 +375,93 @@ impl Runtime {
             }
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_protocol::items::{AssistantPhase, ItemBody};
+
+    #[test]
+    fn markdown_boundaries_hold_unfinished_blocks_and_section_titles() {
+        for (text, ready) in [
+            ("Intro\n\n```rs\nx()\n\n", "Intro\n\n"),
+            ("```rs\nx()\n```\nrest", "```rs\nx()\n```\n"),
+            ("Intro\n\n## Results\n\n", "Intro\n\n"),
+            ("**Results**\n\nBody\n\nNext", "**Results**\n\nBody\n\n"),
+            ("Steps:\n\n- one\n- tw", "Steps:\n\n- one\n"),
+            ("Intro.\n\n| a | b |\n|---|---|\n| 1 |", "Intro.\n\n"),
+            ("Text\n# Heading\nbody", "Text\n"),
+            ("~~~\na\n```\n\n", ""),
+            ("  \n", ""),
+        ] {
+            assert_eq!(&text[..paragraph_boundary(text)], ready, "{text:?}");
+        }
+    }
+
+    fn body(text: &str) -> ItemBody {
+        ItemBody::AssistantText {
+            text: text.into(),
+            phase: AssistantPhase::default(),
+        }
+    }
+    fn entry(id: &str, text: &str) -> Buffered {
+        Buffered {
+            attempt: Attempt {
+                id: Uuid::nil(),
+                turn: "turn".into(),
+                provider: ProviderKind::Codex,
+                source: "source".into(),
+            },
+            item: Item {
+                id: id.into(),
+                turn: "turn".into(),
+                position: 1,
+                status: agent_protocol::execution::ItemStatus::Running,
+                deferred: false,
+                input: None,
+                body: body(text),
+            },
+            delivered: body(""),
+            changed: Instant::now(),
+            last_flush: None,
+            boundary: true,
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn paragraphs_deliver_only_the_prefix_and_each_item_keeps_its_own_idle_deadline() {
+        let token = Uuid::new_v4();
+        let mut text = Text {
+            worker: Some(token),
+            ..Default::default()
+        };
+        text.pending.insert("a".into(), entry("a", "A\n\nx"));
+        let first = text.ready(token).unwrap();
+        assert_eq!(first[0].item.body, body("A\n\n"));
+        assert!(!text.is_empty());
+        tokio::time::advance(Duration::from_millis(300)).await;
+        text.pending.insert("b".into(), entry("b", "B\n\ny"));
+        let second = text.ready(token).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].item.body, body("B\n\n"));
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let idle = text.ready(token).unwrap();
+        assert_eq!(idle.len(), 1);
+        assert_eq!(idle[0].item.body, body("A\n\nx"));
+        tokio::time::advance(Duration::from_millis(300)).await;
+        assert_eq!(text.ready(token).unwrap()[0].item.body, body("B\n\ny"));
+        assert!(text.is_empty());
+    }
+    #[test]
+    fn idle_delivery_never_shrinks_to_an_earlier_paragraph_boundary() {
+        assert_eq!(
+            paragraph_body(&body("A\n\nB more"), &body("A\n\nB")),
+            body("A\n\nB")
+        );
+        assert_eq!(
+            paragraph_body(&body("A\n\nB more.\n\nC"), &body("A\n\nB")),
+            body("A\n\nB more.\n\n")
+        );
     }
 }

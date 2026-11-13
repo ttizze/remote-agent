@@ -46,6 +46,9 @@ pub struct WorkspacePreparation {
     pub project_cwd: String,
     pub strategy: Option<crate::workspace::WorkspaceStrategy>,
     pub generation: uuid::Uuid,
+    /// The current preparation created this checkout; cancellation owns its cleanup.
+    #[serde(default)]
+    pub created_worktree: bool,
     pub setup: Option<crate::workspace::WorkspaceSetup>,
     pub visible: bool,
 }
@@ -460,14 +463,12 @@ impl Acknowledged {
 pub struct Extend {
     pub session: SessionRef,
     pub subscription: uuid::Uuid,
-    pub cached: crate::sync::Cursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hydrate {
     pub session: SessionRef,
     pub subscription: uuid::Uuid,
-    pub cached: crate::sync::Cursor,
     pub item: crate::ids::ItemId,
 }
 
@@ -491,8 +492,40 @@ pub struct Fork {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hydrated {
-    pub messages: Vec<Message>,
+    pub cursor: crate::sync::Cursor,
+    pub version: Option<u64>,
+    /// Only large body bytes travel separately; rows are ordered on the subscription.
     pub transfer: Option<crate::models::TransferGrant>,
+}
+
+/// Attach separately transferred bytes only to the exact row that granted them.
+/// This never introduces an item, position or row version through an RPC reply.
+pub fn hydrate_body(replica: &Replica, version: u64, item: crate::models::Item) -> Option<Row> {
+    let crate::sync::Scope::Conversation(id) = replica.scope() else {
+        return None;
+    };
+    let mut row = replica
+        .rows()
+        .get(&crate::sync::Key::Item {
+            thread: id.clone(),
+            id: item.id.clone(),
+        })?
+        .clone();
+    if row.version != version {
+        return None;
+    }
+    let (crate::sync::Content::Full(value) | crate::sync::Content::Summary(value)) = &row.content;
+    let Record::Item(saved) = value.as_ref() else {
+        return None;
+    };
+    if item.is_deferred() {
+        return None;
+    }
+    row.content = crate::sync::Content::Full(std::sync::Arc::new(Record::Item(Item {
+        content: std::sync::Arc::new(item),
+        ..saved.clone()
+    })));
+    Some(row)
 }
 
 /// Deferred bodies keep their identity, position and saved row version.

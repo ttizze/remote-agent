@@ -33,70 +33,146 @@ pub(crate) fn command_result(
 }
 
 pub(crate) async fn resolve_hydration(
-    mut response: agent_protocol::conversation::records::Hydrated,
+    response: agent_protocol::conversation::records::Hydrated,
     expected: &agent_protocol::ids::ItemId,
     session: Option<&crate::transport::Session>,
-) -> Result<Vec<agent_protocol::conversation::records::Message>, PeerError> {
-    use agent_protocol::{
-        conversation::records::{self, Record},
-        sync::{Content, Message},
+) -> Result<Option<(u64, crate::models::Item)>, PeerError> {
+    let Some(grant) = response.transfer else {
+        return Ok(None);
     };
-    if let Some(grant) = response.transfer.take() {
-        let row = response
-            .messages
-            .iter_mut()
-            .rev()
-            .find_map(|message| match message {
-                Message::Hydrate { row, .. } => Some(row),
-                _ => None,
-            });
-        let source = row.as_ref().and_then(|row| match &row.content {
-            Content::Full(value) | Content::Summary(value) => match value.as_ref() {
-                Record::Item(item) => Some(item.clone()),
-                _ => None,
-            },
-        });
-        let item = source
-            .as_ref()
-            .map(|item| item.content.as_ref().clone())
-            .unwrap_or_else(|| {
-                crate::models::Item::new(
+    // Consume one-use grants even when the requesting subscription became obsolete.
+    let resolved = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        crate::transfers::resolve_item(
+            agent_protocol::operations::ItemResponse {
+                item: crate::models::Item::new(
                     expected.clone(),
                     Default::default(),
                     crate::models::ItemBody::Sleep {},
-                )
-            });
-        // Even an obsolete control response must consume its one-use grant.
-        let resolved = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            crate::transfers::resolve_item(
-                agent_protocol::operations::ItemResponse {
-                    item,
-                    transfer: Some(grant),
-                },
-                session,
-            ),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(PeerError::RequestTimeout {
-                method: "item body transfer".into(),
-            })
-        })?;
-        let (Some(row), Some(mut source)) = (row, source) else {
-            return Err(PeerError::InvalidMessage("hydration row is missing".into()));
-        };
-        if resolved.item.id != *expected {
-            return Err(PeerError::InvalidMessage("hydration item changed".into()));
-        }
-        source.content = std::sync::Arc::new(resolved.item);
-        row.content = Content::Full(std::sync::Arc::new(records::Record::Item(source)));
+                ),
+                transfer: Some(grant),
+            },
+            session,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(PeerError::RequestTimeout {
+            method: "item body transfer".into(),
+        })
+    })?;
+    if resolved.item.id != *expected || resolved.item.is_deferred() {
+        return Err(PeerError::InvalidMessage("hydration item changed".into()));
     }
-    for message in &response.messages {
-        records::validate_message(message)
+    let version = response
+        .version
+        .ok_or_else(|| PeerError::InvalidMessage("hydration body version is missing".into()))?;
+    Ok(Some((version, resolved.item)))
+}
+
+async fn gallery_frame(
+    replica: &mut agent_protocol::conversation::records::Replica,
+    stream: &mut agent_transport::framing::Reader,
+) -> Result<(), PeerError> {
+    let message = stream
+        .read::<agent_protocol::conversation::records::Message>()
+        .await
+        .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?
+        .ok_or_else(|| PeerError::ConnectionClosed("gallery subscription ended".into()))?;
+    agent_protocol::conversation::records::validate_message(&message)
+        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+    *replica = replica
+        .apply(1, message)
+        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+    Ok(())
+}
+
+// Keep consuming the one state stream while an RPC or large transfer is in
+// flight; both otherwise share the connection's finite queued-byte budget.
+async fn gallery_request<T>(
+    replica: &mut agent_protocol::conversation::records::Replica,
+    stream: &mut agent_transport::framing::Reader,
+    request: impl std::future::Future<Output = Result<T, PeerError>>,
+) -> Result<T, PeerError> {
+    tokio::pin!(request);
+    loop {
+        tokio::select! {
+            result = &mut request => return result,
+            result = gallery_frame(replica, stream) => result?,
+        }
+    }
+}
+
+async fn gallery_item(
+    client: &Client,
+    request: agent_protocol::conversation::records::Hydrate,
+    replica: &mut agent_protocol::conversation::records::Replica,
+    stream: &mut agent_transport::framing::Reader,
+    session: Option<&crate::transport::Session>,
+) -> Result<std::sync::Arc<crate::models::Item>, PeerError> {
+    use agent_protocol::conversation::records;
+    let response = gallery_request(replica, stream, client.call(&request)).await?;
+    let cursor = response.cursor;
+    let version = response.version;
+    let transferred = response.transfer.is_some();
+    let body = gallery_request(
+        replica,
+        stream,
+        resolve_hydration(response, &request.item, session),
+    )
+    .await?;
+    let key = agent_protocol::sync::Key::Item {
+        thread: request.session.clone(),
+        id: request.item.clone(),
+    };
+    loop {
+        let caught_up = replica.cursor().is_some_and(|current| {
+            current.store == cursor.store && current.sequence >= cursor.sequence
+        });
+        let ready = replica.rows().get(&key).is_some_and(|row| {
+                                let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = &row.content;
+                                transferred || Some(row.version) != version || matches!(value.as_ref(), records::Record::Item(item) if !item.content.is_deferred())
+                            });
+        if caught_up && ready {
+            break;
+        }
+        gallery_frame(replica, stream).await?;
+    }
+    if let Some((version, item)) = body
+        && let Some(row) = records::hydrate_body(replica, version, item)
+    {
+        *replica = replica
+            .apply(
+                1,
+                records::Message::Hydrate {
+                    cursor: replica.cursor().expect("gallery cursor"),
+                    row,
+                },
+            )
             .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
     }
-    Ok(response.messages)
+    let row = replica
+        .rows()
+        .get(&agent_protocol::sync::Key::Item {
+            thread: request.session.clone(),
+            id: request.item.clone(),
+        })
+        .ok_or_else(|| PeerError::InvalidMessage("gallery item is no longer available".into()))?;
+    let value = match &row.content {
+        agent_protocol::sync::Content::Full(value)
+        | agent_protocol::sync::Content::Summary(value) => value,
+    };
+    let records::Record::Item(value) = value.as_ref() else {
+        return Err(PeerError::InvalidMessage(
+            "gallery hydration is not an item".into(),
+        ));
+    };
+    if value.content.is_deferred() {
+        return Err(PeerError::InvalidMessage(
+            "gallery item changed while reading its body".into(),
+        ));
+    }
+    Ok(value.content.clone())
 }
 
 /// A recording owns its prepared connection until transcription finishes or
@@ -278,7 +354,7 @@ impl ClientExt for Client {
         // Store's visible window, retaining their subscription until paging ends.
         use agent_protocol::{conversation::records, sync::Scope};
         let subscription = uuid::Uuid::new_v4();
-        let (opened, _stream) = self
+        let (opened, mut stream) = self
             .request_stream::<records::Opened>(&crate::protocol::Call::SubscribeConversation(
                 records::Subscribe {
                     session: thread_id.clone(),
@@ -306,26 +382,19 @@ impl ClientExt for Client {
             {
                 break;
             }
-            let messages = self
-                .call(&records::Extend {
+            gallery_request(
+                &mut replica,
+                &mut stream,
+                self.call(&records::Extend {
                     session: thread_id.clone(),
                     subscription,
-                    cached: replica.cursor().ok_or_else(|| {
-                        PeerError::InvalidMessage("gallery cursor is missing".into())
-                    })?,
-                })
-                .await?;
-            for message in messages {
-                replica = replica
-                    .apply(1, message)
-                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-            }
-            if replica.window().map(|window| (window.turn, window.item))
+                }),
+            )
+            .await?;
+            while replica.window().map(|window| (window.turn, window.item))
                 >= previous_window.map(|window| (window.turn, window.item))
             {
-                return Err(PeerError::InvalidMessage(
-                    "gallery history did not advance".into(),
-                ));
+                gallery_frame(&mut replica, &mut stream).await?;
             }
         }
         let thread = records::project(&replica)
@@ -333,50 +402,26 @@ impl ClientExt for Client {
             .thread;
         let mut images = Vec::new();
         let mut sources = std::collections::HashSet::new();
-        let mut native_items = std::collections::HashSet::new();
         let mut bytes = 0usize;
         for turn in thread.turns.as_deref().unwrap_or_default().iter().rev() {
             for item in turn.items.as_deref().unwrap_or_default().iter().rev() {
-                if !matches!(item.body(), crate::models::ItemBody::ImageGeneration { .. })
-                    || !native_items.insert(&item.id)
-                {
+                if !matches!(item.body(), crate::models::ItemBody::ImageGeneration { .. }) {
                     continue;
                 }
                 let detail;
                 let item = if item.is_deferred() {
-                    let response = self
-                        .call(&records::Hydrate {
+                    detail = gallery_item(
+                        self,
+                        records::Hydrate {
                             session: thread_id.clone(),
                             subscription,
-                            cached: replica.cursor().expect("opened gallery"),
                             item: item.id.clone(),
-                        })
-                        .await?;
-                    let messages = resolve_hydration(response, &item.id, session).await?;
-                    for message in messages {
-                        replica = replica
-                            .apply(1, message)
-                            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                    }
-                    let row = replica
-                        .rows()
-                        .get(&agent_protocol::sync::Key::Item {
-                            thread: thread_id.clone(),
-                            id: item.id.clone(),
-                        })
-                        .ok_or_else(|| {
-                            PeerError::InvalidMessage("gallery item is no longer available".into())
-                        })?;
-                    let value = match &row.content {
-                        agent_protocol::sync::Content::Full(value)
-                        | agent_protocol::sync::Content::Summary(value) => value,
-                    };
-                    let records::Record::Item(value) = value.as_ref() else {
-                        return Err(PeerError::InvalidMessage(
-                            "gallery hydration is not an item".into(),
-                        ));
-                    };
-                    detail = value.content.clone();
+                        },
+                        &mut replica,
+                        &mut stream,
+                        session,
+                    )
+                    .await?;
                     detail.as_ref()
                 } else {
                     item.as_ref()

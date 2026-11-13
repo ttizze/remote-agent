@@ -81,7 +81,7 @@ contracts! {
     CreateConversation, "host/conversation/create" => (crate::conversation::records::Create, crate::conversation::records::Opened),
     ForkConversation, "host/conversation/fork" => (crate::conversation::records::Fork, s::SessionRef) [clone],
     ChangeConversation, "host/conversation/change" => (crate::conversation::records::Change, crate::conversation::records::Acknowledged) [clone],
-    ExtendConversation, "host/conversation/extend" => (crate::conversation::records::Extend, Vec<crate::conversation::records::Message>) [clone],
+    ExtendConversation, "host/conversation/extend" => (crate::conversation::records::Extend, crate::models::Empty) [clone],
     HydrateConversation, "host/conversation/hydrate" => (crate::conversation::records::Hydrate, crate::conversation::records::Hydrated) [clone],
     CheckConversationCommands, "host/conversation/receipts" => (crate::conversation::records::CheckCommands, crate::conversation::records::Receipts) [clone],
     ReadHandoffHistory, "host/session/context/read" => (crate::handoff::ReadHistory, crate::handoff::Page) [clone],

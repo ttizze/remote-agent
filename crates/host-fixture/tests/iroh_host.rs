@@ -1602,20 +1602,17 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         assert!(timeline.len() > 1);
         assert!(timeline.iter().any(|entry| entry["cursor"].is_string()), "the import reads every older page");
         let imported_reads = read(directory.path()).len();
-        // Opening after background import must start at the latest ten turns,
-        // even if the cached loading snapshot had an all-history floor of zero.
+        // T3 bounds a long agent-only turn to 75 items; older pages continue inside it.
         store.dispatch(Intent::ReadThread(op::ReadThread::open(session.clone()))).await.unwrap();
         let snapshot = store.snapshot();
         let thread = &snapshot.sessions.conversations[&session];
-        let window = op::HISTORY_WINDOW_TURNS as usize;
-        assert_eq!(thread.turns.as_ref().unwrap().len(), window, "initial display is a bounded turn summary page");
+        assert_eq!(thread.turns.as_ref().unwrap().len(), 1);
         assert_eq!(thread.history_has_more, Some(true));
         let latest = thread.turns.as_ref().unwrap().last().unwrap();
-        assert_eq!(latest.items.as_ref().unwrap().len(), 620);
-
+        assert_eq!(latest.items.as_ref().unwrap().len(), 75);
         assert_eq!(latest.items.as_ref().unwrap().last().unwrap().id, "item-11-619".into());
         let rendered = agent_core::presentation::conversation::project_conversation(agent_core::localization::UiLanguage::Japanese, &snapshot.panes.primary().navigation.draft_key, &snapshot.sessions.pending_submissions, thread.clone(), &None);
-        assert_eq!(rendered.turns.len(), window, "the rendered history must contain no empty turn placeholders");
+        assert_eq!(rendered.turns.len(), 1);
         for _ in 0..20 {
             let snapshot = store.snapshot();
             if snapshot.sessions.conversations[&session].history_has_more != Some(true) { break; }
@@ -1973,7 +1970,10 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let project_page = |project: &str, limit| {
             let (all, _) = reduce(&initial, "", Event::Intent(Intent::ExpandProjects));
             let (opened, _) = reduce(&all, "", Event::Intent(Intent::SetProjectExpanded { project_id:project.into(), expanded:true }));
-            let (page, _) = reduce(&opened, "", Event::Intent(Intent::ListProjectSessions(op::ListProjectSessions { project_id:project.into(),limit,search_term:String::new() })));
+            let mut page = opened;
+            while page.lists.project_threads[project].limit < limit {
+                page = reduce(&page, "", Event::Intent(Intent::ExpandThreadList { project_id: Some(project.into()) })).0;
+            }
             page.lists.project_threads[project].clone()
         };
         let more = project_page("project-5", 5);

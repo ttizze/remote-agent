@@ -86,17 +86,16 @@ impl Conversation {
         let Scope::Conversation(session) = self.replica.scope() else {
             unreachable!()
         };
-        let messages = client
+        let before = self.replica.window();
+        client
             .call(&records::Extend {
                 session: session.clone(),
                 subscription: self.subscription,
-                cached: self.replica.cursor().unwrap(),
             })
             .await
             .unwrap();
-        for message in messages {
-            records::validate_message(&message).unwrap();
-            self.replica = self.replica.clone().apply(1, message).unwrap();
+        while self.replica.window() == before {
+            self.next().await;
         }
         self.view()
     }
@@ -127,41 +126,63 @@ impl Conversation {
             .call(&records::Hydrate {
                 session: session.clone(),
                 subscription: self.subscription,
-                cached: self.replica.cursor().unwrap(),
                 item: item.clone(),
             })
             .await
             .unwrap();
         let wire_bytes = agent_protocol::protocol::encode(&reply).unwrap().len();
         let transfer_size = reply.transfer.as_ref().map(|grant| grant.size);
-        let mut transfer = reply.transfer.take();
-        for mut message in reply.messages {
-            if let records::Message::Hydrate { row, .. } = &mut message {
-                let record = match &row.content {
-                    agent_protocol::sync::Content::Full(record)
-                    | agent_protocol::sync::Content::Summary(record) => record,
-                };
-                let records::Record::Item(mut saved) = record.as_ref().clone() else {
-                    panic!("hydration item")
-                };
-                let resolved = agent_transport::transfers::resolve_item(
+        let transferred = reply.transfer.is_some();
+        let resolved = if transferred {
+            Some(
+                agent_transport::transfers::resolve_item(
                     op::ItemResponse {
-                        item: saved.content.as_ref().clone(),
-                        transfer: transfer.take(),
+                        item: agent_protocol::models::Item::new(
+                            item.clone(),
+                            Default::default(),
+                            agent_protocol::models::ItemBody::Sleep {},
+                        ),
+                        transfer: reply.transfer.take(),
                     },
                     Some(transport),
                 )
                 .await
-                .unwrap();
-                assert_eq!(&resolved.item.id, item);
-                assert!(!resolved.item.is_deferred());
-                saved.content = std::sync::Arc::new(resolved.item);
-                row.content = agent_protocol::sync::Content::Full(std::sync::Arc::new(
-                    records::Record::Item(saved),
-                ));
+                .unwrap()
+                .item,
+            )
+        } else {
+            None
+        };
+        loop {
+            let caught_up = self.replica.cursor().is_some_and(|cursor| {
+                cursor.store == reply.cursor.store && cursor.sequence >= reply.cursor.sequence
+            });
+            let ready = self
+                .view()
+                .thread
+                .turns
+                .iter()
+                .flatten()
+                .flat_map(|turn| turn.items.iter().flatten())
+                .find(|row| &row.id == item)
+                .is_some_and(|item| transferred || !item.is_deferred());
+            if caught_up && ready {
+                break;
             }
-            records::validate_message(&message).unwrap();
-            self.replica = self.replica.clone().apply(1, message).unwrap();
+            self.next().await;
+        }
+        if let Some(item) = resolved {
+            let row = records::hydrate_body(&self.replica, reply.version.unwrap(), item).unwrap();
+            self.replica = self
+                .replica
+                .apply(
+                    1,
+                    records::Message::Hydrate {
+                        cursor: self.replica.cursor().unwrap(),
+                        row,
+                    },
+                )
+                .unwrap();
         }
         let view = self.view();
         let saved = view
@@ -359,18 +380,7 @@ impl Catalog {
         .0
     }
     pub fn activity(&self) -> agent_protocol::live_activity::TaskActivityState {
-        records::list_activity(self.replica.rows().iter().filter_map(|(key, row)| {
-            let record = match &row.content {
-                agent_protocol::sync::Content::Full(record)
-                | agent_protocol::sync::Content::Summary(record) => record,
-            };
-            match (key, record.as_ref()) {
-                (agent_protocol::sync::Key::Thread(id), records::Record::Thread(header)) => {
-                    Some((id, header))
-                }
-                _ => None,
-            }
-        }))
+        records::list_rows_activity(self.replica.rows().values())
     }
 }
 

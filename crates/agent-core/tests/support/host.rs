@@ -153,6 +153,7 @@ impl Session {
 struct State {
     sessions: HashMap<SessionRef, uuid::Uuid>,
     sequence: u64,
+    pending_rows: Vec<(uuid::Uuid, agent_protocol::conversation::records::Message)>,
     list_subscription: Option<uuid::Uuid>,
     list_replica: Option<agent_protocol::conversation::records::Replica>,
     threads: HashMap<SessionRef, Value>,
@@ -256,6 +257,9 @@ async fn reader_closed(session: &Session) -> bool {
     session.blobs.lock().await.recv().await.is_none()
 }
 impl Writer {
+    pub fn replica(&self, id: &SessionRef) -> agent_protocol::conversation::records::Replica {
+        self.state.lock().unwrap().replicas[id].clone()
+    }
     pub async fn finish_updates(&self) {
         // Only end the latest subscriptions. Closing a replaced stream before
         // the client receives its new open response races with that response.
@@ -348,12 +352,10 @@ impl Writer {
                 {
                     use agent_protocol::{
                         conversation::records,
-                        sync::{Content, Cursor, Key, Message},
+                        sync::{Content, Key, Message},
                     };
                     let target: SessionRef =
                         serde_json::from_value(request["params"]["session"].clone())?;
-                    let cached: Cursor =
-                        serde_json::from_value(request["params"]["cached"].clone())?;
                     let item: agent_protocol::models::Item =
                         serde_json::from_value(value["result"]["item"].clone())?;
                     let replica = &state.replicas[&target];
@@ -370,14 +372,21 @@ impl Writer {
                     };
                     let mut record = original.clone();
                     record.content = Arc::new(item);
-                    row.version = cached.sequence;
                     row.content = Content::Full(Arc::new(records::Record::Item(record)));
-                    let transfer = serde_json::from_value(value["result"]["transfer"].clone())?;
+                    let transfer: Option<agent_protocol::models::TransferGrant> =
+                        serde_json::from_value(value["result"]["transfer"].clone())?;
+                    let cursor = replica.cursor().unwrap();
+                    let version = row.version;
+                    let subscription =
+                        serde_json::from_value(request["params"]["subscription"].clone())?;
+                    if transfer.is_none() {
+                        state
+                            .pending_rows
+                            .push((subscription, Message::Hydrate { cursor, row }));
+                    }
                     value["result"] = json!(records::Hydrated {
-                        messages: vec![Message::Hydrate {
-                            cursor: cached,
-                            row
-                        }],
+                        cursor,
+                        version: Some(version),
                         transfer
                     });
                 }
@@ -473,6 +482,10 @@ impl Writer {
         } else {
             None
         };
+        let pending_rows = std::mem::take(&mut self.state.lock().unwrap().pending_rows);
+        for (subscription, message) in pending_rows {
+            self.send_rows(subscription, message).await?;
+        }
         let response = protocol::json_boundary::response(request.call.method(), &value.to_string())
             .map_err(std::io::Error::other)?;
         let mut send = request
@@ -634,7 +647,6 @@ impl State {
             if cached.is_some() {
                 self.sequence += 1;
             }
-            response.thread.transcript_version = Some(self.sequence);
             let message = self.rows(response, cached, false)?;
             value["result"] = json!(agent_protocol::conversation::records::Opened {
                 session: target,
@@ -678,7 +690,7 @@ impl State {
         let id = response.thread.id.clone().unwrap();
         let has_more = response.thread.history_has_more == Some(true)
             || response.thread.history_cursor.is_some();
-        let fresh = rows::replica(response, 1);
+        let fresh = rows::replica_at(response, 1, self.sequence.max(7));
         let Message::Snapshot {
             rows: mut incoming, ..
         } = fresh.snapshot().unwrap()
@@ -830,7 +842,6 @@ impl State {
             return Ok(());
         }
         let id: SessionRef = serde_json::from_value(request["params"]["session"].clone())?;
-        let cached = serde_json::from_value(request["params"]["cached"].clone())?;
         let mut response: ThreadResponse = serde_json::from_value(self.threads[&id].clone())?;
         let (turns, more) = if value["result"].get("thread").is_some() {
             let page: ThreadResponse = serde_json::from_value(value["result"].clone())?;
@@ -859,12 +870,10 @@ impl State {
         response.thread.history_cursor = more.then(|| "older".into());
         response.thread.history_has_more = Some(more);
         let current = self.replicas[&id].cursor().unwrap();
-        let mut messages = Vec::new();
-        if current != cached {
-            messages.push(self.replicas[&id].snapshot().unwrap());
-        }
-        messages.push(self.rows(response, Some(current), true)?);
-        value["result"] = json!(messages);
+        let message = self.rows(response, Some(current), true)?;
+        let subscription = serde_json::from_value(request["params"]["subscription"].clone())?;
+        self.pending_rows.push((subscription, message));
+        value["result"] = json!({});
         Ok(())
     }
 }

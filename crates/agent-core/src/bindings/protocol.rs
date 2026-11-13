@@ -773,16 +773,6 @@ struct AddProject {
 #[uniffi::remote(Record)]
 struct ScanProjects {}
 #[uniffi::remote(Record)]
-struct ListSessions {
-    pub query: crate::models::ListQuery,
-}
-#[uniffi::remote(Record)]
-struct ListProjectSessions {
-    pub project_id: String,
-    pub limit: u32,
-    pub search_term: String,
-}
-#[uniffi::remote(Record)]
 struct ListAgents {
     pub thread_id: SessionRef,
 }

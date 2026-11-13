@@ -84,10 +84,23 @@ impl Runtime {
             }
             Err(error) => {
                 if let Some(generation) = setup_generation {
-                    service.setup_update(target, generation, super::super::storage::workspace::SetupChange::Finish {
-                                phase: if runtime.storage.state(target)?.inputs.get(&id).is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action: current, .. } if current == action)) { agent_protocol::workspace::SetupPhase::Failed } else { agent_protocol::workspace::SetupPhase::Cancelled },
+                    let current = runtime.storage.state(target)?.inputs.get(&id).is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action: current, .. } if current == action));
+                    let phase = if current {
+                        agent_protocol::workspace::SetupPhase::Failed
+                    } else {
+                        agent_protocol::workspace::SetupPhase::Cancelled
+                    };
+                    service
+                        .setup_update(
+                            target,
+                            generation,
+                            super::super::storage::workspace::SetupChange::Finish {
+                                phase,
                                 error: Some(error.message.clone()),
-                            }).await.map_err(|error| error.to_string())?;
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
                 }
                 Self::event(
                     service,
@@ -165,80 +178,113 @@ impl Runtime {
                 "Preparation cancelled",
             ));
         }
-        match stage {
-            PreparationStage::Workspace => {
-                let directory = cwd
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| service.inner.projects.chat_directory());
-                tokio::fs::create_dir_all(&directory)
-                    .await
-                    .map_err(|error| Failure::new("workspace_unavailable", error))?;
-                let directory = tokio::fs::canonicalize(&directory)
-                    .await
-                    .map_err(|error| Failure::new("workspace_unavailable", error))?;
-                Ok((
-                    dunce::simplified(&directory)
-                        .to_str()
-                        .ok_or_else(|| {
-                            Failure::new("workspace_unavailable", "workspace path is not UTF-8")
-                        })?
-                        .to_owned(),
-                    None,
-                    false,
-                ))
-            }
-            PreparationStage::Worktree => {
-                let cwd = cwd
-                    .ok_or_else(|| Failure::new("workspace_unavailable", "workspace is missing"))?;
-                let (cwd, created) = service
-                    .prepare_task_workspace(target, id, action, &cwd, cancel)
-                    .await?;
-                Ok((cwd, None, created))
-            }
-            PreparationStage::SetupScript => {
-                let cwd = cwd
-                    .ok_or_else(|| Failure::new("workspace_unavailable", "workspace is missing"))?;
-                if let Some(workspace) = runtime
-                    .storage
-                    .header(target)
-                    .map_err(storage_failure)?
-                    .details
-                    .workspace
-                {
-                    let script = workspace
-                        .setup
-                        .as_ref()
-                        .and_then(|setup| setup.script.clone());
-                    service
-                        .run_setup_script(
-                            target,
-                            workspace.generation,
-                            (&cwd, &workspace.project_cwd),
-                            script,
-                            cancel,
-                        )
-                        .await?;
+        let cancelled = cancel.clone();
+        let generation = runtime
+            .storage
+            .header(target)
+            .map_err(storage_failure)?
+            .details
+            .workspace
+            .map(|workspace| workspace.generation);
+        let result = async {
+            match stage {
+                PreparationStage::Workspace => {
+                    let directory = cwd
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| service.inner.projects.chat_directory());
+                    tokio::fs::create_dir_all(&directory)
+                        .await
+                        .map_err(|error| Failure::new("workspace_unavailable", error))?;
+                    let directory = tokio::fs::canonicalize(&directory)
+                        .await
+                        .map_err(|error| Failure::new("workspace_unavailable", error))?;
+                    Ok((
+                        dunce::simplified(&directory)
+                            .to_str()
+                            .ok_or_else(|| {
+                                Failure::new("workspace_unavailable", "workspace path is not UTF-8")
+                            })?
+                            .to_owned(),
+                        None,
+                        false,
+                    ))
                 }
-                Ok((cwd, None, false))
-            }
-            PreparationStage::Provider => {
-                if let Some(workspace) = runtime
-                    .storage
-                    .header(target)
-                    .map_err(storage_failure)?
-                    .details
-                    .workspace
-                {
-                    service
-                        .setup_update(
-                            target,
-                            workspace.generation,
-                            super::super::storage::workspace::SetupChange::AgentStarted,
-                        )
+                PreparationStage::Worktree => {
+                    let cwd = cwd.ok_or_else(|| {
+                        Failure::new("workspace_unavailable", "workspace is missing")
+                    })?;
+                    let (cwd, created) = service
+                        .prepare_task_workspace(target, id, action, &cwd, cancel)
                         .await?;
+                    Ok((cwd, None, created))
                 }
-                Self::prepare_provider(service, target, id, action, cwd, provider).await
+                PreparationStage::SetupScript => {
+                    let cwd = cwd.ok_or_else(|| {
+                        Failure::new("workspace_unavailable", "workspace is missing")
+                    })?;
+                    if let Some(workspace) = runtime
+                        .storage
+                        .header(target)
+                        .map_err(storage_failure)?
+                        .details
+                        .workspace
+                    {
+                        let script = workspace
+                            .setup
+                            .as_ref()
+                            .and_then(|setup| setup.script.clone());
+                        service
+                            .run_setup_script(
+                                target,
+                                workspace.generation,
+                                (&cwd, &workspace.project_cwd),
+                                script,
+                                cancel,
+                            )
+                            .await?;
+                    }
+                    Ok((cwd, None, false))
+                }
+                PreparationStage::Provider => {
+                    if let Some(workspace) = runtime
+                        .storage
+                        .header(target)
+                        .map_err(storage_failure)?
+                        .details
+                        .workspace
+                    {
+                        service
+                            .setup_update(
+                                target,
+                                workspace.generation,
+                                super::super::storage::workspace::SetupChange::AgentStarted,
+                            )
+                            .await?;
+                    }
+                    Self::prepare_provider(service, target, id, action, cwd, provider).await
+                }
             }
         }
+        .await;
+        if cancelled.is_cancelled()
+            && let Some(workspace) = runtime
+                .storage
+                .header(target)
+                .map_err(storage_failure)?
+                .details
+                .workspace
+                .filter(|workspace| {
+                    Some(workspace.generation) == generation && workspace.created_worktree
+                })
+            && let Some(path) = workspace.setup.and_then(|setup| setup.worktree_path)
+        {
+            service
+                .inner
+                .worktrees
+                .discard(path)
+                .await
+                .map_err(|error| Failure::new("worktree_cleanup_failed", error))?;
+        }
+        result
     }
 }

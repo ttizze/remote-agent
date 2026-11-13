@@ -8,8 +8,10 @@ use agent_protocol::{
     session::ProviderKind,
 };
 
-fn context(seed: u128) -> Context {
+fn context(seed: u128) -> Context<'static> {
     Context {
+        preparation: None,
+        rewind_binding: None,
         external_busy: false,
         now: 100,
         seed: Uuid::from_u128(seed),
@@ -206,6 +208,14 @@ async fn history_extensions_arrive_on_the_stream_before_later_commits() {
                                 Arc::new(Turn {
                                     id: format!("t{n}").into(),
                                     status: TurnStatus::Completed,
+                                    items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                                        format!("user{n}").into(),
+                                        agent_protocol::execution::ItemStatus::Completed,
+                                        agent_protocol::items::ItemBody::UserMessage {
+                                            text: Some("question".into()),
+                                            content: vec![],
+                                        },
+                                    ))]),
                                     ..Default::default()
                                 })
                             })
@@ -228,10 +238,7 @@ async fn history_extensions_arrive_on_the_stream_before_later_commits() {
         .apply(1, opened.initial)
         .unwrap();
     let mut stream = opened.subscription;
-    let _reply = owners
-        .read(&target, 1, stream.id, replica.cursor().unwrap(), None)
-        .await
-        .unwrap();
+    let _reply = owners.read(&target, 1, stream.id, None).await.unwrap();
     owners
         .input(
             &target,
@@ -261,6 +268,7 @@ async fn subscriptions_share_the_connection_budget_and_release_unread_bytes() {
         let (messages, receiver) = mpsc::channel(4);
         let (owner, _input) = mpsc::unbounded_channel();
         let id = Uuid::new_v4();
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
         (
             Subscriber {
                 session: 1,
@@ -271,12 +279,14 @@ async fn subscriptions_share_the_connection_budget_and_release_unread_bytes() {
                 window: Window { turn: 0, item: 0 },
                 messages,
                 bytes: bytes.clone(),
+                queued_bytes: queued_bytes.clone(),
             },
             Subscription {
                 id,
                 owner,
                 receiver,
                 bytes,
+                queued_bytes,
             },
         )
     }

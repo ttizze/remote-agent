@@ -58,7 +58,7 @@ impl HostRpcService {
                 delivery: ContinuationDelivery::Pending,
             });
         }
-        let _report = self.inner.conversation.update_report.lock().await;
+        let mut report_committed = self.inner.conversation.update_report.lock().await;
         let storage = &self.inner.conversation.storage;
         storage.set_updating(true).map_err(anyhow::Error::msg)?;
         // The report lock hides this transaction's admission marker until the
@@ -69,6 +69,7 @@ impl HostRpcService {
             }
         });
         agent_local_host::save_private_json(&directory.join(RECOVERY_FILE), &Recovery { tasks })?;
+        *report_committed = true;
         let _ = scopeguard::ScopeGuard::into_inner(reset_storage);
         let _ = scopeguard::ScopeGuard::into_inner(reset);
         Ok(())
@@ -85,7 +86,7 @@ impl HostRpcService {
             return Ok(());
         };
         let _report = self.inner.conversation.update_report.lock().await;
-        if self.inner.conversation.storage.updating()? {
+        if *_report {
             return Ok(());
         }
         let path = directory.join(RECOVERY_FILE);
@@ -128,7 +129,7 @@ impl HostRpcService {
             return Ok(());
         };
         let _report = self.inner.conversation.update_report.lock().await;
-        if self.inner.conversation.storage.updating()? {
+        if *_report {
             return Ok(());
         }
         let path = directory.join(RECOVERY_FILE);
@@ -183,13 +184,7 @@ impl HostRpcService {
         loop {
             let pending = {
                 let _report = self.inner.conversation.update_report.lock().await;
-                if self
-                    .inner
-                    .conversation
-                    .storage
-                    .updating()
-                    .map_err(anyhow::Error::msg)?
-                {
+                if *_report {
                     return Ok(());
                 }
                 let mut report: Recovery = serde_json::from_slice(&std::fs::read(&path)?)?;
@@ -298,6 +293,8 @@ mod tests {
                 )
                 .unwrap();
             let context = Context {
+                preparation: None,
+                rewind_binding: None,
                 now: 100,
                 seed: uuid::Uuid::new_v4(),
                 steers: true,
@@ -432,9 +429,6 @@ mod tests {
             service.set_history_scope(directory.path().into(), true);
             let _connection = service.open_session();
             let storage = &service.inner.conversation.storage;
-            Runtime::recover(&service, &target, ProviderKind::Codex)
-                .await
-                .unwrap();
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 service.resume_after_update(directory.path()),
@@ -525,6 +519,8 @@ mod tests {
             ContinuationDelivery::Pending
         ));
         let context = Context {
+            preparation: None,
+            rewind_binding: None,
             now: 200,
             seed: uuid::Uuid::new_v4(),
             steers: true,

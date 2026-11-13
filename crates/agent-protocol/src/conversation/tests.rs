@@ -1,8 +1,10 @@
 use super::*;
 use crate::items::AssistantPhase;
 
-fn context(seed: u128) -> Context {
+fn context(seed: u128) -> Context<'static> {
     Context {
+        preparation: None,
+        rewind_binding: None,
         external_busy: false,
         now: 100,
         seed: Uuid::from_u128(seed),
@@ -823,6 +825,36 @@ fn recovery_continuation_is_once_and_respects_settings_and_explicit_interrupts()
 }
 
 #[test]
+fn update_recovery_does_not_continue_a_turn_waiting_for_user_input() {
+    for body in [approval(), RequestBody::Question { questions: vec![] }] {
+        let (state, attempt) = running();
+        let requested = observe(
+            &state,
+            &attempt,
+            Observation::Request {
+                id: "waiting".into(),
+                body,
+            },
+            3,
+        );
+        let state = state.apply(&requested.changes);
+        let recovered = step(
+            &state,
+            Event::Restart {
+                updating: true,
+                continue_after_restart: true,
+            },
+            context(4),
+        );
+        assert!(recovered.continuations.is_empty());
+        assert!(recovered.actions.is_empty());
+        let state = state.apply(&recovered.changes);
+        assert_eq!(state.turns[&attempt.turn].state, TurnState::Interrupted);
+        assert!(state.requests.is_empty());
+    }
+}
+
+#[test]
 fn continuation_bypasses_the_held_queue_without_releasing_other_inputs() {
     let (state, attempt) = running();
     let queued = submit(&state, 3, FollowUp::Queue);
@@ -858,9 +890,9 @@ fn continuation_bypasses_the_held_queue_without_releasing_other_inputs() {
 
 #[test]
 fn retry_wait_survives_restart_and_only_the_due_wake_creates_a_new_attempt() {
-    let (state, attempt) = running();
-    let waiting = observe(&state, &attempt, Observation::Retry { at: 200 }, 3);
-    assert_eq!(waiting.actions, vec![Action::WaitUntil(200)]);
+    let (state, attempt) = codex_running();
+    let waiting = observe(&state, &attempt, Observation::Failed(Some(overload())), 3);
+    assert_eq!(waiting.actions, vec![Action::WaitUntil(2100)]);
     let state = state.apply(&waiting.changes);
     let recovered = step(
         &state,
@@ -870,7 +902,7 @@ fn retry_wait_survives_restart_and_only_the_due_wake_creates_a_new_attempt() {
         },
         context(4),
     );
-    assert_eq!(recovered.actions, vec![Action::WaitUntil(200)]);
+    assert_eq!(recovered.actions, vec![Action::WaitUntil(2100)]);
     assert!(recovered.continuations.is_empty());
     let state = state.apply(&recovered.changes);
     let early = step(
@@ -878,18 +910,18 @@ fn retry_wait_survives_restart_and_only_the_due_wake_creates_a_new_attempt() {
         Event::Wake,
         Context {
             external_busy: false,
-            now: 199,
+            now: 2099,
             ..context(5)
         },
     );
-    assert_eq!(early.actions, vec![Action::WaitUntil(200)]);
+    assert_eq!(early.actions, vec![Action::WaitUntil(2100)]);
     assert!(early.changes.is_empty());
     let due = step(
         &state,
         Event::Wake,
         Context {
             external_busy: false,
-            now: 200,
+            now: 2100,
             ..context(6)
         },
     );
@@ -908,10 +940,10 @@ fn retry_wait_survives_restart_and_only_the_due_wake_creates_a_new_attempt() {
 #[test]
 fn due_retry_without_a_connection_or_workspace_finishes_and_holds_the_queue() {
     for missing_workspace in [false, true] {
-        let (state, attempt) = running();
+        let (state, attempt) = codex_running();
         let state = state.apply(&submit(&state, 2, FollowUp::Queue).changes);
-        let mut state =
-            state.apply(&observe(&state, &attempt, Observation::Retry { at: 200 }, 3).changes);
+        let mut state = state
+            .apply(&observe(&state, &attempt, Observation::Failed(Some(overload())), 3).changes);
         if missing_workspace {
             state.thread.workspace = Workspace::Missing;
         } else {
@@ -930,7 +962,7 @@ fn due_retry_without_a_connection_or_workspace_finishes_and_holds_the_queue() {
             &state,
             Event::Wake,
             Context {
-                now: 200,
+                now: 2100,
                 ..context(5)
             },
         );
@@ -1772,14 +1804,14 @@ fn a_new_message_starts_past_a_held_queue_without_releasing_old_inputs() {
 
 #[test]
 fn retry_fences_an_in_flight_steer_and_cannot_be_ended_by_old_callbacks() {
-    let (state, attempt) = running();
+    let (state, attempt) = codex_running();
     let steer = submit(&state, 3, FollowUp::Steer);
     let state = state.apply(&steer.changes);
     let Action::Deliver { id, action, .. } = &steer.actions[0] else {
         unreachable!()
     };
     let in_flight = state.inputs[id].clone();
-    let retry = observe(&state, &attempt, Observation::Retry { at: 200 }, 4);
+    let retry = observe(&state, &attempt, Observation::Failed(Some(overload())), 4);
     let state = state.apply(&retry.changes);
     assert!(matches!(&state.inputs[id].state,
         InputState::Unknown { delivery, status: UnknownState::Fenced, .. } if delivery.attempt.turn == attempt.turn));
@@ -1800,7 +1832,7 @@ fn retry_fences_an_in_flight_steer_and_cannot_be_ended_by_old_callbacks() {
         Event::Wake,
         Context {
             external_busy: false,
-            now: 200,
+            now: 2100,
             ..context(6)
         },
     );
@@ -2072,7 +2104,7 @@ fn retrying_a_failed_input_uses_the_workspace_and_binding_established_by_later_i
 
 #[test]
 fn retry_closes_the_old_answer_channel_and_holds_existing_queued_input() {
-    let (state, attempt) = running();
+    let (state, attempt) = codex_running();
     let requested = observe(
         &state,
         &attempt,
@@ -2096,8 +2128,8 @@ fn retry_closes_the_old_answer_channel_and_holds_existing_queued_input() {
     let state = state.apply(&answered.changes);
     let queued = submit(&state, 5, FollowUp::Queue);
     let state = state.apply(&queued.changes);
-    let retry = observe(&state, &attempt, Observation::Retry { at: 200 }, 6);
-    assert_eq!(retry.actions, vec![Action::WaitUntil(200)]);
+    let retry = observe(&state, &attempt, Observation::Failed(Some(overload())), 6);
+    assert_eq!(retry.actions, vec![Action::WaitUntil(2100)]);
     let state = state.apply(&retry.changes);
     assert_eq!(state.requests["request"].state, RequestState::Unknown);
     assert!(state.thread.queue_held);
@@ -2238,7 +2270,7 @@ fn a_pending_interrupt_survives_retry_and_background_events_before_and_after_the
             let stop = command(&state, 3, Command::Interrupt { turn: None });
             let state = state.apply(&stop.changes);
             let observation = if retry {
-                Observation::Retry { at: 200 }
+                Observation::Failed(Some(overload()))
             } else {
                 Observation::Background {
                     tasks: vec![BackgroundTask {
@@ -3092,7 +3124,7 @@ fn ending_a_newer_turn_rearms_an_older_retry_whose_timer_fired_while_it_was_bloc
         Observation::Interrupted,
         Observation::Failed(Some(ExecutionError::default())),
     ] {
-        let (state, old) = running();
+        let (state, old) = codex_running();
         let background = observe(
             &state,
             &old,
@@ -3117,27 +3149,27 @@ fn ending_a_newer_turn_rearms_an_older_retry_whose_timer_fired_while_it_was_bloc
             context(5),
         );
         let state = state.apply(&delivered.changes);
-        let waiting = observe(&state, &old, Observation::Retry { at: 200 }, 6);
+        let waiting = observe(&state, &old, Observation::Failed(Some(overload())), 6);
         let state = state.apply(&waiting.changes);
         let wake = step(
             &state,
             Event::Wake,
             Context {
                 external_busy: false,
-                now: 200,
+                now: 2100,
                 ..context(7)
             },
         );
         assert!(wake.actions.is_empty());
         let ended = observe(&state, &foreground, terminal, 8);
-        assert_eq!(ended.actions, vec![Action::WaitUntil(200)]);
+        assert_eq!(ended.actions, vec![Action::WaitUntil(2100)]);
         let state = state.apply(&ended.changes);
         let resumed = step(
             &state,
             Event::Wake,
             Context {
                 external_busy: false,
-                now: 201,
+                now: 2101,
                 ..context(9)
             },
         );
@@ -3150,8 +3182,8 @@ fn ending_a_newer_turn_rearms_an_older_retry_whose_timer_fired_while_it_was_bloc
 
 #[test]
 fn stopping_a_retry_wait_prevents_the_due_timer_from_starting_a_new_attempt() {
-    let (state, attempt) = running();
-    let waiting = observe(&state, &attempt, Observation::Retry { at: 200 }, 3);
+    let (state, attempt) = codex_running();
+    let waiting = observe(&state, &attempt, Observation::Failed(Some(overload())), 3);
     let state = state.apply(&waiting.changes);
     let stopped = command(&state, 4, Command::Interrupt { turn: None });
     let state = state.apply(&stopped.changes);
@@ -3162,7 +3194,7 @@ fn stopping_a_retry_wait_prevents_the_due_timer_from_starting_a_new_attempt() {
             Event::Wake,
             Context {
                 external_busy: false,
-                now: 201,
+                now: 2101,
                 ..context(5)
             }
         )
@@ -3233,10 +3265,17 @@ fn waking_an_idle_owner_acknowledges_delivery_of_its_persisted_queue() {
 
 #[test]
 fn a_resume_action_expires_when_stopped_completed_or_superseded_by_another_attempt() {
-    let (state, attempt) = running();
-    let waiting = observe(&state, &attempt, Observation::Retry { at: 100 }, 3);
+    let (state, attempt) = codex_running();
+    let waiting = observe(&state, &attempt, Observation::Failed(Some(overload())), 3);
     let state = state.apply(&waiting.changes);
-    let resumed = step(&state, Event::Wake, context(4));
+    let resumed = step(
+        &state,
+        Event::Wake,
+        Context {
+            now: 2100,
+            ..context(4)
+        },
+    );
     let state = state.apply(&resumed.changes);
     let action = &resumed.actions[0];
     let Action::Resume {
@@ -3250,9 +3289,16 @@ fn a_resume_action_expires_when_stopped_completed_or_superseded_by_another_attem
     assert!(!state.apply(&stopped.changes).permits(action));
     let completed = observe(&state, current, Observation::Completed, 6);
     assert!(!state.apply(&completed.changes).permits(action));
-    let retry = observe(&state, current, Observation::Retry { at: 100 }, 7);
+    let retry = observe(&state, current, Observation::Failed(Some(overload())), 7);
     let state = state.apply(&retry.changes);
-    let next = step(&state, Event::Wake, context(8));
+    let next = step(
+        &state,
+        Event::Wake,
+        Context {
+            now: 4100,
+            ..context(8)
+        },
+    );
     let state = state.apply(&next.changes);
     assert!(state.permits(&next.actions[0]));
     assert!(!state.permits(action));
@@ -3306,7 +3352,7 @@ fn a_restart_continuation_cannot_be_admitted_after_a_later_message_finishes() {
 
 #[test]
 fn a_restart_continuation_yields_to_a_surviving_retry_and_unheld_queued_input() {
-    let (state, old) = running();
+    let (state, old) = codex_running();
     let background = observe(
         &state,
         &old,
@@ -3331,7 +3377,7 @@ fn a_restart_continuation_yields_to_a_surviving_retry_and_unheld_queued_input() 
         context(5),
     );
     let state = state.apply(&delivered.changes);
-    let retry = observe(&state, &old, Observation::Retry { at: 200 }, 6);
+    let retry = observe(&state, &old, Observation::Failed(Some(overload())), 6);
     let state = state.apply(&retry.changes);
     let restarted = step(
         &state,
@@ -3669,10 +3715,10 @@ fn manual_input_cancels_a_capacity_wait_and_keeps_queued_input_held() {
     let state = state.apply(&waiting.changes);
     let manual = submit(&state, 12, FollowUp::Queue);
     let next = state.apply(&manual.changes);
-    assert!(matches!(
+    assert_eq!(
         next.turns[&attempt.turn].state,
-        TurnState::Failed(_)
-    ));
+        TurnState::Failed(ExecutionError::default())
+    );
     assert!(matches!(
         next.inputs[Uuid::from_u128(10).to_string().as_str()].state,
         InputState::Queued { .. }
@@ -3942,26 +3988,421 @@ fn failed_compaction_never_resumes_the_preceding_task() {
         ("  /CoMpAcT\n", true),
         ("/compact please", false),
     ] {
-        let (mut state, attempt) = codex_running();
-        let item = state
-            .items
-            .values_mut()
-            .find(|item| {
-                item.turn == attempt.turn && matches!(item.body, ItemBody::UserMessage { .. })
-            })
-            .unwrap();
-        item.body = ItemBody::UserMessage {
-            text: None,
-            content: vec![crate::items::MessagePart::Text { text: text.into() }],
-        };
-        let failed = observe(&state, &attempt, Observation::Failed(Some(overload())), 10);
-        assert_eq!(failed.actions.is_empty(), compact);
-        if compact {
-            assert!(
-                matches!(&state.apply(&failed.changes).turns[&attempt.turn].state, TurnState::Failed(error) if error.message == "capacity")
+        for steer in [false, true] {
+            let (state, active) = codex_running();
+            let state = if steer {
+                state
+            } else {
+                state.apply(&observe(&state, &active, Observation::Completed, 10).changes)
+            };
+            let admitted = command(
+                &state,
+                200,
+                Command::Submit {
+                    id: Uuid::from_u128(200).to_string().into(),
+                    content: InputContent {
+                        parts: vec![InputPart::Text { text: text.into() }],
+                        ..content(if steer {
+                            FollowUp::Steer
+                        } else {
+                            FollowUp::Queue
+                        })
+                    },
+                },
             );
-        } else {
-            assert_eq!(failed.actions, [Action::WaitUntil(2100)]);
+            if steer && compact {
+                assert!(matches!(admitted.outcome, Outcome::Rejected(_)));
+                assert!(admitted.changes.is_empty());
+                assert!(admitted.actions.is_empty());
+                continue;
+            }
+            let [
+                Action::Deliver {
+                    id,
+                    action,
+                    attempt,
+                    ..
+                },
+            ] = &admitted.actions[..]
+            else {
+                panic!("admitted input")
+            };
+            let state = state.apply(&admitted.changes);
+            let acknowledged = step(
+                &state,
+                Event::Delivered {
+                    id: id.clone(),
+                    action: *action,
+                    native_turn: None,
+                },
+                context(201),
+            );
+            let mut state = state.apply(&acknowledged.changes);
+            // The owner can omit completed transcript bodies from the working set.
+            state.items.clear();
+            if compact {
+                let restart = step(
+                    &state,
+                    Event::Restart {
+                        updating: true,
+                        continue_after_restart: true,
+                    },
+                    context(203),
+                );
+                assert!(restart.continuations.is_empty());
+                let resumed = step(
+                    &state.apply(&restart.changes),
+                    Event::Command {
+                        id: OperationId::Job(Uuid::from_u128(204)),
+                        receipt: None,
+                        command: Command::ContinueAfterRestart {
+                            source: attempt.turn.clone(),
+                            enabled: true,
+                            content: content(FollowUp::Queue),
+                        },
+                    },
+                    context(204),
+                );
+                assert!(resumed.changes.is_empty());
+                assert!(resumed.actions.is_empty());
+                // Ordinary follow-ups cannot be delivered into a compacting turn.
+                let queued = submit(&state, 205, FollowUp::Steer);
+                assert_eq!(queued.outcome, Outcome::Accepted);
+                assert!(queued.actions.is_empty());
+                let next = state.apply(&queued.changes);
+                let completed = observe(&next, attempt, Observation::Completed, 206);
+                assert!(matches!(
+                    &completed.actions[..],
+                    [Action::Deliver { steer: false, .. }]
+                ));
+            }
+            let failed = observe(&state, attempt, Observation::Failed(Some(overload())), 202);
+            assert_eq!(
+                failed.actions.is_empty(),
+                compact,
+                "steer={steer}, text={text:?}"
+            );
+            if compact {
+                assert!(
+                    matches!(&state.apply(&failed.changes).turns[&attempt.turn].state, TurnState::Failed(error) if error.message == "capacity")
+                );
+            } else {
+                assert_eq!(failed.actions, [Action::WaitUntil(2100)]);
+            }
         }
     }
+}
+
+#[test]
+fn editing_a_queued_steer_into_compact_does_not_block_later_steering() {
+    let (mut state, active) = codex_running();
+    for n in [200u128, 201] {
+        let mut waiting = context(n);
+        waiting.steer_ready = false;
+        let queued = step(
+            &state,
+            Event::Command {
+                id: OperationId::Client(Uuid::from_u128(n)),
+                receipt: None,
+                command: Command::Submit {
+                    id: Uuid::from_u128(n).to_string().into(),
+                    content: content(FollowUp::Steer),
+                },
+            },
+            waiting,
+        );
+        assert_eq!(queued.outcome, Outcome::Accepted);
+        assert!(queued.actions.is_empty());
+        state = state.apply(&queued.changes);
+    }
+    let compact: ClientInputId = Uuid::from_u128(200).to_string().into();
+    let edited = command(
+        &state,
+        202,
+        Command::EditInput {
+            id: compact.clone(),
+            parts: vec![InputPart::Text {
+                text: "/compact".into(),
+            }],
+        },
+    );
+    let state = state.apply(&edited.changes);
+    let next = step(&state, Event::Wake, context(203));
+    assert!(
+        matches!(&next.actions[..], [Action::Deliver { id, steer: true, .. }] if id.as_str() == Uuid::from_u128(201).to_string())
+    );
+    let state = state.apply(&next.changes);
+    let Action::Deliver { id, action, .. } = &next.actions[0] else {
+        unreachable!()
+    };
+    let delivered = step(
+        &state,
+        Event::Delivered {
+            id: id.clone(),
+            action: *action,
+            native_turn: None,
+        },
+        context(204),
+    );
+    let state = state.apply(&delivered.changes);
+    let completed = observe(&state, &active, Observation::Completed, 205);
+    assert!(
+        matches!(&completed.actions[..], [Action::Deliver { id, steer: false, .. }] if id == &compact)
+    );
+}
+
+fn starting_compaction() -> (State, ClientInputId, Uuid, Attempt) {
+    let (state, old) = codex_running();
+    let state = state.apply(&observe(&state, &old, Observation::Completed, 10).changes);
+    let submitted = command(
+        &state,
+        200,
+        Command::Submit {
+            id: Uuid::from_u128(200).to_string().into(),
+            content: InputContent {
+                parts: vec![InputPart::Text {
+                    text: "/compact".into(),
+                }],
+                ..content(FollowUp::Queue)
+            },
+        },
+    );
+    let [
+        Action::Deliver {
+            id,
+            action,
+            attempt,
+            ..
+        },
+    ] = &submitted.actions[..]
+    else {
+        panic!("compact delivery")
+    };
+    (
+        state.apply(&submitted.changes),
+        id.clone(),
+        *action,
+        attempt.clone(),
+    )
+}
+
+#[test]
+fn compact_promotion_sends_only_the_selected_input_and_preserves_the_queue_hold() {
+    for before_ack in [false, true] {
+        for held in [false, true] {
+            for terminal in [
+                Observation::Completed,
+                Observation::Interrupted,
+                Observation::Failed(None),
+            ] {
+                let (mut state, id, action, compact) = starting_compaction();
+                if !before_ack {
+                    state = state.apply(
+                        &step(
+                            &state,
+                            Event::Delivered {
+                                id: id.clone(),
+                                action,
+                                native_turn: None,
+                            },
+                            context(201),
+                        )
+                        .changes,
+                    );
+                }
+                for n in [202, 203] {
+                    state = state.apply(&submit(&state, n, FollowUp::Queue).changes);
+                }
+                state.thread.queue_held = held;
+                let selected: ClientInputId = Uuid::from_u128(203).to_string().into();
+                let promoted = command(&state, 204, Command::SteerInput(selected.clone()));
+                assert_eq!(promoted.outcome, Outcome::Accepted);
+                state = state.apply(&promoted.changes);
+                if before_ack {
+                    let ack = step(
+                        &state,
+                        Event::Delivered {
+                            id,
+                            action,
+                            native_turn: None,
+                        },
+                        context(205),
+                    );
+                    assert!(matches!(&ack.actions[..], [Action::Interrupt { .. }]));
+                    state = state.apply(&ack.changes);
+                } else {
+                    assert!(matches!(&promoted.actions[..], [Action::Interrupt { .. }]));
+                }
+                let ended = observe(&state, &compact, terminal, 206);
+                let [
+                    Action::Deliver {
+                        id,
+                        action,
+                        attempt,
+                        steer: false,
+                        ..
+                    },
+                ] = &ended.actions[..]
+                else {
+                    panic!("selected input must start")
+                };
+                assert_eq!(id, &selected);
+                state = state.apply(&ended.changes);
+                let ack = step(
+                    &state,
+                    Event::Delivered {
+                        id: id.clone(),
+                        action: *action,
+                        native_turn: None,
+                    },
+                    context(207),
+                );
+                state = state.apply(&ack.changes);
+                let completed = observe(&state, attempt, Observation::Completed, 208);
+                assert_eq!(
+                    completed.actions.is_empty(),
+                    held,
+                    "other inputs obey the original hold"
+                );
+                let state = state.apply(&completed.changes);
+                assert_eq!(state.thread.queue_held, held);
+                if held {
+                    assert!(step(&state, Event::Wake, context(209)).actions.is_empty());
+                    assert!(matches!(
+                        &command(&state, 210, Command::ResumeQueue).actions[..],
+                        [Action::Deliver { .. }]
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn stopping_or_restarting_a_compact_promotion_cancels_its_selected_input() {
+    for before_ack in [false, true] {
+        for restart in [false, true] {
+            let (mut state, id, action, compact) = starting_compaction();
+            if !before_ack {
+                state = state.apply(
+                    &step(
+                        &state,
+                        Event::Delivered {
+                            id: id.clone(),
+                            action,
+                            native_turn: None,
+                        },
+                        context(201),
+                    )
+                    .changes,
+                );
+            }
+            state = state.apply(&submit(&state, 202, FollowUp::Queue).changes);
+            state = state.apply(
+                &command(
+                    &state,
+                    203,
+                    Command::SteerInput(Uuid::from_u128(202).to_string().into()),
+                )
+                .changes,
+            );
+            let stopped = if restart {
+                step(
+                    &state,
+                    Event::Restart {
+                        updating: true,
+                        continue_after_restart: true,
+                    },
+                    context(204),
+                )
+            } else {
+                command(&state, 204, Command::Interrupt { turn: None })
+            };
+            assert!(stopped.continuations.is_empty());
+            state = state.apply(&stopped.changes);
+            if !restart {
+                if before_ack {
+                    state = state.apply(
+                        &step(
+                            &state,
+                            Event::Delivered {
+                                id,
+                                action,
+                                native_turn: None,
+                            },
+                            context(205),
+                        )
+                        .changes,
+                    );
+                }
+                let ended = observe(&state, &compact, Observation::Interrupted, 206);
+                assert!(ended.actions.is_empty());
+                state = state.apply(&ended.changes);
+            }
+            assert!(state.thread.queue_held);
+            assert!(step(&state, Event::Wake, context(207)).actions.is_empty());
+        }
+        // A later queued message must not be mistaken for promotion after Stop.
+        let (mut state, id, action, compact) = starting_compaction();
+        if !before_ack {
+            state = state.apply(
+                &step(
+                    &state,
+                    Event::Delivered {
+                        id: id.clone(),
+                        action,
+                        native_turn: None,
+                    },
+                    context(201),
+                )
+                .changes,
+            );
+        }
+        state = state.apply(&command(&state, 202, Command::Interrupt { turn: None }).changes);
+        state = state.apply(&submit(&state, 203, FollowUp::Queue).changes);
+        if before_ack {
+            state = state.apply(
+                &step(
+                    &state,
+                    Event::Delivered {
+                        id,
+                        action,
+                        native_turn: None,
+                    },
+                    context(204),
+                )
+                .changes,
+            );
+        }
+        let ended = observe(&state, &compact, Observation::Interrupted, 205);
+        assert!(ended.actions.is_empty());
+        assert!(state.apply(&ended.changes).thread.queue_held);
+    }
+}
+
+#[test]
+fn a_queued_compact_cannot_be_promoted_into_an_ordinary_running_turn() {
+    let (state, _) = codex_running();
+    let queued = command(
+        &state,
+        200,
+        Command::Submit {
+            id: Uuid::from_u128(200).to_string().into(),
+            content: InputContent {
+                parts: vec![InputPart::Text {
+                    text: "/compact".into(),
+                }],
+                ..content(FollowUp::Queue)
+            },
+        },
+    );
+    let state = state.apply(&queued.changes);
+    let promoted = command(
+        &state,
+        201,
+        Command::SteerInput(Uuid::from_u128(200).to_string().into()),
+    );
+    assert!(matches!(promoted.outcome, Outcome::Rejected(_)));
+    assert!(promoted.changes.is_empty());
+    assert!(promoted.actions.is_empty());
 }

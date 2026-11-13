@@ -43,10 +43,9 @@ impl Storage {
             let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
             let key = thread_key(&transaction, target)?;
             let (mut header, counters) = rows::header(&transaction, key)?;
-            let state = rows::load(&transaction, key, self.process)?;
             let changed = match update {
                 SetupChange::Begin { input, workspace } => {
-                    if state.inputs.get(&input).is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action, .. } if action == generation)) {
+                    if rows::input(&transaction, key, input)?.is_some_and(|input| matches!(input.state, decision::InputState::Preparing { action, .. } if action == generation)) {
                         header.details.workspace = Some(workspace); true
                     } else { false }
                 }
@@ -58,7 +57,7 @@ impl Storage {
                 update => header.details.workspace.as_mut().filter(|workspace| workspace.generation == generation)
                     .and_then(|workspace| workspace.setup.as_mut()).is_some_and(|setup| apply(setup, update, now.max(0) as u64)),
             };
-            let mut result = Committed { state: Some(state), step: Step::default(), cursor: cursor(&transaction)?, rows: vec![], removed: vec![], reset: false };
+            let mut result = Committed { step: Step::default(), cursor: cursor(&transaction)?, rows: vec![], removed: vec![], reset: false };
             if changed {
                 result.step.outcome = Outcome::Accepted;
                 result.cursor = Self::advance(&transaction)?;
@@ -168,186 +167,11 @@ fn apply(
     true
 }
 
-/// Setup admission shares the writer transaction with AgentStarted, so Stop
-/// cannot cross the point where provider creation is no longer cancellable.
-pub(super) fn command(
-    saved: Option<&WorkspacePreparation>,
-    command: &decision::Command,
-    inputs: &std::collections::BTreeMap<ClientInputId, decision::PendingInput>,
-    cwd: Option<&str>,
-    bindings_empty: bool,
-    active_turn: bool,
-) -> Result<Option<(WorkspacePreparation, String)>, &'static str> {
-    match command {
-        decision::Command::RetryInput { id, work_locally } => retry(
-            saved,
-            inputs.get(id).map(|input| &input.state),
-            cwd,
-            bindings_empty,
-            *work_locally,
-        ),
-        decision::Command::Interrupt { turn } => {
-            let started = saved
-                .and_then(|workspace| workspace.setup.as_ref())
-                .is_some_and(|setup| !setup.can_cancel && setup.phase == SetupPhase::Running);
-            let targeting_preparation = !active_turn || turn.is_some();
-            if started
-                && targeting_preparation
-                && inputs.values().any(|input| {
-                    matches!(
-                        input.state,
-                        decision::InputState::Preparing {
-                            stage: agent_protocol::session::PreparationStage::Provider,
-                            ..
-                        }
-                    ) && turn
-                        .as_ref()
-                        .is_none_or(|turn| turn.as_str() == input.id.as_str())
-                })
-            {
-                Err("The agent has already started")
-            } else {
-                Ok(None)
-            }
-        }
-        _ => Ok(None),
-    }
-}
-
-/// A failed or interrupted script re-enters setup automatically. Working locally is an
-/// explicit disposition of an early, unbound workspace preparation.
-pub(super) fn retry(
-    saved: Option<&WorkspacePreparation>,
-    input: Option<&decision::InputState>,
-    cwd: Option<&str>,
-    bindings_empty: bool,
-    work_locally: bool,
-) -> Result<Option<(WorkspacePreparation, String)>, &'static str> {
-    let Some(saved) = saved else {
-        return if work_locally {
-            Err("workspace setup is unavailable")
-        } else {
-            Ok(None)
-        };
-    };
-    if work_locally {
-        if !bindings_empty
-            || !matches!(
-                input,
-                Some(
-                    decision::InputState::Failed(_)
-                        | decision::InputState::Preparing {
-                            stage: agent_protocol::session::PreparationStage::Workspace
-                                | agent_protocol::session::PreparationStage::Worktree
-                                | agent_protocol::session::PreparationStage::SetupScript,
-                            ..
-                        }
-                )
-            )
-        {
-            return Err("the agent has already started");
-        }
-        let mut workspace = saved.clone();
-        workspace.strategy = Some(agent_protocol::workspace::WorkspaceStrategy::Root);
-        return Ok(Some((workspace, saved.project_cwd.clone())));
-    }
-    let failed_script = saved.setup.as_ref().is_some_and(|setup| {
-        setup.stages.iter().any(|stage| {
-            stage.id == SetupStageId::SetupScript
-                && (stage.status == SetupStageStatus::Failed
-                    || setup.phase == SetupPhase::Cancelled
-                        && stage.status == SetupStageStatus::Skipped
-                        && stage.started_at_ms.is_some())
-        })
-    });
-    Ok(
-        (failed_script && matches!(input, Some(decision::InputState::Failed(_))))
-            .then(|| (saved.clone(), cwd.unwrap_or(&saved.project_cwd).to_owned())),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_protocol::{
-        session::PreparationStage,
-        workspace::{WorkspaceSetup, WorkspaceStrategy},
-    };
+    use agent_protocol::workspace::WorkspaceSetup;
 
-    fn saved() -> WorkspacePreparation {
-        WorkspacePreparation {
-            project_cwd: "/project".into(),
-            strategy: Some(WorkspaceStrategy::Worktree {
-                base_ref: "main".into(),
-                start_from_origin: false,
-            }),
-            generation: Uuid::from_u128(1),
-            setup: Some(WorkspaceSetup::new(Some("main".into()), 0)),
-            visible: true,
-        }
-    }
-
-    #[test]
-    fn work_locally_requires_an_early_unbound_input() {
-        let saved = saved();
-        for (stage, early) in [
-            (PreparationStage::Workspace, true),
-            (PreparationStage::Worktree, true),
-            (PreparationStage::SetupScript, true),
-            (PreparationStage::Provider, false),
-        ] {
-            let input = decision::InputState::Preparing {
-                stage,
-                action: Uuid::from_u128(2),
-                mode: decision::DeliveryMode::Direct,
-            };
-            for unbound in [false, true] {
-                let result = retry(Some(&saved), Some(&input), Some("/checkout"), unbound, true);
-                if early && unbound {
-                    let (workspace, cwd) = result.unwrap().unwrap();
-                    assert_eq!(workspace.strategy, Some(WorkspaceStrategy::Root));
-                    assert_eq!(cwd, "/project");
-                } else {
-                    assert!(result.is_err(), "{stage:?}, unbound={unbound}");
-                }
-            }
-        }
-        let failed = decision::InputState::Failed(Default::default());
-        assert!(
-            retry(Some(&saved), Some(&failed), Some("/checkout"), true, true)
-                .unwrap()
-                .is_some()
-        );
-        assert!(retry(Some(&saved), Some(&failed), Some("/checkout"), false, true).is_err());
-        assert!(retry(None, Some(&failed), Some("/checkout"), true, true).is_err());
-    }
-
-    #[test]
-    fn retry_reenters_only_a_failed_script_and_preserves_the_checkout() {
-        let mut saved = saved();
-        let failed = decision::InputState::Failed(Default::default());
-        let queued = decision::InputState::Queued { steer: None };
-        assert!(
-            retry(Some(&saved), Some(&failed), Some("/checkout"), true, false)
-                .unwrap()
-                .is_none()
-        );
-        saved
-            .setup
-            .as_mut()
-            .unwrap()
-            .stage(SetupStageId::SetupScript, SetupStageStatus::Failed, 1);
-        assert!(
-            retry(Some(&saved), Some(&queued), Some("/checkout"), true, false)
-                .unwrap()
-                .is_none()
-        );
-        let (workspace, cwd) = retry(Some(&saved), Some(&failed), Some("/checkout"), true, false)
-            .unwrap()
-            .unwrap();
-        assert_eq!(workspace, saved);
-        assert_eq!(cwd, "/checkout");
-    }
     #[test]
     fn an_async_script_failure_keeps_its_message_when_the_setup_card_finishes() {
         let mut setup = WorkspaceSetup::new(None, 0);

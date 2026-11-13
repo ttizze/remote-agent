@@ -178,10 +178,12 @@ pub(super) fn write_history(
     now: i64,
 ) -> Result<(), String> {
     let namespace = Uuid::new_v5(&Uuid::NAMESPACE_URL, id.to_string().as_bytes());
-    let mut state = State::new(header(response, now).state);
+    let key = thread_key(transaction, id)?;
+    let (saved, counters) = rows::header(transaction, key)?;
+    let mut state = State::new(saved.state);
+    state.counters.input = counters.input;
     let mut seen_turns = BTreeSet::new();
     let mut seen_items = BTreeSet::new();
-    let key = thread_key(transaction, id)?;
     let scope = rows::WriteScope {
         key,
         id,
@@ -209,6 +211,7 @@ pub(super) fn write_history(
             completed_at: native.completed_at_ms.and_then(|at| at.try_into().ok()),
             duration_ms: native.duration_ms,
             retry_count: 0,
+            compaction: false,
             error: native
                 .error
                 .clone()
@@ -236,7 +239,7 @@ pub(super) fn write_history(
             transaction,
             &scope,
             &Change::Turn(turn.clone()),
-            &state,
+            &state.turns,
             &mut Vec::new(),
             &mut Vec::new(),
         )?;
@@ -271,7 +274,7 @@ pub(super) fn write_history(
                 transaction,
                 &scope,
                 &Change::Item(item.clone()),
-                &state,
+                &state.turns,
                 &mut Vec::new(),
                 &mut Vec::new(),
             )?;
@@ -281,6 +284,8 @@ pub(super) fn write_history(
             }
         }
     }
+    state.counters.turn = state.counters.turn.max(counters.turn);
+    state.counters.item = state.counters.item.max(counters.item);
     let updated_at = header(response, now).details.updated_at;
     rows::write_header(transaction, key, id, &state, sequence, updated_at, None)?;
     Ok(())
@@ -338,8 +343,23 @@ pub(super) fn install(
     let mut header = header(response, now);
     let parent = header.details.parent.take();
     if let Some(key) = existing_key(transaction, id)? {
+        let (previous_header, counters) = rows::header(transaction, key)?;
+        header.state.queue_held = previous_header.state.queue_held;
+        let previous = previous_header.details;
+        header.details.read_through = previous.read_through;
+        header.details.selection = decision::records::Selection {
+            model: previous.selection.model.or(header.details.selection.model),
+            effort: previous
+                .selection
+                .effort
+                .or(header.details.selection.effort),
+            service_tier: previous
+                .selection
+                .service_tier
+                .or(header.details.selection.service_tier),
+        };
         let parent: Option<i64> = None;
-        transaction.execute("UPDATE threads SET seq=?1,loaded=1,parent=?2,cwd=?3,updated_at=?4,history_seq=?1,body=?5 WHERE key=?6", params![integer(sequence)?,parent,header.state.workspace.cwd(),header.details.updated_at,codec::header(&header,&Counters::default())?,key]).map_err(failure)?;
+        transaction.execute("UPDATE threads SET seq=?1,loaded=1,parent=?2,cwd=?3,updated_at=?4,history_seq=?1,body=?5 WHERE key=?6", params![integer(sequence)?,parent,header.state.workspace.cwd(),header.details.updated_at,codec::header(&header,&counters)?,key]).map_err(failure)?;
     } else {
         insert_header(transaction, id, &header, &Counters::default(), sequence)?;
     }
@@ -387,7 +407,7 @@ pub(super) fn install(
                     source: source.id.clone(),
                 }),
             },
-            &state,
+            &state.turns,
             &mut Vec::new(),
             &mut Vec::new(),
         )?;
@@ -486,6 +506,14 @@ impl Storage {
             } else if floor.turn != 0 || floor.item != 0 {
                 floor = rows::older_window(&transaction, key, floor)?;
                 let mut rows = rows::snapshot(&transaction, key, id, floor)?;
+                rows.retain(|row| {
+                    !agent_protocol::sync::contains(
+                        &Scope::Conversation(id.clone()),
+                        Some(window),
+                        &row.key,
+                        &row.position,
+                    )
+                });
                 decision::records::summarize(&mut rows, 128 * 1024)?;
                 messages.push(Message::Extend {
                     cursor: current,
