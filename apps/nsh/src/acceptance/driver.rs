@@ -370,6 +370,23 @@ fn attempt(
         ),
         Step::Drag(from, to) => drag(&Tree::read(mtm, menus), from, to),
         Step::Drop => done(release()),
+        Step::Pointer(x, y) => done((|| {
+            let window = main_window(mtm).ok_or("no window to move the pointer in")?;
+            let content = window.contentView().ok_or("the window has no content")?;
+            let point = content.convertPoint_toView(
+                NSPoint::new(
+                    *x,
+                    if content.isFlipped() {
+                        *y
+                    } else {
+                        content.bounds().size.height - y
+                    },
+                ),
+                None,
+            );
+            hover_point(&window, point)?;
+            Ok(format!("moved the pointer to {x}, {y}"))
+        })()),
         Step::Hover(find) => on_element(&Tree::read(mtm, menus), find, |tree, index| {
             hover(tree, index).map(|()| format!("hovered over {}", tree.nodes[index].describe()))
         }),
@@ -1412,13 +1429,19 @@ fn hover(tree: &Tree, index: usize) -> Result<(), String> {
         frame.origin.x + frame.size.width / 2.0,
         frame.origin.y + frame.size.height / 2.0,
     );
+    hover_point(window, point)
+}
+
+fn hover_point(window: &NSWindow, point: NSPoint) -> Result<(), String> {
     let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
         NSEventType::MouseMoved, point, NSEventModifierFlags::empty(), 0.0, window.windowNumber(), None, 0, 0, 0.0,
     ).ok_or("AppKit made no pointer event")?;
     let content = window.contentView().ok_or("the window has no content")?;
+    window.setAcceptsMouseMovedEvents(true);
+    window.sendEvent(&event);
     let mut view = content
         .hitTest(content.convertPoint_fromView(point, None))
-        .ok_or_else(|| format!("no view is under {}", node.describe()))?;
+        .ok_or("no view is under the pointer")?;
     // A native view (message text) keeps moves to itself, and only NSH's
     // root view tracks hover: the move goes to the outermost NSH view.
     let nsh = |view: &NSView| view.class().name().to_string_lossy().starts_with("Nsh");
@@ -1497,6 +1520,8 @@ fn capture(mtm: MainThreadMarker, output: &Path, name: &str) -> Result<String, S
         .ok_or("no window to capture")?;
     let mut views = Vec::new();
     describe_views(&content, &content, None, &mut views);
+    let mut seen = std::collections::HashSet::new();
+    describe_accessibility(&content, &content, None, &mut seen, &mut views);
     let size = content.bounds().size;
     let report = json!({
         "width": size.width,
@@ -1554,6 +1579,61 @@ fn describe_views(view: &NSView, content: &NSView, parent: Option<usize>, out: &
     }));
     for child in view.subviews() {
         describe_views(&child, content, Some(index), out);
+    }
+}
+
+/// SwiftUI's Text and Button are logical accessibility nodes, without a
+/// backing NSView. Capture their actual screen frames as well as native views.
+fn describe_accessibility(
+    object: &AnyObject,
+    content: &NSView,
+    parent: Option<usize>,
+    seen: &mut std::collections::HashSet<usize>,
+    out: &mut Vec<Value>,
+) {
+    if out.len() >= MAX_NODES || !seen.insert(object as *const _ as usize) {
+        return;
+    }
+    let index = if object.downcast_ref::<NSView>().is_none()
+        && responds(object, sel!(accessibilityFrame))
+    {
+        let screen: NSRect = unsafe { msg_send![object, accessibilityFrame] };
+        let frame = content
+            .window()
+            .map(|window| content.convertRect_fromView(window.convertRectFromScreen(screen), None))
+            .unwrap_or(screen);
+        let top = if content.isFlipped() {
+            frame.origin.y
+        } else {
+            content.bounds().size.height - frame.origin.y - frame.size.height
+        };
+        let texts: serde_json::Map<String, Value> = [
+            ("label", sel!(accessibilityLabel)),
+            ("title", sel!(accessibilityTitle)),
+            ("value", sel!(accessibilityValue)),
+            ("identifier", sel!(accessibilityIdentifier)),
+        ]
+        .into_iter()
+        .filter_map(|(name, selector)| {
+            text(object, selector)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (name.into(), json!(value)))
+        })
+        .collect();
+        let index = out.len();
+        out.push(json!({"parent":parent,"class":object.class().name().to_string_lossy(),
+            "frame":[frame.origin.x,top,frame.size.width,frame.size.height],"hidden":false,"alpha":1,
+            "role":text(object,sel!(accessibilityRole)),"texts":texts,"layer":null}));
+        Some(index)
+    } else {
+        parent
+    };
+    if responds(object, sel!(accessibilityChildren)) {
+        let children: Option<Retained<NSArray<AnyObject>>> =
+            unsafe { msg_send![object, accessibilityChildren] };
+        for child in children.iter().flat_map(|children| children.iter()) {
+            describe_accessibility(&child, content, index, seen, out);
+        }
     }
 }
 

@@ -73,6 +73,7 @@ description = "A finished turn: the user's message, the folded work row, the ans
 nsh = ["send [groups] 完了した作業を確認します", "expect \"最初の確認が終わりました。次のコマンドを確認します。\" 20000", "fixture /release-inputs", "expect \"シミュレータで完了しました。\" 30000"]
 t3 = [{ send = "[groups] 完了した作業を確認します" }, { waitText = "Running pwd" }, { release = true }, { waitText = "シミュレータで完了しました。" }, { waitMs = 1500 }]
 column = "composer"
+absent = ["user-copy", "user-edit", "user-time", "assistant-copy", "assistant-fork", "assistant-time"]
 elements = ["composer", "composer-overlay", "composer-send", "window", "header", "header-project", "header-title", "header-details-toggle", "header-terminal-toggle", "header-panel-toggle", "user-bubble", "user-text", "user-copy", "user-edit", "user-time", "work-toggle", "assistant-text", "assistant-copy", "assistant-fork", "assistant-time", "changed-files-card"]
 
 [[state]]
@@ -154,6 +155,7 @@ description = "A Markdown answer: heading, emphasis, quote, lists, tasks, a code
 nsh = ["send [markdown-document] [immediate] 文書を確認します", "expect \"見出し\" 30000", "wait 1500"]
 t3 = [{ send = "[markdown-document] [immediate] 文書を確認します" }, { waitText = "見出し" }]
 column = "composer"
+absent = ["assistant-copy"]
 elements = ["composer", "composer-overlay", "markdown-body", "markdown-code", "markdown-code-language", "markdown-code-copy", "markdown-image-error", "assistant-copy"]
 
 [[state]]
@@ -445,7 +447,7 @@ kind = "box"
 # so the columns differ in width.
 from_end = true
 t3 = "[data-message-role=user] .bg-message"
-nsh = { text = "message.user-text", up = "background" }
+nsh = { text = "conversation.user-bubble", role = "AXGroup" }
 
 [[element]]
 id = "user-text"
@@ -461,7 +463,7 @@ what = "User message: copy"
 kind = "icon"
 from_end = true
 t3 = "[data-message-role=user] button[aria-label='Copy message']"
-nsh = { text = "Copy message" }
+nsh = { text = "conversation.user-copy", role = "AXButton" }
 
 [[element]]
 id = "user-edit"
@@ -469,7 +471,7 @@ what = "User message: edit"
 kind = "icon"
 from_end = true
 t3 = "[data-message-role=user] button[aria-label='Edit from here']"
-nsh = { text = "Edit in composer" }
+nsh = { text = "conversation.user-edit", role = "AXButton" }
 
 [[element]]
 id = "user-time"
@@ -477,14 +479,14 @@ what = "User message time"
 kind = "text"
 from_end = true
 t3 = "[data-message-role=user] p.tabular-nums"
-nsh = { contains = ":", role = "AXStaticText" }
+nsh = { text = "conversation.user-time", role = "AXStaticText" }
 
 [[element]]
 id = "work-toggle"
 what = "Folded work row (Worked for …)"
 kind = "text"
 t3 = "[data-timeline-row-kind=turn-fold] button span"
-nsh = { contains = "Worked for", role = "AXStaticText" }
+nsh = { text = "conversation.assistant-fold", role = "AXButton" }
 
 [[element]]
 id = "work-group-toggle"
@@ -506,21 +508,21 @@ id = "assistant-copy"
 what = "Answer: copy"
 kind = "icon"
 t3 = "[data-message-role=assistant] button[aria-label='Copy message']"
-nsh = { text = "Copy answer" }
+nsh = { text = "conversation.assistant-copy", role = "AXButton" }
 
 [[element]]
 id = "assistant-fork"
 what = "Answer: fork"
 kind = "icon"
 t3 = "[data-message-role=assistant] button[aria-label='Fork from this response']"
-nsh = { text = "Branch conversation here" }
+nsh = { text = "conversation.assistant-fork", role = "AXButton" }
 
 [[element]]
 id = "assistant-time"
 what = "Answer time"
 kind = "text"
 t3 = "[data-message-role=assistant] p.tabular-nums"
-nsh = { contains = ":", role = "AXStaticText", nth = 1 }
+nsh = { text = "conversation.assistant-time", role = "AXStaticText" }
 
 [[element]]
 id = "working-header"
@@ -779,17 +781,14 @@ what = "Markdown answer body"
 # Both sides' column of blocks: its frame, not one text's ink.
 kind = "box"
 t3 = "[data-timeline-row-kind=message][data-message-role=assistant].pb-4 .chat-markdown"
-# NSH draws a text view for each run of text between a code block, an image
-# and a table: the body is the column holding them (the first text view's
-# fifth ancestor), as T3 Code's `.chat-markdown` holds its blocks.
-nsh = { contains = "見出し", role = "AXTextArea", up = 5 }
+nsh = { text = "conversation.assistant-body" }
 
 [[element]]
 id = "markdown-code"
 what = "Markdown code block"
 kind = "box"
 t3 = "[data-message-role=assistant] .chat-markdown-codeblock"
-nsh = { contains = "stays code", up = "background" }
+nsh = { text = "conversation.code", role = "AXGroup" }
 
 [[element]]
 id = "markdown-code-language"

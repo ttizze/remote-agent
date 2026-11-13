@@ -109,6 +109,8 @@ const MEASURE = `(selectors) => {
 const OUTLINE = `(() => {
   const lines = [];
   const walk = (element, depth) => {
+    const style = getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return;
     const rect = element.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0 && element.children.length === 0) return;
     if (['svg', 'path', 'circle', 'line', 'rect', 'polyline', 'g'].includes(element.tagName.toLowerCase())) return;

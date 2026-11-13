@@ -61,8 +61,12 @@ nsh-acceptance *scenarios:
 # dependencies installed, for Playwright and the Codex schema. `--compare RUN` measures a run
 # again. Only on request, as nsh-acceptance. Report: target/nsh-parity/run-*/report.md.
 nsh-parity *args:
-    AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev
-    cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ${1-} != --compare && ${1-} != --t3 ]]; then
+        AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev
+        cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
+    fi
     cargo xtask nsh-parity "$@"
 
 # List worktrees whose build outputs went unused for three days; --delete removes those outputs.

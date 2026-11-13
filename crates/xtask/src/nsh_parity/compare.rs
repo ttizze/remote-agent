@@ -35,6 +35,7 @@ pub struct T3Style {
 #[derive(Debug, Deserialize)]
 pub struct NshCapture {
     pub width: f64,
+    pub height: f64,
     pub views: Vec<NshView>,
 }
 
@@ -69,8 +70,9 @@ fn opaque() -> f64 {
 pub struct Measure {
     pub frame: Rect,
     pub radius: Option<f64>,
-    /// Endless animations running in it or inside it (a shimmer, a spinner).
-    pub animations: Vec<String>,
+    /// Endless animations in it or inside it. None means the renderer does
+    /// not publish animation metadata (SwiftUI can redraw without CALayer keys).
+    pub animations: Option<Vec<String>>,
     pub ink: Option<Ink>,
     /// The components of `frame` (x, y, width, height) the side leaves open.
     pub unknown: [bool; 4],
@@ -82,7 +84,7 @@ pub struct Measure {
     pub note: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Difference {
     pub element: String,
     pub metric: &'static str,
@@ -148,7 +150,7 @@ fn t3_measure(capture: &T3Capture, image: &Image, element: &Element) -> Option<M
     Some(Measure {
         frame: found.frame,
         radius,
-        animations: found.animations.clone(),
+        animations: Some(found.animations.clone()),
         ink: image.ink(found.frame, radius.unwrap_or(0.0)),
         note: if element.kind == Kind::Text {
             format!(
@@ -175,10 +177,17 @@ fn gpui_measure(layout: &GpuiLayout) -> Measure {
 
 fn nsh_measure(views: &[NshView], index: usize, image: &Image) -> Measure {
     let view = &views[index];
-    let animations = subtree(views, index)
+    let animations: Vec<_> = subtree(views, index)
         .filter_map(|index| views[index].layer.as_ref())
         .flat_map(|layer| layer.animations.iter().cloned())
         .collect();
+    let hosted = subtree(views, index)
+        .chain(std::iter::successors(Some(index), |&node| {
+            views[node].parent
+        }))
+        .any(|node| {
+            views[node].class.contains("NSHosting") || views[node].class.starts_with("SwiftUI.")
+        });
     let radius = view
         .layer
         .as_ref()
@@ -186,7 +195,7 @@ fn nsh_measure(views: &[NshView], index: usize, image: &Image) -> Measure {
     Measure {
         frame: view.frame,
         radius,
-        animations,
+        animations: (!hosted || !animations.is_empty()).then_some(animations),
         ink: image.ink(view.frame, radius.unwrap_or(0.0)),
         ..Measure::default()
     }
@@ -249,7 +258,7 @@ pub fn find(views: &[NshView], matcher: &NshMatch) -> Option<usize> {
 
 /// Drawn: laid out on screen and, as T3's side counts it, not transparent
 /// through itself or an ancestor (hover-only controls).
-fn shown(views: &[NshView], index: usize) -> bool {
+pub(super) fn shown(views: &[NshView], index: usize) -> bool {
     let view = &views[index];
     let transparent = |view: &NshView| {
         view.alpha == 0.0
@@ -303,9 +312,21 @@ pub fn differences(
     let mut out = Vec::new();
     for element in elements(map, state) {
         let pair = (reference.get(&element.id), nsh.get(&element.id));
+        if state.absent.contains(&element.id) {
+            if pair.0.is_some() || pair.1.is_some() {
+                out.push(difference(
+                    element,
+                    "expected hidden",
+                    if pair.0.is_some() { "shown" } else { "hidden" }.into(),
+                    if pair.1.is_some() { "shown" } else { "hidden" }.into(),
+                ));
+            }
+            continue;
+        }
         let presence = match pair {
             (Some(_), None) => Some(("present", "shown", "missing")),
             (None, Some(_)) => Some(("present", "not shown", "shown")),
+            (None, None) => Some(("not measured", "missing", "missing")),
             _ => None,
         };
         if let Some((metric, reference, nsh)) = presence {
@@ -473,16 +494,12 @@ fn compare(
             out.push(found);
         }
     }
-    if let (Some(theirs), Some(ours)) = (reference.radius, nsh.radius)
-        && (theirs - ours).abs() > tolerance.radius
-    {
-        out.push(difference(
-            element,
-            "corner radius",
-            format!("{theirs:.0}"),
-            format!("{ours:.0}"),
-        ));
-    }
+    out.extend(corner_radius(
+        element,
+        tolerance.radius,
+        reference.radius,
+        nsh.radius,
+    ));
     out.extend(fill(element, tolerance, reference, nsh));
     out.extend(drawn(
         element,
@@ -491,16 +508,50 @@ fn compare(
         nsh,
         frames.container(),
     ));
-    let animated = [reference, nsh].map(|measure| !measure.animations.is_empty());
-    if animated[0] != animated[1] {
-        out.push(difference(
-            element,
-            "animation",
-            animations(reference),
-            animations(nsh),
-        ));
-    }
+    out.extend(animation(element, reference, nsh));
     out
+}
+
+fn corner_radius(
+    element: &Element,
+    tolerance: f64,
+    reference: Option<f64>,
+    nsh: Option<f64>,
+) -> Option<Difference> {
+    if element.kind == Kind::Text {
+        return None;
+    }
+    let theirs = reference?;
+    match nsh {
+        Some(ours) if (theirs - ours).abs() > tolerance => Some(difference(
+            element,
+            "corner radius",
+            format!("{theirs:.0}"),
+            format!("{ours:.0}"),
+        )),
+        None => Some(difference(
+            element,
+            "corner radius not measured",
+            format!("{theirs:.0}"),
+            "unavailable".into(),
+        )),
+        _ => None,
+    }
+}
+
+fn animation(element: &Element, reference: &Measure, nsh: &Measure) -> Option<Difference> {
+    let theirs = reference.animations.as_ref()?;
+    let metric = match &nsh.animations {
+        Some(ours) if theirs.is_empty() != ours.is_empty() => "animation metadata",
+        None => "animation not measured",
+        _ => return None,
+    };
+    Some(difference(
+        element,
+        metric,
+        animations(reference),
+        animations(nsh),
+    ))
 }
 
 fn noted(mut difference: Difference, note: &str) -> Difference {
@@ -640,10 +691,13 @@ fn hex(color: Rgb) -> String {
 }
 
 fn animations(measure: &Measure) -> String {
-    if measure.animations.is_empty() {
+    let Some(animations) = &measure.animations else {
+        return "unavailable".into();
+    };
+    if animations.is_empty() {
         "none".into()
     } else {
-        measure.animations.join(", ")
+        animations.join(", ")
     }
 }
 
@@ -768,8 +822,55 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
     fn measure(frame: Rect) -> Measure {
         Measure {
             frame,
+            animations: Some(vec![]),
             ..Measure::default()
         }
+    }
+
+    #[test]
+    fn swiftui_without_layer_metadata_is_unmeasured_rather_than_static_or_square() {
+        let map = Map::parse(MAP).unwrap();
+        let element = map.element("column").unwrap();
+        let image = Image {
+            width: 20,
+            height: 20,
+            pixels: vec![[0; 3]; 400],
+            scale: 1.0,
+        };
+        let mut hosted = view(None, [0.0, 0.0, 20.0, 20.0], "bubble", None);
+        hosted.class = "SwiftUI.AccessibilityNode".into();
+        let ours = nsh_measure(&[hosted], 0, &image);
+        assert_eq!(ours.radius, None);
+        assert_eq!(ours.animations, None);
+        assert_eq!(
+            corner_radius(element, 2.0, Some(16.0), ours.radius)
+                .unwrap()
+                .metric,
+            "corner radius not measured"
+        );
+        assert!(corner_radius(element, 2.0, None, ours.radius).is_none());
+        let mut reference = measure(ours.frame);
+        for keys in [vec![], vec!["shimmer".into()]] {
+            reference.animations = Some(keys);
+            assert_eq!(
+                animation(element, &reference, &ours).unwrap().metric,
+                "animation not measured"
+            );
+        }
+        let square = nsh_measure(
+            &[view(None, ours.frame, "box", layer(None, 0.0, &[]))],
+            0,
+            &image,
+        );
+        assert_eq!(square.animations, Some(vec![]));
+        assert_eq!(
+            corner_radius(element, 2.0, Some(16.0), square.radius)
+                .unwrap()
+                .metric,
+            "corner radius"
+        );
+        assert!(corner_radius(element, 2.0, Some(2.0), square.radius).is_none());
+        assert!(corner_radius(map.element("row").unwrap(), 2.0, Some(0.0), None).is_none());
     }
 
     #[test]
@@ -905,9 +1006,27 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
             scale: 1.0,
         };
         let row = nsh_measure(&views, 3, &image);
-        assert_eq!(row.animations, ["spin"]);
+        assert_eq!(row.animations, Some(vec!["spin".into()]));
         // A radius beyond half the height draws a pill.
         assert_eq!(nsh_measure(&views, 1, &image).radius, Some(9.0));
+    }
+
+    #[test]
+    fn missing_both_selectors_cannot_pass_unless_the_state_requires_absence() {
+        let mut map = Map::parse(MAP).unwrap();
+        map.states[0].elements = vec!["row".into()];
+        let empty = BTreeMap::new();
+        let missing = differences(&map, &map.states[0], &empty, &empty);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].metric, "not measured");
+        map.states[0].absent = vec!["row".into()];
+        assert!(differences(&map, &map.states[0], &empty, &empty).is_empty());
+        let shown = BTreeMap::from([("row".into(), measure([0.0, 0.0, 10.0, 10.0]))]);
+        for (reference, candidate) in [(&shown, &empty), (&empty, &shown), (&shown, &shown)] {
+            let unexpected = differences(&map, &map.states[0], reference, candidate);
+            assert_eq!(unexpected.len(), 1);
+            assert_eq!(unexpected[0].metric, "expected hidden");
+        }
     }
 
     #[test]
@@ -920,7 +1039,7 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
             (
                 "spinner".to_owned(),
                 Measure {
-                    animations: vec!["live-tool-shine".into()],
+                    animations: Some(vec!["live-tool-shine".into()]),
                     ..measure([20.0, 15.0, 60.0, 10.0])
                 },
             ),
@@ -967,7 +1086,7 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
                 ),
                 (
                     "spinner".into(),
-                    "animation",
+                    "animation metadata",
                     "live-tool-shine".into(),
                     "none".into()
                 ),
@@ -1050,7 +1169,8 @@ gpui = { x = 14, y = 14, width = 16, height = 16, glyph_dx = -20, glyph_dy = 0, 
 
     #[test]
     fn drawn_text_glyphs_and_fills_are_compared() {
-        let map = Map::parse(MAP).unwrap();
+        let mut map = Map::parse(MAP).unwrap();
+        map.states[0].elements = vec!["row".into(), "icon".into()];
         let state = &map.states[0];
         let ink = |line: f64, color: Rgb, bounds: Rect| Ink {
             background: [10, 10, 10],

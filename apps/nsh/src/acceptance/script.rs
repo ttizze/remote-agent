@@ -76,6 +76,7 @@
 //!   of that element, moves onto the middle of the first element labelled
 //!   `<target>` and holds the button there, so `expect` and `screenshot` see the
 //!   drag; `drop` releases it. `after` and the timeout find the dragged element.
+//! - `pointer <x> <y>`: moves the pointer to content coordinates, origin top left.
 //! - `hover <label> [after <anchor>] [timeout-ms]`: moves the pointer over that
 //!   element's centre, as hover-only controls need.
 //! - `choose <path>`: answers the open or save panel the app shows with
@@ -162,6 +163,7 @@ pub(crate) enum Step {
     Select(Find, String),
     Menu(Find),
     Hover(Find),
+    Pointer(f64, f64),
     /// A press on the first element, moved onto the second and held there.
     /// The first is found after its anchor, if it names one.
     Drag(Find, Find),
@@ -342,6 +344,7 @@ fn step(words: &[String]) -> Result<Step, String> {
         }
         ("unmark", [target, rest @ ..]) => Step::Compose(find(target, rest)?, Composition::Unmark),
         ("window", [width, height]) => Step::Window(points(width)?, points(height)?),
+        ("pointer", [x, y]) => Step::Pointer(coordinate(x)?, coordinate(y)?),
         ("scroll", [target, lines, rest @ ..]) => wheel(target, lines, rest)?,
         ("drag_by", [target, points, rest @ ..]) => Step::DragBy(
             find(target, rest)?,
@@ -502,11 +505,18 @@ fn fraction(value: &str) -> Result<f64, String> {
 }
 
 fn points(value: &str) -> Result<f64, String> {
+    coordinate(value)
+        .ok()
+        .filter(|points| *points > 0.0)
+        .ok_or_else(|| format!("{value:?} is not a size in points"))
+}
+
+fn coordinate(value: &str) -> Result<f64, String> {
     value
         .parse()
         .ok()
-        .filter(|points: &f64| points.is_finite() && *points > 0.0)
-        .ok_or_else(|| format!("{value:?} is not a size in points"))
+        .filter(|points: &f64| points.is_finite() && *points >= 0.0)
+        .ok_or_else(|| format!("{value:?} is not a finite nonnegative coordinate"))
 }
 
 fn milliseconds(value: &str) -> Result<Duration, String> {
@@ -601,6 +611,21 @@ mod tests {
         assert!(contains("target suffix", "target*"));
         assert!(contains("a*b", "a*b"));
         assert!(!contains("ab", "a*b"));
+    }
+
+    #[test]
+    fn pointer_uses_finite_content_coordinates() {
+        assert_eq!(
+            parse("pointer 1278 798.5").unwrap()[0].step,
+            Step::Pointer(1278.0, 798.5)
+        );
+        assert!(parse("pointer NaN 1").is_err());
+        assert!(parse("pointer 1 inf").is_err());
+        assert_eq!(
+            parse("pointer 0 0").unwrap()[0].step,
+            Step::Pointer(0.0, 0.0)
+        );
+        assert!(parse("pointer -1 1").is_err());
     }
 
     #[test]
