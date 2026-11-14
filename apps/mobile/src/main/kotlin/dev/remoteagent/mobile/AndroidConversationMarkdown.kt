@@ -131,6 +131,7 @@ private fun MarkdownBlocks(
             is MarkdownBlock.Callout -> {
                 val marker = MarkdownRun(
                     text = markdownCalloutMarker(block.kind),
+                    template = null,
                     strong = false,
                     emphasis = false,
                     strikethrough = false,

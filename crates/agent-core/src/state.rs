@@ -1108,6 +1108,20 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             }
         }
 
+        Intent::UseArtifactTemplate { storage_scope, thread_id, template } => {
+            if storage_scope == previous.connection.storage_scope {
+                let current = previous.input.drafts.get(&thread_id).map_or("", |draft| draft.text.as_str());
+                let busy = previous.operation_running(op::OperationKey::Submission {draft_key:thread_id.clone()})
+                    || previous.operation_running(op::OperationKey::Attachment {draft_key:thread_id.clone()})
+                    || previous.operation_running(op::OperationKey::Dictation {draft_key:thread_id.clone()})
+                    || matches!(&thread_id, DraftKey::Session {session} if previous.input.queued_edits.contains_key(session));
+                match crate::composer::template::append(current, &template, busy) {
+                    Ok(text) if text != current => Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default()).text = text,
+                    Ok(_) => {},
+                    Err(reason) => Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists")).error = Some(reason.into()),
+                }
+            }
+        }
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.input.drafts).insert(thread_id, Arc::new(draft));
         }

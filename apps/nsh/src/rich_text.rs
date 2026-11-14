@@ -353,6 +353,7 @@ fn paragraph(runs: Vec<MarkdownRun>, style: &MarkdownStyle, chip: Chip) -> Value
                 .map(|_| web_link_menu(crate::l10n::language()));
             let mut value = json!({
                 "text": run.text, "strong": run.strong, "emphasis": run.emphasis,
+                "template": run.template,
                 "strikethrough": run.strikethrough, "code": run.code, "math":run.math, "link": run.link,
                 "darkColor": run.dark_color, "lightColor": run.light_color,
             });

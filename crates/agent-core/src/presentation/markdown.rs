@@ -6,7 +6,9 @@ use ::markdown::{
 use std::{borrow::Cow, collections::HashMap};
 mod code;
 mod structure;
+mod template;
 use structure::{disclosures, without_disclosure_tags};
+pub use template::{ArtifactTemplate, ArtifactTemplateGallery, ArtifactTemplateKind};
 #[cfg(feature = "diagrams")]
 mod diagram;
 #[cfg(feature = "diagrams")]
@@ -127,6 +129,7 @@ pub struct MarkdownCell {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct MarkdownRun {
     pub text: String,
+    pub template: Option<ArtifactTemplate>,
     pub strong: bool,
     pub emphasis: bool,
     pub strikethrough: bool,
@@ -691,6 +694,11 @@ fn block(
         _ => {}
     }
     // Read opaque JSON before Markdown unescapes Windows path separators.
+    if matches!(node, Node::Paragraph(_))
+        && template::blocks(node, source, context, style.clone(), blocks)
+    {
+        return;
+    }
     if matches!(node, Node::Paragraph(_))
         && let Some(position) = node.position()
         && let Some(path) =

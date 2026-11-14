@@ -54,6 +54,11 @@ pub enum Intent {
         thread_id: DraftKey,
         action: crate::composer::context::ContextAction,
     },
+    UseArtifactTemplate {
+        storage_scope: String,
+        thread_id: DraftKey,
+        template: crate::presentation::markdown::ArtifactTemplate,
+    },
     EnsureFileMetadata {
         paths: Vec<String>,
         now_ms: u64,

@@ -41,7 +41,7 @@ enum ConversationMarkdownContent {
                 paragraphs.removeAll(keepingCapacity: true)
                 appendChildren(children, to: &result)
             case let .callout(kind, children, style):
-                let marker = MarkdownRun(text: markdownCalloutMarker(kind: kind), strong: false, emphasis: false,
+                let marker = MarkdownRun(text: markdownCalloutMarker(kind: kind), template: nil, strong: false, emphasis: false,
                                          strikethrough: false, code: false, math: false, link: nil, image: nil,
                                          file: nil, darkColor: nil, lightColor: nil)
                 paragraphs.append(contentsOf: blocks([marker], style: style, startingID: paragraphs.count))
