@@ -344,7 +344,14 @@ impl Runtime {
             runtime_mode: "full-access".into(),
             interaction_mode: "default".into(),
             branch: None,
-            worktree_path: Some(cwd),
+            worktree_path: match &preparation {
+                // T3 claims an existing worktree on thread creation, including
+                // launches without an initial message (ThreadLaunchService).
+                Some(model::WorkspacePreparation::ExistingWorktree {
+                    worktree_path, ..
+                }) => Some(worktree_path.clone()),
+                _ => Some(cwd),
+            },
             active_provider_thread_id: None,
             lineage: model::Lineage {
                 parent_thread_id: None,
