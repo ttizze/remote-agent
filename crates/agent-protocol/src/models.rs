@@ -129,6 +129,8 @@ pub struct Thread {
     pub project_id: ProjectMembership,
     pub preview: Option<String>,
     pub updated_at: Option<f64>,
+    /// Last human submission, in Unix milliseconds; agent activity never advances it.
+    pub last_input_at: Option<i64>,
     pub history_has_more: Option<bool>,
     pub history_cursor: Option<String>,
     pub history_limit: Option<u64>,

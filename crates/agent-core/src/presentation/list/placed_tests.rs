@@ -10,6 +10,43 @@ fn session(id: &str) -> SessionRef {
     SessionRef::new(ProviderKind::Codex, id.into()).unwrap()
 }
 
+#[test]
+fn recent_chats_move_only_when_a_person_submits_input() {
+    let mut snapshot = Snapshot::default();
+    snapshot.lists.threads = Some(Arc::new(crate::models::ThreadList {
+        data: [
+            ("older", Some(100)),
+            ("newer", Some(200)),
+            ("unknown", None),
+        ]
+        .map(|(id, last_input_at)| Thread {
+            id: Some(session(id)),
+            last_input_at,
+            ..Default::default()
+        })
+        .into(),
+        ..Default::default()
+    }));
+    let order = |snapshot: &Snapshot| {
+        snapshot
+            .recent_thread_list()
+            .unwrap()
+            .threads
+            .into_iter()
+            .map(|row| row.id.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&snapshot), ["newer", "older", "unknown"]);
+    for at in [300., 1_000., f64::INFINITY, f64::NAN] {
+        let page = Arc::make_mut(snapshot.lists.threads.as_mut().unwrap());
+        page.data[0].updated_at = Some(at);
+        page.data[2].updated_at = Some(at);
+        assert_eq!(order(&snapshot), ["newer", "older", "unknown"]);
+    }
+    Arc::make_mut(snapshot.lists.threads.as_mut().unwrap()).data[0].last_input_at = Some(400);
+    assert_eq!(order(&snapshot), ["older", "newer", "unknown"]);
+}
+
 fn fixture() -> Snapshot {
     let mut snapshot = Snapshot {
         connection: crate::state::Connection {
@@ -382,6 +419,7 @@ fn large_placement_lists_keep_scope_hidden_and_dangling_destinations_in_every_vi
             id: Some(session(&format!("chat-{index}"))),
             name: Some(format!("Chat {index}")),
             updated_at: Some(index as f64),
+            last_input_at: Some(index as i64),
             ..Default::default()
         })
         .collect();
@@ -397,6 +435,7 @@ fn large_placement_lists_keep_scope_hidden_and_dangling_destinations_in_every_vi
             name: Some(format!("Source {index}")),
             project_id: ProjectMembership::Assigned("source".into()),
             updated_at: Some(index as f64),
+            last_input_at: Some(index as i64),
             ..Default::default()
         })
         .into();

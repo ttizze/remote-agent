@@ -763,9 +763,8 @@ impl ListSource<'_> {
             .filter(|thread| thread.parent_id.is_none())
             .collect();
         rows.sort_by(|a, b| {
-            b.updated_at
-                .unwrap_or(0.0)
-                .total_cmp(&a.updated_at.unwrap_or(0.0))
+            b.last_input_at
+                .cmp(&a.last_input_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
         let limit = self.lists.list_query.limit as usize;
@@ -1114,17 +1113,17 @@ mod tests {
     }
 
     #[test]
-    fn recent_chats_merge_closed_projects_in_update_order_and_page_globally() {
+    fn recent_chats_merge_closed_projects_in_human_input_order_and_page_globally() {
         let mut snapshot = snapshot_list(json!([
-            {"id":{"provider":"codex","id":"standalone"},"updatedAt":10},
-            {"id":{"provider":"codex","id":"duplicate"},"updatedAt":5}
+            {"id":{"provider":"codex","id":"standalone"},"updatedAt":10,"lastInputAt":10000},
+            {"id":{"provider":"codex","id":"duplicate"},"updatedAt":5,"lastInputAt":5000}
         ]));
         let page = serde_json::from_value(json!({
             "data":[
-                {"id":{"provider":"codex","id":"project-chat"},"projectId":"project","updatedAt":30},
-                {"id":{"provider":"codex","id":"duplicate"},"projectId":"project","updatedAt":20},
-                {"id":{"provider":"claude","id":"duplicate"},"projectId":"project","updatedAt":15},
-                {"id":{"provider":"codex","id":"agent"},"parentId":{"provider":"codex","id":"project-chat"},"projectId":"project","updatedAt":40}
+                {"id":{"provider":"codex","id":"project-chat"},"projectId":"project","updatedAt":30,"lastInputAt":30000},
+                {"id":{"provider":"codex","id":"duplicate"},"projectId":"project","updatedAt":20,"lastInputAt":20000},
+                {"id":{"provider":"claude","id":"duplicate"},"projectId":"project","updatedAt":15,"lastInputAt":15000},
+                {"id":{"provider":"codex","id":"agent"},"parentId":{"provider":"codex","id":"project-chat"},"projectId":"project","updatedAt":40,"lastInputAt":40000}
             ],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false
         })).unwrap();
         Arc::make_mut(&mut snapshot.lists.project_threads).insert("project".into(), Arc::new(page));
@@ -1177,10 +1176,10 @@ mod tests {
             &mut snapshot,
             serde_json::from_value(json!({
                 "data": [
-                    {"id":{"provider":"codex","id":"assigned"}, "updatedAt":4,"projectId":"known"},
-                    {"id":{"provider":"codex","id":"missing"}, "updatedAt":3,"projectId":"absent"},
-                    {"id":{"provider":"codex","id":"chat"}, "updatedAt":2,"projectId":null},
-                    {"id":{"provider":"codex","id":"unknown"},"updatedAt":1}
+                    {"id":{"provider":"codex","id":"assigned"}, "updatedAt":4,"lastInputAt":4000,"projectId":"known"},
+                    {"id":{"provider":"codex","id":"missing"}, "updatedAt":3,"lastInputAt":3000,"projectId":"absent"},
+                    {"id":{"provider":"codex","id":"chat"}, "updatedAt":2,"lastInputAt":2000,"projectId":null},
+                    {"id":{"provider":"codex","id":"unknown"},"updatedAt":1,"lastInputAt":1000}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
                  "hasMore":true,"hasMoreProjects":false,"limit":5, }))

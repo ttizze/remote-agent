@@ -482,24 +482,12 @@ fn pages(
             standalone.push(thread)
         }
     }
-    let newest = groups
-        .iter()
-        .map(|(id, rows)| {
-            (
-                id.as_str(),
-                rows.iter()
-                    .filter_map(|row| row.updated_at)
-                    .max_by(f64::total_cmp)
-                    .unwrap_or_default(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    projects.sort_by(|a, b| {
-        newest
-            .get(b.id.as_str())
-            .copied()
-            .unwrap_or_default()
-            .total_cmp(&newest.get(a.id.as_str()).copied().unwrap_or_default())
+    projects.sort_by_cached_key(|project| {
+        std::cmp::Reverse(
+            groups
+                .get(&project.id)
+                .and_then(|rows| rows.iter().filter_map(|row| row.last_input_at).max()),
+        )
     });
     let has_more_projects = projects.len() > snapshot.lists.list_query.project_limit as usize;
     projects.truncate(snapshot.lists.list_query.project_limit as usize);

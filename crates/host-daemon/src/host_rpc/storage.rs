@@ -440,7 +440,13 @@ impl Storage {
                 state.turns.get(turn).map(|turn| history::context_start_before(&transaction,key,turn.ordinal)).transpose()?
             } else {None};
             let context=Context {rewind_context_start, preparation: header.details.workspace.as_deref(), rewind_binding: rewind_binding.as_ref(), imported_turns: &imported_turns, steer_ready, external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
+            let submitted = matches!(&event, Event::Command {
+                id: decision::OperationId::Client(_),
+                command: decision::Command::Submit { .. },
+                receipt: None,
+            });
             let mut step = decision::step(&state, event, context);
+            let last_input_at = (submitted && step.outcome == Outcome::Accepted).then_some(context.now);
             let from = cursor(&transaction)?;
             let changed = status_changed || !step.changes.is_empty()
                 || !step.continuations.is_empty();
@@ -488,7 +494,7 @@ change,
                 rows::bind_items(&transaction, key, attempt, self.process, &items)?;
             }
             if created || status_changed || !step.changes.is_empty() {
-                updated.extend(rows::write_header(&transaction, &rows::WriteScope { key, id, sequence: through.sequence, at: if status_changed && step.changes.is_empty() {header.details.updated_at} else {context.now}, process: self.process }, &state, admitted, Some(&previous_header), Some(context.steers))?);
+                updated.extend(rows::write_header(&transaction, &rows::WriteScope { key, id, sequence: through.sequence, at: if status_changed && step.changes.is_empty() {header.details.updated_at} else {context.now}, process: self.process }, &state, admitted, Some(&previous_header), Some(context.steers), last_input_at)?);
             }
             for continuation in &step.continuations {
                 jobs::enqueue(
