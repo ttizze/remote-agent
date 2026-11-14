@@ -286,8 +286,9 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                 // shows the link's line again once it is laid out, and a
                 // composition does not outlive the field it was in.
                 cleanup(move || {
-                    laid_out.set(false);
-                    composing.set(false);
+                    // The panel's own signals may go first when it closes.
+                    laid_out.try_set(false);
+                    composing.try_set(false);
                 });
                 input()
                     .px_3()

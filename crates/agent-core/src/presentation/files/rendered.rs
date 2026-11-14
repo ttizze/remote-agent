@@ -95,18 +95,26 @@ pub fn file_rendered(
 /// `None` for what T3 Code's `MermaidViewer` refuses to draw: resource URLs,
 /// markup, node metadata and custom configuration.
 pub fn mermaid_file_markdown(text: &str) -> Option<String> {
+    // T3 Code's expression runs without JavaScript's `u` flag: only ASCII
+    // letters fold case and bound words, `^` also follows a lone CR and the
+    // Unicode line separators, and `\s` is JavaScript's own set of spaces.
     static REFUSED: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(concat!(
-            // JavaScript's `^` also follows a lone CR and the Unicode line
-            // separators, its `\s` includes U+FEFF, and its `\b` is ASCII's.
-            r"(?imR)%%[\s\x{FEFF}]*\{|(?:^|[\x{2028}\x{2029}])[\s\x{FEFF}]*---",
-            r"|</?[A-Za-z]|<[!?]|@[\s\x{FEFF}]*\{",
-            r"|(?:^|[^0-9A-Za-z_])(?:img|image)[\s\x{FEFF}]*:",
-            r"|url[\s\x{FEFF}]*\(|@import|(?:https?|data|blob|file):",
+        const SPACE: &str = concat!(
+            r"[\t\n\x0B\x0C\r \xA0\x{1680}\x{2000}-\x{200A}",
+            r"\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]*",
+        );
+        Regex::new(&format!(
+            concat!(
+                r"(?mR)%%{space}\{{|(?:^|[\x{{2028}}\x{{2029}}]){space}---",
+                r"|</?[a-z]|<[!?]|@{space}\{{",
+                r"|(?:^|[^0-9a-z_])(?:img|image){space}:",
+                r"|url{space}\(|@import|(?:https?|data|blob|file):",
+            ),
+            space = SPACE,
         ))
         .unwrap()
     });
-    if REFUSED.is_match(text) {
+    if REFUSED.is_match(&text.to_ascii_lowercase()) {
         return None;
     }
     // A fence longer than any run of backticks in the diagram's own text.
@@ -391,6 +399,10 @@ mod tests {
             mermaid_file_markdown("graph TD\n  A[\"```x```\"] --> B").as_deref(),
             Some("````mermaid\ngraph TD\n  A[\"```x```\"] --> B\n````")
         );
+        // Neither a word ending in `image` nor NEL, which JavaScript's `\s` leaves out.
+        for drawn in ["graph TD\n  A[homeimage: x]", "graph TD\n  A[%%\u{85}{]"] {
+            assert!(mermaid_file_markdown(drawn).is_some(), "{drawn:?}");
+        }
         for refused in [
             "%%{init: {}}%%\ngraph TD",
             "---\ntitle: a\n---\ngraph TD",
@@ -401,6 +413,9 @@ mod tests {
             "graph TD\n  style A fill:url(#a)",
             "graph TD\r---",
             "graph TD\u{2028}---",
+            "graph TD\n  A[\u{17f}image: x]",
+            "graph TD\n  A[\u{212a}IMG : x]",
+            "GRAPH TD\n  STYLE A FILL:URL (#a)",
             "%%\u{feff}{init: {}}%%\ngraph TD",
             "\u{feff}---\ntitle: a\n---\ngraph TD",
             "graph TD\n  A[背景image: x]",
