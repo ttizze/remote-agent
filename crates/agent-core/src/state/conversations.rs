@@ -236,6 +236,17 @@ pub(crate) fn install(
         .insert(id.clone(), Arc::new(output.projection));
     let mut projected = projected;
     projected.thread = super::outputs::overlay(projected.thread, &snapshot.sessions.live_outputs);
+    if let Some(turns) = projected.thread.turns.take() {
+        projected.thread.turns = Some(share_turns(
+            snapshot
+                .sessions
+                .conversations
+                .get(&id)
+                .and_then(|thread| thread.turns.as_deref())
+                .unwrap_or_default(),
+            turns,
+        ));
+    }
     promote_draft(snapshot, &id, projected.thread.cwd.as_deref());
     Arc::make_mut(&mut snapshot.sessions.conversations)
         .insert(id.clone(), Arc::new(projected.thread.clone()));
@@ -267,6 +278,35 @@ pub(crate) fn received(
     }
 }
 
+fn share_turns(
+    previous: &[Arc<crate::models::Turn>],
+    turns: Vec<Arc<crate::models::Turn>>,
+) -> Vec<Arc<crate::models::Turn>> {
+    turns
+        .into_iter()
+        .map(|mut turn| {
+            let Some(old) = previous
+                .iter()
+                .rev()
+                .find(|old| old.matches_occurrence(&turn))
+            else {
+                return turn;
+            };
+            if old == &turn {
+                return old.clone();
+            }
+            if let Some(items) = Arc::make_mut(&mut turn).items.as_mut() {
+                for item in items {
+                    if let Some(old) = old.items.iter().flatten().find(|old| *old == item) {
+                        *item = old.clone();
+                    }
+                }
+            }
+            turn
+        })
+        .collect()
+}
+
 pub(crate) fn refresh(snapshot: &mut Snapshot, id: &SessionRef) -> Result<Vec<Effect>, PeerError> {
     let held = snapshot
         .sessions
@@ -292,18 +332,14 @@ pub(crate) fn refresh(snapshot: &mut Snapshot, id: &SessionRef) -> Result<Vec<Ef
     )
     .map_err(PeerError::InvalidMessage)?;
     projected.thread = super::outputs::overlay(projected.thread, &snapshot.sessions.live_outputs);
-    if let (Some(previous), Some(turns)) = (before.as_ref(), projected.thread.turns.as_mut()) {
-        for turn in turns {
-            if let Some(old) = previous
-                .turns
-                .iter()
-                .flatten()
-                .find(|old| old.id == turn.id)
-                && old.as_ref() == turn.as_ref()
-            {
-                *turn = old.clone();
-            }
-        }
+    if let Some(turns) = projected.thread.turns.take() {
+        projected.thread.turns = Some(share_turns(
+            before
+                .as_ref()
+                .and_then(|thread| thread.turns.as_deref())
+                .unwrap_or_default(),
+            turns,
+        ));
     }
     promote_draft(snapshot, id, projected.thread.cwd.as_deref());
     let thread = Arc::new(projected.thread);

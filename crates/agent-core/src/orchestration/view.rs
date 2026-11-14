@@ -17,7 +17,7 @@ pub fn project(
         return Err("conversation identity changed".into());
     }
     let id = identity.clone();
-    let turns = timeline(projection, provider, cwd, details, capabilities.fork)?;
+    let turns = timeline(projection, provider, details, capabilities.fork)?;
     let mut queue = op::InputQueue::default();
     let mut preparations = Vec::new();
     let mut submissions = BTreeMap::new();
@@ -201,7 +201,6 @@ fn driver_kind(driver: &str) -> Result<session::ProviderKind, String> {
 fn timeline(
     projection: &ThreadProjection,
     provider: session::ProviderKind,
-    cwd: Option<&str>,
     details: &BTreeMap<(String, String), Arc<model::TurnItem>>,
     can_fork: bool,
 ) -> Result<Vec<Arc<models::Turn>>, String> {
@@ -296,7 +295,6 @@ fn timeline(
         turn.items.as_mut().unwrap().extend(item_view(
             detail.map_or(row.item.as_ref(), |detail| detail.as_ref()),
             provider,
-            cwd,
             detail.is_some(),
         )?);
     }
@@ -524,7 +522,6 @@ fn request_views(
 fn item_view(
     item: &model::TurnItem,
     provider: session::ProviderKind,
-    cwd: Option<&str>,
     has_detail: bool,
 ) -> Result<Vec<Arc<items::Item>>, String> {
     use model::TurnItemBody as Body;
@@ -593,10 +590,12 @@ fn item_view(
             ..
         } => items::ItemBody::CommandExecution {
             command: input.clone(),
-            cwd: cwd.map(str::to_owned),
+            cwd: None,
             output: output.clone().unwrap_or_default(),
             exit_code: *exit_code,
-            output_omitted: output_omitted == &Some(true),
+            // Stream omission requests details; the hydrated result determines
+            // whether the provider itself omitted any output.
+            output_omitted: has_detail && output_omitted == &Some(true),
         },
         Body::FileChange {
             file_name,
