@@ -422,6 +422,13 @@ pub(super) fn install(
     Ok(())
 }
 
+fn fork_name(title: &str, existing: &BTreeSet<String>) -> String {
+    (1..=existing.len() + 1)
+        .map(|number| format!("{title} ({number})"))
+        .find(|name| !existing.contains(name))
+        .expect("one more candidate than existing names")
+}
+
 impl Storage {
     pub(in crate::host_rpc) fn fork(
         &self,
@@ -448,6 +455,9 @@ impl Storage {
             }
             let busy: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE thread=?1 AND state IN ('running','waiting'))", [source_key], |row| row.get(0)).map_err(failure)?;
             let (mut header, _) = rows::header(&transaction, source_key)?;
+            let title = decision::records::summary(source, &header).name.unwrap_or_default();
+            let names = rows::headers(&transaction, false)?.into_iter().filter_map(|(id, header)| decision::records::summary(&id, &header).name).collect();
+            header.state.name = fork_name(&title, &names);
             header.state.provider = turn.provider;
             header.state.context_start = context_start_before(&transaction, source_key, turn.ordinal.saturating_add(1))?;
             header.state.queue_held = false;

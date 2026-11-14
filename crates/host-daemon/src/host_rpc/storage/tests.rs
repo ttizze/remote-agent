@@ -54,6 +54,116 @@ fn header() -> Header {
 }
 
 #[test]
+fn fork_titles_are_numbered_persisted_and_stable_on_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let storage = Storage::open(&path);
+    let source = address("fork-titles");
+    storage
+        .import(
+            &source,
+            &agent_protocol::models::ThreadResponse {
+                thread: agent_protocol::models::Thread {
+                    id: Some(source.clone()),
+                    name: Some("会話のタイトル".into()),
+                    preview: Some("別のプレビュー".into()),
+                    turns: Some(vec![Arc::new(agent_protocol::models::Turn {
+                        id: "answered".into(),
+                        ..Default::default()
+                    })]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Some(&source),
+            100,
+        )
+        .unwrap();
+    // A title already used by another conversation also reserves its number.
+    let mut occupied = header();
+    occupied.state.name = "会話のタイトル (1)".into();
+    storage
+        .create(&address("occupied-title"), &occupied)
+        .unwrap();
+    let first = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let through = "answered".into();
+    storage.fork(&source, &first, &through, 200).unwrap();
+    assert_eq!(
+        storage.header(&first).unwrap().state.name,
+        "会話のタイトル (2)"
+    );
+    let before_retry = storage.list(None).unwrap();
+    storage.fork(&source, &first, &through, 300).unwrap();
+    assert_eq!(storage.list(None).unwrap(), before_retry);
+    drop(storage);
+
+    let storage = Storage::open(&path);
+    for (origin, expected) in [
+        (&source, "会話のタイトル (3)"),
+        (&first, "会話のタイトル (2) (1)"),
+    ] {
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        storage.fork(origin, &target, &through, 400).unwrap();
+        assert_eq!(
+            storage
+                .history(&target, None)
+                .unwrap()
+                .thread
+                .name
+                .as_deref(),
+            Some(expected)
+        );
+        assert!(storage.summaries("", false).unwrap().iter().any(|thread| {
+            thread.id.as_ref() == Some(&target) && thread.name.as_deref() == Some(expected)
+        }));
+    }
+    assert_eq!(
+        storage.header(&source).unwrap().state.name,
+        "会話のタイトル"
+    );
+    assert_eq!(
+        storage.header(&first).unwrap().state.name,
+        "会話のタイトル (2)"
+    );
+}
+
+#[rstest::rstest]
+#[case(Some("プレビューのタイトル\n次の行"), "プレビューのタイトル (1)")]
+#[case(None, "(1)")]
+fn fork_titles_number_sources_without_a_name(
+    #[case] preview: Option<&str>,
+    #[case] expected: &str,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let source = address("preview-title");
+    storage
+        .import(
+            &source,
+            &agent_protocol::models::ThreadResponse {
+                thread: agent_protocol::models::Thread {
+                    id: Some(source.clone()),
+                    preview: preview.map(str::to_owned),
+                    turns: Some(vec![Arc::new(agent_protocol::models::Turn {
+                        id: "answered".into(),
+                        ..Default::default()
+                    })]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            Some(&source),
+            100,
+        )
+        .unwrap();
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    storage
+        .fork(&source, &target, &"answered".into(), 200)
+        .unwrap();
+    assert_eq!(storage.header(&target).unwrap().state.name.trim(), expected);
+}
+
+#[test]
 fn forks_settle_copied_background_work_and_allow_the_next_input() {
     use agent_protocol::{
         conversation::{Turn, Wait},
