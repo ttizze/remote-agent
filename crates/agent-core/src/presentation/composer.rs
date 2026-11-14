@@ -266,7 +266,8 @@ impl ComposerPresentation {
             background: thread
                 .and_then(|thread| super::background_work::BackgroundWork::new(&thread.background)),
             unavailable: session
-                .and_then(|id| snapshot.input_unavailable_reason(id.clone(), provider)),
+                .and_then(|id| snapshot.input_unavailable_reason(id.clone(), provider))
+                .or_else(|| snapshot.project_clone_block_reason(&pane.navigation.cwd)),
             question_phase: question.as_ref().and_then(|question| {
                 snapshot.operation_phase(OperationKey::Request {
                     id: question.request_id.clone(),

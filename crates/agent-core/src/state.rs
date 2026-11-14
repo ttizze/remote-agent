@@ -393,6 +393,8 @@ group! {
         pub activity: Arc<Activity>,
         #[serde(skip)]
         pub task_activity: Option<Arc<agent_protocol::live_activity::TaskActivityState>>,
+        #[serde(skip)]
+        pub project_clones: Option<Arc<agent_protocol::project_clone::ProjectClones>>,
         /// Device-owned organization, scoped by Host storage identity and registered project ID.
         #[serde(default)]
         pub project_preferences: Arc<BTreeMap<String, BTreeMap<String, ProjectPreferences>>>,
@@ -739,7 +741,7 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         ReadFileOpenCapabilities, OpenInEditor,
         SaveFile, WriteWorkspaceFile, ReviewWorkspace, ChangeWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListProjectSessions,
-        ListAgents, AddProject, ScanProjects, ImportProjects, CreateSession, RetryPreparation,
+        ListAgents, AddProject, ScanProjects, ImportProjects, CloneProject, ReadProjectClones, ChangeProjectClone, CreateSession, RetryPreparation,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
@@ -1377,6 +1379,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 return (next, Vec::new());
             }
             next.project_import = Arc::default();
+            next.lists.project_clones = None;
             next.terminals = Arc::default();
             Arc::make_mut(next.panes.primary_mut()).observed_agents = None;
             next.catalog.provider_settings = None;
@@ -1520,7 +1523,10 @@ impl Snapshot {
     }
 
     fn prepare_connection_refresh(&mut self) -> Vec<Effect> {
-        let mut effects = vec![Effect::execute(op::ReadTaskActivity {})];
+        let mut effects = vec![
+            Effect::execute(op::ReadTaskActivity {}),
+            Effect::execute(op::ReadProjectClones {}),
+        ];
         if self.catalog.provider_settings.take().is_some() {
             effects.push(Effect::execute(op::ReadProviderSettings {}));
         }
@@ -1925,6 +1931,10 @@ fn submission(
     if let Some(reason) = thread_id
         .as_ref()
         .and_then(|id| previous.submission_unavailable_reason(id, provider))
+        .or_else(|| {
+            cwd.as_deref()
+                .and_then(|cwd| previous.project_clone_block_reason(cwd))
+        })
     {
         next.fail_operation(
             op::OperationKey::Submission {

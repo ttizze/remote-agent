@@ -848,8 +848,8 @@ mod tests {
         assert_eq!(connected.lists.threads.as_ref().unwrap().limit, 15);
         assert_eq!(
             effects.len(),
-            5,
-            "status, three independent model reads, and accounts only; no list read"
+            6,
+            "status, clone jobs, three independent model reads, and accounts only; no list read"
         );
         let (renamed, effects) = super::super::super::notifications::notification(
             &connected,
@@ -1685,8 +1685,8 @@ mod tests {
         let (_, effects) = reduce(&snapshot, "", Event::Connected);
         assert_eq!(
             effects.len(),
-            7,
-            "reconnecting loads task aggregate and each model provider without an unobserved fleet"
+            8,
+            "reconnecting loads task aggregate, clone jobs and each model provider without an unobserved fleet"
         );
         let (ignored, effects) = reduce_intent(
             &snapshot,
@@ -1728,8 +1728,8 @@ mod tests {
         let (_, effects) = reduce(&watching, "", Event::Connected);
         assert_eq!(
             effects.len(),
-            8,
-            "reconnect refreshes each model provider and only the observed fleet"
+            9,
+            "reconnect refreshes clone jobs, each model provider and only the observed fleet"
         );
         let (closed, effects) =
             reduce_intent(&watching, "", Intent::WatchAgents { thread_id: None });

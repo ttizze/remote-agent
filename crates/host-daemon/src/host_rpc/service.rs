@@ -45,6 +45,7 @@ struct ServiceInner {
     providers: crate::providers::Registry,
     provider_settings: crate::providers::Settings,
     projects: ProjectStore,
+    project_clones: crate::project_clone::Clones,
     router: SessionRouter,
     event_pumps: std::sync::Once,
     files: crate::workspace_files::WorkspaceFiles,
@@ -101,6 +102,7 @@ impl HostRpcService {
                 worktree_cleanup: tokio::sync::Notify::new(),
                 permission_settings_access: Default::default(),
                 terminals: Default::default(),
+                project_clones: crate::project_clone::Clones::new(projects.clone()),
                 projects,
                 router,
                 event_pumps: std::sync::Once::new(),
@@ -173,6 +175,7 @@ impl HostRpcService {
             browser.shutdown().await;
         }
         self.inner.terminals.shutdown().await;
+        self.inner.project_clones.shutdown().await;
         self.inner.router.record_running();
         self.inner.providers.shutdown().await;
     }
@@ -365,6 +368,9 @@ impl HostRpcService {
         request: &Call,
         target_session: Option<&agent_protocol::session::SessionRef>,
     ) -> Result<Body, Failure> {
+        if let Some(response) = self.project_request(request).await? {
+            return Ok(response);
+        }
         if let Call::Browser(params) = request {
             let browser = self.inner.browser.get().ok_or_else(|| {
                 Failure::new(
@@ -445,15 +451,6 @@ impl HostRpcService {
                 .answer_request(session, params.request_id.clone(), params.answer.clone())
                 .await?)
                 .into(),
-            Call::AddProject(params) => (self
-                .inner
-                .projects
-                .register(std::path::Path::new(&params.cwd))
-                .await
-                .map_err(|error| Failure::new("project_add_failed", error))?)
-            .into(),
-            Call::ScanProjects(_) => self.scan_projects().await?.into(),
-            Call::ImportProjects(params) => self.import_projects(&params.paths).await?.into(),
             Call::ReadListDecorations(params) => self.list_decorations(params).await?.into(),
             Call::ListSessions(params) => self.list_sessions(params).await?.into(),
             Call::ListProjectSessions(params) => self.list_project_sessions(params).await?.into(),
@@ -734,6 +731,19 @@ impl HostRpcService {
 
     fn start_event_pumps(&self) {
         self.inner.event_pumps.call_once(|| {
+            let mut clones = self.inner.project_clones.subscribe();
+            let owner = Arc::downgrade(&self.inner);
+            tokio::spawn(async move {
+                while clones.changed().await.is_ok() {
+                    let state = clones.borrow_and_update().clone();
+                    let Some(inner) = owner.upgrade() else { break };
+                    if let Some(state) = state {
+                        inner.router.broadcast(
+                            agent_protocol::protocol::Notification::ProjectClones { state },
+                        );
+                    }
+                }
+            });
             if let Err(message) = self.inner.store.interrupt_running() {
                 tracing::error!(target: "agent", operation = "host.transcript.write", message);
             }

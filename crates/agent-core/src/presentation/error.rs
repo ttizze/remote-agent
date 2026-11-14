@@ -68,6 +68,8 @@ fn operation_notice(key: &OperationKey) -> Option<(ErrorScope, &'static str)> {
     use ErrorScope::*;
     use OperationKey::*;
     Some(match key {
+        ProjectClone { id: None } => return None,
+        ProjectClone { id: Some(_) } => (Settings, "リポジトリの取得操作に失敗しました"),
         History { .. }
         | Request { .. }
         | AccountLogin { .. }

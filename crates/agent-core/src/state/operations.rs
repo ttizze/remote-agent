@@ -133,6 +133,9 @@ pub enum Intent {
     AddProject(AddProject),
     ScanProjects(ScanProjects),
     ImportProjects(ImportProjects),
+    CloneProject(CloneProject),
+    ReadProjectClones(ReadProjectClones),
+    ChangeProjectClone(ChangeProjectClone),
     SelectImportProject {
         path: String,
         selected: bool,
@@ -305,6 +308,9 @@ pub enum StalePolicy {
 pub enum OperationKey {
     ProjectScan,
     ProjectImport,
+    ProjectClone {
+        id: Option<String>,
+    },
     TaskActivity,
     LiveActivity {
         activity_id: Option<String>,
@@ -606,6 +612,8 @@ mod sessions;
 pub use sessions::*;
 mod project_import;
 pub use project_import::*;
+mod project_clone;
+pub use project_clone::*;
 mod submission;
 pub use submission::*;
 

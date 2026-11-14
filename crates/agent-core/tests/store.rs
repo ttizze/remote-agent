@@ -731,6 +731,87 @@ async fn a_browser_session_orders_actions_reads_while_shown_and_slows_after_fail
     store.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn project_clone_notifications_survive_stale_reads_and_actions_use_the_same_job() {
+    use agent_protocol::project_clone::*;
+    let (store, mut reader, writer) = setup(authenticated_snapshot()).await;
+    reader.script_project_clones();
+    let request = CloneProject {
+        id: "00000000-0000-0000-0000-000000000001".into(),
+        repository: "https://host/repo".into(),
+        destination: "/repo".into(),
+    };
+    let catalog = |revision, phase| ProjectClones {
+        epoch: "clone-host".into(),
+        revision,
+        clones: vec![ProjectCloneState {
+            request: request.clone(),
+            phase,
+            progress: None,
+            error: None,
+        }],
+    };
+    let operation = store.dispatch(Intent::CloneProject(request.clone()));
+    let call = read(&mut reader).await;
+    assert_eq!(call["method"], "host/project/clone");
+    assert_eq!(call["params"], json!(request));
+    writer
+        .reply(
+            &call,
+            json!({"result":catalog(1, ProjectClonePhase::Queued)}),
+        )
+        .await
+        .unwrap();
+    operation.await.unwrap();
+    let reading = store.dispatch(Intent::ReadProjectClones(ReadProjectClones {}));
+    let delayed = read(&mut reader).await;
+    assert_eq!(delayed["method"], "host/project/clones");
+    writer.notify(json!({"method":"host/project/clonesChanged","params":{"state":catalog(3, ProjectClonePhase::Failed)}})).await.unwrap();
+    wait_for(&store, |state| {
+        state
+            .project_clone_views()
+            .first()
+            .is_some_and(|view| view.can_retry)
+    })
+    .await;
+    writer
+        .reply(
+            &delayed,
+            json!({"result":catalog(2, ProjectClonePhase::Fetching)}),
+        )
+        .await
+        .unwrap();
+    reading.await.unwrap();
+    assert_eq!(
+        store.snapshot().project_clone_views()[0].state.phase,
+        ProjectClonePhase::Failed
+    );
+    for (action, revision, phase) in [
+        (ProjectCloneAction::Retry, 4, ProjectClonePhase::Fetching),
+        (ProjectCloneAction::Cancel, 5, ProjectClonePhase::Cancelled),
+    ] {
+        let changing = store.dispatch(Intent::ChangeProjectClone(ChangeProjectClone {
+            id: request.id.clone(),
+            action,
+        }));
+        let call = read(&mut reader).await;
+        assert_eq!(call["method"], "host/project/clone/change");
+        assert_eq!(call["params"]["id"], request.id);
+        let view = &store.snapshot().project_clone_views()[0];
+        assert!(
+            !view.can_cancel && !view.can_retry && !view.can_dismiss,
+            "a pending action cannot be submitted twice"
+        );
+        writer
+            .reply(&call, json!({"result":catalog(revision, phase)}))
+            .await
+            .unwrap();
+        changing.await.unwrap();
+        assert_eq!(store.snapshot().project_clone_views()[0].state.phase, phase);
+    }
+    store.close().await.unwrap();
+}
+
 fn authenticated_snapshot() -> Snapshot {
     Snapshot {
         catalog: agent_core::state::Catalog {

@@ -22,6 +22,7 @@ pub mod media;
 pub mod model_settings;
 pub mod onboarding;
 pub mod permissions;
+pub mod project_clone;
 pub mod project_menu;
 pub mod settings;
 pub mod sidebar;

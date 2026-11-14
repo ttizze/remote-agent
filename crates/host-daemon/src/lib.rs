@@ -8,6 +8,7 @@ mod host_identity;
 mod host_rpc;
 mod host_runtime;
 mod platform;
+mod project_clone;
 mod projects;
 pub mod providers;
 mod terminals;

@@ -31,8 +31,12 @@ pub struct Reader {
     incoming: mpsc::Receiver<Request>,
     scripted_composer_catalog: bool,
     scripted_model_catalog: bool,
+    scripted_project_clones: bool,
 }
 impl Reader {
+    pub fn script_project_clones(&mut self) {
+        self.scripted_project_clones = true;
+    }
     pub fn script_model_catalog(&mut self) {
         self.scripted_model_catalog = true;
     }
@@ -41,6 +45,22 @@ impl Reader {
     }
     pub async fn read_request(&mut self) -> std::io::Result<Option<Request>> {
         while let Some(request) = self.incoming.recv().await {
+            if !self.scripted_project_clones && matches!(&request.call, Call::ReadProjectClones(_))
+            {
+                let mut send = request.send.lock().await.take().unwrap();
+                agent_transport::framing::write(
+                    &mut send,
+                    protocol::Response::Success {
+                        result: agent_protocol::project_clone::ProjectClones {
+                            epoch: "fixture".into(),
+                            revision: 0,
+                            clones: Vec::new(),
+                        },
+                    },
+                )
+                .await?;
+                continue;
+            }
             if matches!(&request.call, Call::MarkSessionRead(_)) {
                 let mut send = request.send.lock().await.take().unwrap();
                 agent_transport::framing::write(
@@ -169,6 +189,7 @@ pub fn from_peer(
             incoming,
             scripted_composer_catalog: false,
             scripted_model_catalog: false,
+            scripted_project_clones: false,
         },
         Writer {
             state: Mutex::new(State::default()),

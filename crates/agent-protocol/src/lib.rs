@@ -20,6 +20,7 @@ pub mod models;
 pub mod operations;
 pub mod paths;
 pub mod permissions;
+pub mod project_clone;
 pub mod project_import;
 pub mod protocol;
 pub mod providers;

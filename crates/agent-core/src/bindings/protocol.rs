@@ -9,11 +9,61 @@ use agent_protocol::file_metadata::{FileMetadata, FileMetadataKind, FilePathMeta
 use agent_protocol::file_tree::EntryKind;
 use agent_protocol::live_activity::*;
 use agent_protocol::permissions::*;
+use agent_protocol::project_clone::*;
 use agent_protocol::project_import::ScanProjects;
 use agent_protocol::providers::*;
 use agent_protocol::workspace::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
+#[uniffi::remote(Record)]
+struct CloneProject {
+    pub id: String,
+    pub repository: String,
+    pub destination: String,
+}
+#[uniffi::remote(Record)]
+struct ReadProjectClones {}
+#[uniffi::remote(Record)]
+struct ChangeProjectClone {
+    pub id: String,
+    pub action: ProjectCloneAction,
+}
+#[uniffi::remote(Enum)]
+enum ProjectCloneAction {
+    Cancel,
+    Retry,
+    Dismiss,
+}
+#[uniffi::remote(Enum)]
+enum ProjectClonePhase {
+    Queued,
+    Fetching,
+    Resolving,
+    Checkout,
+    Registering,
+    Completed,
+    Cancelling,
+    Cancelled,
+    Failed,
+}
+#[uniffi::remote(Record)]
+struct CloneProgress {
+    pub current: u64,
+    pub total: u64,
+}
+#[uniffi::remote(Record)]
+struct ProjectCloneState {
+    pub request: CloneProject,
+    pub phase: ProjectClonePhase,
+    pub progress: Option<CloneProgress>,
+    pub error: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct ProjectClones {
+    pub epoch: String,
+    pub revision: u64,
+    pub clones: Vec<ProjectCloneState>,
+}
 #[uniffi::remote(Record)]
 struct ReadProviderSettings {}
 #[uniffi::remote(Record)]

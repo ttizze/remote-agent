@@ -8,6 +8,42 @@ use std::{
 const MAX_SESSIONS_PER_PROVIDER: usize = 5_000;
 
 impl HostRpcService {
+    /// Project acquisition has one route, including registration and discovery.
+    pub(super) async fn project_request(&self, request: &Call) -> Result<Option<Body>, Failure> {
+        Ok(Some(match request {
+            Call::AddProject(params) => self
+                .inner
+                .projects
+                .register(Path::new(&params.cwd))
+                .await
+                .map_err(|error| Failure::new("project_add_failed", error))?
+                .into(),
+            Call::ScanProjects(_) => self.scan_projects().await?.into(),
+            Call::ImportProjects(params) => self.import_projects(&params.paths).await?.into(),
+            Call::CloneProject(params) => self
+                .inner
+                .project_clones
+                .start(params.clone())
+                .await
+                .map_err(|error| Failure::new("project_clone_failed", error))?
+                .into(),
+            Call::ReadProjectClones(_) => self
+                .inner
+                .project_clones
+                .read()
+                .await
+                .map_err(|error| Failure::new("project_clone_read_failed", error))?
+                .into(),
+            Call::ChangeProjectClone(params) => self
+                .inner
+                .project_clones
+                .change(params.clone())
+                .await
+                .map_err(|error| Failure::new("project_clone_change_failed", error))?
+                .into(),
+            _ => return Ok(None),
+        }))
+    }
     pub(super) async fn scan_projects(&self) -> Result<ProjectScan, Failure> {
         let projects = self.project_snapshot().await?;
         let owned = self.inner.conversations.active_sessions("")?;

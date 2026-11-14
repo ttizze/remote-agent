@@ -12,6 +12,10 @@ pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method")]
 pub enum Notification {
+    #[serde(rename = "host/project/clonesChanged")]
+    ProjectClones {
+        state: crate::project_clone::ProjectClones,
+    },
     #[serde(rename = "host/provider/settingsChanged")]
     ProviderSettings {
         settings: crate::providers::ProviderSettings,
@@ -137,6 +141,7 @@ results! {
     Decorations(crate::operations::ListDecorations),
     ProjectScan(crate::project_import::ProjectScan),
     ProjectImport(crate::project_import::ProjectImportResult),
+    ProjectClones(crate::project_clone::ProjectClones),
     Agents(Vec<crate::models::AgentObservation>),
     ComposerCatalog(crate::composer::ComposerCatalog),
     FileOpenCapabilities(crate::editors::FileOpenCapabilities),

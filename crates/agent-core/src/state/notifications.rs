@@ -51,6 +51,11 @@ pub(super) fn notification(
     }
 
     match message {
+        Notification::ProjectClones { state } => {
+            let mut next = previous.clone();
+            let effects = next.accept_project_clones(state);
+            (next, effects)
+        }
         Notification::SessionHistoryReplaced { thread } => {
             let mut next = previous.clone();
             let effects = op::replace_history(&mut next, "", *thread, false);
