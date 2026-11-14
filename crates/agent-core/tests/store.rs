@@ -4800,10 +4800,13 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
 
 #[tokio::test]
 async fn item_details_reject_a_foreign_source_even_when_the_item_id_matches() {
-    let mut initial = snapshot();
-    let session = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
-    Arc::make_mut(&mut initial.sessions.conversations).insert(session.clone(), Arc::new(serde_json::from_value(json!({"id":session,"turns":[{"id":"turn","status":"completed","items":[{"id":"command","status":"completed","body":{"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}}}]}]})).unwrap()));
-    let (store, mut reader, writer) = setup(initial).await;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let session = SessionRef::new(ProviderKind::Codex, "details-validation".into()).unwrap();
+    let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(session.clone())));
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/conversation/subscribe");
+    writer.reply(&request, json!({"result":{"thread":{"id":session,"turns":[{"id":"turn","status":"completed","items":[{"id":"command","status":"completed","body":{"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}}}]}]}}})).await.unwrap();
+    opening.await.unwrap();
     let before = store.snapshot();
     let reading = store.dispatch(Intent::ReadItem(op::ReadItem {
         thread_id: session.clone(),
