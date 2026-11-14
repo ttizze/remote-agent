@@ -2049,6 +2049,38 @@
         }
       }
     },
+    "Markdownのソースを表示": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Markdownのソースを表示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show markdown source"
+          }
+        }
+      }
+    },
+    "Markdownをレンダリング表示": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Markdownをレンダリング表示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show rendered markdown"
+          }
+        }
+      }
+    },
     "Markdownをコピー": {
       "localizations": {
         "ja": {

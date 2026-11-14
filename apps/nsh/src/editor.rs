@@ -6,7 +6,9 @@ use crate::{
     ui::{self, Enabled, Icon, colors},
 };
 use agent_core::{
-    presentation::files::{file_edit_prompt, file_line_start_utf16},
+    presentation::files::{
+        file_edit_prompt, file_line_start_utf16, file_renders_markdown, is_markdown_preview_file,
+    },
     state::{Intent, operations as op},
 };
 use nsh_core::{element::input, prelude::*};
@@ -40,6 +42,29 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
     let field = element_ref();
     let composing = signal(false);
     let laid_out = signal(false);
+    let surroundings = crate::rich_text::Surroundings::current();
+    let preferred = computed(move || connection.state.with(|state| state.render_markdown));
+    // The link's line the reader left for the rendering, as T3 Code's handled reveal.
+    let line_left = signal(None::<u32>);
+    let rendered = computed(move || {
+        let line = target.with(|target| target.line);
+        file_renders_markdown(
+            &path.get(),
+            preferred.get(),
+            line.is_some() && line != line_left.get(),
+        )
+    });
+    let toggle_rendered = move || {
+        let next = !rendered.get_untracked();
+        // The source's field is made again: it shows the link's line again, and
+        // a composition does not outlive the field it was in.
+        laid_out.set(false);
+        composing.set(false);
+        line_left.set(target.with_untracked(|target| target.line).filter(|_| next));
+        connection
+            .application
+            .with(|application| application.set_render_markdown(next));
+    };
     let position = computed(move || {
         (
             target.with(|target| target.line),
@@ -130,6 +155,29 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                 .child(
                     ui::icon_button(Icon::REFRESH, tr("再読込"), reload).enabled(move || !busy()),
                 )
+                .child(when(
+                    move || is_markdown_preview_file(&path.get()),
+                    move || {
+                        view()
+                            .child(when(rendered, move || {
+                                ui::icon_button(
+                                    Icon::CODE,
+                                    tr("Markdownのソースを表示"),
+                                    toggle_rendered,
+                                )
+                            }))
+                            .child(when(
+                                move || !rendered.get(),
+                                move || {
+                                    ui::icon_button(
+                                        Icon::EYE,
+                                        tr("Markdownをレンダリング表示"),
+                                        toggle_rendered,
+                                    )
+                                },
+                            ))
+                    },
+                ))
                 .child(ui::icon_button(
                     Icon::SHARE,
                     tr("プレビュー・共有"),
@@ -163,49 +211,83 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
             move || controls.with(|controls| controls.truncated),
             || notice(tr("file.preview.truncated")),
         ))
-        .child(
-            input()
-                .px_3()
-                .py_2()
-                .multiline(true)
-                .submit_behavior(SubmitBehavior::Newline)
-                .readonly(move || controls.with(|controls| !controls.can_edit))
-                .on_layout(
-                    move |_: &nsh_core::geometry::Bounds<nsh_core::geometry::Points>| {
-                        laid_out.set(true)
-                    },
-                )
-                .value(move || controls.with(|controls| controls.text.clone()))
-                .on_change(move |text: &str| {
-                    connection.client.with(|client| {
-                        client.dispatch(
-                            &host.get(),
-                            None,
-                            Intent::SetFileDraft {
-                                path: path.get(),
-                                text: text.into(),
-                            },
-                        )
-                    })
-                })
-                .on_composition_change(move |event: &Composition| composing.set(event.composing))
-                .auto_correct(false)
-                .auto_capitalize(AutoCapitalize::None)
-                // VoiceOver names the text by its file, as the header shows it.
-                .label({
-                    let path = path.get();
-                    std::path::Path::new(&path)
-                        .file_name()
-                        .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned())
-                })
-                .font_family(SharedString::from("monospace"))
-                .text_size(if is_desktop() { px(14.0) } else { px(17.0) })
-                .text_color(move || nsh_base::theme().foreground)
-                .element_ref(&field)
+        .child(when(rendered, move || {
+            // T3 Code's `mx-auto max-w-4xl px-6 py-5`.
+            scroll()
                 .flex_1()
                 .min_h_0()
-                .w_full(),
-        )
+                .on_scroll(move |_: &ScrollEvent| {
+                    #[cfg(desktop)]
+                    surroundings.selection.dismiss();
+                })
+                .child(
+                    view()
+                        .w_full()
+                        .items_center()
+                        .px(px(24.0))
+                        .py(px(20.0))
+                        .child(crate::rich_text::file(
+                            surroundings,
+                            path.get(),
+                            move || Some(controls.with(|controls| controls.text.clone())),
+                            || 896.0,
+                        )),
+                )
+        }))
+        .child(when(
+            move || !rendered.get(),
+            move || {
+                input()
+                    .px_3()
+                    .py_2()
+                    .multiline(true)
+                    .submit_behavior(SubmitBehavior::Newline)
+                    .readonly(move || controls.with(|controls| !controls.can_edit))
+                    .on_layout(
+                        move |_: &nsh_core::geometry::Bounds<nsh_core::geometry::Points>| {
+                            laid_out.set(true)
+                        },
+                    )
+                    .value(move || controls.with(|controls| controls.text.clone()))
+                    .on_change(move |text: &str| {
+                        connection.client.with(|client| {
+                            client.dispatch(
+                                &host.get(),
+                                None,
+                                Intent::SetFileDraft {
+                                    path: path.get(),
+                                    text: text.into(),
+                                },
+                            )
+                        })
+                    })
+                    .on_composition_change(move |event: &Composition| {
+                        composing.set(event.composing)
+                    })
+                    .auto_correct(false)
+                    .auto_capitalize(AutoCapitalize::None)
+                    // VoiceOver names the text by its file, as the header shows it.
+                    .label({
+                        let path = path.get();
+                        std::path::Path::new(&path).file_name().map_or_else(
+                            || path.clone(),
+                            |name| name.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .font_family(SharedString::from("monospace"))
+                    .text_size(if is_desktop() { px(14.0) } else { px(17.0) })
+                    .text_color(move || nsh_base::theme().foreground)
+                    .element_ref(&field)
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+            },
+        ))
+        .map(|screen| {
+            #[cfg(desktop)]
+            let screen = screen.child(surroundings.selection_bar());
+            screen
+        })
 }
 
 pub(crate) fn editors() -> impl Element {

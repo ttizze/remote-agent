@@ -140,6 +140,9 @@ impl Icon {
     #[cfg(desktop)]
     pub(crate) const PUSH: Self = icon!(CloudUpload);
     pub(crate) const WRAP: Self = icon!(TextWrap);
+    /// T3 Code's file panel: show a file rendered, or its source again.
+    pub(crate) const EYE: Self = icon!(Eye);
+    pub(crate) const CODE: Self = icon!(CodeXml);
     #[cfg(desktop)]
     pub(crate) const MAXIMIZE: Self = icon!(Maximize2);
     pub(crate) const MINIMIZE: Self = icon!(Minimize2);

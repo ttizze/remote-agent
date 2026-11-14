@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 mod search;
 mod view;
 pub(crate) use search::documents as search_documents;
-pub(crate) use view::{content, message};
+pub(crate) use view::{content, file, message};
 
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Part {
@@ -212,10 +212,12 @@ impl Surroundings {
     }
 }
 
-/// Shared document semantics and metadata for NSH TextView.
+/// Shared document semantics and metadata for NSH TextView: `blocks` reads
+/// `source` in the workspace folder and the Host's home.
 fn message_parts(
     surroundings: Surroundings,
     source: impl Fn() -> Option<String> + 'static,
+    blocks: impl Fn(String, String, Option<String>) -> Vec<MarkdownBlock> + 'static,
 ) -> Memo<Vec<Part>> {
     let connection = surroundings.connection;
     let document = computed(move || {
@@ -223,7 +225,7 @@ fn message_parts(
             return (Vec::new(), Vec::new());
         };
         let diagrams = diagrams(&source);
-        let blocks = agent_core::presentation::markdown::workspace_markdown_blocks(
+        let blocks = blocks(
             source,
             connection
                 .composer
