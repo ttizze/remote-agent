@@ -30,6 +30,7 @@ pub(in crate::host_rpc) mod history;
 mod imports;
 pub(super) mod jobs;
 mod journal;
+mod lifecycle;
 mod list;
 mod native_import;
 pub(in crate::host_rpc) mod outbox;

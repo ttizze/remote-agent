@@ -43,8 +43,8 @@ mod forks;
 pub mod handoffs;
 pub use execution::{
     Completion, activate_queued, cancel_start, cancel_uncertain, complete, fail_start,
-    finish_provider_turn, interrupt, observe_item, observe_plan, observe_subagent, started,
-    uncertain_delivery,
+    finish_provider_turn, interrupt, observe_item, observe_plan, observe_subagent,
+    provider_stopped, started, uncertain_delivery,
 };
 pub use forks::fork_thread;
 mod checkpoints;

@@ -37,10 +37,29 @@ impl Runtime {
                 sources.push((native.clone(), runtime.register_native(&target, &native)));
             }
         }
+        // Stop can arrive while a source still has buffered deltas. Drain them
+        // before settling the run; terminal attempts reject later observations.
+        sources.sort_by(|(left, _), (right, _)| left.id.cmp(&right.id));
+        let mut updates = Vec::with_capacity(sources.len());
+        for (_, source) in &sources {
+            updates.push(source.updates.lock().await);
+            Self::flush_text(service, source).await?;
+        }
+        runtime.storage.provider_stopped(
+            provider.key(),
+            &agent_protocol::orchestration::ProviderFailure {
+                class: "provider_error".into(),
+                message: error.message.clone(),
+                code: error.provider_code.clone(),
+                retryable: None,
+                reset_at: None,
+            },
+            &commands::at(),
+        )?;
+        drop(updates);
         for (native, source) in sources {
             let result = async {
             let _updates = source.updates.lock().await;
-            Self::flush_text(service, &source).await?;
             for execution in runtime.storage.source_executions(&source.target, &native)? {
                 let result = async {
                 let attempt = execution.attempt;
