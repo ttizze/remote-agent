@@ -537,8 +537,10 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
         fixture.update(SessionChange::Item {turn_id:"turn".into(), item: changed}).await;
         fixture.update(SessionChange::Request { request: serde_json::from_value(json!({"id": "approval", "target": {"turn": {"turnId": "turn", "itemId": "item-0"}}, "delivery": "awaiting", "body": {"approval": {"kind": "command", "description": "", "details": "", "choices": [{"id": "choice-0", "label": "承認", "description": "", "effect": "allow"}, {"id": "choice-1", "label": "このセッションで承認", "description": "", "effect": "allowLasting"}, {"id": "choice-2", "label": "拒否", "description": "", "effect": "deny"}]}}})).unwrap() }).await;
         wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap().last().unwrap().body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
+        let decline = fixture.store.snapshot().request("approval").unwrap().body.choices().iter()
+            .find(|choice| choice.effect == agent_protocol::requests::ChoiceEffect::Deny).unwrap().id.clone();
         for intent in [
-            Intent::Respond(op::Respond {request_id: "approval".into(),answer:Answer::Approval {choice_id: "choice-2".into()}}),
+            Intent::Respond(op::Respond {request_id: "approval".into(),answer:Answer::Approval {choice_id: decline}}),
             Intent::Interrupt(op::Interrupt {thread_id: agent_protocol::session::SessionRef {provider:Some(agent_protocol::session::ProviderKind::Codex),id:"A".into()},turn_id:"turn".into()}),
         ] {
             let completion = fixture.store.dispatch(intent);
