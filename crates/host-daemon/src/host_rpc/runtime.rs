@@ -40,6 +40,8 @@ mod resources;
 mod rpc;
 pub(in crate::host_rpc) mod stream;
 #[cfg(test)]
+mod t3_contract;
+#[cfg(test)]
 mod tests;
 mod text;
 
