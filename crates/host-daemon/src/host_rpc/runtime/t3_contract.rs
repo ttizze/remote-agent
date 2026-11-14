@@ -2314,6 +2314,120 @@ async fn finished_run(
 }
 
 #[tokio::test]
+async fn later_input_carries_unsent_failed_requests_once_without_resending_their_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let projects = directory.path().join("projects.json");
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    agent.create_gate.close();
+    let service = HostRpcService::new([agent.backend()], projects.clone());
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("first-unsent-request"),
+    )
+    .await;
+    let first = finished_run(&service, &session, 1).await;
+    assert_eq!(first.projection.runs[0].status, model::RunStatus::Failed);
+    send(
+        &service,
+        &session,
+        ProviderKind::Codex,
+        "second-unsent-request",
+    )
+    .await;
+    let second = finished_run(&service, &session, 2).await;
+    assert!(
+        second
+            .projection
+            .runs
+            .iter()
+            .all(|run| run.status == model::RunStatus::Failed)
+    );
+    assert!(agent.inputs.lock().unwrap().is_empty());
+    drop(service);
+    let resumed = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([resumed.backend()], projects);
+    send(
+        &service,
+        &session,
+        ProviderKind::Codex,
+        "new-current-request",
+    )
+    .await;
+    let current = finished_run(&service, &session, 3).await;
+    let run = current
+        .projection
+        .runs
+        .iter()
+        .find(|run| run.ordinal == 3)
+        .unwrap();
+    assert_eq!(run.status, model::RunStatus::Completed);
+    assert_eq!(run.context_handoff_id, None);
+    let handoff = current
+        .projection
+        .context_handoffs
+        .iter()
+        .find(|handoff| handoff.target_run_id == run.id)
+        .expect("T3 prepares missed native requests as retry history");
+    assert_eq!(handoff.transfer_id, None);
+    assert_eq!(
+        handoff.strategy,
+        model::HandoffStrategy::DeltaSinceTargetLastSeen
+    );
+    assert_eq!(
+        (
+            handoff.covered_run_ordinals.from,
+            handoff.covered_run_ordinals.to
+        ),
+        (1, 2)
+    );
+    assert!(current.projection.context_transfers.is_empty());
+    assert!(
+        !current
+            .projection
+            .turn_items
+            .iter()
+            .any(|item| matches!(item.body, model::TurnItemBody::Handoff { .. }))
+    );
+    let history = serde_json::to_string(&*resumed.injected.lock().unwrap()).unwrap();
+    assert_eq!(history.matches("first-unsent-request").count(), 1);
+    assert_eq!(history.matches("second-unsent-request").count(), 1);
+    assert!(!history.contains("new-current-request"));
+    send(
+        &service,
+        &session,
+        ProviderKind::Codex,
+        "next-current-request",
+    )
+    .await;
+    let next = finished_run(&service, &session, 4).await;
+    assert_eq!(
+        next.projection
+            .runs
+            .iter()
+            .find(|run| run.ordinal == 4)
+            .unwrap()
+            .status,
+        model::RunStatus::Completed
+    );
+    assert_eq!(
+        resumed.injected.lock().unwrap().len(),
+        1,
+        "settled retry history must not be injected again"
+    );
+    let inputs = resumed.inputs.lock().unwrap();
+    assert_eq!(
+        inputs.len(),
+        2,
+        "only the two new inputs are submitted natively"
+    );
+    assert!(matches!(&inputs[0].input[0], op::Input::Text {text} if text == "new-current-request"));
+    assert!(
+        matches!(&inputs[1].input[0], op::Input::Text {text} if text == "next-current-request")
+    );
+}
+
+#[tokio::test]
 async fn a_spent_native_fork_uses_fresh_portable_context_without_an_extra_handoff_card() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));

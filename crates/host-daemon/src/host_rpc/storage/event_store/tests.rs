@@ -28,7 +28,8 @@ fn item(id: &str, run: &str) -> model::TurnItem {
         "providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":79,
         "status":"completed","title":null,"startedAt":NOW,"completedAt":NOW,"updatedAt":NOW,
         "type":"assistant_message","messageId":id,"text":"body","attachments":[],"streaming":false
-    })).unwrap()
+    }))
+    .unwrap()
 }
 
 fn event(id: &str, item: model::TurnItem) -> Event {
@@ -114,7 +115,9 @@ fn a_queued_body_gets_its_position_at_activation_after_ordinal_reassignment() {
     projections::save(&tx, Some("thread"), &run).unwrap();
     run.status = model::RunStatus::Queued;
     projections::save(&tx, Some("thread"), &run).unwrap();
-    let requeued = append(&tx, &event("requeued", queued), None, Some(4)).unwrap();
+    let requeued = append(&tx, &event("requeued", queued.clone()), None, Some(4)).unwrap();
+    queued.status = model::TurnItemStatus::Cancelled;
+    let cancelled = append(&tx, &event("cancelled", queued), None, Some(4)).unwrap();
     tx.commit().unwrap();
     assert!(
         matches!(active.event.change,model::Change::TurnItem(value) if value.ordinal==4_000_001)
@@ -122,4 +125,91 @@ fn a_queued_body_gets_its_position_at_activation_after_ordinal_reassignment() {
     assert!(
         matches!(requeued.event.change,model::Change::TurnItem(value) if value.ordinal==4_000_001)
     );
+    assert!(
+        matches!(cancelled.event.change,model::Change::TurnItem(value) if value.ordinal==4_000_001)
+    );
+}
+
+#[test]
+fn run_start_is_reserved_before_items_and_appends_after_the_slot_is_taken() {
+    let mut db = database();
+    let tx = db.transaction().unwrap();
+    let message = append(
+        &tx,
+        &event("message", item("message", "second")),
+        None,
+        Some(2),
+    )
+    .unwrap();
+    let recovery = item_position(
+        &tx,
+        "thread",
+        "recovery",
+        Some("second"),
+        Some(2),
+        ItemPlacement::RunStart,
+    )
+    .unwrap();
+    assert_eq!(recovery, 2_000_000);
+    let saved = append(
+        &tx,
+        &event("recovery", item("recovery", "second")),
+        None,
+        Some(2),
+    )
+    .unwrap();
+    assert!(
+        matches!(&saved.event.change, model::Change::TurnItem(value) if value.ordinal == recovery)
+    );
+    tx.execute_batch("CREATE TEMP TRIGGER reject_redundant_position_insert BEFORE INSERT ON orchestration_v2_turn_item_positions WHEN EXISTS(SELECT 1 FROM orchestration_v2_turn_item_positions WHERE thread_id=NEW.thread_id AND turn_item_id=NEW.turn_item_id) BEGIN SELECT RAISE(ABORT,'Existing item positions must be reused'); END;").unwrap();
+    assert_eq!(
+        item_position(
+            &tx,
+            "thread",
+            "recovery",
+            Some("moved"),
+            Some(3),
+            ItemPlacement::RunStart
+        )
+        .unwrap(),
+        recovery
+    );
+    assert_eq!(
+        item_position(
+            &tx,
+            "thread",
+            "retry-recovery",
+            Some("second"),
+            Some(2),
+            ItemPlacement::RunStart
+        )
+        .unwrap(),
+        2_000_002
+    );
+    assert_eq!(
+        item_position(
+            &tx,
+            "thread",
+            "reply",
+            Some("second"),
+            Some(2),
+            ItemPlacement::Append
+        )
+        .unwrap(),
+        2_000_003
+    );
+    append(
+        &tx,
+        &event("retry-recovery", item("retry-recovery", "second")),
+        None,
+        Some(2),
+    )
+    .unwrap();
+    append(&tx, &event("reply", item("reply", "second")), None, Some(2)).unwrap();
+    tx.commit().unwrap();
+    assert!(
+        matches!(&message.event.change,model::Change::TurnItem(value) if value.ordinal == 2_000_001)
+    );
+    let events = read(&db, Some("thread"), 0, saved.sequence, 10).unwrap();
+    assert_eq!(events, [message, saved]);
 }
