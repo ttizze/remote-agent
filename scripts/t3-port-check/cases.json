@@ -120,7 +120,8 @@
       "host_rpc::service::workspace_setup::tests::workspace_options_share_the_review_and_existing_worktrees_must_belong_to_the_repository",
       "host_rpc::service::worktrees::tests::failed_provider_preparation_keeps_the_owned_checkout_for_retry",
       "host_rpc::storage::tests::one_day_event_retention_resets_old_cursors_and_keeps_command_receipts",
-      "host_rpc::storage::tests::providerless_and_native_addresses_keep_separate_rows_receipts_and_parents"
+      "host_rpc::storage::tests::providerless_and_native_addresses_keep_separate_rows_receipts_and_parents",
+      "host_rpc::runtime::t3_contract::native_source_queries_use_canonical_ownership_across_provider_switches"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",

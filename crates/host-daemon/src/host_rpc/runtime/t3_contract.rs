@@ -144,6 +144,70 @@ async fn shell(service: &HostRpcService) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn native_source_queries_use_canonical_ownership_across_provider_switches() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let session = create(&service, directory.path().to_str().unwrap(), Some("first")).await;
+    settled(&service, &session, 1).await;
+    let codex_native = codex.inputs.lock().unwrap()[0].thread_id.clone();
+    let storage = &service.inner.conversation.storage;
+    assert_eq!(
+        storage.active_source(&session).unwrap(),
+        Some(codex_native.clone())
+    );
+    assert_eq!(
+        storage.native_owner(&codex_native).unwrap(),
+        Some(session.clone())
+    );
+    let connection = service.open_session();
+    let ack: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: session.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::Submit {
+                id: Uuid::new_v4().to_string().into(),
+                content: input(ProviderKind::Claude, "second"),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    ack.accepted().unwrap();
+    settled(&service, &session, 2).await;
+    let claude_native = claude.inputs.lock().unwrap()[0].thread_id.clone();
+    assert_eq!(
+        storage.active_source(&session).unwrap(),
+        Some(claude_native.clone())
+    );
+    assert_eq!(
+        storage.native_owner(&codex_native).unwrap(),
+        Some(session.clone())
+    );
+    assert_eq!(
+        storage.native_owner(&claude_native).unwrap(),
+        Some(session.clone())
+    );
+    let private = storage.active_sources().unwrap();
+    assert!(private.contains(&codex_native));
+    assert!(private.contains(&claude_native));
+    let foreign = SessionRef::new(ProviderKind::Claude, codex_native.id.clone()).unwrap();
+    assert_eq!(storage.native_owner(&foreign).unwrap(), None);
+    let owners = storage
+        .native_owners([&codex_native, &claude_native, &foreign])
+        .unwrap();
+    assert_eq!(owners.len(), 2);
+    assert_eq!(owners[&codex_native], session);
+    assert_eq!(owners[&claude_native], session);
+}
+
+#[tokio::test]
 async fn created_and_renamed_threads_are_shared_as_t3_shells() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
