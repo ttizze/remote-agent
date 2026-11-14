@@ -5,6 +5,18 @@ use super::*;
 use agent_protocol::orchestration::{self as model, projection::ThreadStreamItem};
 
 impl Storage {
+    pub(in crate::host_rpc) fn context_history(
+        &self,
+        params: &agent_protocol::handoff::ReadHistory,
+    ) -> Result<agent_protocol::handoff::Page, String> {
+        self.with(|connection| {
+            let tx = connection.transaction().map_err(failure)?;
+            let page = timeline::context_history(&tx, params)?;
+            tx.commit().map_err(failure)?;
+            Ok(page)
+        })
+    }
+
     pub(in crate::host_rpc) fn thread_stream(
         &self,
         id: &SessionRef,

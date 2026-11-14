@@ -198,6 +198,59 @@ pub(super) fn handoff_items(
     Ok(items)
 }
 
+/// Excerpts use the same inherited timeline as snapshots, but read full bodies
+/// only for the requested historical items rather than their wire previews.
+pub(super) fn context_history(
+    connection: &Connection,
+    params: &agent_protocol::handoff::ReadHistory,
+) -> Result<agent_protocol::handoff::Page, String> {
+    use agent_protocol::{handoff, orchestration::handoffs as history};
+    let timeline = read(
+        connection,
+        &params.session.application_id(),
+        &mut BTreeSet::new(),
+    )?;
+    if timeline.state.thread.deleted_at.is_some() {
+        return Err("conversation does not exist".into());
+    }
+    let indices: Vec<_> = timeline
+        .items
+        .iter()
+        .filter(|index| history::historical_role(&index.kind).is_some())
+        .collect();
+    let limit = params.limit.clamp(1, 20);
+    let mut messages = Vec::new();
+    for index in indices.iter().skip(params.offset).take(limit) {
+        let item = projections::read::<model::TurnItem>(connection, &index.id)?
+            .filter(|item| item.thread_id == index.source_thread_id)
+            .ok_or("history item disappeared within snapshot")?;
+        let run = item
+            .run_id
+            .as_ref()
+            .map(|id| projections::read::<model::Run>(connection, id))
+            .transpose()?
+            .flatten();
+        let message = history::historical_message(&item, run.map(|run| run.status))
+            .ok_or("history item has no historical text")?;
+        messages.push(handoff::Message {
+            role: if message.message.role == "user" {
+                handoff::Role::User
+            } else {
+                handoff::Role::Assistant
+            },
+            source: message.source(),
+            text: message.text,
+        });
+    }
+    let next = params.offset.saturating_add(messages.len());
+    let mut page = handoff::page(messages, 0, limit, params.text_offset);
+    for item in &mut page.items {
+        item.position += params.offset;
+    }
+    page.next_offset = (next < indices.len()).then_some(next);
+    Ok(page)
+}
+
 fn inherited_run_ids<'a>(
     runs: impl Iterator<Item = &'a model::Run>,
     through: u64,

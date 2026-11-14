@@ -19,6 +19,20 @@ pub struct SelectedHistory {
     pub omitted_items: usize,
 }
 
+/// The timeline index can select historical items before reading their bodies.
+pub fn historical_role(kind: &str) -> Option<&'static str> {
+    match kind {
+        "user_message" => Some("user"),
+        "assistant_message"
+        | "command_execution"
+        | "error"
+        | "run_interrupt_result"
+        | "file_change"
+        | "proposed_plan" => Some("assistant"),
+        _ => None,
+    }
+}
+
 fn value_name(value: &impl Serialize) -> String {
     serde_json::to_value(value)
         .expect("contract serializes")
@@ -31,77 +45,82 @@ pub fn historical_message(
     item: &TurnItem,
     run_status: Option<RunStatus>,
 ) -> Option<HistoricalText> {
-    let text = match &item.body {
-        TurnItemBody::UserMessage { text, .. } | TurnItemBody::AssistantMessage { text, .. } => {
-            text.clone()
-        }
+    let (kind, text) = match &item.body {
+        TurnItemBody::UserMessage { text, .. } => ("user_message", text.clone()),
+        TurnItemBody::AssistantMessage { text, .. } => ("assistant_message", text.clone()),
         TurnItemBody::CommandExecution {
             input,
             output,
             exit_code,
             ..
-        } => format!(
-            "Command: {input}\nExit code: {}\n{}",
-            exit_code.map_or_else(|| "unknown".into(), |code| code.to_string()),
-            output.as_deref().unwrap_or("")
+        } => (
+            "command_execution",
+            format!(
+                "Command: {input}\nExit code: {}\n{}",
+                exit_code.map_or_else(|| "unknown".into(), |code| code.to_string()),
+                output.as_deref().unwrap_or("")
+            ),
         ),
-        TurnItemBody::Error { failure, .. } => failure.message.clone(),
-        TurnItemBody::RunInterruptResult { message } => message.clone(),
+        TurnItemBody::Error { failure, .. } => ("error", failure.message.clone()),
+        TurnItemBody::RunInterruptResult { message } => ("run_interrupt_result", message.clone()),
         TurnItemBody::FileChange {
             file_name, changes, ..
-        } => format!(
-            "File change: {}",
-            if changes.is_empty() {
-                file_name.clone()
-            } else {
-                changes
-                    .iter()
-                    .filter_map(|change| change.get("path").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
+        } => (
+            "file_change",
+            format!(
+                "File change: {}",
+                if changes.is_empty() {
+                    file_name.clone()
+                } else {
+                    changes
+                        .iter()
+                        .filter_map(|change| change.get("path").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ),
         ),
-        TurnItemBody::ProposedPlan { markdown, .. } => markdown.clone(),
+        TurnItemBody::ProposedPlan { markdown, .. } => ("proposed_plan", markdown.clone()),
         _ => return None,
     };
-    let kind = serde_json::to_value(&item.body).expect("item serializes")["type"]
-        .as_str()
-        .expect("item type")
-        .to_owned();
     Some(HistoricalText {
         message: HistoricalMessage {
-            role: if matches!(item.body, TurnItemBody::UserMessage { .. }) {
-                "user"
-            } else {
-                "assistant"
-            }
-            .into(),
+            role: historical_role(kind)?.into(),
             run_status: run_status.map(|status| value_name(&status)),
             thread_id: item.thread_id.clone(),
             run_id: item.run_id.clone(),
             item_id: item.id.clone(),
             provider_thread_id: item.provider_thread_id.clone(),
             status: value_name(&item.status),
-            kind,
+            kind: kind.into(),
         },
         text,
     })
 }
 
+impl HistoricalText {
+    pub fn source(&self) -> String {
+        let meta = &self.message;
+        format!(
+            "{}; thread={}; run={}; item={}; provider-thread={}; status={}{}",
+            meta.kind,
+            meta.thread_id,
+            meta.run_id.as_deref().unwrap_or("imported"),
+            meta.item_id,
+            meta.provider_thread_id.as_deref().unwrap_or("none"),
+            meta.status,
+            meta.run_status
+                .as_ref()
+                .map_or_else(String::new, |status| format!("; run-status={status}")),
+        )
+    }
+}
+
 fn render_message(message: &HistoricalText) -> String {
-    let meta = &message.message;
     format!(
-        "[Historical {}; {}; thread={}; run={}; item={}; provider-thread={}; status={}{}]\n{}",
-        meta.role,
-        meta.kind,
-        meta.thread_id,
-        meta.run_id.as_deref().unwrap_or("imported"),
-        meta.item_id,
-        meta.provider_thread_id.as_deref().unwrap_or("none"),
-        meta.status,
-        meta.run_status
-            .as_ref()
-            .map_or_else(String::new, |status| format!("; run-status={status}")),
+        "[Historical {}; {}]\n{}",
+        message.message.role,
+        message.source(),
         message.text
     )
 }

@@ -111,22 +111,11 @@ impl HostRpcService {
         params: &agent_protocol::handoff::ReadHistory,
     ) -> Result<agent_protocol::handoff::Page, Failure> {
         super::super::runtime::Runtime::ensure_imported(self, &params.session).await?;
-        let (history, _) =
-            super::super::runtime::Runtime::handoff_history(self, &params.session, 0).await?;
-        let messages = history
-            .thread
-            .turns
-            .iter()
-            .flatten()
-            .flat_map(|turn| agent_protocol::handoff::Message::from_turn(turn));
-        let mut page = agent_protocol::handoff::page(
-            messages,
-            params.offset,
-            params.limit,
-            params.text_offset,
-        );
-        page.history_read_state = history.thread.history_read_state;
-        Ok(page)
+        self.inner
+            .conversation
+            .storage
+            .context_history(params)
+            .map_err(super::super::runtime::storage_failure)
     }
 }
 
