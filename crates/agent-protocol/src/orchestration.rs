@@ -30,6 +30,7 @@ pub fn derived_id(prefix: &str, parts: &[&str]) -> String {
 mod capabilities;
 pub use capabilities::*;
 pub mod projection;
+pub mod shell;
 mod state;
 pub mod wire;
 pub use state::{Change, State};
