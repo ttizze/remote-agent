@@ -8,22 +8,22 @@
       "host_rpc::runtime::t3_contract::an_empty_worktree_launch_prepares_a_checkout_without_creating_a_run",
       "host_rpc::runtime::t3_contract::created_and_renamed_threads_are_shared_as_t3_shells",
       "host_rpc::runtime::t3_contract::foreground_completion_preserves_a_background_command_and_accepts_its_late_result",
-      "host_rpc::runtime::t3_contract::generated_images_survive_as_assistant_attachments_without_storing_host_paths",
+      "host_rpc::runtime::t3_contract::generated_images_keep_t3_tool_results_and_markdown_embeds",
       "host_rpc::runtime::t3_contract::importing_a_discovered_project_lists_its_existing_native_conversations",
       "host_rpc::runtime::t3_contract::provider_stop_settles_the_owned_run_and_preserves_the_conversation",
       "host_rpc::runtime::t3_contract::refreshed_native_catalog_is_visible_as_a_canonical_thread_without_inventing_a_run",
-      "host_rpc::runtime::t3_contract::rewind_continues_from_the_retained_native_head_in_an_independent_thread",
+      "host_rpc::runtime::t3_contract::codex_rewind_continues_from_the_retained_head_in_the_same_native_thread",
       "host_rpc::runtime::t3_contract::switching_providers_carries_prior_history_without_duplicate_input",
       "host_rpc::runtime::t3_contract::update_restart_continues_the_same_conversation_once_without_repeating_user_input",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_1",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_2",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_3",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_4",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_5",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_6",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_7",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_8",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_9",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_01",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_02",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_03",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_04",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_05",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_06",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_07",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_08",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_09",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_10",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_11",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_12",
@@ -164,7 +164,7 @@
       "orchestration::tests::queued_activation_reuses_execution_ids_and_moves_after_work_started_ahead",
       "orchestration::tests::queued_attempts_cannot_accept_provider_callbacks_and_inherit_a_queue_hold",
       "orchestration::tests::rewind_holds_unsent_runs_without_rolling_back_or_deleting_their_messages",
-      "orchestration::tests::rewind_selects_a_new_native_thread_at_the_last_retained_turn_and_forbids_the_old_head",
+      "orchestration::tests::rewind_without_native_rollback_selects_a_new_thread_and_forbids_the_old_head",
       "orchestration::tests::rolled_back_runs_remain_addressable_and_their_ordinals_are_not_reused",
       "orchestration::tests::shared_provider_sessions_do_not_allow_another_native_thread_to_own_a_callback",
       "orchestration::tests::steer_appends_a_message_to_the_existing_run_without_allocating_a_run",
@@ -232,119 +232,188 @@
   },
   "obsolete_symbols": [
     {
-      "path": "crates/agent-protocol/src/conversation/records.rs",
       "name": "Record",
-      "pattern": "\\bpub\\s+enum\\s+Record\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Record\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation/records.rs",
+        "crates/agent-protocol/src/conversation/records/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation/records.rs",
       "name": "Message",
-      "pattern": "\\bpub\\s+type\\s+Message\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Message\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation/records.rs",
+        "crates/agent-protocol/src/conversation/records/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation/records.rs",
       "name": "Event",
-      "pattern": "\\bpub\\s+type\\s+Event\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation/records.rs",
+        "crates/agent-protocol/src/conversation/records/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation/records.rs",
       "name": "Row",
-      "pattern": "\\bpub\\s+type\\s+Row\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Row\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation/records.rs",
+        "crates/agent-protocol/src/conversation/records/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation/records.rs",
       "name": "Replica",
-      "pattern": "\\bpub\\s+type\\s+Replica\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Replica\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation/records.rs",
+        "crates/agent-protocol/src/conversation/records/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Cursor",
-      "pattern": "\\bpub\\s+struct\\s+Cursor\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Cursor\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Window",
-      "pattern": "\\bpub\\s+struct\\s+Window\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Window\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Row",
-      "pattern": "\\bpub\\s+struct\\s+Row\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Row\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Event",
-      "pattern": "\\bpub\\s+struct\\s+Event\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Replica",
-      "pattern": "\\bpub\\s+struct\\s+Replica\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Replica\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Key",
-      "pattern": "\\bpub\\s+enum\\s+Key\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Key\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Position",
-      "pattern": "\\bpub\\s+enum\\s+Position\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Position\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Content",
-      "pattern": "\\bpub\\s+enum\\s+Content\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Content\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "Message",
-      "pattern": "\\bpub\\s+enum\\s+Message\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Message\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/sync.rs",
       "name": "ApplyError",
-      "pattern": "\\bpub\\s+enum\\s+ApplyError\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+ApplyError\\b",
+      "globs": [
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation.rs",
       "name": "State",
-      "pattern": "\\bpub\\s+struct\\s+State\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+State\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation.rs",
       "name": "Counters",
-      "pattern": "\\bpub\\s+struct\\s+Counters\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Counters\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation.rs",
       "name": "Step",
-      "pattern": "\\bpub\\s+struct\\s+Step\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Step\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation.rs",
       "name": "Context",
-      "pattern": "\\bpub\\s+struct\\s+Context\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Context\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation.rs",
       "name": "Event",
-      "pattern": "\\bpub\\s+enum\\s+Event\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation.rs",
       "name": "Observation",
-      "pattern": "\\bpub\\s+enum\\s+Observation\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Observation\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation.rs",
       "name": "Action",
-      "pattern": "\\bpub\\s+enum\\s+Action\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Action\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs"
+      ]
     },
     {
-      "path": "crates/agent-protocol/src/conversation.rs",
       "name": "Change",
-      "pattern": "\\bpub\\s+enum\\s+Change\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Change\\b",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs"
+      ]
     }
   ]
 }

@@ -34,10 +34,10 @@ if "Summary" not in result.stdout or not GUARDS.issubset(passed):
 missing = SCORED - passed
 remaining = [] if HOLDOUT else [path for path in CASES["obsolete_files"] if (ROOT / path).exists()]
 obsolete_symbols = [] if HOLDOUT else [
-    f"{rule['path']}: {rule['name']}"
+    rule['name']
     for rule in CASES["obsolete_symbols"]
-    if (ROOT / rule["path"]).exists()
-    and re.search(rule["pattern"], (ROOT / rule["path"]).read_text())
+    if any(re.search(rule["pattern"], path.read_text())
+           for glob in rule["globs"] for path in ROOT.glob(glob) if path.is_file())
 ]
 for crate, name in sorted(missing):
     print(f"scenario did not pass: {crate} {name}")

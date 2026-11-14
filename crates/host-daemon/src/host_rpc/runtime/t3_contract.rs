@@ -521,16 +521,34 @@ async fn a_native_child_has_canonical_subagent_lineage_and_an_execution_node() {
 }
 
 #[tokio::test]
-async fn generated_images_survive_as_assistant_attachments_without_storing_host_paths() {
+async fn generated_images_keep_t3_tool_results_and_markdown_embeds() {
     use agent_protocol::items::{Item, ItemBody};
+    use base64::Engine;
     let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("generated image.png");
+    std::fs::write(&image,base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a+X0AAAAASUVORK5CYII=").unwrap()).unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
-    observe(&service,&native,execution,SessionChange::Item {turn_id:"observed-turn".into(),item:Arc::new(Item::new("native-image".into(),agent_protocol::execution::ItemStatus::Completed,ItemBody::ImageGeneration {
-        saved_path:None,data:Some("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a+X0AAAAASUVORK5CYII=".into()),revised_prompt:None,
-    }))}).await;
+    observe(
+        &service,
+        &native,
+        execution,
+        SessionChange::Item {
+            turn_id: "observed-turn".into(),
+            item: Arc::new(Item::new(
+                "native-image".into(),
+                agent_protocol::execution::ItemStatus::Completed,
+                ItemBody::ImageGeneration {
+                    saved_path: Some(image.to_str().unwrap().into()),
+                    data: None,
+                    revised_prompt: Some("fixture image".into()),
+                },
+            )),
+        },
+    )
+    .await;
     observe(
         &service,
         &native,
@@ -546,29 +564,35 @@ async fn generated_images_survive_as_assistant_attachments_without_storing_host_
     )
     .await;
     let current = settled(&service, &session, 1).await;
-    let attachments: Vec<_> = current
+    // CodexAdapterV2.ts4143-4190 and6531-6564; generatedImageMarkdown.ts16.
+    let tool = current
         .projection
         .turn_items
         .iter()
-        .filter_map(|item| match &item.body {
-            model::TurnItemBody::AssistantMessage { attachments, .. } => Some(attachments),
+        .find_map(|item| match &item.body {
+            model::TurnItemBody::DynamicTool {
+                tool_name: Some(name),
+                output: Some(output),
+                ..
+            } if name == "image_gen.imagegen" => Some(output),
             _ => None,
         })
-        .flatten()
-        .collect();
-    assert_eq!(attachments.len(), 1);
-    assert!(
-        attachments[0]["id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
-    );
-    assert_eq!(attachments[0]["mimeType"], "image/png");
-    assert!(attachments[0]["sizeBytes"].as_u64().unwrap() > 0);
-    assert!(
-        !serde_json::to_string(&attachments)
-            .unwrap()
-            .contains(directory.path().to_str().unwrap())
-    );
+        .expect("image generation tool result");
+    assert_eq!(tool["savedPath"], image.to_str().unwrap());
+    let embed = format!("![](<{}>)", image.to_str().unwrap());
+    let (text, attachments) = current
+        .projection
+        .turn_items
+        .iter()
+        .find_map(|item| match &item.body {
+            model::TurnItemBody::AssistantMessage {
+                text, attachments, ..
+            } => Some((text, attachments)),
+            _ => None,
+        })
+        .expect("fallback final answer embeds the generated image");
+    assert_eq!(text, &embed);
+    assert!(attachments.is_empty());
     assert!(agent.inputs.lock().unwrap().is_empty());
 }
 
@@ -616,7 +640,7 @@ async fn refreshed_native_catalog_is_visible_as_a_canonical_thread_without_inven
 }
 
 #[tokio::test]
-async fn rewind_continues_from_the_retained_native_head_in_an_independent_thread() {
+async fn codex_rewind_continues_from_the_retained_head_in_the_same_native_thread() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
@@ -687,7 +711,9 @@ async fn rewind_continues_from_the_retained_native_head_in_an_independent_thread
     }
     let inputs = agent.inputs.lock().unwrap();
     assert_eq!(inputs.len(), 3);
-    assert_ne!(inputs[1].thread_id, inputs[2].thread_id);
+    // CodexAdapterV2.canRollbackThread and CheckpointRollbackService use
+    // provider-thread.rollback; native fork is the unsupported-provider fallback.
+    assert_eq!(inputs[1].thread_id, inputs[2].thread_id);
     let records = agent.records.lock().unwrap();
     let native = records.get(&inputs[2].thread_id.id).unwrap();
     assert_eq!(

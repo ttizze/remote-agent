@@ -898,8 +898,14 @@ fn rewind_holds_unsent_runs_without_rolling_back_or_deleting_their_messages() {
 }
 
 #[test]
-fn rewind_selects_a_new_native_thread_at_the_last_retained_turn_and_forbids_the_old_head() {
+fn rewind_without_native_rollback_selects_a_new_thread_and_forbids_the_old_head() {
     let (state, first, attempt) = running();
+    assert!(
+        !state.provider_sessions["session"]
+            .capabilities
+            .threads
+            .can_rollback_thread
+    );
     let first_native = state.run_attempts[&attempt]
         .provider_turn_id
         .clone()
