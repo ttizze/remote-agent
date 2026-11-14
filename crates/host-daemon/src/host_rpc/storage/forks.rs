@@ -82,7 +82,7 @@ impl Storage {
 pub(super) fn native_origin(
     connection: &Connection,
     target: &model::State,
-) -> Result<Option<model::ProviderThreadFork>, String> {
+) -> Result<Option<model::ProviderThreadFork>, projections::ReadError> {
     let Some(fork) = target.unconsumed_fork() else {
         return Ok(None);
     };

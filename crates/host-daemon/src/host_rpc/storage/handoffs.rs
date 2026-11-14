@@ -225,7 +225,7 @@ fn prepare(
     fork: Option<&model::ContextTransfer>,
     fresh: bool,
     now: &str,
-) -> Result<Vec<model::Change>, String> {
+) -> Result<Vec<model::Change>, projections::ReadError> {
     let fork_source = fork
         .map(|fork| projections::metadata(connection, &fork.source_thread_id))
         .transpose()?;
@@ -757,7 +757,7 @@ pub(super) fn prepare_admission(
     state: &model::State,
     run_ids: &[String],
     now: &str,
-) -> Result<Vec<model::Change>, String> {
+) -> Result<Vec<model::Change>, projections::ReadError> {
     let mut changes = Vec::new();
     for id in run_ids {
         let run = state.runs.get(id).ok_or("context start run is missing")?;

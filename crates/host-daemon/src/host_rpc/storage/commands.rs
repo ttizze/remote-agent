@@ -25,7 +25,7 @@ impl Storage {
             let decision = decide(&state)?;
             let events = append_decision(&transaction, &state, decision, None, now)?;
             transaction.commit().map_err(failure)?;
-            Ok(events)
+            Ok(events.events)
         })
     }
 
@@ -121,14 +121,29 @@ pub(super) fn execute(
                     .changes
                     .insert(0, model::Change::ThreadCreated(state.thread.clone()));
             }
-            append_decision(
+            transaction
+                .execute_batch("SAVEPOINT orchestration_decision")
+                .map_err(failure)?;
+            let appended = append_decision(
                 &transaction,
                 &state,
                 decision,
                 Some(command.id),
                 command.now,
             )?;
-            None
+            if let Some(error) = appended.preparation_error {
+                transaction
+                    .execute_batch(
+                        "ROLLBACK TO orchestration_decision; RELEASE orchestration_decision",
+                    )
+                    .map_err(failure)?;
+                Some(error)
+            } else {
+                transaction
+                    .execute_batch("RELEASE orchestration_decision")
+                    .map_err(failure)?;
+                None
+            }
         }
         Err(error) => Some(error),
     };
@@ -144,13 +159,46 @@ pub(super) fn execute(
     })
 }
 
+pub(super) struct Appended {
+    pub events: Vec<model::StoredEvent>,
+    pub preparation_error: Option<String>,
+}
+
+/// Settled outbox rows are still existing identities. Working State only
+/// retains live rows, so use the persisted outbox for admission deduplication.
+fn new_start_runs(
+    connection: &Connection,
+    effects: &[model::Effect],
+) -> Result<Vec<String>, String> {
+    let mut runs = std::collections::BTreeSet::new();
+    for effect in effects
+        .iter()
+        .filter(|effect| effect.status == model::EffectStatus::Pending)
+    {
+        let model::EffectRequest::ProviderTurnStart { run_id } = &effect.request else {
+            continue;
+        };
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM orchestration_v2_effect_outbox WHERE effect_id=?1)",
+                [&effect.id],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        if !exists {
+            runs.insert(run_id.clone());
+        }
+    }
+    Ok(runs.into_iter().collect())
+}
+
 pub(super) fn append_decision(
     transaction: &rusqlite::Transaction<'_>,
     state: &model::State,
     decision: model::Decision,
     command_id: Option<&str>,
     now: &str,
-) -> Result<Vec<model::StoredEvent>, String> {
+) -> Result<Appended, String> {
     let mut ordinals: std::collections::BTreeMap<_, _> = state
         .runs
         .values()
@@ -164,17 +212,9 @@ pub(super) fn append_decision(
     let seed = command_id
         .map(str::to_owned)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
-    let starts: Vec<_> = decision
-        .effects
-        .iter()
-        .filter(|effect| {
-            effect.status == model::EffectStatus::Pending && !state.effects.contains_key(&effect.id)
-        })
-        .filter_map(|effect| match &effect.request {
-            model::EffectRequest::ProviderTurnStart { run_id } => Some(run_id.clone()),
-            _ => None,
-        })
-        .collect();
+    let starts = new_start_runs(transaction, &decision.effects)?;
+    let mut effects = decision.effects;
+    let mut preparation_error = None;
     let (users,mut changes):(Vec<_>,Vec<_>)=decision.changes.into_iter().partition(|change|matches!(change,model::Change::TurnItem(item) if matches!(item.body,model::TurnItemBody::UserMessage {..}) && item.run_id.as_ref().is_some_and(|id|starts.contains(id))));
     let mut events = Vec::new();
     // Write source observations first. Plan against those same uncommitted
@@ -219,22 +259,90 @@ pub(super) fn append_decision(
                     current.turn_items.insert(item.id.clone(), item.clone());
                 }
             }
-            changes.extend(super::handoffs::prepare_admission(
-                transaction,
-                &current,
-                &starts,
-                now,
-            )?);
+            current.effects.extend(
+                effects
+                    .iter()
+                    .map(|effect| (effect.id.clone(), effect.clone())),
+            );
+            let mut failed_changes = Vec::new();
+            for run_id in &starts {
+                match super::handoffs::prepare_admission(
+                    transaction,
+                    &current,
+                    std::slice::from_ref(run_id),
+                    now,
+                ) {
+                    Ok(plan) => changes.extend(plan),
+                    Err(projections::ReadError::Storage(error)) => return Err(failure(error)),
+                    Err(projections::ReadError::Data(error)) => {
+                        preparation_error.get_or_insert_with(|| error.clone());
+                        let run = current
+                            .runs
+                            .get(run_id)
+                            .ok_or("context target run is missing")?;
+                        let attempt = run
+                            .active_attempt_id
+                            .as_deref()
+                            .ok_or("context target attempt is missing")?;
+                        let context = model::Context {
+                            command_id: &seed,
+                            now,
+                            next_run_ordinal: current
+                                .runs
+                                .values()
+                                .map(|run| run.ordinal)
+                                .max()
+                                .unwrap_or(0)
+                                .checked_add(1)
+                                .ok_or("run ordinal exhausted")?,
+                            can_steer: false,
+                        };
+                        let failed = model::fail_start(
+                            &current,
+                            attempt,
+                            model::ProviderFailure {
+                                class: "provider_error".into(),
+                                message: error.clone(),
+                                code: Some("context_prepare_failed".into()),
+                                retryable: Some(false),
+                                reset_at: None,
+                            },
+                            context,
+                        )?;
+                        current = current.apply(&failed);
+                        failed_changes.extend(failed.changes);
+                        effects.extend(failed.effects);
+                        for effect in effects.iter_mut().filter(|effect| {
+                            effect.status == model::EffectStatus::Pending
+                                && matches!(&effect.request, model::EffectRequest::ProviderTurnStart {run_id:id} if id==run_id)
+                        }) {
+                            // The new outbox identity and its rejection commit
+                            // together; settlement must refer to an owned row.
+                            event_store::save_effect(transaction, effect)?;
+                            effect.status = model::EffectStatus::Failed;
+                            effect.last_error = Some(error.clone());
+                            effect.updated_at = now.into();
+                            effect.completed_at = Some(now.into());
+                            effect.lease_owner = None;
+                            effect.lease_expires_at = None;
+                        }
+                    }
+                }
+            }
             changes.extend(users.iter().cloned());
+            changes.extend(failed_changes);
         }
     }
-    for effect in decision.effects {
+    for effect in effects {
         if effect.thread_id != state.thread.id {
             return Err("effect and command have different owners".into());
         }
         event_store::save_effect(transaction, &effect)?;
     }
-    Ok(events)
+    Ok(Appended {
+        events,
+        preparation_error,
+    })
 }
 
 #[cfg(test)]

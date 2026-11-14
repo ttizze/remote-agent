@@ -1,5 +1,6 @@
 //! T3's inherited timeline, snapshot windows and opaque identity cursors.
 //! Only the selected page's bodies are deserialized, including on fork chains.
+use super::projections::ReadError;
 use super::*;
 use agent_protocol::orchestration::{self as model, projection::*};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -27,11 +28,11 @@ fn local_items(
     thread_id: &str,
     inherited: Option<&[String]>,
     origin: Option<model::ThreadHistoryOrigin>,
-) -> Result<Vec<IndexedItem>, String> {
+) -> Result<Vec<IndexedItem>, ReadError> {
     let inherited_json = inherited
         .map(serde_json::to_string)
         .transpose()
-        .map_err(failure)?;
+        .map_err(ReadError::from)?;
     let mut query=connection.prepare("SELECT i.turn_item_id,i.type,
         json_extract(i.payload_json,'$.inputIntent'),json_extract(i.payload_json,'$.createdBy')
         FROM orchestration_v2_projection_turn_items i
@@ -47,7 +48,7 @@ fn local_items(
             WHERE a.run_id=i.run_id AND a.root_node_id=i.node_id AND a.status='superseded') AND NOT EXISTS(
             SELECT 1 FROM orchestration_v2_projection_turn_items request
             WHERE request.thread_id=i.thread_id AND request.run_id=i.run_id AND request.type='run_interrupt_request'))
-        ORDER BY i.ordinal,i.turn_item_id").map_err(failure)?;
+        ORDER BY i.ordinal,i.turn_item_id").map_err(ReadError::from)?;
     let rows = query
         .query_map(
             params![
@@ -64,9 +65,9 @@ fn local_items(
                 ))
             },
         )
-        .map_err(failure)?;
+        .map_err(ReadError::from)?;
     rows.map(|row| {
-        let (id, kind, input_intent, created_by) = row.map_err(failure)?;
+        let (id, kind, input_intent, created_by) = row.map_err(ReadError::from)?;
         Ok(IndexedItem {
             source_thread_id: thread_id.into(),
             id,
@@ -89,7 +90,7 @@ fn read(
     connection: &Connection,
     thread_id: &str,
     ancestors: &mut BTreeSet<String>,
-) -> Result<Timeline, String> {
+) -> Result<Timeline, ReadError> {
     ancestors.insert(thread_id.into());
     let state = projections::metadata(connection, thread_id)?;
     let mut items = Vec::new();
@@ -158,7 +159,7 @@ pub(super) fn handoff_items(
     after: u64,
     through: u64,
     inherited: bool,
-) -> Result<Vec<(model::TurnItem, Option<model::RunStatus>)>, String> {
+) -> Result<Vec<(model::TurnItem, Option<model::RunStatus>)>, ReadError> {
     let timeline = read(connection, thread_id, &mut BTreeSet::new())?;
     let mut sources = std::collections::BTreeMap::new();
     sources.insert(thread_id.to_owned(), timeline.state);

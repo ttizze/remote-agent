@@ -1,6 +1,47 @@
 //! Full T3-shaped JSON is the stored record. Indexed columns are written from
 //! that very value, rather than split out and reinserted during deserialization.
 use super::*;
+
+/// Keep unavailable storage separate from invalid or missing source records.
+/// A queued input may fail validation without losing its predecessor's result.
+#[derive(Debug)]
+pub(super) enum ReadError {
+    Storage(rusqlite::Error),
+    Data(String),
+}
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => error.fmt(f),
+            Self::Data(error) => error.fmt(f),
+        }
+    }
+}
+impl From<rusqlite::Error> for ReadError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+impl From<serde_json::Error> for ReadError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Data(error.to_string())
+    }
+}
+impl From<String> for ReadError {
+    fn from(error: String) -> Self {
+        Self::Data(error)
+    }
+}
+impl From<&str> for ReadError {
+    fn from(error: &str) -> Self {
+        Self::Data(error.into())
+    }
+}
+impl From<ReadError> for String {
+    fn from(error: ReadError) -> Self {
+        error.to_string()
+    }
+}
 use agent_protocol::orchestration as model;
 use rusqlite::types::Value as SqlValue;
 use serde::{Serialize, de::DeserializeOwned};
@@ -184,7 +225,10 @@ pub(super) fn save<T: Projection>(
     Ok(())
 }
 
-pub(super) fn read<T: Projection>(connection: &Connection, id: &str) -> Result<Option<T>, String> {
+pub(super) fn read<T: Projection>(
+    connection: &Connection,
+    id: &str,
+) -> Result<Option<T>, ReadError> {
     let body = connection
         .query_row(
             &format!("SELECT payload_json FROM {} WHERE {}=?1", T::TABLE, T::KEY),
@@ -192,8 +236,8 @@ pub(super) fn read<T: Projection>(connection: &Connection, id: &str) -> Result<O
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(failure)?;
-    body.map(|body| serde_json::from_str(&body).map_err(failure))
+        .map_err(ReadError::from)?;
+    body.map(|body| serde_json::from_str(&body).map_err(ReadError::from))
         .transpose()
 }
 
@@ -298,22 +342,22 @@ fn promoted_message(
 fn records<T: Projection>(
     connection: &Connection,
     thread_id: &str,
-) -> Result<BTreeMap<String, T>, String> {
+) -> Result<BTreeMap<String, T>, ReadError> {
     let mut query = connection
         .prepare(&format!(
             "SELECT {},payload_json FROM {} WHERE thread_id=?1",
             T::KEY,
             T::TABLE
         ))
-        .map_err(failure)?;
+        .map_err(ReadError::from)?;
     let rows = query
         .query_map([thread_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(failure)?;
+        .map_err(ReadError::from)?;
     rows.map(|row| {
-        let (id, body) = row.map_err(failure)?;
-        Ok((id, serde_json::from_str(&body).map_err(failure)?))
+        let (id, body) = row.map_err(ReadError::from)?;
+        Ok((id, serde_json::from_str(&body).map_err(ReadError::from)?))
     })
     .collect()
 }
@@ -361,7 +405,10 @@ pub(super) fn load(
     Ok(state)
 }
 
-pub(super) fn metadata(connection: &Connection, thread_id: &str) -> Result<model::State, String> {
+pub(super) fn metadata(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<model::State, ReadError> {
     let thread =
         read::<model::Thread>(connection, thread_id)?.ok_or("conversation does not exist")?;
     let mut state = model::State::new(thread);
@@ -370,17 +417,17 @@ pub(super) fn metadata(connection: &Connection, thread_id: &str) -> Result<model
     state.nodes = records(connection, thread_id)?;
     let mut query=connection.prepare("SELECT provider_thread_id,payload_json FROM orchestration_v2_projection_provider_threads p
         WHERE thread_id=?1 OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents s
-        WHERE s.thread_id=?1 AND s.provider_thread_id=p.provider_thread_id)").map_err(failure)?;
+        WHERE s.thread_id=?1 AND s.provider_thread_id=p.provider_thread_id)").map_err(ReadError::from)?;
     let rows = query
         .query_map([thread_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(failure)?;
+        .map_err(ReadError::from)?;
     for row in rows {
-        let (id, body) = row.map_err(failure)?;
+        let (id, body) = row.map_err(ReadError::from)?;
         state
             .provider_threads
-            .insert(id, serde_json::from_str(&body).map_err(failure)?);
+            .insert(id, serde_json::from_str(&body).map_err(ReadError::from)?);
     }
     state.provider_turns = records(connection, thread_id)?;
     state.runtime_requests = records(connection, thread_id)?;
@@ -389,24 +436,24 @@ pub(super) fn metadata(connection: &Connection, thread_id: &str) -> Result<model
     state.checkpoint_scopes = records(connection, thread_id)?;
     state.checkpoints = records(connection, thread_id)?;
     state.context_handoffs = records(connection, thread_id)?;
-    let mut query=connection.prepare("SELECT context_transfer_id,payload_json FROM orchestration_v2_projection_context_transfers WHERE source_thread_id=?1 OR target_thread_id=?1").map_err(failure)?;
+    let mut query=connection.prepare("SELECT context_transfer_id,payload_json FROM orchestration_v2_projection_context_transfers WHERE source_thread_id=?1 OR target_thread_id=?1").map_err(ReadError::from)?;
     let rows = query
         .query_map([thread_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(failure)?;
+        .map_err(ReadError::from)?;
     for row in rows {
-        let (id, body) = row.map_err(failure)?;
+        let (id, body) = row.map_err(ReadError::from)?;
         state
             .context_transfers
-            .insert(id, serde_json::from_str(&body).map_err(failure)?);
+            .insert(id, serde_json::from_str(&body).map_err(ReadError::from)?);
     }
     let mut query=connection.prepare("SELECT s.provider_session_id,s.payload_json,
         EXISTS(SELECT 1 FROM orchestration_v2_projection_provider_session_bindings b WHERE b.provider_session_id=s.provider_session_id AND b.thread_id=?1)
         FROM orchestration_v2_projection_provider_sessions s WHERE EXISTS(
             SELECT 1 FROM orchestration_v2_projection_provider_session_bindings b WHERE b.provider_session_id=s.provider_session_id AND b.thread_id=?1)
         OR EXISTS(SELECT 1 FROM orchestration_v2_projection_provider_threads p WHERE p.provider_session_id=s.provider_session_id
-            AND (p.thread_id=?1 OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents a WHERE a.thread_id=?1 AND a.provider_thread_id=p.provider_thread_id)))").map_err(failure)?;
+            AND (p.thread_id=?1 OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents a WHERE a.thread_id=?1 AND a.provider_thread_id=p.provider_thread_id)))").map_err(ReadError::from)?;
     let rows = query
         .query_map([thread_id], |row| {
             Ok((
@@ -415,15 +462,15 @@ pub(super) fn metadata(connection: &Connection, thread_id: &str) -> Result<model
                 row.get::<_, bool>(2)?,
             ))
         })
-        .map_err(failure)?;
+        .map_err(ReadError::from)?;
     for row in rows {
-        let (id, body, attached) = row.map_err(failure)?;
+        let (id, body, attached) = row.map_err(ReadError::from)?;
         if attached {
             state.attached_provider_sessions.insert(id.clone());
         }
         state
             .provider_sessions
-            .insert(id, serde_json::from_str(&body).map_err(failure)?);
+            .insert(id, serde_json::from_str(&body).map_err(ReadError::from)?);
     }
     Ok(state)
 }

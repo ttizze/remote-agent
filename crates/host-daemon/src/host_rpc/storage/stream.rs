@@ -46,7 +46,7 @@ impl Storage {
         &self,
         id: &SessionRef,
     ) -> Result<Option<model::Thread>, String> {
-        self.with(|connection| projections::read(connection, &id.application_id()))
+        self.with(|connection| Ok(projections::read(connection, &id.application_id())?))
     }
 
     pub(in crate::host_rpc) fn thread_item_attempt(
