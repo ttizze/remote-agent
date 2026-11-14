@@ -125,6 +125,9 @@ impl Runtime {
         provider: ProviderKind,
     ) -> Result<(), String> {
         let runtime = &service.inner.conversation;
+        if runtime.storage.thread_header(target)?.is_some() {
+            return Ok(());
+        }
         runtime
             .recovery(target)
             .get_or_try_init(|| async {

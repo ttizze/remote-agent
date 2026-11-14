@@ -14,12 +14,8 @@ pub(super) fn context<'a>(state: &model::State, id: &'a str, now: &'a str) -> mo
         command_id: id,
         now,
         next_run_ordinal: state
-            .runs
-            .values()
-            .map(|run| run.ordinal)
-            .max()
-            .unwrap_or(0)
-            + 1,
+            .next_run_ordinal()
+            .expect("stored run ordinal fits the SQL position range"),
         can_steer: false,
     }
 }
@@ -164,6 +160,12 @@ impl Runtime {
             .conversation
             .storage
             .recover_effects(&commands::at())
+            .and_then(|_| {
+                service.inner.conversation.storage.runtime_restarted(
+                    service.inner.conversation.updating_recovery,
+                    &commands::at(),
+                )
+            })
         {
             tracing::error!(target:"agent",operation="outbox.recover",%error);
             return;
@@ -275,6 +277,16 @@ impl Runtime {
     ) -> Result<(), String> {
         use model::EffectRequest as Request;
         match &effect.request {
+            Request::ProviderRuntimeContinue { source_run_id } => {
+                service.inner.conversation.storage.continue_runtime(
+                    &effect.id,
+                    worker,
+                    &effect.thread_id,
+                    source_run_id,
+                    super::recovery::CONTINUE,
+                    &commands::at(),
+                )?;
+            }
             Request::ProviderTurnStart { run_id } => {
                 Self::start_turn(service, effect, worker, run_id).await?
             }

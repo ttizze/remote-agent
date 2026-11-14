@@ -186,6 +186,15 @@ impl State {
             .max_by_key(|run| run.ordinal)
     }
 
+    pub fn next_run_ordinal(&self) -> Option<u64> {
+        self.runs
+            .values()
+            .map(|run| run.ordinal)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+    }
+
     pub fn next_queued_run(&self) -> Option<&Run> {
         self.runs
             .values()

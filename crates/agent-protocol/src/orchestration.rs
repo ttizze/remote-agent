@@ -44,9 +44,11 @@ pub mod handoffs;
 pub use execution::{
     Completion, activate_queued, cancel_start, cancel_uncertain, complete, fail_start,
     finish_provider_turn, interrupt, observe_item, observe_plan, observe_subagent,
-    provider_stopped, started, uncertain_delivery,
+    started, uncertain_delivery,
 };
 pub use forks::fork_thread;
+mod recovery;
+pub use recovery::{continue_restarted, provider_stopped, runtime_restarted};
 mod checkpoints;
 pub use checkpoints::{checkpoint_captured, prepare_checkpoint_scope};
 mod preparation;

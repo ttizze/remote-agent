@@ -243,14 +243,7 @@ impl Runtime {
                 let context = model::Context {
                     command_id: &operation,
                     now: &now,
-                    next_run_ordinal: state
-                        .runs
-                        .values()
-                        .map(|run| run.ordinal)
-                        .max()
-                        .unwrap_or(0)
-                        .checked_add(1)
-                        .ok_or("run ordinal exhausted")?,
+                    next_run_ordinal: state.next_run_ordinal().ok_or("run ordinal exhausted")?,
                     can_steer,
                 };
                 let selected = match &request.command {

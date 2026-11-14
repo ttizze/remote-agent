@@ -284,12 +284,7 @@ pub(super) fn append_decision(
                             command_id: &failure_id,
                             now,
                             next_run_ordinal: current
-                                .runs
-                                .values()
-                                .map(|run| run.ordinal)
-                                .max()
-                                .unwrap_or(0)
-                                .checked_add(1)
+                                .next_run_ordinal()
                                 .ok_or("run ordinal exhausted")?,
                             can_steer: false,
                         };

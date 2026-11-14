@@ -202,6 +202,7 @@ pub fn started(
             ..root.clone()
         }),
         Change::ProviderThread(ProviderThread {
+            status: ProviderThreadStatus::Active,
             first_run_ordinal: provider_thread.first_run_ordinal.or(Some(run.ordinal)),
             last_run_ordinal: Some(run.ordinal),
             updated_at: context.now.into(),
@@ -484,121 +485,6 @@ pub fn fail_start(
     finish_run(state, attempt_id, Completion::Failed(failure), context)
 }
 
-/// A dead provider settles only its own work. This is a process observation,
-/// so it can release an uncertain native write without replaying that input.
-pub fn provider_stopped(
-    state: &State,
-    provider_instance_id: &str,
-    failure: &ProviderFailure,
-    context: Context<'_>,
-) -> Result<Decision, String> {
-    let mut decision = if let Some(run) = state
-        .active_run()
-        .filter(|run| run.provider_instance_id == provider_instance_id)
-        && let Some(attempt) = state
-            .active_attempt(run.active_attempt_id.as_deref())
-            .filter(|attempt| {
-                matches!(
-                    attempt.status,
-                    RunAttemptStatus::Pending | RunAttemptStatus::Running
-                )
-            }) {
-        finish_run(
-            state,
-            &attempt.id,
-            Completion::Failed(failure.clone()),
-            context,
-        )?
-    } else {
-        Decision::default()
-    };
-    decision.changes.extend(
-        state
-            .provider_sessions
-            .values()
-            .filter(|session| {
-                session.provider_instance_id == provider_instance_id
-                    && !matches!(
-                        session.status,
-                        ProviderSessionStatus::Stopped | ProviderSessionStatus::Error
-                    )
-            })
-            .map(|session| {
-                Change::ProviderSession(ProviderSession {
-                    status: ProviderSessionStatus::Error,
-                    last_error: Some(failure.message.clone()),
-                    updated_at: context.now.into(),
-                    ..session.clone()
-                })
-            }),
-    );
-    decision.effects.extend(
-        state
-            .effects
-            .values()
-            .filter(|effect| {
-                if !matches!(effect.status, EffectStatus::Pending | EffectStatus::Running) {
-                    return false;
-                }
-                match &effect.request {
-                    EffectRequest::ProviderTurnStart { run_id }
-                    | EffectRequest::ProviderRuntimeContinue {
-                        source_run_id: run_id,
-                    } => state
-                        .runs
-                        .get(run_id)
-                        .is_some_and(|run| run.provider_instance_id == provider_instance_id),
-                    EffectRequest::ProviderSessionDetach {
-                        provider_session_id,
-                        ..
-                    }
-                    | EffectRequest::ProviderSessionApplyModelSelection {
-                        provider_session_id,
-                        ..
-                    }
-                    | EffectRequest::ProviderTurnInterrupt {
-                        provider_session_id,
-                        ..
-                    }
-                    | EffectRequest::ProviderTurnSteer {
-                        provider_session_id,
-                        ..
-                    }
-                    | EffectRequest::ProviderTurnRestart {
-                        provider_session_id,
-                        ..
-                    }
-                    | EffectRequest::RuntimeRequestRespond {
-                        provider_session_id,
-                        ..
-                    } => state
-                        .provider_sessions
-                        .get(provider_session_id)
-                        .is_some_and(|session| {
-                            session.provider_instance_id == provider_instance_id
-                        }),
-                    EffectRequest::ProviderThreadRollback {
-                        provider_thread_id, ..
-                    } => state
-                        .provider_threads
-                        .get(provider_thread_id)
-                        .is_some_and(|thread| thread.provider_instance_id == provider_instance_id),
-                    EffectRequest::CheckpointCapture { .. } => false,
-                }
-            })
-            .map(|effect| Effect {
-                status: EffectStatus::Failed,
-                lease_owner: None,
-                lease_expires_at: None,
-                last_error: Some(failure.message.clone()),
-                updated_at: context.now.into(),
-                completed_at: Some(context.now.into()),
-                ..effect.clone()
-            }),
-    );
-    Ok(decision)
-}
-
 /// Only the I/O owner can prove a claimed start has not written to the native
 /// process yet. Stop can then cancel it without waiting for a native turn ID.
 pub fn cancel_start(
@@ -788,7 +674,7 @@ pub fn cancel_uncertain(
     Ok(decision)
 }
 
-fn finish_run(
+pub(super) fn finish_run(
     state: &State,
     attempt_id: &str,
     completion: Completion,
@@ -849,6 +735,13 @@ fn finish_run(
             ..attempt.clone()
         }),
     ];
+    if let Some(thread) = state.provider_threads.get(&attempt.provider_thread_id) {
+        changes.push(Change::ProviderThread(ProviderThread {
+            status: ProviderThreadStatus::Idle,
+            updated_at: context.now.into(),
+            ..thread.clone()
+        }));
+    }
     if let Some(turn) = attempt
         .provider_turn_id
         .as_ref()

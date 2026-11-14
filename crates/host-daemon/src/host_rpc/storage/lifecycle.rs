@@ -4,6 +4,55 @@ use super::*;
 use agent_protocol::orchestration as model;
 
 impl Storage {
+    pub(in crate::host_rpc) fn runtime_restarted(
+        &self,
+        continue_after_restart: bool,
+        now: &str,
+    ) -> Result<(), String> {
+        self.with(|connection| {
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
+            let states = {
+                let mut query = tx.prepare("SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL ORDER BY thread_id").map_err(failure)?;
+                let ids = query.query_map([], |row| row.get::<_,String>(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
+                ids.into_iter().map(|id| projections::load(&tx, &id, &[])).collect::<Result<Vec<_>,_>>()?
+            };
+            // Provider sessions are shared. Read every source's liveness before
+            // publishing any stopped session, as T3's sessionsLiveAtStart does.
+            for state in states {
+                let command = Uuid::new_v4().to_string();
+                let decision = model::runtime_restarted(&state, continue_after_restart, model::Context {
+                    command_id: &command, now, next_run_ordinal: state.next_run_ordinal().ok_or("run ordinal exhausted")?, can_steer: false,
+                })?;
+                commands::append_decision(&tx, &state, decision, None, now)?;
+            }
+            tx.commit().map_err(failure)
+        })
+    }
+
+    pub(in crate::host_rpc) fn continue_runtime(
+        &self,
+        effect_id: &str,
+        worker: &str,
+        thread_id: &str,
+        source_run_id: &str,
+        text: &str,
+        now: &str,
+    ) -> Result<(), String> {
+        self.with(|connection| {
+            let source_message: String = connection.query_row("SELECT json_extract(payload_json,'$.userMessageId') FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND run_id=?2", params![thread_id, source_run_id], |row| row.get(0)).map_err(failure)?;
+            let items = [model::user_item_id(thread_id, &source_message)];
+            let command = format!("command:restart-continuation:{source_run_id}");
+            let receipt = commands::execute(connection, commands::Command {
+                id: &command, thread_id, kind: "message.dispatch", now, item_ids: &items,
+            }, None, |state| {
+                if !state.effects.get(effect_id).is_some_and(|effect| effect.status == model::EffectStatus::Running && effect.lease_owner.as_deref() == Some(worker)) {return Ok(model::Decision::default());}
+                model::continue_restarted(state, source_run_id, text, model::Context {
+                command_id: &command, now, next_run_ordinal: state.next_run_ordinal().ok_or("run ordinal exhausted")?, can_steer: false,
+            })})?;
+            receipt.error.map_or(Ok(()), Err)
+        })
+    }
+
     pub(in crate::host_rpc) fn provider_stopped(
         &self,
         provider_instance_id: &str,
@@ -22,7 +71,7 @@ impl Storage {
                 let decision = model::provider_stopped(&state, provider_instance_id, error, model::Context {
                     command_id: &command,
                     now,
-                    next_run_ordinal: state.runs.values().map(|run| run.ordinal).max().unwrap_or(0).saturating_add(1),
+                    next_run_ordinal: state.next_run_ordinal().ok_or("run ordinal exhausted")?,
                     can_steer: false,
                 })?;
                 commands::append_decision(&tx, &state, decision, None, now)?;
