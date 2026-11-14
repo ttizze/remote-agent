@@ -79,10 +79,6 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
             move || rendered.get(),
             move || {
                 let next = !rendered.get_untracked();
-                // The source's field is made again: it shows the link's line again,
-                // and a composition does not outlive the field it was in.
-                laid_out.set(false);
-                composing.set(false);
                 line_left.set(
                     target
                         .with_untracked(|target| target.line_request)
@@ -286,6 +282,13 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
         .child(when(
             move || !rendered.get(),
             move || {
+                // The field goes whenever a rendering shows: the next one made
+                // shows the link's line again once it is laid out, and a
+                // composition does not outlive the field it was in.
+                cleanup(move || {
+                    laid_out.set(false);
+                    composing.set(false);
+                });
                 input()
                     .px_3()
                     .py_2()

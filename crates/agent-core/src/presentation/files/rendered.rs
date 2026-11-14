@@ -97,10 +97,12 @@ pub fn file_rendered(
 pub fn mermaid_file_markdown(text: &str) -> Option<String> {
     static REFUSED: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
-            // JavaScript's `^` also follows a lone CR, and its `\b` is ASCII's.
-            r"(?imR)%%\s*\{|^\s*---|</?[A-Za-z]|<[!?]|@\s*\{",
-            r"|(?:^|[^0-9A-Za-z_])(?:img|image)\s*:",
-            r"|url\s*\(|@import|(?:https?|data|blob|file):",
+            // JavaScript's `^` also follows a lone CR and the Unicode line
+            // separators, its `\s` includes U+FEFF, and its `\b` is ASCII's.
+            r"(?imR)%%[\s\x{FEFF}]*\{|(?:^|[\x{2028}\x{2029}])[\s\x{FEFF}]*---",
+            r"|</?[A-Za-z]|<[!?]|@[\s\x{FEFF}]*\{",
+            r"|(?:^|[^0-9A-Za-z_])(?:img|image)[\s\x{FEFF}]*:",
+            r"|url[\s\x{FEFF}]*\(|@import|(?:https?|data|blob|file):",
         ))
         .unwrap()
     });
@@ -398,6 +400,9 @@ mod tests {
             "graph TD\n  A@{ IMG: \"x\" }",
             "graph TD\n  style A fill:url(#a)",
             "graph TD\r---",
+            "graph TD\u{2028}---",
+            "%%\u{feff}{init: {}}%%\ngraph TD",
+            "\u{feff}---\ntitle: a\n---\ngraph TD",
             "graph TD\n  A[背景image: x]",
         ] {
             assert_eq!(mermaid_file_markdown(refused), None, "{refused:?}");
