@@ -331,6 +331,25 @@ pub fn admit(
         Change::Node(root),
         Change::TurnItem(item),
     ];
+    changes.extend(
+        state
+            .context_transfers
+            .values()
+            .filter(|transfer| {
+                transfer.kind == TransferType::Fork
+                    && transfer.target_thread_id == state.thread.id
+                    && transfer.status == TransferStatus::Pending
+                    && transfer.target_run_id.is_none()
+            })
+            .map(|transfer| {
+                Change::ContextTransfer(ContextTransfer {
+                    target_run_id: Some(run_id.clone()),
+                    target_provider_instance_id: Some(selection.instance_id.clone()),
+                    updated_at: context.now.into(),
+                    ..transfer.clone()
+                })
+            }),
+    );
     changes.extend(preparation.map(Change::TurnItem));
     if !queued {
         changes.push(Change::Thread(Thread {

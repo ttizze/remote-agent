@@ -202,6 +202,35 @@ pub fn started(
         }),
         Change::ProviderTurn(turn),
     ]);
+    if let Some(reference) = &provider_thread.native_thread_ref {
+        // ProviderTurnStartService consumes a planned native fork only when
+        // the provider accepts a turn, including callback-before-ACK delivery.
+        changes.extend(
+            state
+                .context_transfers
+                .values()
+                .filter(|transfer| {
+                    transfer.kind == TransferType::Fork
+                        && transfer.target_thread_id == state.thread.id
+                        && transfer.target_run_id.as_ref() == Some(&run.id)
+                        && transfer.status == TransferStatus::Pending
+                        && transfer.resolution.is_none()
+                })
+                .map(|transfer| {
+                    Change::ContextTransfer(ContextTransfer {
+                        target_provider_instance_id: Some(run.provider_instance_id.clone()),
+                        status: TransferStatus::Consumed,
+                        resolution: Some(ContextTransferResolution::NativeFork {
+                            provider_thread_ref: reference.clone(),
+                        }),
+                        error: None,
+                        updated_at: context.now.into(),
+                        consumed_at: Some(context.now.into()),
+                        ..transfer.clone()
+                    })
+                }),
+        );
+    }
     if state.turn_items.values().any(|item| {
         item.run_id.as_deref() == Some(&run.id)
             && matches!(item.body, TurnItemBody::RunInterruptRequest { .. })

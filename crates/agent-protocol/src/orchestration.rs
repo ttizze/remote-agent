@@ -39,11 +39,13 @@ pub use commands::{
     move_queued, promote_queued, rewind, user_item_id,
 };
 mod execution;
+mod forks;
 pub use execution::{
     Completion, activate_queued, cancel_start, cancel_uncertain, complete, fail_start,
     finish_provider_turn, interrupt, observe_item, observe_plan, observe_subagent, started,
     uncertain_delivery,
 };
+pub use forks::fork_thread;
 mod checkpoints;
 pub use checkpoints::{checkpoint_captured, prepare_checkpoint_scope};
 mod preparation;

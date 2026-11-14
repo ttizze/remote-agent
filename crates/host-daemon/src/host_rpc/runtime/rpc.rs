@@ -128,14 +128,13 @@ impl Runtime {
                     service
                         .inner
                         .conversation
-                        .owners
-                        .fork(
+                        .storage
+                        .fork_thread(
                             &request.source,
-                            request.target.clone(),
-                            request.through.clone(),
-                            now(),
+                            &request.target,
+                            &request.through,
+                            &commands::at(),
                         )
-                        .await
                         .map_err(storage_failure)?;
                     Ok::<_, Failure>(request.target.clone())
                 }
@@ -347,9 +346,9 @@ impl Runtime {
             worktree_path: match &preparation {
                 // T3 claims an existing worktree on thread creation, including
                 // launches without an initial message (ThreadLaunchService).
-                Some(model::WorkspacePreparation::ExistingWorktree {
-                    worktree_path, ..
-                }) => Some(worktree_path.clone()),
+                Some(model::WorkspacePreparation::ExistingWorktree { worktree_path, .. }) => {
+                    Some(worktree_path.clone())
+                }
                 _ => Some(cwd),
             },
             active_provider_thread_id: None,

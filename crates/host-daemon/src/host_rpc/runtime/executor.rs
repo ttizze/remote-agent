@@ -377,14 +377,47 @@ impl Runtime {
             reload |= current.needs_reload || current.response.thread.cwd.as_deref() != Some(&cwd);
             SessionRef::new(provider, id.clone()).map_err(|error| storage_failure(error.into()))?
         } else {
-            let response = agent
-                .create(
-                    &cwd,
-                    Some(&run.model_selection.model),
-                    service.browser_config(&target.to_string())?,
-                )
-                .await
-                .map_err(Failure::before_submission)?;
+            let fork = state.context_transfers.values().find(|transfer| {
+                transfer.kind == model::TransferType::Fork
+                    && transfer.target_thread_id == state.thread.id
+                    && transfer.target_run_id.as_ref() == Some(&run.id)
+                    && transfer.status == model::TransferStatus::Pending
+                    && transfer.resolution.is_none()
+            });
+            let response = if let Some(fork) = fork {
+                let source = fork
+                    .source_point
+                    .provider_thread_ref
+                    .as_ref()
+                    .filter(|reference| {
+                        reference.driver == provider.driver()
+                            && reference.strength == model::NativeRefStrength::Strong
+                    })
+                    .and_then(|reference| reference.native_id.as_deref());
+                let turn = fork
+                    .source_point
+                    .provider_turn_ref
+                    .as_ref()
+                    .and_then(|reference| reference.native_id.as_deref());
+                let (Some(source), Some(turn)) = (source, turn) else {
+                    return Err(Failure::new(
+                        "fork_context_unavailable",
+                        "fork requires portable context from its selected source run",
+                    ));
+                };
+                agent
+                    .fork(source, turn, service.browser_config(&target.to_string())?)
+                    .await
+            } else {
+                agent
+                    .create(
+                        &cwd,
+                        Some(&run.model_selection.model),
+                        service.browser_config(&target.to_string())?,
+                    )
+                    .await
+            }
+            .map_err(Failure::before_submission)?;
             op::validate_thread(&response, None)
                 .map_err(|error| Failure::new("invalid_thread", error))?;
             response

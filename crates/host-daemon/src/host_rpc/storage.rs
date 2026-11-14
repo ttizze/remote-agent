@@ -24,6 +24,7 @@ mod codec;
 pub(in crate::host_rpc) mod commands;
 mod event_store;
 mod executions;
+mod forks;
 pub(in crate::host_rpc) mod history;
 mod imports;
 pub(super) mod jobs;
