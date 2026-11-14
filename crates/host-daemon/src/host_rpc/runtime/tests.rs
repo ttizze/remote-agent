@@ -1436,11 +1436,19 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         .into_values()
         .next()
         .unwrap();
+    let native_turn = agent.records.lock().unwrap()[&native.id]
+        .thread
+        .turns
+        .as_ref()
+        .unwrap()[0]
+        .clone();
+    let native_turn_id = native_turn.id.clone();
+    let native_answer_id = native_turn.items.as_ref().unwrap()[1].id.clone();
     let text = |delta: &str| AgentChange::Session {
         session: native.clone(),
         change: SessionChange::Text {
-            turn_id: "turn-0".into(),
-            item_id: "answer-0".into(),
+            turn_id: native_turn_id.clone(),
+            item_id: native_answer_id.clone(),
             field: agent_protocol::session::TextField::AssistantText,
             delta: delta.into(),
         },
@@ -1559,7 +1567,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         AgentChange::Session {
             session: native.clone(),
             change: SessionChange::Item {
-                turn_id: "turn-0".into(),
+                turn_id: native_turn_id.clone(),
                 item: Arc::new(Item::new(
                     "reason-0".into(),
                     ItemStatus::Running,
@@ -1579,7 +1587,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         AgentChange::Session {
             session: native.clone(),
             change: SessionChange::ReasoningPart {
-                turn_id: "turn-0".into(),
+                turn_id: native_turn_id.clone(),
                 item_id: "reason-0".into(),
                 field: ReasoningField::Summary,
                 index: 0,
@@ -1595,7 +1603,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
             AgentChange::Session {
                 session: native.clone(),
                 change: SessionChange::Text {
-                    turn_id: "turn-0".into(),
+                    turn_id: native_turn_id.clone(),
                     item_id: "reason-0".into(),
                     field: TextField::ReasoningSummary { index: 0 },
                     delta: delta.into(),
@@ -1626,7 +1634,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
             session: native.clone(),
             change: SessionChange::Turn {
                 turn: agent_protocol::models::Turn {
-                    id: "turn-0".into(),
+                    id: native_turn_id.clone(),
                     status: agent_protocol::execution::TurnStatus::Completed,
                     ..Default::default()
                 },

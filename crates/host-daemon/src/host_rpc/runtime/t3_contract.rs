@@ -1416,7 +1416,16 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
         .projection
         .context_handoffs
         .iter()
-        .find(|handoff| handoff.target_run_id == current.projection.runs.last().unwrap().id)
+        .find(|handoff| {
+            handoff.target_run_id
+                == current
+                    .projection
+                    .runs
+                    .iter()
+                    .max_by_key(|run| run.ordinal)
+                    .unwrap()
+                    .id
+        })
         .unwrap();
     assert_eq!(
         handoff.strategy,

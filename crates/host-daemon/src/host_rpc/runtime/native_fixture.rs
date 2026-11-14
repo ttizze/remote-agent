@@ -508,13 +508,8 @@ impl Agent for NativeAgent {
             _ => {}
         }
         self.inputs.lock().unwrap().push(input.clone());
-        let ordinal = self.records.lock().unwrap()[&input.thread_id.id]
-            .thread
-            .turns
-            .as_ref()
-            .map_or(0, Vec::len);
         let mut user = Item::new(
-            format!("user-{ordinal}").into(),
+            format!("user-{execution}").into(),
             ItemStatus::Completed,
             ItemBody::UserMessage {
                 text: None,
@@ -522,14 +517,14 @@ impl Agent for NativeAgent {
             },
         );
         user.client_input_id = Some(input.client_user_message_id.clone());
-        let turn_id: TurnId = format!("turn-{ordinal}").into();
+        let turn_id: TurnId = format!("turn-{execution}").into();
         let turn = Turn {
             id: turn_id.clone(),
             status: TurnStatus::Completed,
             items: Some(vec![
                 Arc::new(user),
                 Arc::new(Item::new(
-                    format!("answer-{ordinal}").into(),
+                    format!("answer-{execution}").into(),
                     ItemStatus::Completed,
                     ItemBody::AssistantText {
                         text: format!("answer {}", input.client_user_message_id),
