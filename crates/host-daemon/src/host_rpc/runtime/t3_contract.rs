@@ -1243,15 +1243,13 @@ async fn queued_fork_input_preserves_context_after_a_failed_start(#[case] provid
     let codex = codex.restarted();
     let claude = claude.restarted();
     let service = HostRpcService::new([codex.backend(), claude.backend()], projects);
-    let connection = service.open_session();
-    let ack: records::Acknowledged = call(
+    let ack = Runtime::change(
         &service,
-        connection.id(),
-        Call::ChangeConversation(records::Change {
+        &records::Change {
             session: target.clone(),
             operation: Uuid::new_v4(),
             command: Command::ResumeQueue,
-        }),
+        },
     )
     .await
     .unwrap();
@@ -1264,6 +1262,30 @@ async fn queued_fork_input_preserves_context_after_a_failed_start(#[case] provid
             .any(|transfer| transfer.target_run_id.as_ref() == Some(&queued)),
         "queued activation claims the undelivered fork source"
     );
+    if provider == ProviderKind::Claude {
+        let current = snapshot(&service, &target);
+        let transfer = current
+            .projection
+            .context_transfers
+            .iter()
+            .find(|transfer| transfer.target_run_id.as_ref() == Some(&queued))
+            .unwrap();
+        assert_eq!(
+            transfer.status,
+            model::TransferStatus::ResolvedPortable,
+            "T3 prepares queued portable context before acknowledging resume"
+        );
+        assert!(
+            current
+                .projection
+                .runs
+                .iter()
+                .find(|run| run.id == queued)
+                .unwrap()
+                .context_handoff_id
+                .is_some()
+        );
+    }
     let current = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let current = snapshot(&service, &target);
@@ -1660,4 +1682,311 @@ async fn switching_back_replaces_a_full_native_context_before_appending_history(
             "budget recovery preserves the immediately preceding switch handoff link"
         );
     }
+}
+
+#[tokio::test]
+async fn provider_handoff_is_committed_before_the_dispatch_acknowledgement() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("source-history"),
+    )
+    .await;
+    settled(&service, &session, 1).await;
+    // On this current-thread runtime the owner returns the acknowledgement
+    // without yielding after commit. The native worker has not started it.
+    let ack = Runtime::change(
+        &service,
+        &records::Change {
+            session: session.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::Submit {
+                id: Uuid::new_v4().to_string().into(),
+                content: input(ProviderKind::Claude, "next-input"),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(ack.error.is_none());
+    let current = snapshot(&service, &session);
+    let run = current
+        .projection
+        .runs
+        .iter()
+        .max_by_key(|run| run.ordinal)
+        .unwrap();
+    let id = run
+        .context_handoff_id
+        .as_ref()
+        .expect("T3 commits the context plan with its acknowledgement");
+    assert!(
+        current
+            .projection
+            .context_handoffs
+            .iter()
+            .any(|handoff| &handoff.id == id)
+    );
+    assert!(claude.inputs.lock().unwrap().is_empty());
+    settled(&service, &session, 2).await;
+}
+
+#[tokio::test]
+async fn provider_handoff_uses_the_message_actor_for_agent_created_input() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("source-history"),
+    )
+    .await;
+    settled(&service, &session, 1).await;
+    let operation = Uuid::new_v4().to_string();
+    let at = commands::at();
+    let ack = service
+        .inner
+        .conversation
+        .storage
+        .thread_command(
+            super::super::storage::commands::Command {
+                id: &operation,
+                thread_id: &session.id,
+                kind: "message.dispatch",
+                now: &at,
+                item_ids: &[],
+            },
+            None,
+            |state| {
+                model::admit(
+                    state,
+                    model::Input {
+                        message_id: operation.clone(),
+                        created_by: model::Actor::Agent,
+                        creation_source: model::CreationSource::Server,
+                        text: "agent continuation".into(),
+                        attachments: vec![],
+                        context: None,
+                        model_selection: model::ModelSelection {
+                            instance_id: "claude".into(),
+                            model: "fixture".into(),
+                            options: vec![],
+                        },
+                        driver: ProviderKind::Claude.driver().into(),
+                        workspace_preparation: None,
+                        fork_origin: None,
+                    },
+                    model::Admission::Queue,
+                    super::executor::context(state, &operation, &at),
+                )
+            },
+        )
+        .unwrap();
+    assert!(ack.error.is_none());
+    let current = settled(&service, &session, 2).await;
+    assert!(
+        current
+            .projection
+            .context_transfers
+            .iter()
+            .any(
+                |transfer| transfer.kind == model::TransferType::ProviderHandoff
+                    && transfer.status == model::TransferStatus::Consumed
+                    && transfer.created_by == model::Actor::Agent
+            )
+    );
+}
+
+#[tokio::test]
+async fn a_provider_thread_without_a_native_reference_receives_full_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("old-native-history-marker"),
+    )
+    .await;
+    let first = settled(&service, &session, 1).await;
+    let old = first.projection.thread.active_provider_thread_id.unwrap();
+    send(
+        &service,
+        &session,
+        ProviderKind::Claude,
+        "foreign-history-marker",
+    )
+    .await;
+    settled(&service, &session, 2).await;
+    // A failed replacement may leave this canonical row without a native ID.
+    // Prior accepted runs remain historical facts, not occupancy of a new ID.
+    service
+        .inner
+        .conversation
+        .storage
+        .observe_thread(&session.id, &[], &commands::at(), |state| {
+            Ok(model::Decision {
+                changes: vec![model::Change::ProviderThread(model::ProviderThread {
+                    native_thread_ref: None,
+                    status: model::ProviderThreadStatus::NotLoaded,
+                    ..state.provider_threads[&old].clone()
+                })],
+                effects: vec![],
+            })
+        })
+        .unwrap();
+    send(
+        &service,
+        &session,
+        ProviderKind::Codex,
+        "fresh-current-marker",
+    )
+    .await;
+    settled(&service, &session, 3).await;
+    let inputs = codex.inputs.lock().unwrap();
+    assert_ne!(inputs[0].thread_id, inputs[1].thread_id);
+    let context = serde_json::to_string(&*codex.injected.lock().unwrap()).unwrap();
+    assert!(context.contains("old-native-history-marker"));
+    assert!(context.contains("foreign-history-marker"));
+    assert!(!context.contains("fresh-current-marker"));
+}
+
+#[tokio::test]
+async fn native_fork_provenance_survives_provider_switches() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let source = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("fork-source"),
+    )
+    .await;
+    let first = settled(&service, &source, 1).await;
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let connection = service.open_session();
+    let _: agent_protocol::models::Empty = call(
+        &service,
+        connection.id(),
+        Call::ForkConversation(records::Fork {
+            source,
+            target: target.clone(),
+            through: first.projection.runs[0].id.clone().into(),
+        }),
+    )
+    .await
+    .unwrap();
+    send(&service, &target, ProviderKind::Codex, "fork-first").await;
+    let first = settled(&service, &target, 1).await;
+    let owner = first.projection.thread.active_provider_thread_id.unwrap();
+    let provenance = first
+        .projection
+        .provider_threads
+        .iter()
+        .find(|thread| thread.id == owner)
+        .unwrap()
+        .forked_from
+        .clone();
+    assert!(provenance.is_some());
+    send(
+        &service,
+        &target,
+        ProviderKind::Claude,
+        "fork-other-provider",
+    )
+    .await;
+    settled(&service, &target, 2).await;
+    send(&service, &target, ProviderKind::Codex, "fork-return").await;
+    let current = settled(&service, &target, 3).await;
+    assert_eq!(
+        current
+            .projection
+            .provider_threads
+            .iter()
+            .find(|thread| thread.id == owner)
+            .unwrap()
+            .forked_from,
+        provenance
+    );
+}
+
+#[tokio::test]
+async fn first_injection_recovery_keeps_its_provider_without_inventing_a_source_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let connection = service.open_session();
+    let session = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            workspace: Some(agent_protocol::workspace::WorkspaceStrategy::Root),
+            session: session.clone(),
+            provider: ProviderKind::Claude,
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            selection: Default::default(),
+            initial: Some((
+                Uuid::new_v4().to_string().into(),
+                input(ProviderKind::Claude, "source-history"),
+            )),
+        }),
+    )
+    .await
+    .unwrap();
+    settled(&service, &session, 1).await;
+    codex
+        .fail_inject
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    send(
+        &service,
+        &session,
+        ProviderKind::Codex,
+        "new-provider-current",
+    )
+    .await;
+    let current = settled(&service, &session, 2).await;
+    let item = current
+        .projection
+        .visible_turn_items
+        .iter()
+        .find(|entry| entry.item.title.as_deref() == Some("Recovered context"))
+        .expect("recovery item");
+    let model::TurnItemBody::Handoff {
+        from_provider_instance_ids,
+        from_model_selections,
+        to_model,
+        ..
+    } = &item.item.body
+    else {
+        panic!("handoff");
+    };
+    assert_eq!(from_provider_instance_ids, &["codex".to_string()]);
+    assert!(from_model_selections.as_ref().unwrap().is_empty());
+    assert_eq!(to_model.as_deref(), Some("fixture"));
 }
