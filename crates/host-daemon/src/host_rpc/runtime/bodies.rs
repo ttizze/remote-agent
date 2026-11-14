@@ -11,14 +11,9 @@ impl Runtime {
         covered: u64,
     ) -> Result<(agent_protocol::models::ThreadResponse, bool), Failure> {
         let storage = &service.inner.conversation.storage;
-        let covered = covered.max(
-            storage
-                .header(target)
-                .map_err(storage_failure)?
-                .state
-                .context_start,
-        );
-        let history = storage.history(target, covered).map_err(storage_failure)?;
+        let history = storage
+            .history(target, Some(covered))
+            .map_err(storage_failure)?;
         for turn in history.thread.turns.iter().flatten() {
             for item in turn.items.iter().flatten().filter(|item| {
                 item.is_deferred()
@@ -29,7 +24,9 @@ impl Runtime {
                 }
             }
         }
-        let mut history = storage.history(target, covered).map_err(storage_failure)?;
+        let mut history = storage
+            .history(target, Some(covered))
+            .map_err(storage_failure)?;
         let missing_message = history.thread.turns.iter().flatten().any(|turn| {
             turn.items.iter().flatten().any(|item| {
                 item.is_deferred()

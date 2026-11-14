@@ -158,7 +158,7 @@ fn forks_settle_copied_background_work_and_allow_the_next_input() {
                 transaction.commit().map_err(failure)
             })
             .unwrap();
-        let before = storage.history(&source, 0).unwrap();
+        let before = storage.history(&source, None).unwrap();
         let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
         let forked = storage.fork(
             &source,
@@ -178,7 +178,7 @@ fn forks_settle_copied_background_work_and_allow_the_next_input() {
         let copied = storage.state(&target).unwrap();
         assert!(copied.active_turn().is_none());
         assert!(copied.bindings.is_empty());
-        let history = storage.history(&target, 0).unwrap();
+        let history = storage.history(&target, None).unwrap();
         let turns = history.thread.turns.unwrap();
         assert_eq!(turns.len(), if later { 2 } else { 1 });
         assert!(
@@ -192,7 +192,7 @@ fn forks_settle_copied_background_work_and_allow_the_next_input() {
             matches!(item.body(), ItemBody::CommandExecution { output, .. } if output == "kept background output")
         );
         assert_eq!(
-            storage.history(&source, 0).unwrap().thread.turns,
+            storage.history(&source, None).unwrap().thread.turns,
             before.thread.turns
         );
         let operation = Uuid::new_v4();
@@ -1052,7 +1052,7 @@ fn a_failed_unconfirmed_delivery_is_fenced_but_a_failed_steer_keeps_its_turn_liv
                     .unwrap()
                     .is_empty()
             );
-            let before = storage.history(&id, 0).unwrap();
+            let before = storage.history(&id, None).unwrap();
             let before_ignored = storage
                 .with(|connection| super::cursor(connection))
                 .unwrap();
@@ -1074,7 +1074,7 @@ fn a_failed_unconfirmed_delivery_is_fenced_but_a_failed_steer_keeps_its_turn_liv
                 )
                 .unwrap();
             assert_eq!(ignored.cursor, before_ignored);
-            assert_eq!(storage.history(&id, 0).unwrap(), before);
+            assert_eq!(storage.history(&id, None).unwrap(), before);
         }
     }
 }
@@ -1390,7 +1390,7 @@ fn native_reimport_keeps_reused_turn_and_item_occurrences_after_reopen() {
     storage
         .import(&id, &response(["first", "second"]), Some(&id), 10)
         .unwrap();
-    let before = storage.history(&id, 0).unwrap().thread.turns.unwrap();
+    let before = storage.history(&id, None).unwrap().thread.turns.unwrap();
     assert_ne!(before[0].id, before[1].id);
     assert_ne!(
         before[0].items.as_ref().unwrap()[0].id,
@@ -1422,7 +1422,7 @@ fn native_reimport_keeps_reused_turn_and_item_occurrences_after_reopen() {
                 now,
             )
             .unwrap();
-        let after = storage.history(&id, 0).unwrap().thread.turns.unwrap();
+        let after = storage.history(&id, None).unwrap().thread.turns.unwrap();
         assert_eq!(after.len(), 2);
         for (index, expected) in ["first", "second"].into_iter().enumerate() {
             assert_eq!(after[index].id, before[index].id);
@@ -1648,7 +1648,7 @@ fn external_turn_completion_refreshes_text_before_releasing_queued_input() {
             100,
         )
         .unwrap();
-    let history = storage.history(&id, 0).unwrap();
+    let history = storage.history(&id, None).unwrap();
     let turns = history.thread.turns.unwrap();
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].id.as_str(), "native-turn");
@@ -1739,7 +1739,7 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
     let storage = Storage::open(&path);
     storage.import_status(&id, 100).unwrap();
     let first = storage.claim(100, 1).unwrap().pop().unwrap();
-    let before = storage.history(&id, 0).unwrap();
+    let before = storage.history(&id, None).unwrap();
     storage.with(|connection| connection.execute_batch("CREATE TRIGGER fail_import BEFORE DELETE ON jobs BEGIN SELECT RAISE(ABORT,'import commit failed'); END;").map_err(failure)).unwrap();
     assert!(
         storage
@@ -1747,7 +1747,7 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
             .unwrap_err()
             .contains("import commit failed")
     );
-    assert_eq!(storage.history(&id, 0).unwrap(), before);
+    assert_eq!(storage.history(&id, None).unwrap(), before);
     assert!(!storage.loaded(&id).unwrap());
     drop(storage);
     let storage = Storage::open(&path);
@@ -1784,7 +1784,7 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
     assert_eq!(repeated.cursor, cursor);
     assert_eq!(repeated.cursor, before_repeated);
     assert!(storage.claim(105, 1).unwrap().is_empty());
-    let loaded = storage.history(&id, 0).unwrap();
+    let loaded = storage.history(&id, None).unwrap();
     assert_eq!(
         loaded.thread.turns.unwrap()[0].items.as_ref().unwrap()[0].body(),
         response.thread.turns.unwrap()[0].items.as_ref().unwrap()[0].body()
@@ -2318,7 +2318,12 @@ fn rewind_removes_the_suffix_without_resetting_loaded_pages_and_reimport_cannot_
         storage.snapshot(&target, replica.cursor(), window).unwrap(),
         Message::Events { .. }
     ));
-    let turns = storage.history(&target, 0).unwrap().thread.turns.unwrap();
+    let turns = storage
+        .history(&target, None)
+        .unwrap()
+        .thread
+        .turns
+        .unwrap();
     let rewind = storage
         .decide(
             &target,
@@ -2401,7 +2406,12 @@ fn rewind_removes_the_suffix_without_resetting_loaded_pages_and_reimport_cannot_
         .reimport(&target, &target, claim.id, claim.attempt, &response, 300)
         .unwrap();
     assert_eq!(imported.step.outcome, Outcome::Accepted);
-    let retained = storage.history(&target, 0).unwrap().thread.turns.unwrap();
+    let retained = storage
+        .history(&target, None)
+        .unwrap()
+        .thread
+        .turns
+        .unwrap();
     assert_eq!(retained.len(), 1);
     assert_eq!(retained[0].id, turns[0].id);
 }
@@ -3285,7 +3295,7 @@ fn external_reimport_finishes_text_that_was_first_seen_while_running() {
                 );
             }
         }
-        let history = storage.history(&target, 0).unwrap();
+        let history = storage.history(&target, None).unwrap();
         let turn = history.thread.turns.as_ref().unwrap().last().unwrap();
         assert_eq!(turn.status, TurnStatus::Completed);
         let item = &turn.items.as_ref().unwrap()[0];
@@ -3502,7 +3512,7 @@ fn provider_switches_publish_the_live_steering_admission_in_both_directions() {
                 None,
             )
             .unwrap();
-        let thread = storage.history(&target, 0).unwrap().thread;
+        let thread = storage.history(&target, None).unwrap().thread;
         assert_eq!(thread.active_provider, Some(to));
         assert_eq!(thread.capabilities.unwrap().steer, steers);
         assert_eq!(thread.steerable, steers);
@@ -3577,7 +3587,7 @@ fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
         else {
             panic!("delivery")
         };
-        let thread = storage.history(&target, 0).unwrap().thread;
+        let thread = storage.history(&target, None).unwrap().thread;
         assert!(!thread.steerable, "unacknowledged {text}");
         assert_eq!(thread.skips_compaction, text == "/compact");
         storage
@@ -3592,7 +3602,7 @@ fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
                 None,
             )
             .unwrap();
-        let thread = storage.history(&target, 0).unwrap().thread;
+        let thread = storage.history(&target, None).unwrap().thread;
         assert_eq!(thread.steerable, text != "/compact", "acknowledged {text}");
         assert_eq!(thread.skips_compaction, text == "/compact");
         if text == "/compact" {
@@ -3635,7 +3645,7 @@ fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
         storage
             .decide(&target, terminal, context(603), None)
             .unwrap();
-        let thread = storage.history(&target, 0).unwrap().thread;
+        let thread = storage.history(&target, None).unwrap().thread;
         assert!(!thread.steerable, "{text} / {ending}");
         assert_eq!(thread.skips_compaction, text == "/compact");
     }

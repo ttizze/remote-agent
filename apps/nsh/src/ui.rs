@@ -83,7 +83,6 @@ pub(crate) mod colors {
     }
 
     /// `--accent`: a pressed or hovered ghost control, white at 4%.
-    #[cfg(desktop)]
     pub(crate) const T3_ACCENT: Rgba = rgba(0xffffff0a);
     /// `--input`: an outlined control's edge, white at 8%.
     pub(crate) const T3_INPUT: Rgba = rgba(0xffffff14);
@@ -137,6 +136,10 @@ impl Icon {
     pub(crate) const GIT_BRANCH: Self = icon!(GitBranch);
     #[cfg(desktop)]
     pub(crate) const PUSH: Self = icon!(CloudUpload);
+    /// T3 Code's file panel: show a file rendered, or its source again.
+    pub(crate) const EYE: Self = icon!(Eye);
+    pub(crate) const CODE: Self = icon!(CodeXml);
+    pub(crate) const TABLE: Self = icon!(Table2);
     #[cfg(desktop)]
     pub(crate) const MAXIMIZE: Self = icon!(Maximize2);
     #[cfg(desktop)]
@@ -388,6 +391,16 @@ pub(crate) fn toggle(
     pressed: impl Fn() -> bool + Copy + 'static,
     press: impl Fn() + 'static,
 ) -> nsh_base::ButtonElement {
+    toggle_with(icon(glyph, 16.0), label, pressed, press)
+}
+
+/// T3 Code's ghost toggle around `glyph`, for one whose icon follows its state.
+pub(crate) fn toggle_with(
+    glyph: impl IntoElement,
+    label: impl IntoReactive<SharedString>,
+    pressed: impl Fn() -> bool + Copy + 'static,
+    press: impl Fn() + 'static,
+) -> nsh_base::ButtonElement {
     let label = label.into_reactive();
     bare_button(label.clone(), press)
         .w(px(28.0))
@@ -397,7 +410,7 @@ pub(crate) fn toggle(
         .hover(|s| s.bg(colors::T3_ACCENT))
         .selected(pressed)
         .selected_style(|s| s.bg(colors::T3_ACCENT))
-        .child(view().tooltip(tooltip(label)).child(icon(glyph, 16.0)))
+        .child(view().tooltip(tooltip(label)).child(glyph))
 }
 
 /// nsh-base's button (focus, keys, accessibility) in the desktop client's

@@ -1,6 +1,9 @@
 //! Native transcript contract: native viewports own scrolling, reuse and text selection.
 use super::*;
 use serde_json::{Value, json};
+
+mod document;
+pub(crate) use document::view as document;
 #[cfg(any(target_os = "macos", test))]
 use std::collections::BTreeMap;
 
@@ -160,7 +163,6 @@ pub(super) fn project_row(
     } else if row.notification.is_some() {
         parts = vec![crate::rich_text::plain(body.clone(), None)];
     }
-    let labels = json!({"plan":tr("計画"),"copyCode":tr("コードをコピー"),"thisResponse":tr("この応答"),"showDetails":tr("詳細を表示"),"saveImage":tr("画像を名前を付けて保存…"),"queuedDescription":tr("実行中の作業の後に送信しました"),"steerDescription":tr("実行中の作業に追加で指示しました"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
     let focus = row.progress.is_some()
         || row.status.is_some()
         || row.preparation.as_ref().is_some_and(|setup| setup.shimmer);
@@ -172,7 +174,13 @@ pub(super) fn project_row(
     {
         button["shimmer"] = shimmer.clone().unwrap_or(Value::Null);
     }
-    let document = json!({"shimmer":shimmer.filter(|_|row.detail.is_none()),"secondary":row.kind == Kind::Activity,"role":if row.kind == Kind::User {"user"} else {"assistant"},"target":target,"sideChat":side_chat,"labels":labels,"menu":{"quote":tr("チャットに追加"),"explain":tr("詳細を表示"),"sideChat":tr("サイドチャットで質問")}});
+    let document = document_metadata(
+        target,
+        side_chat,
+        row.kind == Kind::User,
+        row.kind == Kind::Activity,
+        shimmer.filter(|_| row.detail.is_none()),
+    );
     json!({
         "id":row.id,"plan":matches!(row.shape,Shape::Plan),"planTitle":matches!(row.shape,Shape::Plan).then_some(row.body.as_ref()),
         "error":row.error.as_ref().map(|error|json!({"title":error.title,"message":error.message,"details":error.details,"reconnecting":error.is_reconnecting,"usageLimit":error.is_usage_limit})),"timeAlways":row.kind == Kind::Activity,"preparation":row.preparation.as_ref().map(|setup| preparation_card(setup,open)),"icon":row_icon(row),"separator":matches!(row.shape,Shape::Divider | Shape::Interrupted),"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
@@ -183,6 +191,17 @@ pub(super) fn project_row(
         "document":document,
         "agentStatus":row.agent.as_ref().map(|agent| agent.status)
     })
+}
+
+fn document_metadata(
+    target: &str,
+    side_chat: bool,
+    user: bool,
+    secondary: bool,
+    shimmer: Option<Value>,
+) -> Value {
+    let labels = json!({"plan":tr("計画"),"copyCode":tr("コードをコピー"),"thisResponse":tr("この応答"),"showDetails":tr("詳細を表示"),"saveImage":tr("画像を名前を付けて保存…"),"queuedDescription":tr("実行中の作業の後に送信しました"),"steerDescription":tr("実行中の作業に追加で指示しました"),"copyDiagram":tr("Mermaidをコピー"),"enlarge":tr("拡大"),"shrink":tr("縮小"),"copyTable":tr("表をコピー"),"copyMarkdown":tr("Markdownをコピー"),"copyCsv":tr("CSVをコピー"),"wrap":tr("折り返し"),"unwrap":tr("折り返し解除"),"expand":tr("全文を表示"),"collapse":tr("折りたたむ"),"copied":tr("コピーしました"),"retry":tr("再試行"),"loadingImage":tr("画像を読み込み中…"),"openImage":tr("画像を拡大"),"openFile":tr("ファイルを開く"),"source":tr("ソース"),"diagram":tr("図を表示"),"queued":tr("キューから送信"),"steer":tr("追加の指示")});
+    json!({"shimmer":shimmer,"secondary":secondary,"role":if user {"user"} else {"assistant"},"target":target,"sideChat":side_chat,"labels":labels,"menu":{"quote":tr("チャットに追加"),"explain":tr("詳細を表示"),"sideChat":tr("サイドチャットで質問")}})
 }
 
 fn preparation_card(
@@ -627,9 +646,7 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
                     }
                     row["document"]["searching"] = json!(!query.is_empty());
                     row["document"]["findKey"] = json!(surroundings.find.selection(row["id"].as_str().unwrap_or_default()).and_then(|_|surroundings.find.key()));
-                    let sources = image_sources(row);
-                    row["media"] = media.with(|files| json!(sources.iter().filter_map(|source| match files.get(source) { Some(Image::Ready(_,data)) => Some((source.clone(),data.clone())), _=>None }).collect::<HashMap<_,_>>()));
-                    row["document"]["mediaErrors"] = media.with(|files| json!(sources.iter().filter_map(|source| match files.get(source) { Some(Image::Failed(error)) => Some((source.clone(),error.clone())), _=>None }).collect::<HashMap<_,_>>()));
+                    media.with(|files| attach_images(row, files));
                 }
                 json!({"scope": scope.get(), "rows": rows, "lane":LANE_WIDTH,"padding":lane_padding(window().width.0), "following": timeline.following.get(),
                     "inset": (timeline.inset.get() - timeline.covered.get()).max(0.0), "notice": notice,"opening":opening,
@@ -638,17 +655,8 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
             })
             .on_native_event(move |event: &NativeEvent| {
                 if event.data["scope"].as_str() != Some(scope.get_untracked().as_str()) { return; }
-                #[cfg(desktop)]
-                if event.data["action"] == "saveImage" {
-                    if let Some(source) = event.data["text"].as_str()
-                        && let Some(Image::Ready(file,_)) = media.with_untracked(|files|files.get(source).cloned()) {
-                        crate::media::save_image(file,None);
-                    }
-                    return;
-                }
-                if event.data["action"] == "retryImage" {
-                    if let Some(source) = event.data["text"].as_str() { media.update(|files| {files.remove(source);}); retry_images.update(|serial|*serial = serial.wrapping_add(1)); }
-                } else if event.data["action"] == "visible" {
+                if media_action(&event.data, media, retry_images) { return; }
+                if event.data["action"] == "visible" {
                     timeline.viewable.set(event.data["start"].as_u64().zip(event.data["end"].as_u64()).map(|(start,end)| (start as usize,end as usize)));
                 } else if event.data["action"] == "scroll" {
                     let now = agent_core::presentation::conversation::ScrollPosition {
@@ -676,12 +684,6 @@ fn handle(
 ) {
     let connection = surroundings.connection;
     let action = data["action"].as_str().unwrap_or_default();
-    if action == "copyText" {
-        if let Some(text) = data["text"].as_str() {
-            set_clipboard(text);
-        }
-        return;
-    }
     if action == "retryOpen" {
         if let Some(thread) = connection
             .context
@@ -850,6 +852,57 @@ enum Image {
     Loading,
     Ready(crate::shared::Shared<crate::client::LocalFile>, String),
     Failed(String),
+}
+
+fn attach_images(row: &mut Value, files: &Images) {
+    let sources = image_sources(row);
+    row["media"] = json!(
+        sources
+            .iter()
+            .filter_map(|source| match files.get(source) {
+                Some(Image::Ready(_, data)) => Some((source.clone(), data.clone())),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>()
+    );
+    row["document"]["mediaErrors"] = json!(
+        sources
+            .iter()
+            .filter_map(|source| match files.get(source) {
+                Some(Image::Failed(error)) => Some((source.clone(), error.clone())),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>()
+    );
+}
+
+fn media_action(data: &Value, files: Signal<Images>, retry: Signal<u64>) -> bool {
+    match data["action"].as_str() {
+        Some("copyText") => {
+            if let Some(text) = data["text"].as_str() {
+                set_clipboard(text);
+            }
+        }
+        Some("retryImage") => {
+            if let Some(source) = data["text"].as_str() {
+                files.update(|files| {
+                    files.remove(source);
+                });
+                retry.update(|serial| *serial = serial.wrapping_add(1));
+            }
+        }
+        #[cfg(desktop)]
+        Some("saveImage") => {
+            if let Some(source) = data["text"].as_str()
+                && let Some(Image::Ready(file, _)) =
+                    files.with_untracked(|files| files.get(source).cloned())
+            {
+                crate::media::save_image(file, None);
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 type Images = HashMap<String, Image>;
 

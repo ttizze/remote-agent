@@ -171,7 +171,7 @@ process.stdin.destroy();
                 .inner
                 .conversation
                 .storage
-                .history(&native, 0)
+                .history(&native, None)
                 .unwrap()
                 .thread
                 .turns
@@ -192,7 +192,7 @@ process.stdin.destroy();
         .inner
         .conversation
         .storage
-        .history(&native, 0)
+        .history(&native, None)
         .unwrap();
     let turns = response.thread.turns.unwrap();
     assert_eq!(turns.len(), 1);
@@ -277,7 +277,7 @@ async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_w
             .inner
             .conversation
             .storage
-            .history(&session, 0)
+            .history(&session, None)
             .unwrap();
         let turns = response.thread.turns.unwrap();
         assert_eq!(turns.len(), expected.len().max(1), "{scenario}");
@@ -330,7 +330,7 @@ fn assert_recorded_terminal(
         status => panic!("unhandled reference terminal status {status}"),
     }
     // turn_interrupt_mid_tool/*_output.ts: finishing a turn settles its tools.
-    let history = storage.history(session, 0).unwrap();
+    let history = storage.history(session, None).unwrap();
     let saved = history
         .thread
         .turns
@@ -550,7 +550,7 @@ fn assert_codex_projection(
     if !expected.is_empty() {
         assert_eq!(sessions.len(), 1, "{}", scenario);
         let session = sessions.first().unwrap();
-        let response = storage.history(session, 0).unwrap();
+        let response = storage.history(session, None).unwrap();
         let turns = response.thread.turns.unwrap();
         assert_eq!(turns.len(), expected.len(), "{}", scenario);
         for (turn, reply) in turns.iter().zip(expected) {
@@ -618,7 +618,7 @@ fn assert_codex_projection(
     }
     if scenario == "proposed_plan" {
         let session = sessions.first().unwrap();
-        let response = storage.history(session, 0).unwrap();
+        let response = storage.history(session, None).unwrap();
         let turns = response.thread.turns.unwrap();
         assert!(turns.iter().flat_map(|turn| turn.items.iter().flatten()).any(|item|
             matches!(item.body(), agent_protocol::items::ItemBody::Plan {text}
@@ -638,14 +638,19 @@ async fn assert_fork_prefix(storage: &Storage, owners: &Arc<Owners>, recording: 
         fork["frame"]["params"]["threadId"].as_str().unwrap().into(),
     )
     .unwrap();
-    let history = storage.history(&source, 0).unwrap();
+    let history = storage.history(&source, None).unwrap();
     let through = history.thread.turns.as_ref().unwrap()[0].id.clone();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     owners
         .fork(&source, target.clone(), through, 100)
         .await
         .unwrap();
-    let turns = storage.history(&target, 0).unwrap().thread.turns.unwrap();
+    let turns = storage
+        .history(&target, None)
+        .unwrap()
+        .thread
+        .turns
+        .unwrap();
     assert_eq!(turns.len(), 1);
     let texts = turns[0]
         .items

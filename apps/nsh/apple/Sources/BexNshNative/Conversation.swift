@@ -304,6 +304,7 @@ struct NativeConversationUpdate: Decodable {
         }
         retryOpen.title = update.opening?.retry ?? ""; retryOpen.isHidden = update.opening?.retry == nil
         latest.setAccessibilityLabel(update.latest)
+        latest.isEnabled = !update.latest.isEmpty
         needsLayout = true
         layoutSubtreeIfNeeded()
         apply()
@@ -437,7 +438,7 @@ struct NativeConversationUpdate: Decodable {
             send?(["action": "visible", "scope": scope, "start": visible.location, "end": NSMaxRange(visible)])
         }
         let remaining = table.bounds.height - scroll.documentVisibleRect.maxY
-        latest.isHidden = following || remaining < 48
+        latest.isHidden = !latest.isEnabled || following || remaining < 48
     }
 
     private func didScroll() {

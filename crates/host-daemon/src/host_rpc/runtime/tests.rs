@@ -107,7 +107,7 @@ async fn child_discovery_uses_the_public_parent_and_preserves_already_received_w
             .inner
             .conversation
             .storage
-            .history(&child, 0)
+            .history(&child, None)
             .unwrap();
         assert_eq!(before.thread.parent_id, Some(parent));
         assert_eq!(before.thread.can_accept_direct_input, Some(false));
@@ -127,7 +127,7 @@ async fn child_discovery_uses_the_public_parent_and_preserves_already_received_w
             .inner
             .conversation
             .storage
-            .history(&child, 0)
+            .history(&child, None)
             .unwrap();
         assert_eq!(after.thread.turns, before.thread.turns);
         assert_eq!(after.thread.parent_id, before.thread.parent_id);
@@ -994,7 +994,7 @@ async fn native_reply_before_submit_ack_commits_one_turn_and_replay_never_sends_
         .inner
         .conversation
         .storage
-        .history(&target, 0)
+        .history(&target, None)
         .unwrap();
     let turns = stored.thread.turns.unwrap();
     assert_eq!(turns.len(), 1);
@@ -1019,7 +1019,7 @@ async fn completed(
                 .inner
                 .conversation
                 .storage
-                .history(target, 0)
+                .history(target, None)
                 .unwrap();
             if history.thread.turns.as_ref().is_some_and(|turns| {
                 turns.len() == count
@@ -1115,7 +1115,7 @@ async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resour
         vec!["compaction boundary".into()],
     ));
     reimported(&service, &target, HistoryReadKind::Incomplete).await;
-    let original = storage.history(&target, 0).unwrap();
+    let original = storage.history(&target, None).unwrap();
     let through = original.thread.turns.as_ref().unwrap()[0].id.clone();
     let mut sources = std::collections::HashSet::new();
     for _ in 0..2 {
@@ -1251,7 +1251,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         .inner
         .conversation
         .storage
-        .history(&target, 0)
+        .history(&target, None)
         .unwrap();
     assert_eq!(
         unchanged.thread.turns, initial.thread.turns,
@@ -1264,7 +1264,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     tokio::time::advance(std::time::Duration::from_millis(400)).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
+            let saved = service.inner.conversation.storage.history(&target, None).unwrap();
             if matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with(" 一文。\n\n")) { break; }
             tokio::task::yield_now().await;
         }
@@ -1273,7 +1273,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         .inner
         .conversation
         .storage
-        .history(&target, 0)
+        .history(&target, None)
         .unwrap()
         .thread
         .turns;
@@ -1287,7 +1287,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
             .inner
             .conversation
             .storage
-            .history(&target, 0)
+            .history(&target, None)
             .unwrap()
             .thread
             .turns,
@@ -1302,7 +1302,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
             .inner
             .conversation
             .storage
-            .history(&target, 0)
+            .history(&target, None)
             .unwrap()
             .thread
             .turns,
@@ -1312,7 +1312,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     tokio::time::advance(std::time::Duration::from_millis(799)).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
+            let saved = service.inner.conversation.storage.history(&target, None).unwrap();
             if matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with("unfinished suffix more")) { break; }
             tokio::task::yield_now().await;
         }
@@ -1321,7 +1321,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         .inner
         .conversation
         .storage
-        .history(&target, 0)
+        .history(&target, None)
         .unwrap()
         .thread
         .turns;
@@ -1336,7 +1336,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
             .inner
             .conversation
             .storage
-            .history(&target, 0)
+            .history(&target, None)
             .unwrap()
             .thread
             .turns,
@@ -1408,7 +1408,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     tokio::time::advance(std::time::Duration::from_millis(800)).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
+            let saved = service.inner.conversation.storage.history(&target, None).unwrap();
             if saved.thread.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten())
                 .any(|item| matches!(item.body(), ItemBody::Reasoning { summary, .. } if summary == &["A\n\nB"])) { break; }
             changes.changed().await.unwrap();
@@ -1438,7 +1438,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         .inner
         .conversation
         .storage
-        .history(&target, 0)
+        .history(&target, None)
         .unwrap();
     assert!(
         matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with(" paragraph\n\n final pending")),
@@ -1667,7 +1667,7 @@ async fn explicit_native_imports_append_missing_text_and_keep_settled_messages()
             // Unrelated stream commits cannot prove this import has settled.
             let pending:bool=database.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE lane=?1)",[format!("import:{target}")],|row|row.get(0)).unwrap();
             if !pending {
-                let history=storage.history(&target,0).unwrap();
+                let history=storage.history(&target, None).unwrap();
                 let turns=history.thread.turns.unwrap();
                 assert!(matches!(turns.last().unwrap().items.as_ref().unwrap()[0].body(), ItemBody::AssistantText { text, .. } if text == "external answer"));
                 assert_eq!(turns.len(), 2);
@@ -2043,7 +2043,7 @@ async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_anot
         .inner
         .conversation
         .storage
-        .history(&target, 0)
+        .history(&target, None)
         .unwrap();
     let native_turn = service
         .inner
@@ -2140,7 +2140,7 @@ async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_anot
             .inner
             .conversation
             .storage
-            .history(&target, 0)
+            .history(&target, None)
             .unwrap(),
         before
     );

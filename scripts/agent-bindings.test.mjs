@@ -76,9 +76,7 @@ test('iOS uses its target archive and reuses Swift outputs across invocation pat
     await t.test(platform, (t) => {
       const build = fixture(t);
       const output = join(build.target, triple, 'release');
-      const regular = build.run('scripts/build-agent-ios.sh', [platform]);
-      assert.equal(regular.status, 0, regular.stderr);
-      const first = regular;
+      const first = build.run('scripts/build-agent-ios.sh', [platform]);
       assert.equal(first.status, 0, first.stderr);
       const builds = first.commands.filter(command => command.name === 'cargo' && ['build', 'rustc'].includes(command.args[0]));
       assert.equal(builds.length, 1);
@@ -94,7 +92,7 @@ test('iOS uses its target archive and reuses Swift outputs across invocation pat
       assert.ok(!repeated.commands.some(command => command.name === 'xcrun' && command.args.includes('-emit-library')));
       const retired = join(build.target, 'agent-bindings/retired.swift');
       writeFileSync(retired, 'retired');
-      const changed = build.run('scripts/build-agent-ios.sh', [platform], { ...preview, BINDINGS_SCHEMA: 'changed schema' });
+      const changed = build.run('scripts/build-agent-ios.sh', [platform], { BINDINGS_SCHEMA: 'changed schema' });
       assert.equal(changed.status, 0, changed.stderr);
       assert.ok(changed.commands.some(command => command.name === 'xcrun' && command.args.includes('-emit-library')));
       assert.ok(!existsSync(retired));

@@ -292,7 +292,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         .inner
         .conversation
         .storage
-        .history(&opened, 0)
+        .history(&opened, None)
         .unwrap()
         .thread;
     assert_eq!(reopened.workspace_setup, Some(running));
@@ -305,7 +305,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         .inner
         .conversation
         .storage
-        .history(&opened, 0)
+        .history(&opened, None)
         .unwrap()
         .thread;
     assert!(row.preparations.is_empty());
@@ -581,7 +581,7 @@ async fn local_base_skips_fetch_and_root_selection_overrides_automatic_worktrees
             .inner
             .conversation
             .storage
-            .history(&opened, 0)
+            .history(&opened, None)
             .unwrap()
             .thread;
         if root {
@@ -876,7 +876,7 @@ async fn work_locally_cancels_setup_and_continues_the_same_input_at_the_project_
             .inner
             .conversation
             .storage
-            .history(&opened, 0)
+            .history(&opened, None)
             .unwrap()
             .thread;
         assert_eq!(
@@ -934,7 +934,7 @@ async fn automatic_workspace_preference_selects_the_initial_checkout() {
                 .inner
                 .conversation
                 .storage
-                .history(&id, 0)
+                .history(&id, None)
                 .unwrap()
                 .thread
                 .id

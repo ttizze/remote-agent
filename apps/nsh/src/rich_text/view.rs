@@ -17,8 +17,30 @@ pub(crate) fn message(
     kind: impl Fn() -> Kind + Copy + 'static,
     max_width: impl Fn() -> f32 + Copy + 'static,
 ) -> View {
-    let parts = super::message_parts(surroundings, source);
+    let parts = super::message_parts(
+        surroundings,
+        source,
+        agent_core::presentation::markdown::workspace_markdown_blocks,
+    );
     render_parts(surroundings, move || parts.get(), kind, max_width)
+}
+
+/// The Markdown file at the Host path `path`, rendered as a response is.
+pub(crate) fn file(
+    surroundings: Surroundings,
+    path: String,
+    source: impl Fn() -> Option<String> + 'static,
+    max_width: impl Fn() -> f32 + Copy + 'static,
+) -> View {
+    let parts = super::message_parts(surroundings, source, move |source, cwd, home| {
+        agent_core::presentation::files::file_markdown_blocks(&source, &path, cwd, home)
+    });
+    render_parts(
+        surroundings,
+        move || parts.get(),
+        || Kind::Response,
+        max_width,
+    )
 }
 
 pub(crate) fn content(

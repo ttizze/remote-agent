@@ -597,11 +597,17 @@ impl Storage {
     pub(in crate::host_rpc) fn history(
         &self,
         id: &SessionRef,
-        after: u64,
+        context_after: Option<u64>,
     ) -> Result<ThreadResponse, String> {
         let message = self.with(|connection| {
             let transaction = connection.transaction().map_err(failure)?;
             let key = thread_key(&transaction, id)?;
+            // Display reads retain the full transcript. AI reads select their
+            // boundary in this same snapshot, including after body hydration.
+            let after = match context_after {
+                Some(after) => after.max(rows::header(&transaction, key)?.0.state.context_start),
+                None => 0,
+            };
             let window = Window {
                 turn: if after == 0 {
                     0

@@ -190,7 +190,11 @@ impl NativeComponent for Conversation {
         state.lane = value["lane"].as_f64().unwrap_or(736.0) as f32;
         state.padding = value["padding"].as_f64().unwrap_or(24.0) as f32;
         state.latest = None;
-        if value["following"] == false {
+        if value["following"] == false
+            && value["latest"]
+                .as_str()
+                .is_some_and(|label| !label.is_empty())
+        {
             let data = json!({"id":"native.latest"});
             state.latest = Some(Item::new(
                 control::Descriptor::Button(

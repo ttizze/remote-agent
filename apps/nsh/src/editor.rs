@@ -6,10 +6,15 @@ use crate::{
     ui::{self, Enabled, Icon, colors},
 };
 use agent_core::{
-    presentation::files::{file_edit_prompt, file_line_start_utf16},
+    presentation::files::{
+        FileRendering, file_edit_prompt, file_line_start_utf16, file_rendered, file_rendering,
+        mermaid_file_markdown,
+    },
     state::{Intent, operations as op},
 };
 use nsh_core::{element::input, prelude::*};
+
+mod table;
 
 pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
     let connection = use_context::<Connection>().unwrap();
@@ -40,15 +45,62 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
     let field = element_ref();
     let composing = signal(false);
     let laid_out = signal(false);
+    let surroundings = crate::rich_text::Surroundings::current();
+    let offered = file_rendering(&path.get());
+    let preferences = computed(move || connection.state.with(|state| state.file_rendering));
+    // The opening whose line the reader left for the rendering, as T3 Code's
+    // handled reveal.
+    let line_left = signal(None::<u64>);
+    let shown = computed(move || {
+        file_rendered(
+            &path.get(),
+            preferences.get(),
+            target.with(|target| target.line_request),
+            line_left.get(),
+        )
+    });
+    let rendered = computed(move || shown.get().is_some());
+    // T3 Code's toggle: pressed, with the source's glyph, while the rendering shows.
+    let rendering_toggle = offered.map(|rendering| {
+        let (glyph, show, hide) = match rendering {
+            FileRendering::Markdown => (
+                Icon::EYE,
+                tr("Markdownをレンダリング表示"),
+                tr("Markdownのソースを表示"),
+            ),
+            FileRendering::Mermaid => (Icon::EYE, tr("図を表示"), tr("Mermaidのソースを表示")),
+            FileRendering::Table => (Icon::TABLE, tr("表を表示"), tr("ソースを表示")),
+        };
+        ui::toggle_with(
+            view()
+                .child(when(rendered, || ui::icon(Icon::CODE, 16.0)))
+                .child(when(move || !rendered.get(), move || ui::icon(glyph, 16.0))),
+            move || SharedString::from(if rendered.get() { hide } else { show }),
+            move || rendered.get(),
+            move || {
+                let next = !rendered.get_untracked();
+                line_left.set(
+                    target
+                        .with_untracked(|target| target.line_request)
+                        .filter(|_| next),
+                );
+                let preferences = preferences.get_untracked().with(rendering, next);
+                connection
+                    .application
+                    .with(|application| application.set_file_rendering(preferences));
+            },
+        )
+    });
+    let contents = computed(move || controls.with(|controls| controls.text.clone()));
     let position = computed(move || {
         (
-            target.with(|target| target.line),
+            target.with(|target| (target.line, target.line_request)),
             controls.with(|controls| controls.loaded_revision.clone()),
             laid_out.get(),
         )
     });
     effect(move || {
-        if let (Some(line), Some(_), true) = position.get() {
+        if let ((Some(line), _), Some(_), true) = position.get() {
             let offset = file_line_start_utf16(
                 controls.with_untracked(|controls| controls.text.clone()),
                 line,
@@ -130,6 +182,7 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                 .child(
                     ui::icon_button(Icon::REFRESH, tr("再読込"), reload).enabled(move || !busy()),
                 )
+                .child(rendering_toggle)
                 .child(ui::icon_button(
                     Icon::SHARE,
                     tr("プレビュー・共有"),
@@ -163,49 +216,97 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
             move || controls.with(|controls| controls.truncated),
             || notice(tr("file.preview.truncated")),
         ))
-        .child(
-            input()
-                .px_3()
-                .py_2()
-                .multiline(true)
-                .submit_behavior(SubmitBehavior::Newline)
-                .readonly(move || controls.with(|controls| !controls.can_edit))
-                .on_layout(
-                    move |_: &nsh_core::geometry::Bounds<nsh_core::geometry::Points>| {
-                        laid_out.set(true)
-                    },
-                )
-                .value(move || controls.with(|controls| controls.text.clone()))
-                .on_change(move |text: &str| {
-                    connection.client.with(|client| {
-                        client.dispatch(
-                            &host.get(),
-                            None,
-                            Intent::SetFileDraft {
-                                path: path.get(),
-                                text: text.into(),
-                            },
+        .child(when(
+            move || shown.get() == Some(FileRendering::Markdown),
+            move || crate::conversation::native::document(
+                surroundings,
+                path.get(),
+                move || Some(contents.get()),
+                move |source, cwd, home| agent_core::presentation::files::file_markdown_blocks(&source, &path.get(), cwd, home),
+                896.0,
+            ),
+        ))
+        .child(when(
+            move || shown.get() == Some(FileRendering::Mermaid),
+            move || {
+                let diagram = computed(move || contents.with(|text| mermaid_file_markdown(text)));
+                view().flex_1().min_h_0()
+                    .child(when(move || diagram.with(Option::is_none), || {
+                        text(tr("この図にはリソースのURL、マークアップ、ノードのメタデータ、または独自の設定が含まれています。安全に確認するにはMermaidのソースを表示してください。"))
+                            .text_size(px(12.0)).text_color(colors::muted())
+                    }))
+                    .child(crate::conversation::native::document(
+                        surroundings, path.get(), move || diagram.get(),
+                        agent_core::presentation::markdown::workspace_markdown_blocks, 10_000.0,
+                    ))
+            },
+        ))
+        .child(when(
+            move || shown.get() == Some(FileRendering::Table),
+            move || table::screen(path, move || contents.get()),
+        ))
+        .child(when(
+            move || !rendered.get(),
+            move || {
+                // The field goes whenever a rendering shows: the next one made
+                // shows the link's line again once it is laid out, and a
+                // composition does not outlive the field it was in.
+                cleanup(move || {
+                    // The panel's own signals may go first when it closes.
+                    laid_out.try_set(false);
+                    composing.try_set(false);
+                });
+                input()
+                    .px_3()
+                    .py_2()
+                    .multiline(true)
+                    .submit_behavior(SubmitBehavior::Newline)
+                    .readonly(move || controls.with(|controls| !controls.can_edit))
+                    .on_layout(
+                        move |_: &nsh_core::geometry::Bounds<nsh_core::geometry::Points>| {
+                            laid_out.set(true)
+                        },
+                    )
+                    .value(move || controls.with(|controls| controls.text.clone()))
+                    .on_change(move |text: &str| {
+                        connection.client.with(|client| {
+                            client.dispatch(
+                                &host.get(),
+                                None,
+                                Intent::SetFileDraft {
+                                    path: path.get(),
+                                    text: text.into(),
+                                },
+                            )
+                        })
+                    })
+                    .on_composition_change(move |event: &Composition| {
+                        composing.set(event.composing)
+                    })
+                    .auto_correct(false)
+                    .auto_capitalize(AutoCapitalize::None)
+                    // VoiceOver names the text by its file, as the header shows it.
+                    .label({
+                        let path = path.get();
+                        std::path::Path::new(&path).file_name().map_or_else(
+                            || path.clone(),
+                            |name| name.to_string_lossy().into_owned(),
                         )
                     })
-                })
-                .on_composition_change(move |event: &Composition| composing.set(event.composing))
-                .auto_correct(false)
-                .auto_capitalize(AutoCapitalize::None)
-                // VoiceOver names the text by its file, as the header shows it.
-                .label({
-                    let path = path.get();
-                    std::path::Path::new(&path)
-                        .file_name()
-                        .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned())
-                })
-                .font_family(SharedString::from("monospace"))
-                .text_size(if is_desktop() { px(14.0) } else { px(17.0) })
-                .text_color(move || nsh_base::theme().foreground)
-                .element_ref(&field)
-                .flex_1()
-                .min_h_0()
-                .w_full(),
-        )
+                    .font_family(SharedString::from("monospace"))
+                    .text_size(if is_desktop() { px(14.0) } else { px(17.0) })
+                    .text_color(move || nsh_base::theme().foreground)
+                    .element_ref(&field)
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+            },
+        ))
+        .map(|screen| {
+            #[cfg(desktop)]
+            let screen = screen.child(surroundings.selection_bar());
+            screen
+        })
 }
 
 pub(crate) fn editors() -> impl Element {

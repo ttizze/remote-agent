@@ -683,7 +683,7 @@ mod tests {
         service.resume_after_update(directory.path()).await.unwrap();
         assert_eq!(
             storage
-                .history(&target, 0)
+                .history(&target, None)
                 .unwrap()
                 .thread
                 .turns
