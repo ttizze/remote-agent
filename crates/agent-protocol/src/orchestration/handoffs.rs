@@ -274,3 +274,66 @@ pub fn distinct_model_selections<'a>(
     }
     models
 }
+
+/// Provider switches, portable forks and native recovery share these transfer
+/// records. The writer supplies source points and the actual message actor.
+pub fn provider_transfer(
+    handoff: &ContextHandoff,
+    source_point: ContextSourcePoint,
+    base_point: Option<ContextSourcePoint>,
+    source_provider_instance_id: Option<String>,
+    target_provider_instance_id: &str,
+    created_by: Actor,
+    fork: Option<&ContextTransfer>,
+    recovery: bool,
+    now: &str,
+) -> Option<Change> {
+    let id = handoff.transfer_id.clone()?;
+    let resolution = if handoff.strategy == HandoffStrategy::DeltaSinceTargetLastSeen {
+        ContextTransferResolution::DeltaContext {
+            context_handoff_id: handoff.id.clone(),
+        }
+    } else {
+        ContextTransferResolution::PortableContext {
+            context_handoff_id: handoff.id.clone(),
+        }
+    };
+    if let Some(fork) = fork {
+        return Some(Change::ContextTransfer(ContextTransfer {
+            target_provider_instance_id: Some(target_provider_instance_id.into()),
+            target_run_id: Some(handoff.target_run_id.clone()),
+            status: TransferStatus::ResolvedPortable,
+            resolution: Some(resolution),
+            error: None,
+            updated_at: now.into(),
+            ..fork.clone()
+        }));
+    }
+    let transfer = ContextTransfer {
+        id,
+        kind: TransferType::ProviderHandoff,
+        source_thread_id: source_point.thread_id.clone(),
+        target_thread_id: handoff.thread_id.clone(),
+        source_point,
+        base_point,
+        source_provider_instance_id,
+        target_provider_instance_id: Some(target_provider_instance_id.into()),
+        target_run_id: Some(handoff.target_run_id.clone()),
+        status: if recovery {
+            TransferStatus::ResolvedPortable
+        } else {
+            TransferStatus::Consumed
+        },
+        resolution: Some(resolution),
+        created_by: if recovery { Actor::System } else { created_by },
+        error: None,
+        created_at: now.into(),
+        updated_at: now.into(),
+        consumed_at: (!recovery).then(|| now.into()),
+    };
+    Some(if recovery {
+        Change::ContextTransfer(transfer)
+    } else {
+        Change::ContextTransferCreated(transfer)
+    })
+}

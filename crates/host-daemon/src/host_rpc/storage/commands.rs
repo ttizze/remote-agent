@@ -164,37 +164,69 @@ pub(super) fn append_decision(
     let seed = command_id
         .map(str::to_owned)
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let starts: Vec<_> = decision
+        .effects
+        .iter()
+        .filter(|effect| {
+            effect.status == model::EffectStatus::Pending && !state.effects.contains_key(&effect.id)
+        })
+        .filter_map(|effect| match &effect.request {
+            model::EffectRequest::ProviderTurnStart { run_id } => Some(run_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let (users,mut changes):(Vec<_>,Vec<_>)=decision.changes.into_iter().partition(|change|matches!(change,model::Change::TurnItem(item) if matches!(item.body,model::TurnItemBody::UserMessage {..}) && item.run_id.as_ref().is_some_and(|id|starts.contains(id))));
     let mut events = Vec::new();
-    for (index, change) in decision.changes.into_iter().enumerate() {
-        let event = model::Event {
-            id: Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("event:{seed}:{index}").as_bytes(),
-            )
-            .to_string(),
-            thread_id: state.thread.id.clone(),
-            run_id: None,
-            node_id: None,
-            driver: None,
-            provider_instance_id: None,
-            raw_event_id: None,
-            occurred_at: now.into(),
-            change,
-        };
-        let ordinal = if let model::Change::TurnItem(item) = &event.change {
-            item.run_id
-                .as_ref()
-                .map(|id| ordinals.get(id).copied().ok_or("item run is missing"))
-                .transpose()?
-        } else {
-            None
-        };
-        events.push(event_store::append(
-            transaction,
-            &event,
-            command_id,
-            ordinal,
-        )?);
+    // Write source observations first. Plan against those same uncommitted
+    // rows, then emit the handoff before the newly starting user's item.
+    for phase in 0..2 {
+        for change in changes.drain(..) {
+            let index = events.len();
+            let event = model::Event {
+                id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("event:{seed}:{index}").as_bytes(),
+                )
+                .to_string(),
+                thread_id: state.thread.id.clone(),
+                run_id: None,
+                node_id: None,
+                driver: None,
+                provider_instance_id: None,
+                raw_event_id: None,
+                occurred_at: now.into(),
+                change,
+            };
+            let ordinal = if let model::Change::TurnItem(item) = &event.change {
+                item.run_id
+                    .as_ref()
+                    .map(|id| ordinals.get(id).copied().ok_or("item run is missing"))
+                    .transpose()?
+            } else {
+                None
+            };
+            events.push(event_store::append(
+                transaction,
+                &event,
+                command_id,
+                ordinal,
+            )?);
+        }
+        if phase == 0 && !starts.is_empty() {
+            let mut current = projections::load(transaction, &state.thread.id, &[])?;
+            for change in &users {
+                if let model::Change::TurnItem(item) = change {
+                    current.turn_items.insert(item.id.clone(), item.clone());
+                }
+            }
+            changes.extend(super::handoffs::prepare_admission(
+                transaction,
+                &current,
+                &starts,
+                now,
+            )?);
+            changes.extend(users.iter().cloned());
+        }
     }
     for effect in decision.effects {
         if effect.thread_id != state.thread.id {

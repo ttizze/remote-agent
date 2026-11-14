@@ -251,8 +251,11 @@ pub fn admit(
             created_at: context.now.into(),
             updated_at: context.now.into(),
         });
-    if fork.is_some() {
-        provider_thread.forked_from = input.fork_origin.clone();
+    if let Some(fork) = fork {
+        provider_thread.forked_from = input.fork_origin.clone().filter(|_| {
+            fork.source_provider_instance_id.as_deref()
+                == Some(input.model_selection.instance_id.as_str())
+        });
     }
     let root_id = id(&run_id, "root-node");
     let attempt_id = id(&run_id, "attempt:1");

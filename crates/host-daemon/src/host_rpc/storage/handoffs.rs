@@ -70,7 +70,7 @@ impl Storage {
                 })
             {
                 changes.extend(prepare(
-                    &tx, &state, run, thread, pending, fresh, recovery, now,
+                    &tx, &state, run, thread, pending, fresh, now,
                 )?);
             }
             let mut decision = model::Decision {changes,effects:Vec::new()};
@@ -79,7 +79,7 @@ impl Storage {
                 if pending_handoffs(&candidate.context_handoffs,&thread.id,native).next().is_some() {
                 let budget=context_budget(&tx,&candidate,run,thread,Some(native))?;
                 if matches!(select_context(&tx,&candidate.context_handoffs,&thread.id,native,budget,recovery)?,ContextPlan::InsufficientBudget) {
-                    let replacement=prepare(&tx,&candidate,run,&candidate.provider_threads[&thread.id],None,true,recovery,now)?;
+                    let replacement=prepare(&tx,&candidate,run,&candidate.provider_threads[&thread.id],None,true,now)?;
                     let restored=candidate.apply(&model::Decision {changes:replacement.clone(),effects:Vec::new()});
                     let budget=context_budget(&tx,&restored,run,thread,None)?;
                     if matches!(select_context(&tx,&restored.context_handoffs,&thread.id,"",budget,recovery)?,ContextPlan::Deliver(..)) {
@@ -224,7 +224,6 @@ fn prepare(
     thread: &model::ProviderThread,
     fork: Option<&model::ContextTransfer>,
     fresh: bool,
-    recovery: &str,
     now: &str,
 ) -> Result<Vec<model::Change>, String> {
     let fork_source = fork
@@ -251,7 +250,7 @@ fn prepare(
         return Ok(Vec::new());
     }
     let through = latest.map_or(0, |source| source.ordinal);
-    let after = if fork.is_some() || fresh {
+    let after = if fork.is_some() || fresh || thread.native_thread_ref.is_none() {
         0
     } else {
         source
@@ -300,7 +299,7 @@ fn prepare(
         }
     };
     let coverage = format!(
-        "Provider context handoff. Thread: {}. Covered app runs: {}-{}.\nSource item range: {} through {}.\nRecover omitted history only when the request needs it.\n{recovery}",
+        "Provider context handoff. Thread: {}. Covered app runs: {}-{}.\nSource item range: {} through {}.\nRecover omitted history only when the request needs it. Items included below need no read.",
         source.thread.id,
         covered.from,
         covered.to,
@@ -338,6 +337,7 @@ fn prepare(
             .filter(|candidate| {
                 candidate.ordinal < run.ordinal
                     && candidate.provider_thread_id.as_ref() == Some(&thread.id)
+                    && candidate.started_at.is_some()
             })
             .max_by_key(|run| run.ordinal)
             .into_iter()
@@ -358,12 +358,16 @@ fn prepare(
     };
     let from_models =
         history::distinct_model_selections(source_runs.iter().map(|run| &run.model_selection));
-    let from_providers = source_runs
-        .iter()
-        .map(|run| run.provider_instance_id.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let from_providers = if fresh {
+        vec![thread.provider_instance_id.clone()]
+    } else {
+        source_runs
+            .iter()
+            .map(|run| run.provider_instance_id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
     let strategy = if legacy_import {
         model::HandoffStrategy::ManualContext
     } else if after == 0 {
@@ -398,15 +402,52 @@ fn prepare(
         created_at: now.into(),
         updated_at: now.into(),
     };
-    let resolution = if after == 0 {
-        model::ContextTransferResolution::PortableContext {
-            context_handoff_id: id.clone(),
-        }
-    } else {
-        model::ContextTransferResolution::DeltaContext {
-            context_handoff_id: id.clone(),
-        }
-    };
+    if fork.is_some() && latest.is_none() {
+        return Err("fork context source run is missing".into());
+    }
+    let actor = state
+        .turn_items
+        .values()
+        .find_map(|item| match &item.body {
+            model::TurnItemBody::UserMessage {
+                message_id,
+                created_by,
+                ..
+            } if message_id == &run.user_message_id => Some(*created_by),
+            _ => None,
+        })
+        .ok_or("context target input is missing")?;
+    let point = latest
+        .filter(|_| !fresh)
+        .map(|run| source.context_source_point(run))
+        .unwrap_or(model::ContextSourcePoint {
+            thread_id: source.thread.id.clone(),
+            run_id: None,
+            checkpoint_id: None,
+            turn_item_id: None,
+            provider_thread_ref: None,
+            provider_turn_ref: None,
+        });
+    let base = source
+        .runs
+        .values()
+        .find(|run| run.ordinal == after)
+        .map(|run| source.context_source_point(run));
+    let transfer = history::provider_transfer(
+        &handoff,
+        point,
+        base,
+        if fresh {
+            Some(thread.provider_instance_id.clone())
+        } else {
+            latest.map(|run| run.provider_instance_id.clone())
+        },
+        &run.provider_instance_id,
+        actor,
+        fork,
+        fresh,
+        now,
+    );
     let mut handoff_ids = thread.handoff_ids.clone();
     if !handoff_ids.contains(&id) {
         handoff_ids.push(id.clone());
@@ -467,7 +508,11 @@ fn prepare(
             } else {
                 thread.native_thread_ref.clone()
             },
-            forked_from: None,
+            forked_from: if fork.is_some() {
+                None
+            } else {
+                thread.forked_from.clone()
+            },
             handoff_ids,
             updated_at: now.into(),
             ..thread.clone()
@@ -481,58 +526,7 @@ fn prepare(
             ..run.clone()
         }));
     }
-    let Some(transfer_id) = transfer_id else {
-        return Ok(changes);
-    };
-    let mut transfer = fork.cloned().unwrap_or(model::ContextTransfer {
-        id: transfer_id,
-        kind: model::TransferType::ProviderHandoff,
-        source_thread_id: source.thread.id.clone(),
-        target_thread_id: state.thread.id.clone(),
-        source_point: model::ContextSourcePoint {
-            thread_id: source.thread.id.clone(),
-            run_id: None,
-            checkpoint_id: None,
-            turn_item_id: None,
-            provider_thread_ref: None,
-            provider_turn_ref: None,
-        },
-        base_point: None,
-        source_provider_instance_id: Some(thread.provider_instance_id.clone()),
-        target_provider_instance_id: None,
-        target_run_id: None,
-        status: model::TransferStatus::ResolvedPortable,
-        resolution: None,
-        created_by: model::Actor::System,
-        error: None,
-        created_at: now.into(),
-        updated_at: now.into(),
-        consumed_at: None,
-    });
-    transfer.target_provider_instance_id = Some(run.provider_instance_id.clone());
-    transfer.target_run_id = Some(run.id.clone());
-    transfer.status = model::TransferStatus::ResolvedPortable;
-    transfer.resolution = Some(resolution);
-    transfer.error = None;
-    transfer.updated_at = now.into();
-    if fork.is_none() && !fresh {
-        transfer.source_point =
-            source.context_source_point(latest.ok_or("provider handoff source run is missing")?);
-        transfer.base_point = source
-            .runs
-            .values()
-            .find(|run| run.ordinal == after)
-            .map(|run| source.context_source_point(run));
-        transfer.source_provider_instance_id = latest.map(|run| run.provider_instance_id.clone());
-        transfer.status = model::TransferStatus::Consumed;
-        transfer.created_by = model::Actor::User;
-        transfer.consumed_at = Some(now.into());
-    }
-    changes.push(if fork.is_some() || fresh {
-        model::Change::ContextTransfer(transfer)
-    } else {
-        model::Change::ContextTransferCreated(transfer)
-    });
+    changes.extend(transfer);
     Ok(changes)
 }
 
@@ -736,7 +730,10 @@ fn select_context(
             messages.push(message);
         }
     }
-    let mut coverage = coverage.join("\n");
+    let mut coverage = format!(
+        "{}\nRead omitted history on this Host with the BEX history command below.\n{recovery}",
+        coverage.join("\n")
+    );
     if history::history_cost(&[], &coverage) > 4_000.min(budget / 2) {
         coverage = format!(
             "Context handoff. {} records; detailed coverage references omitted. Recover an omitted item only when the request needs it.\n{recovery}",
@@ -750,4 +747,47 @@ fn select_context(
             Err(_) => ContextPlan::InsufficientBudget,
         },
     )
+}
+
+/// Plan only newly admitted starts. Canonical native-fork provenance records
+/// the capability decision made by admission; queued activation reuses it.
+/// Source availability is rechecked under the same writer transaction.
+pub(super) fn prepare_admission(
+    connection: &Connection,
+    state: &model::State,
+    run_ids: &[String],
+    now: &str,
+) -> Result<Vec<model::Change>, String> {
+    let mut changes = Vec::new();
+    for id in run_ids {
+        let run = state.runs.get(id).ok_or("context start run is missing")?;
+        let mut thread = run
+            .provider_thread_id
+            .as_ref()
+            .and_then(|id| state.provider_threads.get(id))
+            .ok_or("context provider thread is missing")?
+            .clone();
+        if state.context_handoffs.values().any(|handoff| {
+            handoff.target_run_id == run.id && handoff.to_provider_thread_id == thread.id
+        }) {
+            continue;
+        }
+        let fork = state
+            .unconsumed_fork()
+            .filter(|transfer| transfer.target_run_id.as_ref() == Some(&run.id));
+        if fork.is_some() {
+            let native = thread.forked_from.is_some()
+                && fork.is_some_and(|transfer| {
+                    transfer.source_provider_instance_id.as_deref()
+                        == Some(run.provider_instance_id.as_str())
+                })
+                && super::forks::native_origin(connection, state)?.is_some();
+            if native {
+                continue;
+            }
+            thread.forked_from = None;
+        }
+        changes.extend(prepare(connection, state, run, &thread, fork, false, now)?);
+    }
+    Ok(changes)
 }

@@ -397,7 +397,17 @@ impl Runtime {
             reload |= current.needs_reload || current.response.thread.cwd.as_deref() != Some(&cwd);
             SessionRef::new(provider, id.clone()).map_err(|error| storage_failure(error.into()))?
         } else {
-            let response = if let Some(origin) = &thread.forked_from {
+            let response = if let Some(origin) = thread.forked_from.as_ref().filter(|_| {
+                !state.context_handoffs.values().any(|handoff| {
+                    handoff.to_provider_thread_id == thread.id
+                        && handoff.status == model::HandoffStatus::Ready
+                        && matches!(
+                            handoff.strategy,
+                            model::HandoffStrategy::FullThreadSummary
+                                | model::HandoffStrategy::ManualContext
+                        )
+                })
+            }) {
                 let (source_ref, turn_ref) = runtime
                     .storage
                     .native_fork_source(origin)
