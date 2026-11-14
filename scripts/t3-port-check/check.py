@@ -33,9 +33,17 @@ if "Summary" not in result.stdout or not GUARDS.issubset(passed):
     sys.exit(1)
 missing = SCORED - passed
 remaining = [] if HOLDOUT else [path for path in CASES["obsolete_files"] if (ROOT / path).exists()]
+obsolete_symbols = [] if HOLDOUT else [
+    f"{rule['path']}: {rule['name']}"
+    for rule in CASES["obsolete_symbols"]
+    if (ROOT / rule["path"]).exists()
+    and re.search(rule["pattern"], (ROOT / rule["path"]).read_text())
+]
 for crate, name in sorted(missing):
     print(f"scenario did not pass: {crate} {name}")
 for path in remaining:
     print(f"obsolete implementation remains: {path}")
+for symbol in obsolete_symbols:
+    print(f"obsolete contract remains: {symbol}")
 print(f"Passed {len(SCORED & passed)}/{len(SCORED)} scenarios; {len(GUARDS)} guards")
-print(len(missing) + len(remaining))
+print(len(missing) + len(remaining) + len(obsolete_symbols))

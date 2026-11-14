@@ -2,17 +2,33 @@
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
     "host-daemon": [
-      "host_rpc::runtime::t3_contract::created_and_renamed_threads_are_shared_as_t3_shells",
-      "host_rpc::runtime::t3_contract::switching_providers_carries_prior_history_without_duplicate_input",
       "host_rpc::runtime::t3_contract::a_fork_keeps_the_selected_prefix_and_independent_native_resources",
+      "host_rpc::runtime::t3_contract::a_native_child_has_canonical_subagent_lineage_and_an_execution_node",
       "host_rpc::runtime::t3_contract::an_empty_launch_honors_the_selected_existing_worktree_without_sending_input",
+      "host_rpc::runtime::t3_contract::an_empty_worktree_launch_prepares_a_checkout_without_creating_a_run",
+      "host_rpc::runtime::t3_contract::created_and_renamed_threads_are_shared_as_t3_shells",
+      "host_rpc::runtime::t3_contract::foreground_completion_preserves_a_background_command_and_accepts_its_late_result",
+      "host_rpc::runtime::t3_contract::generated_images_survive_as_assistant_attachments_without_storing_host_paths",
+      "host_rpc::runtime::t3_contract::importing_a_discovered_project_lists_its_existing_native_conversations",
+      "host_rpc::runtime::t3_contract::provider_stop_settles_the_owned_run_and_preserves_the_conversation",
+      "host_rpc::runtime::t3_contract::refreshed_native_catalog_is_visible_as_a_canonical_thread_without_inventing_a_run",
+      "host_rpc::runtime::t3_contract::rewind_continues_from_the_retained_native_head_in_an_independent_thread",
+      "host_rpc::runtime::t3_contract::switching_providers_carries_prior_history_without_duplicate_input",
+      "host_rpc::runtime::t3_contract::update_restart_continues_the_same_conversation_once_without_repeating_user_input",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_1",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_2",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_3",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_4",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_5",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_6",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_7"
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_7",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_8",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_9",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_10",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_11",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_12",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_13",
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_14"
     ]
   },
   "guards": {
@@ -189,18 +205,146 @@
     ]
   },
   "obsolete_files": [
+    "crates/agent-protocol/src/conversation/commands.rs",
+    "crates/agent-protocol/src/conversation/execution.rs",
+    "crates/agent-protocol/src/conversation/records/view.rs",
+    "crates/agent-protocol/src/conversation/recovery.rs",
+    "crates/agent-protocol/src/conversation/workspace.rs",
     "crates/host-daemon/src/host_rpc/owners.rs",
-    "crates/host-daemon/src/host_rpc/storage/rows.rs",
-    "crates/host-daemon/src/host_rpc/storage/journal.rs",
+    "crates/host-daemon/src/host_rpc/storage/activity.rs",
     "crates/host-daemon/src/host_rpc/storage/bodies.rs",
-    "crates/host-daemon/src/host_rpc/storage/jobs.rs",
+    "crates/host-daemon/src/host_rpc/storage/catalog.rs",
+    "crates/host-daemon/src/host_rpc/storage/codec.rs",
     "crates/host-daemon/src/host_rpc/storage/executions.rs",
-    "crates/agent-protocol/src/conversation/records/view.rs"
+    "crates/host-daemon/src/host_rpc/storage/history.rs",
+    "crates/host-daemon/src/host_rpc/storage/imports.rs",
+    "crates/host-daemon/src/host_rpc/storage/jobs.rs",
+    "crates/host-daemon/src/host_rpc/storage/journal.rs",
+    "crates/host-daemon/src/host_rpc/storage/list.rs",
+    "crates/host-daemon/src/host_rpc/storage/rows.rs",
+    "crates/host-daemon/src/host_rpc/storage/titles.rs"
   ],
   "holdout": {
     "host-daemon": [
       "host_rpc::runtime::tests::cancelling_unknown_delivery_releases_native_resources_and_allows_a_new_input_without_resending",
       "host_rpc::runtime::tests::a_known_unsent_start_retries_the_reserved_attempt_after_its_outbox_deadline"
     ]
-  }
+  },
+  "obsolete_symbols": [
+    {
+      "path": "crates/agent-protocol/src/conversation/records.rs",
+      "name": "Record",
+      "pattern": "\\bpub\\s+enum\\s+Record\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation/records.rs",
+      "name": "Message",
+      "pattern": "\\bpub\\s+type\\s+Message\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation/records.rs",
+      "name": "Event",
+      "pattern": "\\bpub\\s+type\\s+Event\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation/records.rs",
+      "name": "Row",
+      "pattern": "\\bpub\\s+type\\s+Row\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation/records.rs",
+      "name": "Replica",
+      "pattern": "\\bpub\\s+type\\s+Replica\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Cursor",
+      "pattern": "\\bpub\\s+struct\\s+Cursor\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Window",
+      "pattern": "\\bpub\\s+struct\\s+Window\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Row",
+      "pattern": "\\bpub\\s+struct\\s+Row\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Event",
+      "pattern": "\\bpub\\s+struct\\s+Event\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Replica",
+      "pattern": "\\bpub\\s+struct\\s+Replica\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Key",
+      "pattern": "\\bpub\\s+enum\\s+Key\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Position",
+      "pattern": "\\bpub\\s+enum\\s+Position\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Content",
+      "pattern": "\\bpub\\s+enum\\s+Content\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "Message",
+      "pattern": "\\bpub\\s+enum\\s+Message\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/sync.rs",
+      "name": "ApplyError",
+      "pattern": "\\bpub\\s+enum\\s+ApplyError\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation.rs",
+      "name": "State",
+      "pattern": "\\bpub\\s+struct\\s+State\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation.rs",
+      "name": "Counters",
+      "pattern": "\\bpub\\s+struct\\s+Counters\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation.rs",
+      "name": "Step",
+      "pattern": "\\bpub\\s+struct\\s+Step\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation.rs",
+      "name": "Context",
+      "pattern": "\\bpub\\s+struct\\s+Context\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation.rs",
+      "name": "Event",
+      "pattern": "\\bpub\\s+enum\\s+Event\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation.rs",
+      "name": "Observation",
+      "pattern": "\\bpub\\s+enum\\s+Observation\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation.rs",
+      "name": "Action",
+      "pattern": "\\bpub\\s+enum\\s+Action\\b"
+    },
+    {
+      "path": "crates/agent-protocol/src/conversation.rs",
+      "name": "Change",
+      "pattern": "\\bpub\\s+enum\\s+Change\\b"
+    }
+  ]
 }
