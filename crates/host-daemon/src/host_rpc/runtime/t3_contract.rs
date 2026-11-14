@@ -60,12 +60,14 @@ fn snapshot(service: &HostRpcService, session: &SessionRef) -> model::projection
 }
 
 fn assert_fork_preserves_source(
-    mut current: model::projection::ThreadSnapshot,
+    current: model::projection::ThreadSnapshot,
     before: &model::projection::ThreadSnapshot,
     target: &SessionRef,
 ) {
     // ProjectionStore.ts4253-4270 exposes outgoing transfers on the source too.
-    // The fork adds this link; all owned execution/transcript state stays intact.
+    // The fork adds this link; shared provider-session metadata may also change
+    // when another thread uses the same runtime. The source owns its thread,
+    // execution, native thread and transcript, which must stay intact.
     let transfer = current
         .projection
         .context_transfers
@@ -80,12 +82,18 @@ fn assert_fork_preserves_source(
         transfer.source_point.run_id.as_ref(),
         Some(&before.projection.runs[0].id)
     );
-    let id = transfer.id.clone();
-    current
-        .projection
-        .context_transfers
-        .retain(|transfer| transfer.id != id);
-    assert_eq!(&current, before);
+    assert_eq!(current.snapshot_sequence, before.snapshot_sequence);
+    assert_eq!(current.projection.thread, before.projection.thread);
+    assert_eq!(current.projection.runs, before.projection.runs);
+    assert_eq!(current.projection.attempts, before.projection.attempts);
+    assert_eq!(
+        current.projection.provider_threads,
+        before.projection.provider_threads
+    );
+    assert_eq!(
+        current.projection.visible_turn_items,
+        before.projection.visible_turn_items
+    );
 }
 
 async fn settled(
