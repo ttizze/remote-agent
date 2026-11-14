@@ -6,6 +6,39 @@ use agent_protocol::{
 };
 
 #[test]
+fn stale_settled_details_keep_the_original_read_pending_until_refetched() {
+    let session =
+        crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "details".into())
+            .unwrap();
+    let mut snapshot = Snapshot::default();
+    crate::test_conversations::open(&mut snapshot, serde_json::from_value(serde_json::json!({"thread":{"id":session,"turns":[{"id":"turn","status":"completed","items":[{"id":"command","status":"completed","body":{"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}}}]}]}})).unwrap());
+    let scope = snapshot.sessions.subscriptions[&session];
+    let request = op::ReadItem {
+        thread_id: session.clone(),
+        turn_id: "turn".into(),
+        item_id: "command".into(),
+    };
+    let original = snapshot.sessions.projections[&session].clone();
+    let mut stale = original.projection.turn_items[0].as_ref().clone();
+    stale.updated_at = "2026-11-13T00:00:00.000Z".into();
+    for (scope, current, expected_retries) in [
+        (scope, true, 1),
+        (scope, false, 0),
+        (uuid::Uuid::new_v4(), true, 0),
+    ] {
+        let mut next = snapshot.clone();
+        let effects = request
+            .clone()
+            .complete(&mut next, "", (scope, Some(stale.clone())), current)
+            .unwrap();
+        assert_eq!(effects.len(), expected_retries);
+        assert!(Arc::ptr_eq(&next.sessions.projections[&session], &original));
+        assert!(next.sessions.item_details.is_empty());
+        assert_eq!(next.sessions.conversations, snapshot.sessions.conversations);
+    }
+}
+
+#[test]
 fn unsubmitted_project_drafts_keep_their_address_across_navigation_and_restoration() {
     let new_chat = |snapshot: &Snapshot, cwd: &str| {
         crate::state::reduce(

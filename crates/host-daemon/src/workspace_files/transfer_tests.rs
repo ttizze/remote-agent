@@ -47,12 +47,8 @@ async fn wait_for(store: &Store, condition: impl Fn(&Snapshot) -> bool) {
     }
 }
 fn item(id: usize, complete: bool) -> Value {
-    let body = if id.is_multiple_of(2) {
-        json!({"assistantText":{"text":if complete {format!("{id}:{}", "x".repeat(BODY_SIZE))} else {String::new()},"phase":"unknown"}})
-    } else {
-        json!({"imageGeneration":{"savedPath":null,"data":if complete {Some(format!("{id}:{}", "A".repeat(BODY_SIZE)))} else {None},"revisedPrompt":null}})
-    };
-    json!({"id":format!("item-{id}"),"status":"unknown","clientInputId":null,"body":if complete {json!({"inline":{"body":body}})} else {json!({"deferred":{"summary":body}})}})
+    let body = json!({"commandExecution":{"command":format!("command-{id}"),"cwd":null,"output":if complete {format!("{id}:{}", "x".repeat(BODY_SIZE))} else {String::new()},"exitCode":null}});
+    json!({"id":format!("item-{id}"),"status":"running","clientInputId":null,"body":if complete {json!({"inline":{"body":body}})} else {json!({"deferred":{"summary":body}})}})
 }
 fn command(output: &str) -> Value {
     json!({"id":"item-0","status":"running","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":output,"exitCode":null}}}}})
@@ -524,6 +520,12 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
     tokio::time::timeout(Duration::from_secs(30), async {
         let mut fixture = Fixture::start(12, true).await;
         fixture.open().await;
+        // Canonical command bodies are fetched when requested, including when
+        // their collapsed cards have not been expanded by the UI yet.
+        let reads: Vec<_> = (0..12).map(|id| fixture.store.dispatch(Intent::ReadItem(op::ReadItem {
+            thread_id: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "A".into()).unwrap(),
+            turn_id: "turn".into(), item_id: format!("item-{id}").into(),
+        }))).collect();
         // Hold four real streams before consuming their tokens. With the old
         // queue, controls 5..12 were issued first and exhausted the eight grants.
         let mut transfers = Vec::new();
@@ -531,11 +533,10 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
             transfers.push(fixture.session.accept_stream().await.unwrap());
         }
         assert_eq!(fixture.files.grants.lock().unwrap().len(), 4);
-        let mut changed: agent_protocol::items::Item = serde_json::from_value(item(0, false)).unwrap();
-        if let agent_protocol::items::ItemBody::AssistantText {text, ..} = changed.body_mut() {*text = "live update".into();}
-        fixture.update(SessionChange::Item {turn_id:"turn".into(), item: changed.into()}).await;
+        let changed = serde_json::from_value(json!({"id":"live-update","status":"running","body":{"inline":{"body":{"assistantText":{"text":"live update","phase":"commentary"}}}}})).unwrap();
+        fixture.update(SessionChange::Item {turn_id:"turn".into(), item: changed}).await;
         fixture.update(SessionChange::Request { request: serde_json::from_value(json!({"id": "approval", "target": {"turn": {"turnId": "turn", "itemId": "item-0"}}, "delivery": "awaiting", "body": {"approval": {"kind": "command", "description": "", "details": "", "choices": [{"id": "choice-0", "label": "承認", "description": "", "effect": "allow"}, {"id": "choice-1", "label": "このセッションで承認", "description": "", "effect": "allowLasting"}, {"id": "choice-2", "label": "拒否", "description": "", "effect": "deny"}]}}})).unwrap() }).await;
-        wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
+        wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap().last().unwrap().body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
         for intent in [
             Intent::Respond(op::Respond {request_id: "approval".into(),answer:Answer::Approval {choice_id: "choice-2".into()}}),
             Intent::Interrupt(op::Interrupt {thread_id: agent_protocol::session::SessionRef {provider:Some(agent_protocol::session::ProviderKind::Codex),id:"A".into()},turn_id:"turn".into()}),
@@ -547,8 +548,8 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
             completion.await.unwrap();
         }
         assert_eq!(fixture.files.grants.lock().unwrap().len(), 4, "stalled bodies must retain their slots");
-        // item-0 retries after its stale body is consumed. All 12 final bodies
-        // must match completely, and every grant must have been consumed.
+        // All 12 on-demand bodies must match completely, and every grant must
+        // be consumed while the independent live update stays visible.
         for stream in transfers {
             fixture.files.transfer(OWNER, stream).await.unwrap();
         }
@@ -562,11 +563,13 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
         tokio::select! { _ = serving => unreachable!(), _ = complete => {} }
         let snapshot = fixture.store.snapshot();
         let items = snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
-        assert_eq!(items.len(), 12);
-        for (id, actual) in items.iter().enumerate() {
+        assert_eq!(items.len(), 13);
+        for (id, actual) in items[..12].iter().enumerate() {
             let expected: agent_protocol::models::Item = serde_json::from_value(item(id, true)).unwrap();
             assert_eq!(actual.as_ref(), &expected);
         }
+        assert!(matches!(items[12].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update"));
+        for read in reads { read.await.unwrap(); }
         assert!(fixture.files.grants.lock().unwrap().is_empty());
         fixture.close().await;
     }).await.expect("bulk item reads stalled");
@@ -588,48 +591,72 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
         for iteration in 0..=12 {
             let request = fixture.requests.recv().await.unwrap();
             assert_eq!(request["method"], "host/conversation/hydrate");
-            let target: agent_protocol::session::SessionRef =
-                serde_json::from_value(request["params"]["session"].clone()).unwrap();
-            let body = command(&format!("complete-{iteration}:{}", "x".repeat(BODY_SIZE)));
+            let identity = agent_protocol::session::SessionRef::new(
+                agent_protocol::session::ProviderKind::Codex,
+                "A".into(),
+            )
+            .unwrap();
+            let snapshot = fixture.store.snapshot().sessions.projections[&identity].clone();
+            let original = snapshot
+                .projection
+                .turn_items
+                .iter()
+                .find(|item| item.id == "item-0")
+                .unwrap();
+            let mut detail = original.as_ref().clone();
+            detail.body = agent_protocol::orchestration::TurnItemBody::CommandExecution {
+                input: "pwd".into(),
+                output: Some(format!("complete-{iteration}:{}", "x".repeat(BODY_SIZE))),
+                exit_code: None,
+                output_omitted: None,
+                output_indicates_failure: None,
+            };
             let grant = fixture
                 .files
-                .download_bytes(
-                    OWNER,
-                    agent_protocol::protocol::encode(
-                        fixture
-                            .output
-                            .lock()
-                            .await
-                            .detail(&target, &serde_json::from_value(body).unwrap()),
-                    )
-                    .unwrap(),
-                )
+                .download_bytes(OWNER, agent_protocol::protocol::encode(detail).unwrap())
                 .await
                 .unwrap();
             if iteration < 12 {
-                // This is deliberately BEFORE the control response, not a
-                // delta during the item body transfer. Wait for Store application as the
-                // barrier so the source Arc is certainly stale on arrival.
+                // The authoritative settled revision changes BEFORE the control
+                // result, not while the payload is being transferred. A live
+                // output delta alone intentionally shares T3's one live revision.
+                let mut changed = original.as_ref().clone();
+                changed.status = agent_protocol::orchestration::TurnItemStatus::Completed;
+                changed.updated_at = format!("2026-11-15T01:00:{iteration:02}.000Z");
+                let revision = changed.updated_at.clone();
+                let changed = Arc::new(changed);
+                let mut replacement = snapshot.as_ref().clone();
+                replacement.snapshot_sequence += 1;
+                replacement.projection.updated_at = revision.clone();
+                for item in &mut replacement.projection.turn_items {
+                    if item.id == changed.id {
+                        *item = changed.clone();
+                    }
+                }
+                for item in &mut replacement.projection.visible_turn_items {
+                    if item.source_item_id == changed.id {
+                        item.item = changed.clone();
+                    }
+                }
+                let subscription = fixture.store.snapshot().sessions.subscriptions[&identity];
                 fixture
-                    .update(SessionChange::Item {
-                        turn_id: "turn".into(),
-                        item: serde_json::from_value(deferred_command(&"d".repeat(iteration + 1)))
-                            .unwrap(),
-                    })
-                    .await;
+                    .output
+                    .lock()
+                    .await
+                    .send_stream(
+                        subscription,
+                        agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(
+                            replacement,
+                        ),
+                    )
+                    .await
+                    .unwrap();
                 wait_for(&fixture.store, |s| {
-                    command_output(
-                        &s.sessions.conversations[&agent_protocol::session::SessionRef {
-                            provider: Some(agent_protocol::session::ProviderKind::Codex),
-                            id: "A".into(),
-                        }]
-                            .turns
-                            .as_ref()
-                            .unwrap()[0]
-                            .items
-                            .as_ref()
-                            .unwrap()[0],
-                    ) == "d".repeat(iteration + 1)
+                    s.sessions.projections[&identity]
+                        .projection
+                        .turn_items
+                        .iter()
+                        .any(|item| item.id == "item-0" && item.updated_at == revision)
                 })
                 .await;
             }

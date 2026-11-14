@@ -72,7 +72,9 @@
       "gallery_finishes_with_an_error_when_the_hydrated_image_was_removed",
       "gallery_history_reads_do_not_block_conversation_notifications",
       "gallery_reads_markdown_images_and_deduplicates_against_canonical_tool_paths",
-      "cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace_a_refresh"
+      "cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace_a_refresh",
+      "state::conversations::tests::stale_settled_details_keep_the_original_read_pending_until_refetched",
+      "item_details_reject_a_foreign_source_even_when_the_item_id_matches"
     ]
   },
   "guards": {

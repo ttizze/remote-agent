@@ -4799,6 +4799,34 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
 }
 
 #[tokio::test]
+async fn item_details_reject_a_foreign_source_even_when_the_item_id_matches() {
+    let mut initial = snapshot();
+    let session = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
+    Arc::make_mut(&mut initial.sessions.conversations).insert(session.clone(), Arc::new(serde_json::from_value(json!({"id":session,"turns":[{"id":"turn","status":"completed","items":[{"id":"command","status":"completed","body":{"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}}}]}]})).unwrap()));
+    let (store, mut reader, writer) = setup(initial).await;
+    let before = store.snapshot();
+    let reading = store.dispatch(Intent::ReadItem(op::ReadItem {
+        thread_id: session.clone(),
+        turn_id: "turn".into(),
+        item_id: "command".into(),
+    }));
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/conversation/hydrate");
+    let native = serde_json::from_value(json!({"id":"command","status":"completed","body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"foreign content","exitCode":null}}}}})).unwrap();
+    let mut detail = writer.detail(&session, &native);
+    detail.thread_id = uuid::Uuid::new_v4().to_string();
+    writer.reply(&request, json!({"result":agent_protocol::conversation::records::Hydrated {item:Some(detail), transfer:None}})).await.unwrap();
+    let error = reading.await.unwrap_err();
+    assert!(error.to_string().contains("identity"), "{error}");
+    let after = store.snapshot();
+    assert_eq!(after.sessions.projections, before.sessions.projections);
+    assert_eq!(after.sessions.conversations, before.sessions.conversations);
+    assert!(after.sessions.item_details.is_empty());
+    assert_eq!(after.input.drafts, before.input.drafts);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
     use agent_protocol::session::SessionChange;
     use agent_protocol::session::TextField;
@@ -4867,7 +4895,8 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         let mut reading = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
         let request = requests.recv().await.unwrap();
         assert_eq!(request["method"], "host/conversation/hydrate");
-        let body = agent_protocol::protocol::encode(serde_json::from_value::<agent_protocol::models::Item>(json!({"id":"item","status":"running","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"old body","exitCode":null}}}}})).unwrap()).unwrap();
+        let native: agent_protocol::models::Item = serde_json::from_value(json!({"id":"item","status":"running","body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"old body","exitCode":null}}}}})).unwrap();
+        let body = agent_protocol::protocol::encode(output.lock().await.detail(&read_item.thread_id, &native)).unwrap();
         let grant = json!({"token":([1u8;32]),"sha256":ring::digest::digest(&ring::digest::SHA256,&body).as_ref(),"size":body.len()});
         output.lock().await.reply(&request, json!({"result":{"item":{"id":"item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null}}}}},"transfer":grant}})).await.unwrap();
         let mut transfer = session.accept_stream().await.unwrap();
@@ -4901,9 +4930,9 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         wait_for(&store, |s| s.sessions.projections[&read_item.thread_id].snapshot_sequence > sequence).await;
         assert_eq!(store.snapshot().sessions.subscriptions[&read_item.thread_id],subscription);
         assert!(store.snapshot().panes.primary().error.is_none());
-        // New deferred metadata invalidates the in-flight source; a complete read must retry.
-        output.lock().await.notify(json!({"method":"fixture/session/change","session":read_item.thread_id,"change":SessionChange::Item {turn_id:"turn".into(),item: serde_json::from_value(json!({"id":"item","status":"running","clientInputId":null,"body":{"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"new suffix","exitCode":null}}}}})).unwrap()}})).await.unwrap();
-        wait_for(&store, |s| matches!(s.sessions.conversations[&SessionRef { provider: Some(ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::CommandExecution { output, .. } if output == "new suffix")).await;
+        // A settled revision invalidates the earlier live result; its body must be consumed before retrying.
+        output.lock().await.notify(json!({"method":"fixture/session/change","session":read_item.thread_id,"change":SessionChange::Item {turn_id:"turn".into(),item: serde_json::from_value(json!({"id":"item","status":"completed","clientInputId":null,"body":{"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"new suffix","exitCode":null}}}}})).unwrap()}})).await.unwrap();
+        wait_for(&store, |s| s.sessions.conversations[&SessionRef { provider: Some(ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].status == agent_protocol::execution::ItemStatus::Completed).await;
         assert!(store.snapshot().sessions.conversations[&SessionRef { provider: Some(ProviderKind::Codex), id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].is_deferred());
         assert!(futures_util::poll!(&mut reading).is_pending());
         assert!(futures_util::poll!(&mut duplicate).is_pending());
@@ -4924,7 +4953,10 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             let before = store.snapshot().sessions.conversations.clone();
             let mut failed_read = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
             let request = requests.recv().await.unwrap();
-            let invalid = agent_protocol::protocol::encode(serde_json::from_value::<agent_protocol::models::Item>(json!({"id":if wrong_id {"different"} else {"item"},"status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"invalid body","exitCode":null}}}}})).unwrap()).unwrap();
+            let native = serde_json::from_value(json!({"id":"item","status":"completed","body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"invalid body","exitCode":null}}}}})).unwrap();
+            let mut invalid = output.lock().await.detail(&read_item.thread_id, &native);
+            if wrong_id { invalid.id = "different".into(); }
+            let invalid = agent_protocol::protocol::encode(invalid).unwrap();
             let digest = if wrong_id { ring::digest::digest(&ring::digest::SHA256, &invalid).as_ref().to_vec() } else { vec![0;32] };
             output.lock().await.reply(&request, json!({"result":{"item":{"id":"item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null}}}}},"transfer":{"token":([2u8;32]),"sha256":digest,"size":invalid.len()}}})).await.unwrap();
             let mut transfer = session.accept_stream().await.unwrap();
