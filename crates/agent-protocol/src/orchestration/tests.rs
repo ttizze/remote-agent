@@ -1,6 +1,8 @@
 use super::*;
 use uuid::Uuid;
 
+mod recovery;
+
 const NOW: &str = "2026-11-14T00:00:00.000Z";
 
 #[test]

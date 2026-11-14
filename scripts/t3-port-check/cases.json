@@ -57,7 +57,10 @@
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
       "orchestration::tests::context_transfer_types_follow_t3_contract_instead_of_id_allocator_tags",
-      "orchestration::tests::handoff_tests::history_selection_matches_pinned_t3_reference_outputs"
+      "orchestration::tests::handoff_tests::history_selection_matches_pinned_t3_reference_outputs",
+      "orchestration::tests::recovery::a_prepared_continuation_can_recover_again_without_repeating_the_original_input",
+      "orchestration::tests::recovery::restart_preserves_native_identity_and_admits_one_continuation_without_replaying_input",
+      "orchestration::tests::recovery::continuation_loop_limit_uses_the_pinned_five_minute_window"
     ]
   },
   "guards": {
@@ -219,7 +222,12 @@
       "orchestration::tests::handoff_tests::intact_history_keeps_priority_order_and_omitted_source_ids",
       "orchestration::tests::handoff_tests::native_context_budget_charges_input_attachments_and_output_reserve",
       "orchestration::tests::handoff_tests::selected_history_fits_serialized_native_and_inline_payloads",
-      "orchestration::tests::handoff_tests::portable_fork_resolution_rebinds_only_the_target_and_preserves_its_source"
+      "orchestration::tests::handoff_tests::portable_fork_resolution_rebinds_only_the_target_and_preserves_its_source",
+      "orchestration::tests::recovery::a_restart_expires_live_approval_without_continuing_or_reopening_it",
+      "orchestration::tests::recovery::a_restart_keeps_unknown_native_input_blocked_without_an_automatic_retry",
+      "orchestration::tests::recovery::a_restart_requires_live_owned_work_and_respects_conversation_boundaries",
+      "orchestration::tests::recovery::continuations_respect_newer_input_stop_and_native_maintenance_commands",
+      "orchestration::tests::recovery::provider_failure_preserves_other_processes_and_holds_queued_work"
     ],
     "host-daemon": [
       "host_rpc::routing::credit::tests::streams_share_connection_credit_and_release_it_only_when_the_frame_is_dropped",
