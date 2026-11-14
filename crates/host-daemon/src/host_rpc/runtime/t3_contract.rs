@@ -1314,3 +1314,252 @@ async fn queued_fork_input_preserves_context_after_a_failed_start(#[case] provid
         assert!(delivered.contains("queued-prefix-marker"));
     }
 }
+
+async fn send(service: &HostRpcService, session: &SessionRef, provider: ProviderKind, text: &str) {
+    let connection = service.open_session();
+    let ack: records::Acknowledged = call(
+        service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: session.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::Submit {
+                id: Uuid::new_v4().to_string().into(),
+                content: input(provider, text),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(ack.error.is_none(), "{:?}", ack.error);
+}
+
+#[rstest::rstest]
+#[case("")]
+#[case("injection_unknown")]
+#[case("not_sent")]
+#[tokio::test]
+async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[case] fault: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("already-native-marker"),
+    )
+    .await;
+    settled(&service, &session, 1).await;
+    let original = codex.inputs.lock().unwrap()[0].thread_id.id.clone();
+    send(
+        &service,
+        &session,
+        ProviderKind::Claude,
+        "foreign-history-marker",
+    )
+    .await;
+    settled(&service, &session, 2).await;
+    if fault == "injection_unknown" {
+        codex
+            .fail_inject
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    if fault == "not_sent" {
+        codex
+            .fail_submit
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    send(
+        &service,
+        &session,
+        ProviderKind::Codex,
+        "current-user-marker",
+    )
+    .await;
+    let current = settled(&service, &session, 3).await;
+    let inputs = codex.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2, "one native prompt per accepted input");
+    assert_eq!(claude.inputs.lock().unwrap().len(), 1);
+    let injected = codex.injected.lock().unwrap();
+    let recovering = fault == "injection_unknown";
+    assert_eq!(injected.len(), if recovering { 2 } else { 1 });
+    assert_eq!(inputs[1].thread_id.id == original, !recovering);
+    assert_eq!(injected.last().unwrap().0, inputs[1].thread_id.id);
+    let context = serde_json::to_string(&injected.last().unwrap().1).unwrap();
+    assert!(context.contains("foreign-history-marker"));
+    assert_eq!(context.contains("already-native-marker"), recovering);
+    assert!(!context.contains("current-user-marker"));
+    assert_eq!(
+        current
+            .projection
+            .context_transfers
+            .iter()
+            .filter(|transfer| transfer.kind == model::TransferType::ProviderHandoff)
+            .count(),
+        2,
+        "recovery must preserve both provider-switch records"
+    );
+    assert_eq!(
+        current
+            .projection
+            .context_transfers
+            .iter()
+            .filter(|transfer| transfer.kind == model::TransferType::ProviderResumeFallback)
+            .count(),
+        usize::from(recovering)
+    );
+    let handoff = current
+        .projection
+        .context_handoffs
+        .iter()
+        .find(|handoff| handoff.target_run_id == current.projection.runs.last().unwrap().id)
+        .unwrap();
+    assert_eq!(
+        handoff.strategy,
+        if recovering {
+            model::HandoffStrategy::FullThreadSummary
+        } else {
+            model::HandoffStrategy::DeltaSinceTargetLastSeen
+        }
+    );
+}
+
+#[tokio::test]
+async fn portable_forks_include_only_the_selected_source_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let source = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("selected-source-marker"),
+    )
+    .await;
+    let first = settled(&service, &source, 1).await;
+    send(
+        &service,
+        &source,
+        ProviderKind::Codex,
+        "later-source-marker",
+    )
+    .await;
+    settled(&service, &source, 2).await;
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let connection = service.open_session();
+    let _: agent_protocol::models::Empty = call(
+        &service,
+        connection.id(),
+        Call::ForkConversation(records::Fork {
+            source: source.clone(),
+            target: target.clone(),
+            through: first.projection.runs[0].id.clone().into(),
+        }),
+    )
+    .await
+    .unwrap();
+    send(
+        &service,
+        &target,
+        ProviderKind::Claude,
+        "fork-current-marker",
+    )
+    .await;
+    let current = settled(&service, &target, 1).await;
+    let inputs = claude.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 1);
+    let delivered = serde_json::to_string(&inputs[0].input).unwrap();
+    assert!(delivered.contains("selected-source-marker"));
+    assert!(!delivered.contains("later-source-marker"));
+    assert_eq!(delivered.matches("fork-current-marker").count(), 1);
+    assert!(
+        current
+            .projection
+            .context_transfers
+            .iter()
+            .any(|transfer| transfer.kind == model::TransferType::Fork
+                && transfer.status == model::TransferStatus::ResolvedPortable)
+    );
+}
+
+#[tokio::test]
+async fn accepted_attempts_record_the_native_identity_used_for_context_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("native-identity"),
+    )
+    .await;
+    let current = settled(&service, &session, 1).await;
+    let attempt = &current.projection.attempts[0];
+    let provider_thread = current
+        .projection
+        .provider_threads
+        .iter()
+        .find(|thread| thread.id == attempt.provider_thread_id)
+        .unwrap();
+    assert_eq!(
+        attempt.native_thread_id,
+        provider_thread
+            .native_thread_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+    );
+}
+
+#[tokio::test]
+async fn switching_back_replaces_a_full_native_context_before_appending_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some(&"a".repeat(400_000)),
+    )
+    .await;
+    settled(&service, &session, 1).await;
+    let original = codex.inputs.lock().unwrap()[0].thread_id.id.clone();
+    send(
+        &service,
+        &session,
+        ProviderKind::Claude,
+        "foreign-history-marker",
+    )
+    .await;
+    settled(&service, &session, 2).await;
+    send(&service, &session, ProviderKind::Codex, "near-full-current").await;
+    let current = settled(&service, &session, 3).await;
+    let inputs = codex.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    assert_ne!(
+        inputs[1].thread_id.id, original,
+        "T3 replaces a native context when the delta metadata cannot fit beside accepted history"
+    );
+    let injected = codex.injected.lock().unwrap();
+    let delivered = serde_json::to_string(&injected.last().unwrap().1).unwrap();
+    assert!(delivered.contains("foreign-history-marker"));
+    assert!(!delivered.contains("near-full-current"));
+    assert!(
+        current
+            .projection
+            .context_transfers
+            .iter()
+            .any(|transfer| transfer.kind == model::TransferType::ProviderResumeFallback)
+    );
+}

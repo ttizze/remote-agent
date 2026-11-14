@@ -1805,3 +1805,78 @@ mod fork_tests {
         assert_eq!(transfer.source_thread_id, source.id);
     }
 }
+
+mod handoff_tests {
+    use super::super::handoffs::*;
+    use super::*;
+    fn text(id: &str, role: &str, body: &str) -> HistoricalText {
+        HistoricalText {
+            message: HistoricalMessage {
+                role: role.into(),
+                run_status: Some("completed".into()),
+                thread_id: "source".into(),
+                run_id: Some("run".into()),
+                item_id: id.into(),
+                provider_thread_id: Some("native".into()),
+                status: "completed".into(),
+                kind: if role == "user" {
+                    "user_message"
+                } else {
+                    "assistant_message"
+                }
+                .into(),
+            },
+            text: body.into(),
+        }
+    }
+    #[test]
+    fn intact_history_keeps_priority_order_and_omitted_source_ids() {
+        let messages = [
+            text("first", "user", "original \"request\" 🦀"),
+            text("large", "assistant", &"x".repeat(40_000)),
+            text("latest-user", "user", "newest question"),
+            text("latest-assistant", "assistant", "newest answer"),
+        ];
+        let selected = select_history(&messages, "source reader", 0, &[], 2_000).unwrap();
+        assert_eq!(
+            selected
+                .messages
+                .iter()
+                .map(|message| message.message.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "latest-user", "latest-assistant"]
+        );
+        assert_eq!(selected.omitted_item_ids, ["large"]);
+        assert_eq!(selected.omitted_items, 1);
+        assert!(
+            selected
+                .context
+                .contains("Omitted item IDs, newest last: large.")
+        );
+        assert!(history_cost(&selected.messages, &selected.context) <= 2_000);
+        let rendered = render_history(&selected.messages, &selected.context);
+        assert!(rendered.contains("[Historical user; user_message; thread=source; run=run; item=first; provider-thread=native; status=completed; run-status=completed]"));
+        assert!(rendered.contains("original \"request\" 🦀"));
+    }
+    #[test]
+    fn native_context_budget_charges_input_attachments_and_output_reserve() {
+        let image = serde_json::json!({"type":"image"});
+        assert_eq!(handoff_budget("x", &[], 0, None), 16_000);
+        assert_eq!(handoff_budget("x", &[], 86_000, Some(128_000)), 9_997);
+        assert_eq!(handoff_budget("x", &[image], 86_000, Some(128_000)), 1_805);
+        assert_eq!(handoff_budget("x", &[], 128_000, Some(128_000)), 0);
+    }
+    proptest::proptest! {
+        #[test]
+        fn selected_history_fits_serialized_native_and_inline_payloads(data in proptest::collection::vec((proptest::prelude::any::<bool>(),".{0,300}"),0..20),budget in 1500usize..12_000) {
+            let messages:Vec<_>=data.iter().enumerate().map(|(index,(user,body))|text(&index.to_string(),if *user {"user"} else {"assistant"},body)).collect();
+            let selected=select_history(&messages,"reader",0,&[],budget).unwrap();
+            proptest::prop_assert!(history_cost(&selected.messages,&selected.context)<=budget);
+            proptest::prop_assert_eq!(selected.messages.len()+selected.omitted_items,messages.len());
+            let mut source=messages.iter();
+            for message in selected.messages {
+                proptest::prop_assert!(source.any(|original| original.message.item_id==message.message.item_id && original.text==message.text));
+            }
+        }
+    }
+}
