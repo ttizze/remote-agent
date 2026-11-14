@@ -2432,6 +2432,17 @@ async fn a_source_busy_after_admission_keeps_its_native_plan_until_fresh_allocat
             .forked_from
             .is_some()
     );
+    // The one-shot native failure belongs to the parent. Observe it before
+    // releasing the child's allocation, so the child cannot consume it.
+    let mut changed = storage.changes();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if snapshot(&service, &source).projection.turn_items.iter().any(|item| matches!(&item.body, model::TurnItemBody::Error {failure,..} if failure.class == "delivery_uncertain")) {
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+    }).await.expect("parent owns the uncertain native write");
     drop(creation);
     let completed = finished_run(&service, &target, 1).await;
     assert_eq!(
