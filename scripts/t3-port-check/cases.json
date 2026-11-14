@@ -74,7 +74,10 @@
       "gallery_reads_markdown_images_and_deduplicates_against_canonical_tool_paths",
       "cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace_a_refresh",
       "state::conversations::tests::stale_settled_details_keep_the_original_read_pending_until_refetched",
-      "item_details_reject_a_foreign_source_even_when_the_item_id_matches"
+      "item_details_reject_a_foreign_source_even_when_the_item_id_matches",
+      "opening_a_screenshot_uses_canonical_preview_metadata_without_expanding_work",
+      "approval_can_complete_while_another_request_is_waiting",
+      "approval_reserve_is_bounded_when_ordinary_work_is_full"
     ]
   },
   "guards": {
@@ -185,7 +188,8 @@
       "state::outputs::tests::live_output_is_local_to_its_visible_item_and_never_changes_the_row_cursor_or_cache",
       "state::pending_tests::a_receipt_needs_its_conversations_sequence_coverage_before_retiring_an_input",
       "state::pending_tests::canonical_inputs_settle_only_their_own_conversation_outbox",
-      "state::pending_tests::unrelated_rows_preserve_the_shared_pending_snapshot"
+      "state::pending_tests::unrelated_rows_preserve_the_shared_pending_snapshot",
+      "state::conversations::tests::detail_queries_select_the_exact_item_and_keep_newer_full_content_without_retrying"
     ],
     "agent-protocol": [
       "orchestration::tests::a_failed_answer_delivery_cannot_resend_and_stop_cancels_unanswered_requests",

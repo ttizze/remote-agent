@@ -141,44 +141,47 @@ async fn saturated_dictation_preparations_leave_complete_recording_transcription
 }
 
 #[tokio::test]
-async fn opening_a_deferred_screenshot_loads_its_image_without_expanding_work() {
+async fn opening_a_screenshot_uses_canonical_preview_metadata_without_expanding_work() {
+    use agent_protocol::{conversation::records, orchestration as model};
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let id = SessionRef::new(ProviderKind::Codex, "screenshots".into()).unwrap();
     let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())));
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/conversation/subscribe");
-    writer.reply(&request, json!({"result":{
-        "thread":{"id":id,"turns":[{"id":"turn","status":"completed","items":[{
-            "id":"screenshot","status":"completed","body":{"deferred":{"summary":{"imageView":{"path":"file:///tmp/blog.png"}}}}
-        }]}]}
-    }})).await.unwrap();
-    let request = read(&mut reader).await;
-    assert_eq!(request["method"], "host/conversation/hydrate");
-    assert_eq!(request["params"]["item"], "screenshot");
-    writer.reply(&request, json!({"result":{"item":{
+    let response = serde_json::from_value(json!({"thread":{"id":id,"turns":[{"id":"turn","status":"completed","items":[{
         "id":"screenshot","status":"completed","body":{"inline":{"body":{"imageView":{"path":"file:///tmp/blog.png"}}}}
-    }}})).await.unwrap();
+    }]}]}})).unwrap();
+    let mut snapshot = host_fixture::orchestration::snapshot(response, 7);
+    let model::TurnItemBody::DynamicTool {
+        tool_name,
+        input,
+        output,
+        ..
+    } = &mut Arc::make_mut(&mut snapshot.projection.turn_items[0]).body
+    else {
+        unreachable!()
+    };
+    *tool_name = Some("Read".into());
+    *input = json!({"file_path":"/tmp/blog.png","padding":"x".repeat(20_000)});
+    *output = Some(json!({"data":"untransported-image-body"}));
+    // T3 preserves viewedImagePath outside the omitted tool input/output.
+    model::wire::projection(&mut snapshot.projection);
+    assert!(
+        matches!(&snapshot.projection.turn_items[0].body, model::TurnItemBody::DynamicTool {input, output_omitted:Some(true), viewed_image_path:Some(path), ..} if input["truncated"] == true && path == "file:///tmp/blog.png")
+    );
+    writer.reply(&request, json!({"result":records::Opened {
+        session:id.clone(), subscription_id:uuid::Uuid::nil(), initial:vec![ThreadStreamItem::Snapshot(snapshot), ThreadStreamItem::Synchronized],
+        provider:ProviderKind::Codex, capabilities:Default::default(), project_root:None,
+    }})).await.unwrap();
     opening.await.unwrap();
-    let mut updates = store.subscribe();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let loaded = {
-                let snapshot = updates.borrow_and_update();
-                !snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0]
-                    .items
-                    .as_ref()
-                    .unwrap()[0]
-                    .is_deferred()
-            };
-            if loaded {
-                break;
-            }
-            updates.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
     let snapshot = store.snapshot();
+    assert!(
+        !snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0]
+            .items
+            .as_ref()
+            .unwrap()[0]
+            .is_deferred()
+    );
     let projected = agent_core::presentation::conversation::project_conversation(
         agent_core::localization::UiLanguage::Japanese,
         &snapshot.panes.primary().navigation.draft_key,
@@ -1152,7 +1155,7 @@ async fn approval_can_complete_while_another_request_is_waiting() {
         assert_eq!(answer["method"], "host/conversation/change");
         assert_eq!(
             answer["params"]["command"],
-            json!({"Answer":{"id":"approval","answer":{"approval":{"choiceId":"choice-2"}}}})
+            json!({"Answer":{"id":"approval","answer":{"approval":{"choiceId":"decline"}}}})
         );
         writer.reply(&answer, json!({"result":{}})).await.unwrap();
         writer
@@ -1176,12 +1179,21 @@ async fn approval_can_complete_while_another_request_is_waiting() {
         }
     });
     wait_for(&store, |snapshot| snapshot.request("approval").is_some()).await;
+    let decline = store
+        .snapshot()
+        .request("approval")
+        .unwrap()
+        .body
+        .choices()
+        .iter()
+        .find(|choice| choice.effect == agent_protocol::requests::ChoiceEffect::Deny)
+        .unwrap()
+        .id
+        .clone();
     store
         .dispatch(Intent::Respond(op::Respond {
             request_id: "approval".into(),
-            answer: Answer::Approval {
-                choice_id: "choice-2".into(),
-            },
+            answer: Answer::Approval { choice_id: decline },
         }))
         .await
         .unwrap();
@@ -1216,6 +1228,17 @@ async fn approval_reserve_is_bounded_when_ordinary_work_is_full() {
     })
     .await;
 
+    let decline = store
+        .snapshot()
+        .request("approval-reserve-0")
+        .unwrap()
+        .body
+        .choices()
+        .iter()
+        .find(|choice| choice.effect == agent_protocol::requests::ChoiceEffect::Deny)
+        .unwrap()
+        .id
+        .clone();
     let mut requests = Vec::new();
     let mut receipts = Vec::new();
     for index in 0..32 {
@@ -1233,7 +1256,7 @@ async fn approval_reserve_is_bounded_when_ordinary_work_is_full() {
         receipts.push(store.dispatch(Intent::Respond(op::Respond {
             request_id: format!("approval-reserve-{index}").into(),
             answer: Answer::Approval {
-                choice_id: "deny".into(),
+                choice_id: decline.clone(),
             },
         })));
     }
@@ -1241,7 +1264,7 @@ async fn approval_reserve_is_bounded_when_ordinary_work_is_full() {
         .dispatch(Intent::Respond(op::Respond {
             request_id: "approval-reserve-16".into(),
             answer: Answer::Approval {
-                choice_id: "deny".into(),
+                choice_id: decline.clone(),
             },
         }))
         .await

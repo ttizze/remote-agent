@@ -6,6 +6,73 @@ use agent_protocol::{
 };
 
 #[test]
+fn detail_queries_select_the_exact_item_and_keep_newer_full_content_without_retrying() {
+    let session = crate::session::SessionRef::new(
+        crate::session::ProviderKind::Codex,
+        "multiple-details".into(),
+    )
+    .unwrap();
+    let mut original = Snapshot::default();
+    crate::test_conversations::open(&mut original, serde_json::from_value(serde_json::json!({"thread":{"id":session,"turns":[{"id":"turn","status":"completed","items":[
+        {"id":"lead","status":"completed","body":{"inline":{"body":{"assistantText":{"text":"context","phase":"commentary"}}}}},
+        {"id":"command","status":"completed","body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"fresh output","exitCode":0}}}}}
+    ]}]}})).unwrap());
+    let full = original.sessions.projections[&session]
+        .projection
+        .turn_items
+        .iter()
+        .find(|item| item.id == "command")
+        .unwrap()
+        .as_ref()
+        .clone();
+    let scope = original.sessions.subscriptions[&session];
+    let request = op::ReadItem {
+        thread_id: session.clone(),
+        turn_id: "turn".into(),
+        item_id: "command".into(),
+    };
+    let mut stale = full.clone();
+    stale.updated_at = "2026-11-13T00:00:00.000Z".into();
+    let mut current = original.clone();
+    assert!(
+        request
+            .clone()
+            .complete(&mut current, "", (scope, Some(stale)), true)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        current.sessions.conversations,
+        original.sessions.conversations
+    );
+    assert!(current.sessions.item_details.is_empty());
+
+    let mut wire = original.sessions.projections[&session].as_ref().clone();
+    model::wire::projection(&mut wire.projection);
+    wire.snapshot_sequence += 1;
+    apply(
+        &mut current,
+        &session,
+        vec![ThreadStreamItem::Snapshot(wire)],
+    )
+    .unwrap();
+    request
+        .complete(&mut current, "", (scope, Some(full.clone())), true)
+        .unwrap();
+    assert_eq!(
+        current.sessions.item_details[&(session.application_id(), full.id.clone())].as_ref(),
+        &full
+    );
+    assert!(
+        current
+            .sessions
+            .item_details
+            .keys()
+            .all(|(_, id)| id == "command")
+    );
+}
+
+#[test]
 fn stale_settled_details_keep_the_original_read_pending_until_refetched() {
     let session =
         crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "details".into())
