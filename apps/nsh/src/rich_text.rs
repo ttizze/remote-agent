@@ -172,7 +172,7 @@ pub(crate) struct Surroundings {
 }
 
 impl Surroundings {
-    /// The surroundings of the list being made, with a selection bar of its own.
+    /// The surroundings of the list being made.
     pub(crate) fn current() -> Self {
         Self {
             connection: use_context::<Connection>().unwrap(),

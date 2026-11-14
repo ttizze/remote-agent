@@ -679,11 +679,7 @@ pub(super) fn page_rows(
 ) -> (Vec<crate::models::Thread>, bool) {
     let limit = limit as usize;
     let more = rows.len() > limit;
-    rows.sort_by(|a, b| {
-        b.updated_at
-            .unwrap_or_default()
-            .total_cmp(&a.updated_at.unwrap_or_default())
-    });
+    rows.sort_by_key(|row| std::cmp::Reverse(row.last_input_at));
     rows.truncate(limit);
     (rows, more)
 }

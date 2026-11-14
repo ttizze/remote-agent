@@ -88,6 +88,7 @@ pub fn replica_at(response: ThreadResponse, generation: u64, sequence: u64) -> r
             capabilities: records::capabilities(thread.capabilities.unwrap_or_default()),
             preview: thread.preview,
             updated_at: (thread.updated_at.unwrap_or_default() * 1000.0) as i64,
+            last_input_at: thread.last_input_at,
             project: thread.project_id.clone(),
             branch: thread.git_branch,
             has_changes: thread.has_changes,

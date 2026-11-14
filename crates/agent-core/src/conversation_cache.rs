@@ -415,6 +415,7 @@ mod tests {
                 id: Some(SessionRef::new(ProviderKind::Claude, format!("task-{index}")).unwrap()),
                 name: Some(format!("Task {index}")),
                 updated_at: Some(index as f64),
+                last_input_at: Some(index),
                 status: SessionStatus::Running,
                 ..Default::default()
             })

@@ -821,6 +821,7 @@ pub(super) fn write_header(
     admitted: Option<(decision::records::Selection, Option<String>)>,
     previous: Option<&Header>,
     steers: Option<bool>,
+    last_input_at: Option<i64>,
 ) -> Result<Option<Row>, String> {
     let &WriteScope { key, id, at, .. } = scope;
     let (mut header, counters) = header(transaction, key)?;
@@ -833,6 +834,7 @@ pub(super) fn write_header(
             )))
     .then_some(header.details.activity.status);
     header.state = state.thread.clone();
+    header.details.last_input_at = last_input_at.or(header.details.last_input_at);
     if let Some(steers) = steers {
         header.details.capabilities.steer = steers;
     }

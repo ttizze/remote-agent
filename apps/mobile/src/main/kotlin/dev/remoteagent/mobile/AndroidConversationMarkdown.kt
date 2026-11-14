@@ -24,7 +24,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -55,7 +54,6 @@ import dev.remoteagent.core.markdownCalloutMarker
 private const val RGB_MASK = 0xFFFFFFu
 private const val OPAQUE_ALPHA_MASK = 0xFF000000L
 private const val DARK_SURFACE_LUMINANCE = 0.5f
-private const val COPY_FEEDBACK_MILLIS = 1200L
 private const val LIST_INDENT_DP = 22
 
 @Composable
@@ -164,65 +162,6 @@ private fun MarkdownParagraph(
             )
     ) {
         MarkdownText(block.runs, style, block.style.marker, openFile, cwd)
-    }
-}
-
-@Composable
-private fun MarkdownCode(block: MarkdownBlock.Paragraph, index: Int) {
-    val language = LocalUiLanguage.current
-    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
-    var copied by remember { mutableStateOf(false) }
-    var wrapped by remember { mutableStateOf(false) }
-    val text = block.runs.joinToString("") { it.text }
-    androidx.compose.runtime.LaunchedEffect(copied) {
-        if (copied) {
-            kotlinx.coroutines.delay(COPY_FEEDBACK_MILLIS)
-            copied = false
-        }
-    }
-    Column(
-        Modifier.fillMaxWidth()
-            .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-            .border(
-                1.dp,
-                MaterialTheme.colorScheme.outlineVariant,
-                androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-            )
-            .background(MaterialTheme.colorScheme.surfaceContainer)
-    ) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                block.style.filename ?: (block.style.language ?: "CODE").uppercase(),
-                Modifier.weight(1f),
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            )
-            androidx.compose.material3.TextButton(onClick = { wrapped = !wrapped }) {
-                Text(if (wrapped) language.text("折り返し解除") else language.text("折り返し"))
-            }
-            androidx.compose.material3.TextButton(
-                onClick = {
-                    clipboard.setText(androidx.compose.ui.text.AnnotatedString(text))
-                    copied = true
-                },
-                modifier = Modifier.testTag("markdown.code.copy.$index"),
-            ) {
-                Text(if (copied) "✓" else language.text("コピー"))
-            }
-        }
-        HorizontalDivider()
-        Box(
-            Modifier.fillMaxWidth()
-                .then(if (wrapped) Modifier else Modifier.horizontalScroll(rememberScrollState()))
-                .padding(12.dp)
-        ) {
-            Text(
-                markdownText(block.runs),
-                style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
-            )
-        }
     }
 }
 
@@ -354,7 +293,7 @@ private fun MarkdownText(
 }
 
 @Composable
-private fun markdownText(runs: List<MarkdownRun>): androidx.compose.ui.text.AnnotatedString {
+internal fun markdownText(runs: List<MarkdownRun>): androidx.compose.ui.text.AnnotatedString {
     val dark = MaterialTheme.colorScheme.surface.luminance() < DARK_SURFACE_LUMINANCE
     val inlineBackground = MaterialTheme.colorScheme.surfaceVariant
     return buildAnnotatedString {

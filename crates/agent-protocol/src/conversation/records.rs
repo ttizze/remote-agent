@@ -65,6 +65,7 @@ pub struct Details {
     pub capabilities: Capabilities,
     pub preview: Option<String>,
     pub updated_at: i64,
+    pub last_input_at: Option<i64>,
     pub read_through: Option<TurnId>,
     pub project: crate::models::ProjectMembership,
     pub branch: Option<String>,

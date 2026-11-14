@@ -26,6 +26,7 @@ fn row(index: usize, project: bool, version: u64) -> Row {
             },
             details: Details {
                 updated_at: index as i64,
+                last_input_at: Some(index as i64),
                 project: if project {
                     crate::models::ProjectMembership::Assigned("project".into())
                 } else {
@@ -67,6 +68,67 @@ fn list() -> Snapshot {
     snapshot.lists.subscription = Some(uuid::Uuid::new_v4());
     project(&mut snapshot, false);
     snapshot
+}
+
+#[test]
+fn project_and_conversation_pages_follow_human_input_instead_of_agent_updates() {
+    let mut snapshot = Snapshot::default();
+    let projects = ["older", "newer"]
+        .map(|id| crate::models::Project {
+            id: id.into(),
+            name: id.into(),
+            ..Default::default()
+        })
+        .to_vec();
+    let mut summaries = [(0, "older", 100), (1, "older", 200), (2, "newer", 300)]
+        .map(|(index, project, at)| crate::models::Thread {
+            id: Some(address(index)),
+            project_id: crate::models::ProjectMembership::Assigned(project.into()),
+            last_input_at: Some(at),
+            ..Default::default()
+        })
+        .to_vec();
+    pages(
+        &mut snapshot,
+        projects.clone(),
+        summaries.clone(),
+        None,
+        false,
+    );
+    assert_eq!(
+        snapshot.lists.threads.as_ref().unwrap().projects[0].id,
+        "newer"
+    );
+    assert_eq!(
+        snapshot.lists.project_threads["older"].data[0].id,
+        Some(address(1))
+    );
+    summaries[0].updated_at = Some(999.);
+    pages(
+        &mut snapshot,
+        projects.clone(),
+        summaries.clone(),
+        None,
+        false,
+    );
+    assert_eq!(
+        snapshot.lists.threads.as_ref().unwrap().projects[0].id,
+        "newer"
+    );
+    assert_eq!(
+        snapshot.lists.project_threads["older"].data[0].id,
+        Some(address(1))
+    );
+    summaries[0].last_input_at = Some(400);
+    pages(&mut snapshot, projects, summaries, None, false);
+    assert_eq!(
+        snapshot.lists.threads.as_ref().unwrap().projects[0].id,
+        "older"
+    );
+    assert_eq!(
+        snapshot.lists.project_threads["older"].data[0].id,
+        Some(address(0))
+    );
 }
 
 #[test]
@@ -116,6 +178,15 @@ fn pagination_and_project_disclosure_are_local_without_changing_the_list_cursor(
 #[test]
 fn changes_update_titles_and_unread_without_reloading_or_losing_drafts() {
     let mut snapshot = list();
+    Arc::make_mut(&mut snapshot.lists.list_query).limit = 25;
+    project(&mut snapshot, false);
+    let order = snapshot
+        .thread_list()
+        .unwrap()
+        .threads
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
     snapshot.connection.connected = true;
     let id = address(0);
     Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).thread_id =
@@ -156,7 +227,15 @@ fn changes_update_titles_and_unread_without_reloading_or_losing_drafts() {
     };
     let subscription = snapshot.lists.subscription.unwrap();
     let (next, effects) = received(&snapshot, subscription, message.clone());
-    assert_eq!(next.thread_list().unwrap().threads[0].title, "New title");
+    let rows = next.thread_list().unwrap().threads;
+    assert_eq!(
+        rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>(),
+        order
+    );
+    assert_eq!(
+        rows.iter().find(|row| row.id == id).unwrap().title,
+        "New title"
+    );
     assert_eq!(next.input.drafts[&id.clone().into()].text, "Keep typing");
     assert_eq!(
         effects.len(),
@@ -467,6 +546,7 @@ fn search_projects_expand_page_and_collapse_without_changing_normal_disclosures(
         };
         header.details.project = crate::models::ProjectMembership::Assigned(id);
         header.details.updated_at = 0;
+        header.details.last_input_at = Some(0);
         rows.push(child);
     }
     state = received(

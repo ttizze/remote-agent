@@ -57,6 +57,30 @@ pub(in crate::host_rpc) fn header(response: &ThreadResponse, now: i64) -> Header
                 .as_deref()
                 .and_then(decision::records::preview),
             updated_at: thread.updated_at.map_or(now, |at| (at * 1000.0) as i64),
+            last_input_at: thread.last_input_at.or_else(|| {
+                thread
+                    .turns
+                    .iter()
+                    .flatten()
+                    .filter(|turn| {
+                        turn.items.iter().flatten().any(|item| {
+                            matches!(
+                                item.body(),
+                                agent_protocol::items::ItemBody::UserMessage { .. }
+                            )
+                        })
+                    })
+                    .filter_map(|turn| {
+                        turn.started_at_ms
+                            .and_then(|at| at.try_into().ok())
+                            .or_else(|| {
+                                turn.started_at
+                                    .filter(|at| at.is_finite())
+                                    .map(|at| (at * 1000.0) as i64)
+                            })
+                    })
+                    .max()
+            }),
             project: thread.project_id.clone(),
             branch: thread.git_branch.clone(),
             has_changes: thread.has_changes,
@@ -295,17 +319,17 @@ pub(super) fn write_history(
     }
     state.counters.turn = state.counters.turn.max(counters.turn);
     state.counters.item = state.counters.item.max(counters.item);
-    let updated_at = header(response, now).details.updated_at;
     rows::write_header(
         transaction,
         &rows::WriteScope {
             key,
             id,
             sequence,
-            at: updated_at,
+            at: saved.details.updated_at,
             process,
         },
         &state,
+        None,
         None,
         None,
         None,
@@ -368,6 +392,7 @@ pub(super) fn install(
         let (previous_header, counters) = rows::header(transaction, key)?;
         header.state.queue_held = previous_header.state.queue_held;
         let previous = previous_header.details;
+        header.details.last_input_at = previous.last_input_at.or(header.details.last_input_at);
         header.details.read_through = previous.read_through;
         header.details.selection = decision::records::Selection {
             model: previous.selection.model.or(header.details.selection.model),
@@ -425,6 +450,13 @@ pub(super) fn install(
     Ok(())
 }
 
+fn fork_name(title: &str, existing: &BTreeSet<String>) -> String {
+    (1..=existing.len() + 1)
+        .map(|number| format!("{title} ({number})"))
+        .find(|name| !existing.contains(name))
+        .expect("one more candidate than existing names")
+}
+
 impl Storage {
     pub(in crate::host_rpc) fn fork(
         &self,
@@ -451,6 +483,9 @@ impl Storage {
             }
             let busy: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM turns WHERE thread=?1 AND state IN ('running','waiting'))", [source_key], |row| row.get(0)).map_err(failure)?;
             let (mut header, _) = rows::header(&transaction, source_key)?;
+            let title = decision::records::summary(source, &header).name.unwrap_or_default();
+            let names = rows::headers(&transaction, false)?.into_iter().filter_map(|(id, header)| decision::records::summary(&id, &header).name).collect();
+            header.state.name = fork_name(&title, &names);
             header.state.provider = turn.provider;
             header.state.context_start = context_start_before(&transaction, source_key, turn.ordinal.saturating_add(1))?;
             header.state.queue_held = false;
@@ -487,7 +522,7 @@ impl Storage {
             }
             state.counters.turn = turn.ordinal;
             state.counters.item = transaction.query_row("SELECT coalesce(max(position),0) FROM items WHERE thread=?1", [target_key], |row| row.get::<_,i64>(0)).map_err(failure)?.try_into().map_err(failure)?;
-            rows::write_header(&transaction, &rows::WriteScope { key: target_key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, None, None, None)?;
+            rows::write_header(&transaction, &rows::WriteScope { key: target_key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, None, None, None, None)?;
             transaction.execute("INSERT INTO receipts(operation_id,provider,thread_id,seq,outcome) VALUES (?1,?2,?3,?4,?5)", params![target.id, target.provider.map(ProviderKind::key), target.id, integer(sequence.sequence)?, protocol::encode(Outcome::Accepted).map_err(failure)?]).map_err(failure)?;
             Self::commit(transaction,Some(target),Step::default(),Vec::new(),Vec::new(),true).map(|_|())
         })

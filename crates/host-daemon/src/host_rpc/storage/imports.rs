@@ -227,6 +227,7 @@ impl Storage {
                 None,
                 None,
                 None,
+                None,
             )?);
             Self::commit(
                 transaction,
@@ -411,7 +412,7 @@ impl Storage {
             }
             let previous=rows::header(&transaction,key)?.0.details.selection;
             let selection=decision::records::Selection {model:previous.model.or(response.model.clone()),effort:previous.effort.or(response.effort.clone()),service_tier:previous.service_tier.or(response.service_tier.clone())};
-            rows::write_header(&transaction, &rows::WriteScope { key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, Some((selection,None)), None, None)?;
+            rows::write_header(&transaction, &rows::WriteScope { key, id: target, sequence: sequence.sequence, at: now, process: self.process }, &state, Some((selection,None)), None, None, None)?;
             // Reimport publishes a reset, including the native reader's final completeness.
             let (mut header, _) = rows::header(&transaction, key)?;
             header.details.history_read_state = response.thread.history_read_state.clone();
