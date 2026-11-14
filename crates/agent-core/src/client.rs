@@ -34,6 +34,7 @@ pub(crate) fn command_result(
 
 pub(crate) async fn resolve_hydration(
     response: agent_protocol::conversation::records::Hydrated,
+    expected_thread: &str,
     expected: &agent_protocol::ids::ItemId,
     session: Option<&crate::transport::Session>,
 ) -> Result<Option<agent_protocol::orchestration::TurnItem>, PeerError> {
@@ -55,7 +56,7 @@ pub(crate) async fn resolve_hydration(
     };
     if item
         .as_ref()
-        .is_some_and(|item| item.id != expected.as_str())
+        .is_some_and(|item| item.thread_id != expected_thread || item.id != expected.as_str())
     {
         return Err(PeerError::InvalidMessage(
             "item detail identity changed".into(),
@@ -420,7 +421,7 @@ impl ClientExt for Client {
                 let detail = gallery_request(
                     &mut snapshot,
                     &mut stream,
-                    resolve_hydration(response, &item_id, session),
+                    resolve_hydration(response, &source, &item_id, session),
                 )
                 .await?;
                 let current = snapshot

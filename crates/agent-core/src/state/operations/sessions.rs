@@ -160,14 +160,15 @@ impl Operation for ReadItem {
     ) -> Result<Self::Output, PeerError> {
         let response = context
             .call(&agent_protocol::conversation::records::Hydrate {
-                session: crate::session::SessionRef::new(None, source)
+                session: crate::session::SessionRef::new(None, source.clone())
                     .map_err(|error| PeerError::InvalidMessage(error.into()))?,
                 item: self.item_id.clone(),
             })
             .await?;
         Ok((
             subscription,
-            crate::client::resolve_hydration(response, &self.item_id, context.session).await?,
+            crate::client::resolve_hydration(response, &source, &self.item_id, context.session)
+                .await?,
         ))
     }
     fn complete(
@@ -182,20 +183,26 @@ impl Operation for ReadItem {
         }
         if let Some(item) = body {
             let key = (item.thread_id.clone(), item.id.clone());
-            let valid = snapshot
-                .sessions
-                .projections
-                .get(&self.thread_id)
-                .is_some_and(|snapshot| {
-                    snapshot.projection.visible_turn_items.iter().any(|row| {
-                        row.source_thread_id == key.0
-                            && row.source_item_id == key.1
-                            && crate::orchestration::same_detail_revision(&row.item, &item)
-                    })
-                });
-            if valid {
+            let source =
+                snapshot
+                    .sessions
+                    .projections
+                    .get(&self.thread_id)
+                    .and_then(|snapshot| {
+                        snapshot.projection.visible_turn_items.iter().find(|row| {
+                            row.source_thread_id == key.0 && row.source_item_id == key.1
+                        })
+                    });
+            if source
+                .is_some_and(|row| crate::orchestration::same_detail_revision(&row.item, &item))
+            {
                 Arc::make_mut(&mut snapshot.sessions.item_details).insert(key, Arc::new(item));
                 return super::super::conversations::refresh(snapshot, &self.thread_id);
+            }
+            if source.is_some()
+                && item_source(&self, snapshot).is_some_and(|item| item.is_deferred())
+            {
+                return Ok(vec![Effect::continuation(self)]);
             }
         }
         Ok(Vec::new())
