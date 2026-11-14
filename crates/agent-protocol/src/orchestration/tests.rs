@@ -1913,6 +1913,51 @@ mod handoff_tests {
         }
     }
 
+    #[test]
+    fn portable_fork_resolution_rebinds_only_the_target_and_preserves_its_source() {
+        let old = "2026-11-13T00:00:00.000Z";
+        let original:ContextTransfer=serde_json::from_value(serde_json::json!({"id":"transfer","type":"fork","sourceThreadId":"source","targetThreadId":"target","sourcePoint":{"threadId":"source","runId":"source-run"},"basePoint":null,"sourceProviderInstanceId":"codex","targetProviderInstanceId":"codex","targetRunId":"failed-run","status":"pending","resolution":null,"createdBy":"user","error":"weak native source","createdAt":old,"updatedAt":old,"consumedAt":null})).unwrap();
+        let handoff:ContextHandoff=serde_json::from_value(serde_json::json!({"id":"handoff","transferId":"transfer","threadId":"target","targetRunId":"retry-run","fromProviderThreadIds":["source-provider-thread"],"toProviderThreadId":"target-provider-thread","coveredRunOrdinals":{"from":1,"to":1},"strategy":"full_thread_summary","status":"ready","summaryMessageId":null,"detailInTurnItem":true,"createdByProviderInstanceId":null,"createdAt":NOW,"updatedAt":NOW})).unwrap();
+        let change = provider_transfer(
+            &handoff,
+            original.source_point.clone(),
+            None,
+            Some("codex".into()),
+            "claude",
+            Actor::Agent,
+            Some(&original),
+            false,
+            NOW,
+        )
+        .unwrap();
+        let Change::ContextTransfer(updated) = change else {
+            panic!("existing fork transfer is updated");
+        };
+        assert_eq!(updated.id, original.id);
+        assert_eq!(updated.source_point, original.source_point);
+        assert_eq!(
+            updated.source_provider_instance_id,
+            original.source_provider_instance_id
+        );
+        assert_eq!(updated.created_at, old);
+        assert_eq!(updated.created_by, Actor::User);
+        assert_eq!(updated.target_run_id.as_deref(), Some("retry-run"));
+        assert_eq!(
+            updated.target_provider_instance_id.as_deref(),
+            Some("claude")
+        );
+        assert_eq!(updated.status, TransferStatus::ResolvedPortable);
+        assert_eq!(
+            updated.resolution,
+            Some(ContextTransferResolution::PortableContext {
+                context_handoff_id: "handoff".into()
+            })
+        );
+        assert!(updated.error.is_none() && updated.consumed_at.is_none());
+        assert_eq!(updated.updated_at, NOW);
+        assert_eq!(original.target_run_id.as_deref(), Some("failed-run"));
+    }
+
     proptest::proptest! {
         #[test]
         fn selected_history_fits_serialized_native_and_inline_payloads(data in proptest::collection::vec((proptest::prelude::any::<bool>(),".{0,300}"),0..20),budget in 1500usize..12_000) {

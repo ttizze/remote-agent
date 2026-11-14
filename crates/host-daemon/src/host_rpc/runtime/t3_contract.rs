@@ -1917,6 +1917,9 @@ async fn native_fork_provenance_survives_provider_switches() {
     )
     .await;
     settled(&service, &target, 2).await;
+    codex
+        .fail_inject
+        .store(1, std::sync::atomic::Ordering::SeqCst);
     send(&service, &target, ProviderKind::Codex, "fork-return").await;
     let current = settled(&service, &target, 3).await;
     assert_eq!(
@@ -1928,6 +1931,20 @@ async fn native_fork_provenance_survives_provider_switches() {
             .unwrap()
             .forked_from,
         provenance
+    );
+    let inputs = codex.inputs.lock().unwrap();
+    let fresh = &inputs.last().unwrap().thread_id.id;
+    let native = codex.records.lock().unwrap();
+    assert_eq!(
+        native[fresh].thread.turns.as_ref().unwrap().len(),
+        1,
+        "full portable recovery creates a fresh native context rather than copying the parent prefix again"
+    );
+    let context = serde_json::to_string(&*codex.injected.lock().unwrap()).unwrap();
+    assert!(
+        context.contains("fork-source")
+            && context.contains("fork-first")
+            && context.contains("fork-other-provider")
     );
 }
 

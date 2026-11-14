@@ -42,7 +42,9 @@
       "host_rpc::runtime::t3_contract::provider_handoff_uses_the_message_actor_for_agent_created_input",
       "host_rpc::runtime::t3_contract::a_provider_thread_without_a_native_reference_receives_full_history",
       "host_rpc::runtime::t3_contract::native_fork_provenance_survives_provider_switches",
-      "host_rpc::runtime::t3_contract::first_injection_recovery_keeps_its_provider_without_inventing_a_source_model"
+      "host_rpc::runtime::t3_contract::first_injection_recovery_keeps_its_provider_without_inventing_a_source_model",
+      "host_rpc::storage::commands::tests::a_context_preparation_rejection_is_durable_without_partial_admission",
+      "host_rpc::storage::commands::tests::queued_context_failure_preserves_the_preceding_native_completion"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
@@ -208,7 +210,8 @@
       "orchestration::tests::fork_tests::undelivered_forks_are_reclaimed_only_after_the_assigned_run_finishes",
       "orchestration::tests::handoff_tests::intact_history_keeps_priority_order_and_omitted_source_ids",
       "orchestration::tests::handoff_tests::native_context_budget_charges_input_attachments_and_output_reserve",
-      "orchestration::tests::handoff_tests::selected_history_fits_serialized_native_and_inline_payloads"
+      "orchestration::tests::handoff_tests::selected_history_fits_serialized_native_and_inline_payloads",
+      "orchestration::tests::handoff_tests::portable_fork_resolution_rebinds_only_the_target_and_preserves_its_source"
     ],
     "host-daemon": [
       "host_rpc::routing::credit::tests::streams_share_connection_credit_and_release_it_only_when_the_frame_is_dropped",
