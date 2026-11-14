@@ -3,9 +3,13 @@
 # Pure UI state does not require a new shared Rust business model.
 # This file is not a record of runtime acceptance results.
 
-revision = "4a368144f4f4f3494cc98cbee1c750784a9a3edc"
+revision = "38dfc8fb7a05f591e1e9c5b660c7a1fcc7ab6f3c"
 
 [sources]
+feedback_contract = "crates/agent-protocol/src/feedback.rs"
+feedback_host = "crates/host-daemon/src/host_rpc/service/feedback.rs"
+feedback_actions = "crates/agent-core/src/state/operations/feedback.rs"
+feedback_view = "crates/agent-core/src/presentation/feedback.rs"
 upload_operations = "crates/agent-core/src/state/operations/submission.rs"
 snapshot = "crates/agent-protocol/src/snapshot.rs"
 snapshot_upload = "crates/agent-core/src/composer/snapshot.rs"
@@ -965,9 +969,9 @@ windows = { status = "missing", detail = "代替モデル利用とその使用�
 
 [[implementation]]
 components = ["feedback"]
-phase = "extension"
-next = "フィードバック機能を持たせるなら送信操作と状態から追加する。"
-rust = { status = "missing", detail = "T3のフィードバック送信と状態を会話へ通知する契約がない。", evidence = ["operations", "intents"] }
+phase = "restore"
+next = "共通の送信可否・通知と送信/取消操作をネイティブへ接続し、成功時はIDをコピーできるようにする。"
+rust = { status = "present", detail = "Hostの現在のCodexセッションへ明示送信し、ログ添付の選択、送信中/成功/失敗/結果不明、成功IDと取消可否を共通化した。接続先・操作IDの照合と連打防止があり、画面移動でも結果を保持し、再接続で再送しない。", evidence = ["feedback_contract", "feedback_host", "feedback_actions", "feedback_view", "composer"] }
 mac = { status = "missing", detail = "フィードバック状態の会話通知がない。", evidence = ["desktop_notices"] }
 iphone = { status = "missing", detail = "フィードバック状態の会話通知がない。", evidence = ["iphone_notices"] }
 windows = { status = "missing", detail = "フィードバック状態の会話通知がない。", evidence = ["desktop_notices"] }
