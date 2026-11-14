@@ -425,7 +425,16 @@
       "host_rpc::storage::timeline::tests::context_excerpts_cannot_read_a_deleted_conversation",
       "host_rpc::storage::event_store::tests::item_positions_are_stable_and_identical_in_projection_and_replayed_events",
       "host_rpc::storage::event_store::tests::a_queued_body_gets_its_position_at_activation_after_ordinal_reassignment",
-      "host_rpc::storage::event_store::tests::run_start_is_reserved_before_items_and_appends_after_the_slot_is_taken"
+      "host_rpc::storage::event_store::tests::run_start_is_reserved_before_items_and_appends_after_the_slot_is_taken",
+      "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer",
+      "host_rpc::runtime::replay::recorded_codex_frames_cross_the_native_adapter_and_conversation_writer",
+      "host_rpc::runtime::replay::recorded_deepseek_acp_conversation_crosses_the_process_and_conversation_writer",
+      "host_rpc::runtime::resources::tests::capacity_resume_checks_native_safety_and_preserves_stop::case_02___continued__",
+      "host_rpc::runtime::resources::tests::capacity_resume_checks_native_safety_and_preserves_stop::case_03___stop_after_ack__",
+      "host_rpc::storage::tests::a_claimed_legacy_import_failure_is_unavailable_and_can_be_retried",
+      "host_rpc::storage::tests::a_private_native_source_cannot_create_a_second_conversation_row",
+      "host_rpc::storage::tests::catalog_claims_survive_restart_and_do_not_restore_superseded_native_sources",
+      "host_rpc::storage::tests::repeated_catalog_native_parent_does_not_version_an_unchanged_public_child"
     ]
   },
   "obsolete_files": [
