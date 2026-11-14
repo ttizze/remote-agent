@@ -666,6 +666,313 @@ async fn generated_images_keep_t3_tool_results_and_markdown_embeds() {
     assert!(agent.inputs.lock().unwrap().is_empty());
 }
 
+async fn complete_image_turn(service: &HostRpcService, native: &SessionRef, execution: Uuid) {
+    observe(
+        service,
+        native,
+        execution,
+        SessionChange::Turn {
+            turn: agent_protocol::models::Turn {
+                id: "observed-turn".into(),
+                status: agent_protocol::execution::TurnStatus::Completed,
+                ..Default::default()
+            },
+            completed: true,
+        },
+    )
+    .await;
+}
+
+fn generated_image(
+    id: &str,
+    status: agent_protocol::execution::ItemStatus,
+    path: Option<String>,
+    data: Option<String>,
+) -> SessionChange {
+    SessionChange::Item {
+        turn_id: "observed-turn".into(),
+        item: Arc::new(agent_protocol::items::Item::new(
+            id.into(),
+            status,
+            agent_protocol::items::ItemBody::ImageGeneration {
+                saved_path: path,
+                data,
+                revised_prompt: None,
+            },
+        )),
+    }
+}
+
+#[rstest::rstest]
+#[case::deduplicate(0)]
+#[case::existing_markdown_and_references(1)]
+#[case::links_code_and_escaped_embeds(2)]
+#[case::unclosed_fence(3)]
+#[case::unclosed_comment(4)]
+#[case::unclosed_raw_html(5)]
+#[case::windows_unc_and_reserved_characters(6)]
+#[tokio::test]
+async fn generated_image_answers_match_the_pinned_markdown_cases(#[case] case: usize) {
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../scripts/t3-port-check/generated-image-fixtures.json"
+    ))
+    .unwrap();
+    let fixture = &fixtures["cases"][case];
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let (session, native, execution) =
+        running(&service, &agent, directory.path().to_str().unwrap()).await;
+    for (index, path) in fixture["saved"].as_array().unwrap().iter().enumerate() {
+        observe(
+            &service,
+            &native,
+            execution,
+            generated_image(
+                &format!("image-{index}"),
+                agent_protocol::execution::ItemStatus::Completed,
+                Some(path.as_str().unwrap().into()),
+                None,
+            ),
+        )
+        .await;
+    }
+    let text = fixture["text"].as_str().unwrap();
+    if !text.is_empty() {
+        observe(
+            &service,
+            &native,
+            execution,
+            SessionChange::Item {
+                turn_id: "observed-turn".into(),
+                item: Arc::new(agent_protocol::items::Item::new(
+                    "final-answer".into(),
+                    agent_protocol::execution::ItemStatus::Completed,
+                    agent_protocol::items::ItemBody::AssistantText {
+                        text: text.into(),
+                        phase: agent_protocol::items::AssistantPhase::Final,
+                    },
+                )),
+            },
+        )
+        .await;
+    }
+    complete_image_turn(&service, &native, execution).await;
+    let current = settled(&service, &session, 1).await;
+    let messages: Vec<_> = current
+        .projection
+        .turn_items
+        .iter()
+        .filter_map(|item| {
+            if let model::TurnItemBody::AssistantMessage {
+                text, attachments, ..
+            } = &item.body
+            {
+                Some((text, attachments))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(messages.len(), 1, "{}", fixture["name"]);
+    assert_eq!(
+        messages[0].0,
+        fixture["expected"].as_str().unwrap(),
+        "{}",
+        fixture["name"]
+    );
+    assert!(messages[0].1.is_empty());
+    complete_image_turn(&service, &native, execution).await;
+    assert_eq!(
+        snapshot(&service, &session).projection.turn_items,
+        current.projection.turn_items,
+        "duplicate terminal events must not duplicate image messages"
+    );
+}
+
+#[rstest::rstest]
+#[tokio::test]
+async fn late_generated_images_finish_the_same_answer_after_foreground_completion(
+    #[values(false, true)] existing_answer: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let (session, native, execution) =
+        running(&service, &agent, directory.path().to_str().unwrap()).await;
+    observe(
+        &service,
+        &native,
+        execution,
+        generated_image(
+            "late-image",
+            agent_protocol::execution::ItemStatus::Running,
+            None,
+            None,
+        ),
+    )
+    .await;
+    if existing_answer {
+        observe(
+            &service,
+            &native,
+            execution,
+            SessionChange::Item {
+                turn_id: "observed-turn".into(),
+                item: Arc::new(agent_protocol::items::Item::new(
+                    "answer".into(),
+                    agent_protocol::execution::ItemStatus::Completed,
+                    agent_protocol::items::ItemBody::AssistantText {
+                        text: "Created.".into(),
+                        phase: agent_protocol::items::AssistantPhase::Final,
+                    },
+                )),
+            },
+        )
+        .await;
+    }
+    complete_image_turn(&service, &native, execution).await;
+    let current = settled(&service, &session, 1).await;
+    let image=current.projection.turn_items.iter().find(|item|matches!(&item.body,model::TurnItemBody::DynamicTool {tool_name:Some(name),..} if name=="image_gen.imagegen")).unwrap();
+    assert_eq!(image.status, model::TurnItemStatus::Running);
+    observe(
+        &service,
+        &native,
+        execution,
+        generated_image(
+            "late-image",
+            agent_protocol::execution::ItemStatus::Completed,
+            Some("/late.png".into()),
+            None,
+        ),
+    )
+    .await;
+    let done = snapshot(&service, &session);
+    let answers: Vec<_> = done
+        .projection
+        .turn_items
+        .iter()
+        .filter_map(|item| {
+            if let model::TurnItemBody::AssistantMessage { text, .. } = &item.body {
+                Some((item.id.clone(), text.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(answers.len(), 1);
+    assert_eq!(
+        answers[0].1,
+        if existing_answer {
+            "Created.\n\n![](</late.png>)"
+        } else {
+            "![](</late.png>)"
+        }
+    );
+    observe(
+        &service,
+        &native,
+        execution,
+        generated_image(
+            "late-image",
+            agent_protocol::execution::ItemStatus::Completed,
+            Some("/late.png".into()),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        snapshot(&service, &session).projection.turn_items,
+        done.projection.turn_items
+    );
+    assert!(agent.inputs.lock().unwrap().is_empty());
+}
+
+#[rstest::rstest]
+#[case::inline("inline", true)]
+#[case::data_url("data_url", true)]
+#[case::inclusive_limit("limit", true)]
+#[case::oversize("oversize", false)]
+#[case::invalid("invalid", false)]
+#[tokio::test]
+async fn generated_image_bytes_are_bounded_files_instead_of_database_payloads(
+    #[case] kind: &str,
+    #[case] success: bool,
+) {
+    use base64::Engine;
+    let png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a+X0AAAAASUVORK5CYII=").unwrap();
+    let mut bytes = png;
+    if kind == "limit" {
+        bytes.resize(16 * 1024 * 1024, 0);
+    }
+    if kind == "oversize" {
+        bytes.resize(16 * 1024 * 1024 + 1, 0);
+    }
+    let data = if kind == "invalid" {
+        "invalid base64".into()
+    } else {
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    };
+    let data = if kind == "data_url" {
+        format!("data:image/png;base64,{data}")
+    } else {
+        data
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let (session, native, execution) =
+        running(&service, &agent, directory.path().to_str().unwrap()).await;
+    observe(
+        &service,
+        &native,
+        execution,
+        generated_image(
+            "raw-image",
+            agent_protocol::execution::ItemStatus::Completed,
+            None,
+            Some(data.clone()),
+        ),
+    )
+    .await;
+    complete_image_turn(&service, &native, execution).await;
+    let current = settled(&service, &session, 1).await;
+    let (status, output) = current
+        .projection
+        .turn_items
+        .iter()
+        .find_map(|item| {
+            if let model::TurnItemBody::DynamicTool {
+                tool_name: Some(name),
+                output: Some(output),
+                ..
+            } = &item.body
+            {
+                (name == "image_gen.imagegen").then_some((item.status, output))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    if success {
+        assert_eq!(status, model::TurnItemStatus::Completed);
+        let path = output["savedPath"].as_str().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert!(current.projection.turn_items.iter().any(|item|matches!(&item.body,model::TurnItemBody::AssistantMessage {text,..} if text.contains(path))));
+    } else {
+        assert_eq!(status, model::TurnItemStatus::Failed);
+        assert!(output.get("savedPath").is_none());
+        assert!(output.get("failure").is_some());
+    }
+    assert!(
+        !serde_json::to_string(&current.projection)
+            .unwrap()
+            .contains(&data),
+        "raw image data must not enter the event projection"
+    );
+    assert!(agent.inputs.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn refreshed_native_catalog_is_visible_as_a_canonical_thread_without_inventing_a_run() {
     let directory = tempfile::tempdir().unwrap();

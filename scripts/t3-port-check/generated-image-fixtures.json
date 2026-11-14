@@ -1,0 +1,70 @@
+{
+  "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
+  "cases": [
+    {
+      "name": "appends each new image once",
+      "text": "Done.",
+      "saved": [
+        "/tmp/a.png",
+        "/tmp/b.png",
+        "/tmp/a.png"
+      ],
+      "expected": "Done.\n\n![](</tmp/a.png>)\n\n![](</tmp/b.png>)"
+    },
+    {
+      "name": "skips images the reply already shows",
+      "text": "![A](</tmp/a b.png>) ![B](c:\\Users\\me\\.codex\\b.png) ![C][a\\*b] ![D][unc]\n\n[a\\*b]: c:\\Users\\me\\.codex\\c.png\n[unc]: <\\\\HOST\\Share\\d.png>\n\n![E](file://host/share/e.png)",
+      "saved": [
+        "/tmp/a b.png",
+        "C:\\Users\\Me\\.codex\\b.png",
+        "C:\\Users\\Me\\.codex\\c.png",
+        "\\\\host\\share\\d.png",
+        "\\\\HOST\\SHARE\\e.png",
+        "/tmp/C.png"
+      ],
+      "expected": "![A](</tmp/a b.png>) ![B](c:\\Users\\me\\.codex\\b.png) ![C][a\\*b] ![D][unc]\n\n[a\\*b]: c:\\Users\\me\\.codex\\c.png\n[unc]: <\\\\HOST\\Share\\d.png>\n\n![E](file://host/share/e.png)\n\n![](</tmp/C.png>)"
+    },
+    {
+      "name": "links, code and escaped embeds still need a preview",
+      "text": "[open](/tmp/a.png) `![](/tmp/a.png)`\n\n```md\n![](/tmp/a.png)\n```\n\\![](/tmp/a.png)",
+      "saved": [
+        "/tmp/a.png"
+      ],
+      "expected": "[open](/tmp/a.png) `![](/tmp/a.png)`\n\n```md\n![](/tmp/a.png)\n```\n\\![](/tmp/a.png)\n\n![](</tmp/a.png>)"
+    },
+    {
+      "name": "an unclosed trailing fence is closed first",
+      "text": "Created.\n\n~~~js\nconsole.log(\"done\");",
+      "saved": [
+        "/tmp/a.png"
+      ],
+      "expected": "Created.\n\n~~~js\nconsole.log(\"done\");\n~~~\n\n![](</tmp/a.png>)"
+    },
+    {
+      "name": "an unclosed trailing HTML comment is closed first",
+      "text": "<!--\n![](</tmp/a.png>)",
+      "saved": [
+        "/tmp/a.png"
+      ],
+      "expected": "<!--\n![](</tmp/a.png>)\n-->\n\n![](</tmp/a.png>)"
+    },
+    {
+      "name": "an unclosed trailing raw HTML block is closed first",
+      "text": "<pre>\nlog",
+      "saved": [
+        "/tmp/a.png"
+      ],
+      "expected": "<pre>\nlog\n</pre>\n\n![](</tmp/a.png>)"
+    },
+    {
+      "name": "Windows, UNC and reserved characters keep their path",
+      "text": "",
+      "saved": [
+        "C:\\Users\\me\\a b#1.png",
+        "\\\\host\\share\\a.png",
+        "/tmp/a#b?100%25&copy;\\!\n<x>.png"
+      ],
+      "expected": "![](<C:/Users/me/a b%231.png>)\n\n![](<file://host/share/a.png>)\n\n![](</tmp/a%23b%3F100%2525%26copy;%5C!%0A\\<x\\>.png>)"
+    }
+  ]
+}

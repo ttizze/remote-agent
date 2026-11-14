@@ -429,6 +429,77 @@ fn completed_foreground_keeps_known_background_work_and_process_loss_fences_its_
 }
 
 #[test]
+fn pending_generated_images_outlive_foreground_but_not_their_native_process() {
+    for restart in [false, true] {
+        let (mut state, run, attempt) = running();
+        let mut image = state.turn_items.values().next().unwrap().clone();
+        image.id = "imagegen".into();
+        image.run_id = Some(run.clone());
+        image.node_id = None;
+        image.provider_thread_id = Some("native-thread".into());
+        image.provider_turn_id = state.run_attempts[&attempt].provider_turn_id.clone();
+        image.native_item_ref = Some(native("imagegen", None));
+        image.status = TurnItemStatus::Running;
+        image.body = TurnItemBody::DynamicTool {
+            tool_name: Some("image_gen.imagegen".into()),
+            input: serde_json::json!({}),
+            output: None,
+            output_omitted: None,
+            viewed_image_path: None,
+        };
+        state = state.apply(&observe_item(&state, &attempt, "session", image.clone()).unwrap());
+        let done = state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("done", &state),
+            )
+            .unwrap(),
+        );
+        assert_eq!(done.runs[&run].status, RunStatus::Completed);
+        assert_eq!(done.turn_items["imagegen"].status, TurnItemStatus::Running);
+        let mut final_image = image.clone();
+        final_image.status = TurnItemStatus::Completed;
+        if let TurnItemBody::DynamicTool { output, .. } = &mut final_image.body {
+            *output = Some(serde_json::json!({"status":"completed","savedPath":"/image.png"}));
+        }
+        assert!(
+            observe_item(&done, &attempt, "session", final_image.clone())
+                .unwrap()
+                .changes
+                .iter()
+                .any(|change| matches!(change,Change::TurnItem(item) if item.id=="imagegen"))
+        );
+        let failure = ProviderFailure {
+            class: "provider_error".into(),
+            message: "process stopped".into(),
+            code: None,
+            retryable: None,
+            reset_at: None,
+        };
+        let decision = if restart {
+            runtime_restarted(&done, false, context("restart", &done)).unwrap()
+        } else {
+            provider_stopped(&done, "codex", &failure, context("stop", &done)).unwrap()
+        };
+        let mut lost = done.apply(&decision);
+        assert_eq!(
+            lost.turn_items["imagegen"].status,
+            TurnItemStatus::Interrupted
+        );
+        lost.provider_sessions.get_mut("session").unwrap().status = ProviderSessionStatus::Ready;
+        assert!(
+            observe_item(&lost, &attempt, "session", final_image)
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn io_owner_cancels_a_claimed_start_only_after_stop_and_late_native_evidence_cannot_revive_it() {
     let mut state = accepted(&initial(), 1, Admission::Queue);
     let effect = state.effects.values_mut().next().unwrap();

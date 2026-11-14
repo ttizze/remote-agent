@@ -53,7 +53,21 @@
       "host_rpc::runtime::t3_contract::failed_recovery_allocation_keeps_the_existing_native_reference_and_uncommitted_recovery",
       "host_rpc::runtime::t3_contract::recovery_context_precedes_the_run_input_and_uses_a_stable_run_identity",
       "host_rpc::runtime::t3_contract::later_input_carries_unsent_failed_requests_once_without_resending_their_inputs",
-      "host_rpc::runtime::t3_contract::attached_provider_sessions_publish_the_native_model_switch_capability"
+      "host_rpc::runtime::t3_contract::attached_provider_sessions_publish_the_native_model_switch_capability",
+      "host_rpc::runtime::t3_contract::generated_image_answers_match_the_pinned_markdown_cases::case_1_deduplicate",
+      "host_rpc::runtime::t3_contract::generated_image_answers_match_the_pinned_markdown_cases::case_2_existing_markdown_and_references",
+      "host_rpc::runtime::t3_contract::generated_image_answers_match_the_pinned_markdown_cases::case_3_links_code_and_escaped_embeds",
+      "host_rpc::runtime::t3_contract::generated_image_answers_match_the_pinned_markdown_cases::case_4_unclosed_fence",
+      "host_rpc::runtime::t3_contract::generated_image_answers_match_the_pinned_markdown_cases::case_5_unclosed_comment",
+      "host_rpc::runtime::t3_contract::generated_image_answers_match_the_pinned_markdown_cases::case_6_unclosed_raw_html",
+      "host_rpc::runtime::t3_contract::generated_image_answers_match_the_pinned_markdown_cases::case_7_windows_unc_and_reserved_characters",
+      "host_rpc::runtime::t3_contract::late_generated_images_finish_the_same_answer_after_foreground_completion::existing_answer_1_false",
+      "host_rpc::runtime::t3_contract::late_generated_images_finish_the_same_answer_after_foreground_completion::existing_answer_2_true",
+      "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_1_inline",
+      "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_2_data_url",
+      "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_3_inclusive_limit",
+      "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_4_oversize",
+      "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_5_invalid"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
@@ -62,7 +76,8 @@
       "orchestration::tests::recovery::a_prepared_continuation_can_recover_again_without_repeating_the_original_input",
       "orchestration::tests::recovery::restart_preserves_native_identity_and_admits_one_continuation_without_replaying_input",
       "orchestration::tests::recovery::continuation_loop_limit_uses_the_pinned_five_minute_window",
-      "orchestration::tests::completed_foreground_keeps_known_background_work_and_process_loss_fences_its_late_results"
+      "orchestration::tests::completed_foreground_keeps_known_background_work_and_process_loss_fences_its_late_results",
+      "orchestration::tests::pending_generated_images_outlive_foreground_but_not_their_native_process"
     ],
     "agent-core": [
       "approval_can_complete_while_another_request_is_waiting",
