@@ -58,22 +58,52 @@ fn normalize_item(
     item: &mut model::TurnItem,
     run_ordinal: Option<u64>,
 ) -> Result<(), String> {
-    let existing:Option<i64>=transaction.query_row(
-        "SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id=?1 AND turn_item_id=?2",
-        params![item.thread_id,item.id],|row|row.get(0)).optional().map_err(failure)?;
-    if let Some(ordinal) = existing {
-        item.ordinal = ordinal.try_into().map_err(failure)?;
-        return Ok(());
-    }
-    if matches!(
+    let placement = if matches!(
         item.status,
         model::TurnItemStatus::Pending | model::TurnItemStatus::Cancelled
     ) && matches!(&item.body,model::TurnItemBody::UserMessage {input_intent,..} if input_intent=="queued_turn")
     {
-        item.ordinal = 0;
-        return Ok(());
+        ItemPlacement::Deferred
+    } else {
+        ItemPlacement::Append
+    };
+    item.ordinal = item_position(
+        transaction,
+        &item.thread_id,
+        &item.id,
+        item.run_id.as_deref(),
+        run_ordinal,
+        placement,
+    )?;
+    Ok(())
+}
+
+pub(super) enum ItemPlacement {
+    Deferred,
+    Append,
+    RunStart,
+}
+
+/// Both explicit recovery reservations and ordinary event writes use the same
+/// allocation rule. Existing positions survive retries and queue cancellation.
+pub(super) fn item_position(
+    transaction: &Transaction<'_>,
+    thread_id: &str,
+    item_id: &str,
+    run_id: Option<&str>,
+    run_ordinal: Option<u64>,
+    placement: ItemPlacement,
+) -> Result<u64, String> {
+    let existing:Option<i64>=transaction.query_row(
+        "SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id=?1 AND turn_item_id=?2",
+        params![thread_id,item_id],|row|row.get(0)).optional().map_err(failure)?;
+    if let Some(ordinal) = existing {
+        return ordinal.try_into().map_err(failure);
     }
-    if item.run_id.is_some() != run_ordinal.is_some() {
+    if matches!(placement, ItemPlacement::Deferred) {
+        return Ok(0);
+    }
+    if run_id.is_some() != run_ordinal.is_some() {
         return Err("item position requires its run ordinal".into());
     }
     let lower = integer(run_ordinal.unwrap_or(0))?
@@ -82,22 +112,24 @@ fn normalize_item(
     let upper = lower
         .checked_add(999_999)
         .ok_or("item position exhausted")?;
-    let last: i64 = transaction
+    let (first, last): (i64, i64) = transaction
         .query_row(
-            "SELECT coalesce(max(ordinal),?2) FROM orchestration_v2_turn_item_positions
+            "SELECT coalesce(min(ordinal),?3),coalesce(max(ordinal),?2) FROM orchestration_v2_turn_item_positions
                 WHERE thread_id=?1 AND ordinal BETWEEN ?2 AND ?3",
-            params![item.thread_id, lower, upper],
-            |row| row.get(0),
+            params![thread_id, lower, upper],
+            |row| Ok((row.get(0)?,row.get(1)?)),
         )
         .map_err(failure)?;
-    let ordinal = last
-        .checked_add(1)
-        .filter(|ordinal| *ordinal <= upper)
-        .ok_or("item run position exhausted")?;
+    let ordinal = if matches!(placement, ItemPlacement::RunStart) && first > lower {
+        lower
+    } else {
+        last.checked_add(1)
+            .filter(|ordinal| *ordinal <= upper)
+            .ok_or("item run position exhausted")?
+    };
     transaction.execute("INSERT INTO orchestration_v2_turn_item_positions(thread_id,turn_item_id,ordinal) VALUES (?1,?2,?3)",
-                params![item.thread_id,item.id,ordinal]).map_err(failure)?;
-    item.ordinal = ordinal.try_into().map_err(failure)?;
-    Ok(())
+                params![thread_id,item_id,ordinal]).map_err(failure)?;
+    ordinal.try_into().map_err(failure)
 }
 
 pub(super) fn read(

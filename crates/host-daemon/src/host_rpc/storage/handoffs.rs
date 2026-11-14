@@ -113,7 +113,13 @@ impl Storage {
             let changes = if !native_fork && fork.is_some() {
                 prepare(&tx, &state, run, thread, fork, false, now)?
             } else if !native_fork && replaced {
-                prepare(&tx, &state, run, thread, None, true, now)?
+                let changes = prepare(&tx, &state, run, thread, None, true, now)?;
+                for change in &changes {
+                    if let model::Change::TurnItem(item) = change {
+                        event_store::item_position(&tx, &item.thread_id, &item.id, item.run_id.as_deref(), Some(run.ordinal), event_store::ItemPlacement::RunStart)?;
+                    }
+                }
+                changes
             } else {Vec::new()};
             let prepared_thread = changes.iter().rev().find_map(|change|match change {model::Change::ProviderThread(value) if value.id == thread.id => Some(value), _=>None}).unwrap_or(thread);
             session.created_at = state.provider_sessions.get(&session.id).map_or_else(|| now.into(), |existing| existing.created_at.clone());
@@ -501,10 +507,17 @@ fn prepare(
     }
     let planned_id = id.clone();
     let item = (!runtime_fork).then(|| model::TurnItem {
-        id: model::derived_id(
-            "turn-item",
-            &["run", &run.id, "signal", &format!("context-handoff:{id}")],
-        ),
+        id: if fresh {
+            model::derived_id(
+                "turn-item",
+                &["run", &run.id, "signal", "resume-fallback-handoff"],
+            )
+        } else {
+            model::derived_id(
+                "turn-item",
+                &["run", &run.id, "signal", &format!("context-handoff:{id}")],
+            )
+        },
         thread_id: state.thread.id.clone(),
         run_id: Some(run.id.clone()),
         node_id: run
