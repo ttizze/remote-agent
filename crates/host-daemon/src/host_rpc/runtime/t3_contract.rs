@@ -945,6 +945,32 @@ async fn foreground_completion_preserves_a_background_command_and_accepts_its_la
         &service,
         &native,
         execution,
+        SessionChange::Item {
+            turn_id: "observed-turn".into(),
+            item: Arc::new(Item::new(
+                "unknown-late-command".into(),
+                ItemStatus::Running,
+                ItemBody::CommandExecution {
+                    command: "unknown late command".into(),
+                    cwd: None,
+                    output: "ignored".into(),
+                    exit_code: None,
+                    output_omitted: false,
+                },
+            )),
+        },
+    )
+    .await;
+    let ignored = snapshot(&service, &session);
+    assert_eq!(
+        ignored.projection.nodes, current.projection.nodes,
+        "rejected late items must not create orphan execution nodes"
+    );
+    assert_eq!(ignored.projection.turn_items, current.projection.turn_items);
+    observe(
+        &service,
+        &native,
+        execution,
         command(ItemStatus::Completed, "server-stopped-marker"),
     )
     .await;

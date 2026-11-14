@@ -329,6 +329,49 @@ fn completed_foreground_keeps_known_background_work_and_process_loss_fences_its_
             .changes
             .is_empty()
     );
+    let mut child = late.clone();
+    child.status = TurnItemStatus::Running;
+    child.native_item_ref = Some(native("unknown-child", None));
+    child.body = TurnItemBody::Subagent {
+        subagent_id: "unknown-child".into(),
+        origin: "native".into(),
+        driver: "codex".into(),
+        provider_instance_id: "codex".into(),
+        child_thread_id: None,
+        prompt: "late child".into(),
+        result: None,
+        progress: None,
+    };
+    assert!(
+        observe_item(&done, &attempt, "session", child)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+    let mut restarted =
+        done.apply(&runtime_restarted(&done, false, context("restart", &done)).unwrap());
+    assert!(
+        restarted.provider_threads["native-thread"]
+            .pending_background_tasks
+            .is_empty()
+    );
+    assert_eq!(
+        restarted.turn_items["server"].status,
+        TurnItemStatus::Interrupted
+    );
+    restarted
+        .provider_sessions
+        .get_mut("session")
+        .unwrap()
+        .status = ProviderSessionStatus::Ready;
+    let mut old = late.clone();
+    old.id = "server".into();
+    assert!(
+        observe_item(&restarted, &attempt, "session", old)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
     let failure = ProviderFailure {
         class: "provider_error".into(),
         message: "process stopped".into(),
