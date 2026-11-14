@@ -232,6 +232,15 @@ pub(crate) fn install(
         &snapshot.sessions.item_details,
     )
     .ok()?;
+    Arc::make_mut(&mut snapshot.sessions.metadata).insert(
+        id.clone(),
+        ConversationMetadata {
+            provider: output.provider,
+            capabilities: output.capabilities,
+            project_id: output.projection.projection.thread.project_id.clone(),
+            project_root: output.project_root,
+        },
+    );
     Arc::make_mut(&mut snapshot.sessions.projections)
         .insert(id.clone(), Arc::new(output.projection));
     let mut projected = projected;
@@ -307,6 +316,24 @@ fn share_turns(
         .collect()
 }
 
+/// A moved thread must not inherit its previous project's subscription root.
+pub(crate) fn project_root<'a>(
+    metadata: Option<&'a ConversationMetadata>,
+    projects: &'a [crate::models::Project],
+    project_id: Option<&str>,
+) -> Option<&'a str> {
+    metadata
+        .filter(|metadata| metadata.project_id.as_deref() == project_id)
+        .and_then(|metadata| metadata.project_root.as_deref())
+        .or_else(|| {
+            project_id
+                .and_then(|id| projects.iter().find(|project| project.id == id))
+                .filter(|project| project.roots.len() == 1)
+                .and_then(|project| project.roots.first())
+                .map(|root| root.path.as_str())
+        })
+}
+
 pub(crate) fn refresh(snapshot: &mut Snapshot, id: &SessionRef) -> Result<Vec<Effect>, PeerError> {
     let held = snapshot
         .sessions
@@ -318,16 +345,24 @@ pub(crate) fn refresh(snapshot: &mut Snapshot, id: &SessionRef) -> Result<Vec<Ef
         &held.projection.thread.provider_instance_id,
     )
     .map_err(PeerError::InvalidMessage)?;
-    let capabilities = before
-        .as_ref()
-        .and_then(|thread| thread.capabilities)
+    let metadata = snapshot.sessions.metadata.get(id);
+    let capabilities = metadata
+        .map(|metadata| metadata.capabilities)
         .unwrap_or_default();
     let mut projected = crate::orchestration::project(
         held,
         id,
-        provider,
+        metadata.map_or(provider, |metadata| metadata.provider),
         capabilities,
-        before.as_ref().and_then(|thread| thread.cwd.as_deref()),
+        project_root(
+            metadata,
+            snapshot
+                .lists
+                .threads
+                .as_ref()
+                .map_or(&[], |list| list.projects.as_slice()),
+            held.projection.thread.project_id.as_deref(),
+        ),
         &snapshot.sessions.item_details,
     )
     .map_err(PeerError::InvalidMessage)?;

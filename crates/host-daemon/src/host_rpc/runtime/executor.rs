@@ -535,6 +535,7 @@ impl Runtime {
         let now = commands::at();
         let caps = agent.capabilities();
         let mut capabilities = model::ProviderCapabilities::default();
+        capabilities.sessions.supports_model_switch_in_session = caps.model_change;
         capabilities.threads.can_create_empty_thread = true;
         capabilities.threads.can_read_thread_snapshot = true;
         capabilities.threads.can_fork_thread = caps.fork;

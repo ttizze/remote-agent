@@ -6,12 +6,44 @@ use agent_protocol::{execution as display, items, models, operations as op, requ
 pub fn project(
     snapshot: &ThreadSnapshot,
     identity: &session::SessionRef,
-    provider: session::ProviderKind,
+    capability_provider: session::ProviderKind,
     capabilities: session::Capabilities,
     project_root: Option<&str>,
     details: &BTreeMap<(String, String), Arc<model::TurnItem>>,
 ) -> Result<models::ThreadResponse, String> {
     let projection = &snapshot.projection;
+    let selected =
+        session::ProviderKind::from_instance_id(&projection.thread.provider_instance_id)?;
+    let mut capabilities = session::Capabilities {
+        steer: selected == capability_provider && capabilities.steer,
+        model_change: selected == capability_provider && capabilities.model_change,
+        ..capabilities
+    };
+    if let Some(session) = projection
+        .thread
+        .active_provider_thread_id
+        .as_ref()
+        .and_then(|id| {
+            projection.provider_threads.iter().find(|thread| {
+                &thread.id == id
+                    && thread.provider_instance_id == projection.thread.provider_instance_id
+            })
+        })
+        .and_then(|thread| thread.provider_session_id.as_ref())
+        .and_then(|id| {
+            projection.provider_sessions.iter().find(|session| {
+                &session.id == id
+                    && session.provider_instance_id == projection.thread.provider_instance_id
+            })
+        })
+    {
+        capabilities.steer = session.capabilities.turns.supports_active_steering;
+        capabilities.model_change = session
+            .capabilities
+            .sessions
+            .supports_model_switch_in_session;
+    }
+    let provider = selected;
     let cwd = projection.thread.worktree_path.as_deref().or(project_root);
     if identity.application_id() != projection.thread.id {
         return Err("conversation identity changed".into());

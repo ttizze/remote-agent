@@ -187,18 +187,26 @@ pub fn restore(directory: &Path, snapshot: &mut Snapshot) {
             let provider = serde_json::from_value(serde_json::Value::String(
                 replica.projection.thread.provider_instance_id.clone(),
             ));
-            let metadata = snapshot.thread_metadata(&id);
+            let metadata = snapshot.sessions.metadata.get(&id);
             let Ok(provider) = provider else {
                 continue;
             };
             let Ok(projected) = crate::orchestration::project(
                 &replica,
                 &id,
-                provider,
+                metadata.map_or(provider, |metadata| metadata.provider),
                 metadata
-                    .and_then(|thread| thread.capabilities)
+                    .map(|metadata| metadata.capabilities)
                     .unwrap_or_default(),
-                metadata.and_then(|thread| thread.cwd.as_deref()),
+                crate::state::conversations::project_root(
+                    metadata,
+                    snapshot
+                        .lists
+                        .threads
+                        .as_ref()
+                        .map_or(&[], |list| list.projects.as_slice()),
+                    replica.projection.thread.project_id.as_deref(),
+                ),
                 &BTreeMap::new(),
             ) else {
                 continue;

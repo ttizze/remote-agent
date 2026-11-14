@@ -447,9 +447,20 @@ group! {
     }
 }
 
+/// Host subscription context is independent of disposable conversation views.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationMetadata {
+    pub(crate) provider: crate::session::ProviderKind,
+    pub(crate) capabilities: crate::session::Capabilities,
+    pub(crate) project_id: Option<String>,
+    pub(crate) project_root: Option<String>,
+}
+
 group! {
     /// Open conversations and the input they have accepted or are still receiving.
     pub struct Sessions {
+        #[serde(skip)]
+        pub metadata: Arc<BTreeMap<crate::session::SessionRef, ConversationMetadata>>,
         #[serde(skip)]
         pub live_outputs: Arc<BTreeMap<agent_protocol::conversation::records::OutputKey, (uuid::Uuid, agent_protocol::sync::Output)>>,
         #[serde(skip)]
@@ -1503,6 +1514,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                         ..Default::default()
                     });
                 }
+                next.sessions.metadata = Arc::default();
                 next.sessions.projections = Arc::default();
                 next.sessions.subscription_generations = Arc::default();
                 next.sessions.item_details = Arc::default();
