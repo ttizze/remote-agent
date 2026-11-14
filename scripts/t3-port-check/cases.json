@@ -60,7 +60,8 @@
       "orchestration::tests::handoff_tests::history_selection_matches_pinned_t3_reference_outputs",
       "orchestration::tests::recovery::a_prepared_continuation_can_recover_again_without_repeating_the_original_input",
       "orchestration::tests::recovery::restart_preserves_native_identity_and_admits_one_continuation_without_replaying_input",
-      "orchestration::tests::recovery::continuation_loop_limit_uses_the_pinned_five_minute_window"
+      "orchestration::tests::recovery::continuation_loop_limit_uses_the_pinned_five_minute_window",
+      "orchestration::tests::completed_foreground_keeps_known_background_work_and_process_loss_fences_its_late_results"
     ],
     "agent-core": [
       "approval_can_complete_while_another_request_is_waiting",

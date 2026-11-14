@@ -257,6 +257,110 @@ fn running() -> (State, String, String) {
 }
 
 #[test]
+fn completed_foreground_keeps_known_background_work_and_process_loss_fences_its_late_results() {
+    let (mut state, run, attempt) = running();
+    let root = state.nodes[&state.runs[&run].root_node_id.clone().unwrap()].clone();
+    for id in ["server", "foreground"] {
+        let node = ExecutionNode {
+            id: id.into(),
+            parent_node_id: Some(root.id.clone()),
+            kind: NodeKind::ToolCall,
+            counts_for_run: false,
+            ..root.clone()
+        };
+        let item = TurnItem {
+            id: id.into(),
+            thread_id: state.thread.id.clone(),
+            run_id: Some(run.clone()),
+            node_id: Some(id.into()),
+            provider_thread_id: Some("native-thread".into()),
+            provider_turn_id: state.run_attempts[&attempt].provider_turn_id.clone(),
+            native_item_ref: Some(native(id, None)),
+            parent_item_id: None,
+            ordinal: 10,
+            status: TurnItemStatus::Running,
+            title: None,
+            started_at: Some(NOW.into()),
+            completed_at: None,
+            updated_at: NOW.into(),
+            body: TurnItemBody::CommandExecution {
+                input: id.into(),
+                output: Some("started".into()),
+                exit_code: None,
+                output_omitted: None,
+                output_indicates_failure: None,
+            },
+        };
+        state.nodes.insert(node.id.clone(), node);
+        state.turn_items.insert(item.id.clone(), item);
+    }
+    state.provider_threads.get_mut("native-thread").unwrap().pending_background_tasks = vec![serde_json::from_value(serde_json::json!({"kind":"command","taskId":"server","itemId":"server","nativeItemId":"server"})).unwrap()];
+    let done = state.apply(
+        &complete(
+            &state,
+            &attempt,
+            "session",
+            Completion::Completed,
+            context("done", &state),
+        )
+        .unwrap(),
+    );
+    assert_eq!(done.runs[&run].status, RunStatus::Completed);
+    assert_eq!(done.turn_items["server"].status, TurnItemStatus::Running);
+    assert_eq!(done.nodes["server"].status, NodeStatus::Running);
+    assert_eq!(
+        done.turn_items["foreground"].status,
+        TurnItemStatus::Completed
+    );
+    assert_eq!(done.nodes["foreground"].status, NodeStatus::Completed);
+    let mut late = done.turn_items["server"].clone();
+    late.status = TurnItemStatus::Completed;
+    late.completed_at = Some(NOW.into());
+    let settled = done.apply(&observe_item(&done, &attempt, "session", late.clone()).unwrap());
+    assert!(
+        settled.provider_threads["native-thread"]
+            .pending_background_tasks
+            .is_empty()
+    );
+    late.id = "unknown".into();
+    assert!(
+        observe_item(&done, &attempt, "session", late.clone())
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+    let failure = ProviderFailure {
+        class: "provider_error".into(),
+        message: "process stopped".into(),
+        code: None,
+        retryable: None,
+        reset_at: None,
+    };
+    let mut stopped =
+        done.apply(&provider_stopped(&done, "codex", &failure, context("stop", &done)).unwrap());
+    assert!(
+        stopped.provider_threads["native-thread"]
+            .pending_background_tasks
+            .is_empty()
+    );
+    assert_eq!(
+        stopped.turn_items["server"].status,
+        TurnItemStatus::Interrupted
+    );
+    assert_eq!(stopped.nodes["server"].status, NodeStatus::Interrupted);
+    // The provider's process identifier can be reused after restart. A cleared
+    // roster must still prevent an old completed attempt from reviving work.
+    stopped.provider_sessions.get_mut("session").unwrap().status = ProviderSessionStatus::Ready;
+    late.id = "server".into();
+    assert!(
+        observe_item(&stopped, &attempt, "session", late)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+}
+
+#[test]
 fn io_owner_cancels_a_claimed_start_only_after_stop_and_late_native_evidence_cannot_revive_it() {
     let mut state = accepted(&initial(), 1, Admission::Queue);
     let effect = state.effects.values_mut().next().unwrap();
