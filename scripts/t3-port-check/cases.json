@@ -71,7 +71,8 @@
       "gallery_drains_live_frames_while_image_hydration_waits_for_the_host",
       "gallery_finishes_with_an_error_when_the_hydrated_image_was_removed",
       "gallery_history_reads_do_not_block_conversation_notifications",
-      "gallery_reads_markdown_images_and_deduplicates_against_canonical_tool_paths"
+      "gallery_reads_markdown_images_and_deduplicates_against_canonical_tool_paths",
+      "cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace_a_refresh"
     ]
   },
   "guards": {

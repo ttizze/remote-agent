@@ -543,7 +543,7 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
             let completion = fixture.store.dispatch(intent);
             let request = fixture.requests.recv().await.unwrap();
             assert!(matches!(request["method"].as_str(), Some("host/conversation/change")));
-            fixture.output.lock().await.reply(&request, json!({"result":{"sequence":8,"acceptedAt":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
+            fixture.output.lock().await.reply(&request, json!({"result":{"sequence":8,"accepted_at":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
             completion.await.unwrap();
         }
         assert_eq!(fixture.files.grants.lock().unwrap().len(), 4, "stalled bodies must retain their slots");

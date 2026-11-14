@@ -667,7 +667,8 @@ impl State {
             if self.list_replica.is_some() {
                 self.sequence += 1;
             }
-            if request["params"]["afterSequence"].as_u64().is_some() {
+            if matches!(&request.call, Call::SubscribeConversation(params) if params.after_sequence.is_some())
+            {
                 self.sequence += 1;
             }
             let provider = response

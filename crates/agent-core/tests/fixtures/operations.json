@@ -193,7 +193,7 @@
             "id": "thread-1"
           },
           "subscription": "00000000-0000-0000-0000-000000000002",
-          "afterSequence": null
+          "after_sequence": null
         },
         "response": {
           "result": {
@@ -299,7 +299,7 @@
             "id": "thread-1"
           },
           "subscription": "00000000-0000-0000-0000-000000000002",
-          "afterSequence": null
+          "after_sequence": null
         },
         "response": {
           "result": {
@@ -435,7 +435,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -443,7 +443,7 @@
     ],
     "result": {
       "sequence": 7,
-      "acceptedAt": "2026-11-14T00:00:00.000Z",
+      "accepted_at": "2026-11-14T00:00:00.000Z",
       "error": null
     }
   },
@@ -500,7 +500,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -508,7 +508,7 @@
     ],
     "result": {
       "sequence": 7,
-      "acceptedAt": "2026-11-14T00:00:00.000Z",
+      "accepted_at": "2026-11-14T00:00:00.000Z",
       "error": null
     }
   },
@@ -622,7 +622,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -630,7 +630,7 @@
     ],
     "result": {
       "sequence": 7,
-      "acceptedAt": "2026-11-14T00:00:00.000Z",
+      "accepted_at": "2026-11-14T00:00:00.000Z",
       "error": null
     }
   },
@@ -698,7 +698,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -706,7 +706,7 @@
     ],
     "result": {
       "sequence": 7,
-      "acceptedAt": "2026-11-14T00:00:00.000Z",
+      "accepted_at": "2026-11-14T00:00:00.000Z",
       "error": null
     }
   },
@@ -775,7 +775,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -783,7 +783,7 @@
     ],
     "result": {
       "sequence": 7,
-      "acceptedAt": "2026-11-14T00:00:00.000Z",
+      "accepted_at": "2026-11-14T00:00:00.000Z",
       "error": null
     }
   },
@@ -815,7 +815,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -1060,7 +1060,7 @@
             "id": "thread-1"
           },
           "subscription": "00000000-0000-0000-0000-000000000002",
-          "afterSequence": null
+          "after_sequence": null
         },
         "response": {
           "result": {
@@ -1144,7 +1144,7 @@
             "id": "thread"
           },
           "subscription": "00000000-0000-0000-0000-000000000002",
-          "afterSequence": null
+          "after_sequence": null
         },
         "response": {
           "result": {
@@ -1285,7 +1285,7 @@
             "id": "thread"
           },
           "subscription": "00000000-0000-0000-0000-000000000002",
-          "afterSequence": null
+          "after_sequence": null
         },
         "response": {
           "error": {
@@ -1440,7 +1440,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -1501,7 +1501,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -1601,7 +1601,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -1667,7 +1667,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }
@@ -1759,7 +1759,7 @@
         "response": {
           "result": {
             "sequence": 7,
-            "acceptedAt": "2026-11-14T00:00:00.000Z",
+            "accepted_at": "2026-11-14T00:00:00.000Z",
             "error": null
           }
         }

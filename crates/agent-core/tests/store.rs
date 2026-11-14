@@ -5006,7 +5006,7 @@ async fn foreign_conversation_stream_preserves_history_and_only_reports_failed_r
         .unwrap();
     let recovery = read(&mut reader).await;
     assert_eq!(recovery["method"], "host/conversation/subscribe");
-    assert_eq!(recovery["params"]["afterSequence"], json!(sequence));
+    assert_eq!(recovery["params"]["after_sequence"], json!(sequence));
     assert!(!store.snapshot().sessions.subscriptions.contains_key(&id));
     assert!(store.snapshot().panes.primary().error.is_none());
     assert_eq!(
@@ -5740,7 +5740,9 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/conversation/extend");
     assert_eq!(request["params"]["session"], json!(id));
-    let captured = request["params"]["cached"].clone();
+    let captured = request["params"]["cursor"].clone();
+    assert_eq!(captured, "oldest-A");
+    let live_sequence = store.snapshot().sessions.projections[&id].snapshot_sequence;
     assert!(store.snapshot().operation_running(history.clone()));
     writer
         .reply(
@@ -5765,7 +5767,7 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
         thread_id: id.clone(),
     });
     let request = read(&mut reader).await;
-    assert_eq!(request["params"]["cached"], captured);
+    assert_eq!(request["params"]["cursor"], captured);
     assert!(store.snapshot().operation_running(history.clone()));
     assert!(store.snapshot().operation_error(history.clone()).is_none());
     writer
@@ -5806,7 +5808,11 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
         thread_id: id.clone(),
     });
     let old_request = read(&mut reader).await;
-    assert_eq!(old_request["params"]["cached"], captured);
+    assert_eq!(old_request["params"]["cursor"], "oldest-B");
+    assert_eq!(
+        store.snapshot().sessions.projections[&id].snapshot_sequence,
+        live_sequence
+    );
     let refresh = store.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone())));
     let request = read(&mut reader).await;
     writer
@@ -6052,7 +6058,7 @@ async fn local_unknown_input_restore_and_discard_follow_the_user_intent_after_ho
         request["params"]["command"]["ResolveUnknown"],
         json!({"id":input,"retry":false})
     );
-    writer.reply(&request, json!({"result":{"sequence":8,"acceptedAt":"2026-11-14T00:00:00.000Z","error":"original was never admitted"}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"sequence":8,"accepted_at":"2026-11-14T00:00:00.000Z","error":"original was never admitted"}})).await.unwrap();
     receipt.await.unwrap();
     let state = store.snapshot();
     assert!(!state.sessions.pending_submissions.contains_key(&input));
