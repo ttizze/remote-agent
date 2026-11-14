@@ -3,9 +3,13 @@
 # Pure UI state does not require a new shared Rust business model.
 # This file is not a record of runtime acceptance results.
 
-revision = "d6ba4012785de014fba9274c682d133dc1dcd75f"
+revision = "4a368144f4f4f3494cc98cbee1c750784a9a3edc"
 
 [sources]
+upload_operations = "crates/agent-core/src/state/operations/submission.rs"
+snapshot = "crates/agent-protocol/src/snapshot.rs"
+snapshot_upload = "crates/agent-core/src/composer/snapshot.rs"
+snapshot_view = "crates/agent-core/src/presentation/snapshot.rs"
 rich_text = "apps/nsh/src/rich_text.rs"
 artifact_templates = "crates/agent-core/src/presentation/markdown/template.rs"
 template_actions = "crates/agent-core/src/composer/template.rs"
@@ -286,12 +290,12 @@ windows = { status = "missing", detail = "送信音声のプレイヤーがな�
 
 [[implementation]]
 components = ["snapshot"]
-phase = "extension"
-next = "取得元と取得内容を持つ添付契約・取り込み操作から作る。"
-rust = { status = "missing", detail = "Snap Shotのアプリ・アクセシビリティ内容を保持する添付契約がない。画像添付とは別。", evidence = ["items", "state"] }
-mac = { status = "missing", detail = "Snap Shot専用の枠・詳細・開く操作がない。", evidence = ["mac_rows"] }
-iphone = { status = "missing", detail = "Snap Shot添付のUIがない。", evidence = ["iphone_rows", "iphone_attachments"] }
-windows = { status = "missing", detail = "Snap Shot添付のUIがない。", evidence = ["win_rows"] }
+phase = "restore"
+next = "OSでのキャプチャ取り込みと、添付枠・取得元アイコン・詳細を開くネイティブUIを接続する。"
+rust = { status = "present", detail = "取得時刻・アプリ/ウィンドウ・アイコンと、平文/要素ツリーのアクセシビリティ情報を構造化Contextに保持する。通常の画像転送の完了と同時に追加し、送信・保存・履歴復元で保持する。詳細表示の形式/切り詰め情報、内容量/深さの検証、画像を外した際の参照整理がある。", evidence = ["snapshot", "snapshot_upload", "snapshot_view", "context", "upload_operations"] }
+mac = { status = "missing", detail = "取得元の共通データは渡せる。OSキャプチャ取り込み・Snap Shot専用枠/アイコン・詳細を開く操作は未接続。", evidence = ["mac_rows"] }
+iphone = { status = "missing", detail = "取得元の共通データは渡せる。Snap Shot添付枠・取得元アイコン・詳細を開く操作は未接続。", evidence = ["iphone_rows", "iphone_attachments"] }
+windows = { status = "missing", detail = "取得元の共通データは渡せる。OSキャプチャ取り込み・Snap Shot専用枠/アイコン・詳細を開く操作は未接続。", evidence = ["win_rows"] }
 
 [[implementation]]
 components = ["context-chips"]
