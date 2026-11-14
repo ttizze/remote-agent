@@ -147,8 +147,8 @@ adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mob
 if [[ $mode == all ]]; then
 adb -P "$server_port" -s "$serial" shell settings put secure show_ime_with_hard_keyboard 1
 adb -P "$server_port" -s "$serial" shell am instrument -w -r \
-    -e class dev.remoteagent.mobile.VoiceInputTest,dev.remoteagent.mobile.MarkdownLinkTest,dev.remoteagent.mobile.FileViewerTest,dev.remoteagent.mobile.MessageActionsTest,dev.remoteagent.mobile.UnknownSubmissionTest,dev.remoteagent.mobile.ComposerStopTest,dev.remoteagent.mobile.ComposerKeyboardTest \
+    -e class dev.remoteagent.mobile.VoiceInputTest,dev.remoteagent.mobile.MarkdownLinkTest,dev.remoteagent.mobile.FileViewerTest,dev.remoteagent.mobile.MessageActionsTest,dev.remoteagent.mobile.UnknownSubmissionTest,dev.remoteagent.mobile.ComposerStopTest,dev.remoteagent.mobile.ComposerKeyboardTest,dev.remoteagent.mobile.ProjectActionsTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.ui.log"
-grep -qx 'OK (24 tests)' "$log.ui.log"
+grep -qx 'OK (28 tests)' "$log.ui.log"
 fi
 echo "Android API 37: $mode checks passed; records at $log.*"

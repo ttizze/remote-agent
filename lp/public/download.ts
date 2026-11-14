@@ -13,7 +13,7 @@ declare global {
     mac:     { name: 'macOS',         file: { ja: 'Apple Silicon · macOS 26 · ZIP', en: 'Apple Silicon · macOS 26 · ZIP' }, url: 'https://github.com/ttizze/remote-agent/releases/download/prd-133/bex-macOS-arm64.zip', ready: true },
     ios:     { name: 'iPhone', file: { ja: 'iOS 26 · TestFlightで配布中', en: 'iOS 26 · via TestFlight' }, url: 'https://testflight.apple.com/join/UJbK9Ww7', ready: true, cta: { ja: 'TestFlightで入手', en: 'Get on TestFlight' } },
     win:     { name: 'Windows',       file: { ja: 'Windows 11 · x86-64 · EXE', en: 'Windows 11 · x86-64 · EXE' }, url: 'https://github.com/ttizze/remote-agent/releases/download/prd-133/bex-windows-x86_64-setup.exe', ready: true },
-    android: { name: 'Android',       file: { ja: 'Android 8.0以降 · 64-bit · APK（プレビュー）', en: 'Android 8.0+ · 64-bit · preview APK' }, url: 'https://github.com/TooriG/remote-agent/releases/download/android-preview-79/bex-android-preview.apk', ready: true, cta: { ja: 'Androidで使う', en: 'Use on Android' } },
+    android: { name: 'Android',       file: { ja: 'Android 8.0以降 · 64-bit · APK（プレビュー）', en: 'Android 8.0+ · 64-bit · preview APK' }, url: 'https://github.com/TooriG/remote-agent/releases/download/android-preview-81/bex-android-preview.apk', ready: true, cta: { ja: 'Androidで使う', en: 'Use on Android' } },
     linux:   { name: 'Linux',         file: { ja: 'ヘッドレスHost・CLI', en: 'Headless Host and CLI' }, url: SRC + '#headless-linux-and-iphone-pairing', ready: true, source: true }
   };
   const ICON: Record<Platform, string> = {

@@ -26,7 +26,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -68,7 +67,6 @@ import dev.remoteagent.core.ReadThread
 import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.ThreadList
 import dev.remoteagent.core.ThreadSummary
-import dev.remoteagent.core.localizedUiFormat
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 
@@ -119,7 +117,7 @@ internal fun ThreadListScreen(
             Box(Modifier.weight(1f)) { emptyContent() }
         } else {
             TabRow(selectedTabIndex = selectedTab, containerColor = MaterialTheme.colorScheme.background) {
-                listOf(language.text("ÊúÄËøë„ÅÆ„ÉÅ„É£„ÉÉ„Éà"), language.text("„Éó„É≠„Ç∏„Çß„ÇØ„Éà")).forEachIndexed { index, label ->
+                listOf(language.text("ç≈ãﬂÇÃÉ`ÉÉÉbÉg"), language.text("ÉvÉçÉWÉFÉNÉg")).forEachIndexed { index, label ->
                     Tab(selected = selectedTab == index, onClick = { selectedTab = index }, text = { Text(label) })
                 }
             }
@@ -146,7 +144,7 @@ private fun NewChatButton(perform: (Intent, String?) -> Unit) {
         contentPadding = PaddingValues(16.dp),
     ) {
         Icon(painterResource(R.drawable.ic_add), null, Modifier.size(20.dp))
-        Text(language.text("Êñ∞„Åó„ÅÑ„ÉÅ„É£„ÉÉ„Éà"), Modifier.padding(start = 8.dp), fontWeight = FontWeight.SemiBold)
+        Text(language.text("êVÇµÇ¢É`ÉÉÉbÉg"), Modifier.padding(start = 8.dp), fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -217,13 +215,13 @@ private fun LazyListScope.recentChats(
                 onClick = { perform(Intent.ExpandRecentChats, null) },
                 enabled = !loadingThreads && !list.loadingChats,
             ) {
-                LoadingLabel("„ÇÇ„Å£„Å®Ë¶ã„Çã", list.loadingChats)
+                LoadingLabel("Ç‡Ç¡Ç∆å©ÇÈ", list.loadingChats)
             }
         }
     if (list != null && threads.isEmpty())
         item {
             Text(
-                language.text("„ÉÅ„É£„ÉÉ„Éà„Åå„ÅÇ„Çä„Åæ„Åõ„Çì„ÄÇ"),
+                language.text("É`ÉÉÉbÉgÇ™Ç†ÇËÇ‹ÇπÇÒÅB"),
                 Modifier.padding(vertical = 24.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -267,11 +265,11 @@ private fun SummaryRow(thread: ThreadSummary, openConversation: (Intent) -> Unit
             }
         }
         if (thread.active) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-        else if (thread.unread) Text(language.text("‚óè ÂÆå‰∫Ü„ÉªÊú™Á¢∫Ë™ç"))
+        else if (thread.unread) Text(language.text("Åú äÆóπÅEñ¢ämîF"))
         if (thread.hasChanges == true) {
             Icon(
                 painterResource(R.drawable.ic_diff),
-                language.text("‰ΩúÊàêÂÖÉ„Åã„Çâ„ÅÆÂ§âÊõ¥„ÅÇ„Çä"),
+                language.text("çÏê¨å≥Ç©ÇÁÇÃïœçXÇ†ÇË"),
                 Modifier.padding(start = 8.dp).size(18.dp),
                 tint = Color(CHANGES_COLOR_ARGB),
             )
@@ -309,16 +307,24 @@ private fun LazyListScope.projectThreads(
                 onClick = { perform(Intent.ExpandProjects, null) },
                 enabled = !loadingThreads && !list.loadingProjects,
             ) {
-                LoadingLabel("„ÇÇ„Å£„Å®„Éó„É≠„Ç∏„Çß„ÇØ„Éà„ÇíË°®Á§∫", list.loadingProjects)
+                LoadingLabel("Ç‡Ç¡Ç∆ÉvÉçÉWÉFÉNÉgÇï\é¶", list.loadingProjects)
             }
         }
     if (list != null && list.projects.isEmpty())
         item {
             Text(
-                language.text("„Éó„É≠„Ç∏„Çß„ÇØ„Éà„Åå„ÅÇ„Çä„Åæ„Åõ„Çì„ÄÇ"),
+                language.text("ÉvÉçÉWÉFÉNÉgÇ™Ç†ÇËÇ‹ÇπÇÒÅB"),
                 Modifier.padding(vertical = 24.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    list
+        ?.hiddenProjects
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { hidden ->
+            item(key = "hidden-projects") {
+                HiddenProjects(hidden) { project, intent -> perform(intent, project.hostId) }
+            }
         }
 }
 
@@ -343,7 +349,7 @@ private fun LazyListScope.projectSection(
         project.coordinatorUrl?.let {
             item(key = "coordinator:${project.listKey}") {
                 Text(
-                    language.text("„Çø„Çπ„ÇØ„ÅÆ‰æùÈ†º„ÉªÊåØ„ÇäÂàÜ„Åë„ÅØ„É°„Ç§„É≥‰ºöË©±„Å∏„ÄÇ‰ª•‰∏ã„ÅØ„Åì„ÅÆPC„ÅÆ‰ΩúÊ•≠„Çπ„É¨„ÉÉ„Éâ„Åß„Åô„ÄÇ"),
+                    language.text("É^ÉXÉNÇÃàÀóäÅEêUÇËï™ÇØÇÕÉÅÉCÉìâÔòbÇ÷ÅBà»â∫ÇÕÇ±ÇÃPCÇÃçÏã∆ÉXÉåÉbÉhÇ≈Ç∑ÅB"),
                     Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -355,7 +361,7 @@ private fun LazyListScope.projectSection(
         project.error?.let { error ->
             item(key = "error:${project.listKey}") {
                 ErrorTextView(error, color = androidx.compose.ui.graphics.Color.Unspecified)
-                TextButton(onClick = { dispatch(Intent.RefreshProject(project.id)) }) { Text(language.text("ÂÜçË©¶Ë°å")) }
+                TextButton(onClick = { dispatch(Intent.RefreshProject(project.id)) }) { Text(language.text("çƒééçs")) }
             }
         }
         items(project.threads, key = { "project:${project.listKey}:${it.id.listKey}" }) { SummaryRow(it, dispatch) }
@@ -365,7 +371,7 @@ private fun LazyListScope.projectSection(
                     onClick = { dispatch(Intent.ExpandThreadList(project.id)) },
                     enabled = !project.loading,
                 ) {
-                    LoadingLabel("„ÇÇ„Å£„Å®Ë¶ã„Çã", project.loading)
+                    LoadingLabel("Ç‡Ç¡Ç∆å©ÇÈ", project.loading)
                 }
             }
     }
@@ -379,9 +385,6 @@ private fun ProjectRow(
     modifier: Modifier = Modifier,
     floating: Boolean = false,
 ) {
-    val language = LocalUiLanguage.current
-    val openLink = rememberExternalLinkOpener()
-    val coordinatorUrl = project.coordinatorUrl
     Row(
         modifier.fillMaxWidth().padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -389,7 +392,7 @@ private fun ProjectRow(
     ) {
         if (floating) {
             Box(Modifier.size(40.dp, 48.dp), contentAlignment = Alignment.Center) {
-                Text("‚â°", color = MaterialTheme.colorScheme.primary)
+                Text("Åﬂ", color = MaterialTheme.colorScheme.primary)
             }
         } else {
             ProjectDragHandle(project, reorder)
@@ -420,21 +423,8 @@ private fun ProjectRow(
                 }
             }
         }
-        if (coordinatorUrl != null) {
-            IconButton(onClick = { openLink(coordinatorUrl) }) {
-                Icon(
-                    painterResource(R.drawable.ic_chat),
-                    localizedUiFormat(language, "{0}„ÅÆ„É°„Ç§„É≥‰ºöË©±„ÇíClaude„ÅßÈñã„Åè", listOf(project.name)),
-                )
-            }
-        } else {
-            IconButton(onClick = { perform(Intent.NewChat(project.roots.firstOrNull()?.path.orEmpty())) }) {
-                Icon(
-                    painterResource(R.drawable.ic_add),
-                    localizedUiFormat(language, "{0}„ÅßÊñ∞„Åó„ÅÑ„ÉÅ„É£„ÉÉ„Éà", listOf(project.name)),
-                )
-            }
-        }
+        ProjectConversationButton(project, perform)
+        if (!floating) ProjectActions(project, perform)
     }
 }
 

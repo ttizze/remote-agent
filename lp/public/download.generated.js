@@ -5,7 +5,7 @@
     mac: { name: "macOS", file: { ja: "Apple Silicon \xB7 macOS 26 \xB7 ZIP", en: "Apple Silicon \xB7 macOS 26 \xB7 ZIP" }, url: "https://github.com/ttizze/remote-agent/releases/download/prd-133/bex-macOS-arm64.zip", ready: true },
     ios: { name: "iPhone", file: { ja: "iOS 26 \xB7 TestFlight\u3067\u914D\u5E03\u4E2D", en: "iOS 26 \xB7 via TestFlight" }, url: "https://testflight.apple.com/join/UJbK9Ww7", ready: true, cta: { ja: "TestFlight\u3067\u5165\u624B", en: "Get on TestFlight" } },
     win: { name: "Windows", file: { ja: "Windows 11 \xB7 x86-64 \xB7 EXE", en: "Windows 11 \xB7 x86-64 \xB7 EXE" }, url: "https://github.com/ttizze/remote-agent/releases/download/prd-133/bex-windows-x86_64-setup.exe", ready: true },
-    android: { name: "Android", file: { ja: "Android 8.0\u4EE5\u964D \xB7 64-bit \xB7 APK\uFF08\u30D7\u30EC\u30D3\u30E5\u30FC\uFF09", en: "Android 8.0+ \xB7 64-bit \xB7 preview APK" }, url: "https://github.com/TooriG/remote-agent/releases/download/android-preview-79/bex-android-preview.apk", ready: true, cta: { ja: "Android\u3067\u4F7F\u3046", en: "Use on Android" } },
+    android: { name: "Android", file: { ja: "Android 8.0\u4EE5\u964D \xB7 64-bit \xB7 APK\uFF08\u30D7\u30EC\u30D3\u30E5\u30FC\uFF09", en: "Android 8.0+ \xB7 64-bit \xB7 preview APK" }, url: "https://github.com/TooriG/remote-agent/releases/download/android-preview-81/bex-android-preview.apk", ready: true, cta: { ja: "Android\u3067\u4F7F\u3046", en: "Use on Android" } },
     linux: { name: "Linux", file: { ja: "\u30D8\u30C3\u30C9\u30EC\u30B9Host\u30FBCLI", en: "Headless Host and CLI" }, url: SRC + "#headless-linux-and-iphone-pairing", ready: true, source: true }
   };
   const ICON = {
