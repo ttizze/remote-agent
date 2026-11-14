@@ -67,7 +67,10 @@ pub(in crate::host_rpc) fn header(response: &ThreadResponse, now: i64) -> Header
                             matches!(
                                 item.body(),
                                 agent_protocol::items::ItemBody::UserMessage { .. }
-                            )
+                            ) && item
+                                .author
+                                .as_deref()
+                                .is_none_or(agent_protocol::attribution::Author::is_human)
                         })
                     })
                     .filter_map(|turn| {

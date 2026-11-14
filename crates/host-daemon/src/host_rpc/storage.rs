@@ -440,9 +440,9 @@ impl Storage {
             let context=Context {rewind_context_start, preparation: header.details.workspace.as_deref(), rewind_binding: rewind_binding.as_ref(), imported_turns: &imported_turns, steer_ready, external_busy:context.external_busy || state.active_turn().is_none() && header.details.activity.unobserved_running(),..context};
             let submitted = matches!(&event, Event::Command {
                 id: decision::OperationId::Client(_),
-                command: decision::Command::Submit { .. },
+                command: decision::Command::Submit { content, .. },
                 receipt: None,
-            });
+            } if content.author.as_deref().is_none_or(agent_protocol::attribution::Author::is_human));
             let mut step = decision::step(&state, event, context);
             let last_input_at = (submitted && step.outcome == Outcome::Accepted).then_some(context.now);
             let from = cursor(&transaction)?;

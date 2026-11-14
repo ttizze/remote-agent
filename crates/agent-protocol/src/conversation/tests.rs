@@ -937,11 +937,19 @@ fn interrupted_and_failed_turns_hold_the_queue_and_fence_late_events() {
         Observation::Interrupted,
         Observation::Failed(Some(ExecutionError::default())),
     ] {
+        let expected_attempt = match &terminal {
+            Observation::Interrupted => AttemptState::Interrupted,
+            _ => AttemptState::Failed,
+        };
         let (state, attempt) = running();
         let queued = submit(&state, 3, FollowUp::Queue);
         let state = state.apply(&queued.changes);
         let end = observe(&state, &attempt, terminal, 4);
         let state = state.apply(&end.changes);
+        assert_eq!(
+            state.turns[&attempt.turn].attempts[0].state,
+            expected_attempt
+        );
         assert!(state.thread.queue_held);
         assert!(end.actions.is_empty());
         assert_eq!(

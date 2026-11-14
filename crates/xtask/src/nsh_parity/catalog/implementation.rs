@@ -167,10 +167,7 @@ pub(super) fn write(cwd: &Path, directory: &Path, catalog: &Catalog) -> Result<(
          共通のデータ・操作がない機能はRust側から、既にある機能は受け渡し・UIから直す。\
          一機能ずつ共通契約→受け渡し→Mac/iPhone/Windowsまで通す。\
          コピー完了・ホバー・アイコンのためだけに共通の業務状態は作らない。\n\n\
-         MCP App・ゲスト共有は今回の対象外で、不足数には含めない。\n\n\
-         まず既存TurnRowを各OSへ同じ形で渡し、失われた表示を復旧する。\
-         次に引用/Context、試行履歴、圧縮結果、Markdown構造などの不足を共通化する。\
-         秘密保管・自動実行はHostを含む追加機能として扱う。\n\n",
+         MCP App・ゲスト共有は今回の対象外で、不足数には含めない。\n\n",
     );
     writeln!(
         report,

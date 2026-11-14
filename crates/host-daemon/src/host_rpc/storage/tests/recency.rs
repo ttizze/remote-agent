@@ -118,6 +118,23 @@ fn only_new_client_submissions_advance_recency_and_the_timestamp_survives_reopen
         storage.header(&id).unwrap().details.last_input_at,
         Some(4_000)
     );
+    let mut automation = submit(5);
+    let Event::Command {
+        command: Command::Submit { content, .. },
+        ..
+    } = &mut automation
+    else {
+        unreachable!()
+    };
+    content.author = Some(Box::new(agent_protocol::attribution::Author::Automation {
+        id: Uuid::new_v4(),
+        name: "Daily review".into(),
+    }));
+    assert_eq!(send(automation, 10_000).step.outcome, Outcome::Accepted);
+    assert_eq!(
+        storage.header(&id).unwrap().details.last_input_at,
+        Some(4_000)
+    );
     drop(storage);
     let storage = Storage::open(&path);
     let header = storage.header(&id).unwrap();
@@ -162,10 +179,29 @@ fn imported_recency_uses_user_turns_and_ignores_later_agent_activity() {
                 ..Default::default()
             })
         });
+        let mut automation = agent_protocol::items::Item::new(
+            "automation-input".into(),
+            ItemStatus::Completed,
+            ItemBody::UserMessage {
+                text: Some("Daily review".into()),
+                content: Vec::new(),
+            },
+        );
+        automation.author = Some(Box::new(agent_protocol::attribution::Author::Automation {
+            id: Uuid::new_v4(),
+            name: "Daily review".into(),
+        }));
+        let mut turns = turns.to_vec();
+        turns.push(Arc::new(agent_protocol::models::Turn {
+            id: "automation-turn".into(),
+            started_at_ms: Some(10_000),
+            items: Some(vec![Arc::new(automation)]),
+            ..Default::default()
+        }));
         let mut response = agent_protocol::models::ThreadResponse {
             thread: agent_protocol::models::Thread {
                 id: Some(id.clone()),
-                turns: Some(turns.into()),
+                turns: Some(turns),
                 updated_at: Some(20.0),
                 ..Default::default()
             },

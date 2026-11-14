@@ -20,3 +20,9 @@ pub enum Author {
         label: String,
     },
 }
+
+impl Author {
+    pub fn is_human(&self) -> bool {
+        matches!(self, Self::Device { .. })
+    }
+}
