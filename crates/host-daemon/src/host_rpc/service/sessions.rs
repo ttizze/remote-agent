@@ -99,7 +99,7 @@ impl HostRpcService {
             })
             .unwrap_or_default();
         format!(
-            "{}{}{} history {} --offset 0 --limit 20\nContinue with --offset next_offset, or --offset position --limit 1 --text-offset next_text_offset to read a long item.",
+            "{}{}{} history {} --offset 0 --limit 20\nContinue with --offset next_offset. Read an omitted item with --item-id '<omitted item ID>'; continue its long text with --item-id '<item ID>' --text-offset next_text_offset until null.",
             if cfg!(windows) { "& " } else { "" },
             quote(&program.to_string_lossy()),
             scope,

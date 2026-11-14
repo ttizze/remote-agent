@@ -218,9 +218,19 @@ pub(super) fn context_history(
         .iter()
         .filter(|index| history::historical_role(&index.kind).is_some())
         .collect();
-    let limit = params.limit.clamp(1, 20);
+    let offset = params.item_id.as_ref().map_or(params.offset, |id| {
+        indices
+            .iter()
+            .position(|index| &index.id == id)
+            .unwrap_or(indices.len())
+    });
+    let limit = if params.item_id.is_some() {
+        1
+    } else {
+        params.limit.clamp(1, 20)
+    };
     let mut messages = Vec::new();
-    for index in indices.iter().skip(params.offset).take(limit) {
+    for index in indices.iter().skip(offset).take(limit) {
         let item = projections::read::<model::TurnItem>(connection, &index.id)?
             .filter(|item| item.thread_id == index.source_thread_id)
             .ok_or("history item disappeared within snapshot")?;
@@ -242,12 +252,12 @@ pub(super) fn context_history(
             text: message.text,
         });
     }
-    let next = params.offset.saturating_add(messages.len());
+    let next = offset.saturating_add(messages.len());
     let mut page = handoff::page(messages, 0, limit, params.text_offset);
     for item in &mut page.items {
-        item.position += params.offset;
+        item.position += offset;
     }
-    page.next_offset = (next < indices.len()).then_some(next);
+    page.next_offset = (params.item_id.is_none() && next < indices.len()).then_some(next);
     Ok(page)
 }
 
