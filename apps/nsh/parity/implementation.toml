@@ -3,7 +3,7 @@
 # Pure UI state does not require a new shared Rust business model.
 # This file is not a record of runtime acceptance results.
 
-revision = "a5833d8a72f4bcd29f351505b0c6ce944a5325de"
+revision = "f28e2578f03aecb5c2b5f8ada906135f2bfea5f5"
 
 [sources]
 attempt_contract = "crates/agent-protocol/src/conversation/attempts.rs"
