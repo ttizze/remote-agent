@@ -159,16 +159,7 @@ impl Operation for ReadItem {
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
         let response = context.call(self).await?;
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            crate::transfers::resolve_item(response, context.session),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(PeerError::RequestTimeout {
-                method: "item body transfer".into(),
-            })
-        });
+        let response = resolve_item(response, context.session).await;
         Ok(ItemRead {
             source,
             subscription,
@@ -217,6 +208,22 @@ impl Operation for ReadItem {
         reconcile_pending(snapshot, &self.thread_id);
         Ok(Vec::new())
     }
+}
+
+async fn resolve_item(
+    response: rpc::ItemResponse,
+    session: Option<&crate::transport::Session>,
+) -> Result<rpc::ItemResponse, PeerError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        crate::transfers::resolve_item(response, session),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(PeerError::RequestTimeout {
+            method: "item body transfer".into(),
+        })
+    })
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -680,23 +687,22 @@ pub use agent_protocol::operations::RewindSession;
 
 /// What the user sent in `turn`: its text and the files that can be attached again.
 fn sent_input(
-    turns: &[Arc<crate::models::Turn>],
-    turn: &agent_protocol::ids::TurnId,
-) -> Option<(String, Vec<Attachment>)> {
+    item: &Item,
+) -> Option<(
+    String,
+    Vec<Attachment>,
+    Vec<agent_protocol::context::MessageContext>,
+)> {
     use agent_protocol::items::{ItemBody, MessagePart};
-    let turn = turns.iter().find(|candidate| candidate.id == *turn)?;
-    let (text, content) = turn
-        .items
-        .iter()
-        .flatten()
-        .find_map(|item| match item.body() {
-            ItemBody::UserMessage { text, content } => Some((text, content)),
-            _ => None,
-        })?;
+    let ItemBody::UserMessage { text, content } = item.body() else {
+        return None;
+    };
     let mut texts = Vec::new();
     let mut attachments = Vec::new();
+    let mut contexts = Vec::new();
     for part in content {
         match part {
+            MessagePart::Context { context } => contexts.push(context.as_ref().clone()),
             MessagePart::Text { text } => texts.push(text.as_str()),
             MessagePart::Image { source }
                 if agent_protocol::paths::is_absolute_host_path(source) =>
@@ -718,6 +724,7 @@ fn sent_input(
     Some((
         text.clone().unwrap_or_else(|| texts.join("\n")),
         attachments,
+        contexts,
     ))
 }
 
@@ -781,7 +788,7 @@ impl Operation for RewindSession {
             session: self.thread_id.clone(),
         })
     }
-    type Input = (String, Option<(String, Vec<Attachment>)>);
+    type Input = (String, Option<Arc<Item>>);
     type Output = (Self::Input, crate::models::ThreadResponse);
     fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
         let turns = snapshot
@@ -792,15 +799,43 @@ impl Operation for RewindSession {
             .unwrap_or_default();
         Ok((
             snapshot.connection.storage_scope.clone(),
-            sent_input(turns, &self.turn_id),
+            turns
+                .iter()
+                .find(|turn| turn.id == self.turn_id)
+                .and_then(|turn| turn.items.as_ref())
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        matches!(item.body(), crate::models::ItemBody::UserMessage { .. })
+                    })
+                })
+                .cloned(),
         ))
     }
     async fn run(
         &self,
-        input: Self::Input,
+        (scope, mut original): Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        Ok((input, context.call(self).await?))
+        if let Some(item) = original.as_ref().filter(|item| item.is_deferred()) {
+            let response = context
+                .call(&ReadItem {
+                    thread_id: self.thread_id.clone(),
+                    turn_id: self.turn_id.clone(),
+                    item_id: item.id.clone(),
+                })
+                .await?;
+            let loaded = resolve_item(response, context.session).await?.item;
+            if loaded.id != item.id
+                || loaded.is_deferred()
+                || !matches!(loaded.body(), crate::models::ItemBody::UserMessage { .. })
+            {
+                return Err(PeerError::InvalidMessage(
+                    "original message was not fully loaded".into(),
+                ));
+            }
+            original = Some(Arc::new(loaded));
+        }
+        Ok(((scope, original), context.call(self).await?))
     }
     fn invalidates(&self) -> bool {
         true
@@ -816,10 +851,19 @@ impl Operation for RewindSession {
             return Ok(Vec::new());
         }
         let id = self.thread_id;
-        if let Some((text, attachments)) = original {
+        if let Some((text, attachments, contexts)) = original.as_deref().and_then(sent_input) {
             let drafts = Arc::make_mut(&mut snapshot.input.drafts);
             let draft = Arc::make_mut(drafts.entry(id.clone().into()).or_default());
             draft.text = text;
+            for context in contexts {
+                if !draft
+                    .contexts
+                    .iter()
+                    .any(|current| current.id == context.id)
+                {
+                    draft.contexts.push(context);
+                }
+            }
             for attachment in attachments {
                 if !draft.attachments.contains(&attachment) {
                     draft.attachments.push(attachment);

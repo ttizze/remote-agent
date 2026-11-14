@@ -181,6 +181,62 @@ impl Running {
 }
 
 #[tokio::test]
+async fn incomplete_context_is_rejected_before_creating_submitting_or_editing_a_task() {
+    use agent_protocol::context::{ContextContent, MessageContext};
+    let running = running().await;
+    running.send("kept", FollowUp::Queue).await;
+    let before = running.thread().await.queue;
+    let input = vec![op::Input::Context {
+        context: Box::new(MessageContext {
+            id: "context".into(),
+            label: "Terminal".into(),
+            content: ContextContent::Summary {
+                kind: "terminal".into(),
+            },
+        }),
+    }];
+    let requests = [
+        Call::Submit(op::Submission {
+            thread_id: running.root.clone(),
+            client_user_message_id: "invalid".into(),
+            input: input.clone(),
+            model: None,
+            effort: None,
+            service_tier: None,
+            follow_up: FollowUp::Queue,
+        }),
+        Call::ChangeQueue(op::ChangeQueue {
+            thread_id: running.root.clone(),
+            change: QueueChange::Edit {
+                client_user_message_id: "kept".into(),
+                input: input.clone(),
+            },
+        }),
+        Call::CreateSession(op::CreateSession {
+            provider: ProviderKind::Codex,
+            cwd: Some(running.directory.path().to_string_lossy().into_owned()),
+            model: None,
+            initial_input: Some(op::InitialInput {
+                workspace: None,
+                client_user_message_id: "new-invalid".into(),
+                input,
+                effort: None,
+                service_tier: None,
+            }),
+        }),
+    ];
+    for request in requests {
+        let error = call::<serde_json::Value>(&running.host, running.client.id(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_params");
+    }
+    assert_eq!(running.thread().await.queue, before);
+    assert!(running.sent().is_empty());
+    assert_eq!(running.agent.records.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn queued_input_waits_for_the_running_turn_and_then_runs_in_order() {
     let running = running().await;
     for id in ["first", "second"] {

@@ -1,5 +1,6 @@
 use crate::localization::UiLanguage;
 use agent_protocol::composer::*;
+pub mod context;
 
 /// Keep selected lines quoted and leave room for the user's question.
 #[cfg_attr(feature = "bindings", uniffi::export)]

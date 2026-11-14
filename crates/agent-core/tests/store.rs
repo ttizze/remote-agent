@@ -3159,6 +3159,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
 #[tokio::test]
 async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer(
     #[values(false, true)] navigate: bool,
+    #[values("loaded", "deferred", "failed", "incomplete")] loading: &str,
     #[values(
         "/fixture/shot.png",
         r"C:\fixture\shot.png",
@@ -3173,17 +3174,34 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
     let mut initial = snapshot();
     let user = |id: &str, content: serde_json::Value| json!({"id":id,"status":"completed","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":content}}}}});
     let kept = json!({"id":"kept","status":"completed","items":[user("a",json!([{"text":{"text":"earlier"}}]))]});
-    let thread: Thread = serde_json::from_value(json!({
+    let context = agent_protocol::context::MessageContext {
+        id: "terminal".into(),
+        label: "Build output".into(),
+        content: agent_protocol::context::ContextContent::Terminal {
+            terminal_id: "build".into(),
+            terminal_label: "Build".into(),
+            line_start: 1,
+            line_end: 2,
+            text: "original output".into(),
+        },
+    };
+    let mut thread: Thread = serde_json::from_value(json!({
         "id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"idle",
         "turns":[kept.clone(),
             {"id":"edit","status":"completed","items":[user("b",json!([
                 {"text":{"text":"send this again"}},
                 {"image":{"source":image}},
                 {"image":{"source":"data:image/png;base64,AAAA"}},
-                {"attachment":{"name":"notes.md","path":"/fixture/notes.md"}}
+                {"attachment":{"name":"notes.md","path":"/fixture/notes.md"}},
+                {"context":{"context":context.clone()}}
             ]))]},
             {"id":"later","status":"completed","items":[user("c",json!([{"text":{"text":"removed"}}]))]}]
     })).unwrap();
+    let original = thread.turns.as_ref().unwrap()[1].items.as_ref().unwrap()[0].clone();
+    if loading != "loaded" {
+        let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]);
+        Arc::make_mut(&mut turn.items.as_mut().unwrap()[0]).defer();
+    }
     Arc::make_mut(&mut initial.sessions.conversations).insert(source.clone(), Arc::new(thread));
     Arc::make_mut(&mut initial.input.drafts).insert(
         source.clone().into(),
@@ -3197,7 +3215,45 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         source.clone(),
         "edit".into(),
     )));
-    let request = read(&mut reader).await;
+    tokio::pin!(rewind);
+    let mut request = read(&mut reader).await;
+    // The visible transcript may also request the same deferred item while
+    // the rewind independently captures its original input.
+    while request["method"] == "host/session/item/read" {
+        assert_ne!(loading, "loaded");
+        assert_eq!(request["params"]["itemId"], "b");
+        let response = if loading == "failed" {
+            json!({"error":{"code":"fixture_failure","message":"read failed"}})
+        } else if loading == "incomplete" {
+            let mut incomplete = original.as_ref().clone();
+            incomplete.defer();
+            json!({"result":{"item":incomplete}})
+        } else {
+            json!({"result":{"item":original}})
+        };
+        writer.reply(&request, response).await.unwrap();
+        request = tokio::select! {
+            request = read(&mut reader) => request,
+            outcome = &mut rewind => {
+            assert!(matches!(loading, "failed" | "incomplete"));
+            assert!(outcome.is_err());
+            assert_eq!(
+                store.snapshot().sessions.conversations[&source]
+                    .turns
+                    .as_ref()
+                    .unwrap()
+                    .len(),
+                3
+            );
+            assert_eq!(
+                store.snapshot().input.drafts[&DraftKey::from(source)].text,
+                "replaced"
+            );
+            store.close().await.unwrap();
+            return;
+            }
+        };
+    }
     assert_eq!(request["method"], "host/session/rewind");
     assert_eq!(request["params"]["turnId"], "edit");
     if navigate {
@@ -3259,6 +3315,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
     }
     let draft = &snapshot.input.drafts[&DraftKey::from(source)];
     assert_eq!(draft.text, "send this again");
+    assert_eq!(draft.contexts, [context]);
     assert_eq!(
         draft
             .attachments

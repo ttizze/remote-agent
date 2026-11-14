@@ -224,17 +224,8 @@ impl Surroundings {
 
 /// Host paths for the document's file metadata, including files in tables.
 pub(crate) fn file_paths(blocks: &[MarkdownBlock]) -> Vec<String> {
-    blocks
-        .iter()
-        .flat_map(|block| {
-            let (runs, rows) = match block {
-                MarkdownBlock::Paragraph { runs, .. } => (runs.as_slice(), &[][..]),
-                MarkdownBlock::Table { rows, .. } => (&[][..], rows.as_slice()),
-                MarkdownBlock::Visualization { .. } => (&[][..], &[][..]),
-            };
-            runs.iter()
-                .chain(rows.iter().flatten().flat_map(|cell| &cell.runs))
-        })
+    agent_core::presentation::markdown::markdown_runs(blocks)
+        .into_iter()
         .filter_map(|run| run.file.as_ref().map(|file| file.path.clone()))
         .collect()
 }
@@ -353,7 +344,7 @@ pub(crate) fn plain(text: String, color: Option<u32>) -> Part {
 /// A paragraph of the shared document; a run naming a file carries its chip.
 fn paragraph(runs: Vec<MarkdownRun>, style: &MarkdownStyle, chip: Chip) -> Value {
     json!({
-        "header": style.header, "marker": style.marker, "code": style.code,
+        "header": style.header, "marker": style.marker, "code": style.code, "math":style.math,
         "quoted": style.quoted, "depth": style.list_depth,
         "alignment": match style.alignment { MarkdownAlignment::Left => "left", MarkdownAlignment::Center => "center", MarkdownAlignment::Right => "right" },
         "runs": runs.into_iter().map(|run| {
@@ -362,7 +353,7 @@ fn paragraph(runs: Vec<MarkdownRun>, style: &MarkdownStyle, chip: Chip) -> Value
                 .map(|_| web_link_menu(crate::l10n::language()));
             let mut value = json!({
                 "text": run.text, "strong": run.strong, "emphasis": run.emphasis,
-                "strikethrough": run.strikethrough, "code": run.code, "link": run.link,
+                "strikethrough": run.strikethrough, "code": run.code, "math":run.math, "link": run.link,
                 "darkColor": run.dark_color, "lightColor": run.light_color,
             });
             if let Some(menu) = web_menu {
@@ -421,6 +412,32 @@ pub(crate) fn parts(
     let mut text = Vec::new();
     for block in blocks {
         match block {
+            MarkdownBlock::Disclosure {
+                summary,
+                blocks,
+                style,
+                ..
+            } => {
+                flush(&mut text, &mut result);
+                result.push(Part::Text(vec![paragraph(summary, &style, chip)]));
+                result.extend(parts(blocks, diagrams, chip));
+            }
+            MarkdownBlock::Callout {
+                kind,
+                blocks,
+                style,
+            } => {
+                flush(&mut text, &mut result);
+                result.push(Part::Text(vec![paragraph(
+                    vec![MarkdownRun {
+                        text: agent_core::presentation::markdown::markdown_callout_marker(kind),
+                        ..Default::default()
+                    }],
+                    &style,
+                    chip,
+                )]));
+                result.extend(parts(blocks, diagrams, chip));
+            }
             MarkdownBlock::Paragraph { style, .. } if style.rule => {
                 flush(&mut text, &mut result);
                 result.push(Part::Rule {

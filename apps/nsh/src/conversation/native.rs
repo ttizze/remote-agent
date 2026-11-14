@@ -178,6 +178,8 @@ pub(super) fn project_row(
         "error":row.error.as_ref().map(|error|json!({"title":error.title,"message":error.message,"details":error.details,"reconnecting":error.is_reconnecting,"usageLimit":error.is_usage_limit})),"timeAlways":row.kind == Kind::Activity,"preparation":row.preparation.as_ref().map(|setup| preparation_card(setup,open)),"icon":row_icon(row),"separator":matches!(row.shape,Shape::Divider | Shape::Interrupted),"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
         "collapsible":row.kind == Kind::User && agent_core::presentation::conversation::should_collapse_user_message(&row.body),
         "trailing":matches!(row.shape,Shape::Actions),"fold":matches!(row.shape,Shape::Fold{..} | Shape::Working),"time":row.time,"queued":row.queued,"steer":row.steer,
+        "contexts": row.message.as_ref().map(|item| &item.data.contexts).into_iter().flatten().collect::<Vec<_>>(),
+        "messageId": row.message.as_ref().and_then(|item| item.data.native_id.as_ref()),
         "document":document,
         "agentStatus":row.agent.as_ref().map(|agent| agent.status)
     })
@@ -1039,6 +1041,66 @@ fn operation_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_messages_keep_their_structured_context_and_original_item_identity() {
+        use agent_core::{
+            localization::UiLanguage, presentation::conversation::project_conversation,
+        };
+        use agent_protocol::{
+            context::{ContextContent, MessageContext},
+            execution::ItemStatus,
+            items::{ItemBody, MessagePart},
+            models,
+        };
+        use std::sync::Arc;
+        let context = MessageContext {
+            id: "selected-lines".into(),
+            label: "Build output".into(),
+            content: ContextContent::Terminal {
+                terminal_id: "terminal".into(),
+                terminal_label: "Build".into(),
+                line_start: 2,
+                line_end: 4,
+                text: "compiler output".into(),
+            },
+        };
+        let thread = Arc::new(models::Thread {
+            turns: Some(vec![Arc::new(models::Turn {
+                id: "turn".into(),
+                items: Some(vec![Arc::new(models::Item::new(
+                    "native-input".into(),
+                    ItemStatus::Completed,
+                    ItemBody::UserMessage {
+                        text: Some("explain".into()),
+                        content: vec![MessagePart::Context {
+                            context: Box::new(context.clone()),
+                        }],
+                    },
+                ))]),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        let graph = project_conversation(
+            UiLanguage::English,
+            &Default::default(),
+            &Default::default(),
+            thread,
+            &None,
+        );
+        let row = graph.turns[0]
+            .rows
+            .iter()
+            .cloned()
+            .find_map(super::super::source_row)
+            .unwrap();
+        let shown = project_row(&row, false, "target", "", None, false, None);
+        assert_eq!(shown["messageId"], "native-input");
+        assert_eq!(shown["contexts"], json!([context]));
+        assert!(shown["parts"].to_string().contains("compiler output"));
+        assert!(row.detail.is_none());
+    }
 
     #[test]
     fn subagents_keep_their_message_status_name_and_navigation_availability() {

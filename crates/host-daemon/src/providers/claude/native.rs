@@ -127,10 +127,7 @@ pub(super) fn input_item(id: &str, blocks: &[Value], is_meta: bool) -> Option<It
     let mut item = Item::new(
         id.into(),
         ItemStatus::Unknown,
-        ItemBody::UserMessage {
-            text: None,
-            content,
-        },
+        agent_protocol::context::user_message(None, content),
     );
     item.client_input_id = Some(id.into());
     Some(item)

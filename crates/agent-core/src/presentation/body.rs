@@ -10,6 +10,7 @@ mod tool_output;
 pub struct ItemBody {
     pub text: Option<String>,
     pub images: Vec<String>,
+    pub contexts: Vec<agent_protocol::context::MessageContext>,
 }
 fn attachment(language: UiLanguage, text: &mut String, name: &str, path: &str) {
     if !text.is_empty() {
@@ -34,6 +35,12 @@ fn message(language: UiLanguage, text: Option<&str>, content: &[MessagePart]) ->
     for part in content {
         if let MessagePart::Attachment { name, path } = part {
             attachment(language, &mut result, name, path);
+        }
+        if let MessagePart::Context { context } = part {
+            if !result.is_empty() {
+                result.push_str("\n\n");
+            }
+            result.push_str(&crate::composer::context::display_text(context));
         }
     }
     result
@@ -86,7 +93,21 @@ pub fn item_body(language: UiLanguage, item: &Item) -> ItemBody {
             .collect(),
         _ => vec![],
     };
-    ItemBody { text, images }
+    let contexts = match item.body() {
+        WireBody::UserMessage { content, .. } => content
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Context { context } => Some(context.as_ref().clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    ItemBody {
+        text,
+        images,
+        contexts,
+    }
 }
 pub fn draft_body(language: UiLanguage, draft: &Draft) -> ItemBody {
     let mut text = draft.text.clone();
@@ -98,9 +119,16 @@ pub fn draft_body(language: UiLanguage, draft: &Draft) -> ItemBody {
             attachment(language, &mut text, &file.name, &file.path);
         }
     }
+    for context in &draft.contexts {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&crate::composer::context::display_text(context));
+    }
     ItemBody {
         text: Some(text),
         images,
+        contexts: draft.contexts.clone(),
     }
 }
 pub struct FileChange<'a> {
@@ -220,21 +248,41 @@ fn reasoning_trace(item: &Item) -> Option<String> {
 /// A reasoning trace on one line, as T3 Code's collapsed Thinking row: its
 /// Markdown read as plain text with each run of whitespace one space.
 pub(super) fn reasoning_preview(item: &Item) -> Option<String> {
-    use super::markdown::MarkdownBlock;
-    let mut text = String::new();
-    let mut append = |runs: &[super::markdown::MarkdownRun]| {
-        text.push(' ');
-        text.extend(runs.iter().map(|run| run.text.as_str()));
-    };
-    for block in super::markdown::markdown_blocks(reasoning_trace(item)?) {
-        match &block {
-            MarkdownBlock::Paragraph { runs, .. } => append(runs),
-            MarkdownBlock::Table { rows, .. } => {
-                rows.iter().flatten().for_each(|cell| append(&cell.runs))
-            }
-            MarkdownBlock::Visualization { .. } => {}
+    fn append(blocks: &[super::markdown::MarkdownBlock], text: &mut String) {
+        use super::markdown::MarkdownBlock;
+        for block in blocks {
+            let runs = match block {
+                MarkdownBlock::Paragraph { runs, .. } => runs.as_slice(),
+                MarkdownBlock::Disclosure {
+                    summary, blocks, ..
+                } => {
+                    text.push(' ');
+                    text.extend(summary.iter().map(|run| run.text.as_str()));
+                    append(blocks, text);
+                    continue;
+                }
+                MarkdownBlock::Callout { blocks, .. } => {
+                    append(blocks, text);
+                    continue;
+                }
+                MarkdownBlock::Table { rows, .. } => {
+                    for cell in rows.iter().flatten() {
+                        text.push(' ');
+                        text.extend(cell.runs.iter().map(|run| run.text.as_str()));
+                    }
+                    continue;
+                }
+                MarkdownBlock::Visualization { .. } => continue,
+            };
+            text.push(' ');
+            text.extend(runs.iter().map(|run| run.text.as_str()));
         }
     }
+    let mut text = String::new();
+    append(
+        &super::markdown::markdown_blocks(reasoning_trace(item)?),
+        &mut text,
+    );
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     (!line.is_empty()).then_some(line)
 }
@@ -546,6 +594,17 @@ mod tests {
         assert_eq!(body.text.as_deref(), Some(collapsed));
         assert_eq!(body.images, images);
         assert_eq!(expanded_body(UiLanguage::Japanese, &item), expanded);
+    }
+
+    #[test]
+    fn thinking_preview_keeps_nested_captions_and_body_words_in_reading_order() {
+        let item = Item::new("thinking".into(), crate::models::ItemStatus::Completed, WireBody::Reasoning {
+            content: vec!["Before\n\n<details><summary>**Caption**</summary>\n\nbody\n\n</details>\n\n> [!NOTE]\n> note\n\nAfter".into()], summary: Vec::new(),
+        });
+        assert_eq!(
+            reasoning_preview(&item).as_deref(),
+            Some("Before Caption body note After")
+        );
     }
 
     #[test]

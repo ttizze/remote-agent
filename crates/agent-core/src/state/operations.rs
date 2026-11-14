@@ -44,6 +44,11 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    ChangeContext {
+        storage_scope: String,
+        thread_id: DraftKey,
+        action: crate::composer::context::ContextAction,
+    },
     EnsureFileMetadata {
         paths: Vec<String>,
         now_ms: u64,

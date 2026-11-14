@@ -1894,6 +1894,9 @@ async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
     let mut content = Vec::with_capacity(input.len());
     for part in input {
         match part {
+            op::Input::Context { context } => {
+                content.push(json!({"type":"text","text":context.provider_text()}));
+            }
             op::Input::Text { text, .. } => {
                 let text = input.iter().fold(text.clone(), |text, part| match part {
                     op::Input::Skill { name, path } => {
@@ -2504,6 +2507,30 @@ impl Agent for Claude {
 #[cfg(test)]
 mod execution_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn structured_context_survives_native_input_without_reading_its_references() {
+        use agent_protocol::{
+            context::{ContextContent, MessageContext},
+            items::MessagePart,
+        };
+        let context = MessageContext {
+            id: "file".into(),
+            label: "Source".into(),
+            content: ContextContent::File {
+                path: "/unread/source.rs".into(),
+            },
+        };
+        let content = input_content(&[op::Input::Context {
+            context: Box::new(context.clone()),
+        }])
+        .await
+        .unwrap();
+        let item = native::input_item("item", &content, false).unwrap();
+        assert!(
+            matches!(item.body(), ItemBody::UserMessage { text: None, content } if content == &[MessagePart::Context {context: Box::new(context)}])
+        );
+    }
 
     #[tokio::test]
     async fn queued_input_reads_only_metadata_and_keeps_owned_execution() {

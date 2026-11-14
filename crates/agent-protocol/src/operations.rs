@@ -124,17 +124,42 @@ pub struct RegisterRemoteHost {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Input {
-    Text { text: String },
-    Skill { name: String, path: String },
-    LocalImage { path: String },
-    Mention { path: String, name: String },
+    Context {
+        context: Box<crate::context::MessageContext>,
+    },
+    Text {
+        text: String,
+    },
+    Skill {
+        name: String,
+        path: String,
+    },
+    LocalImage {
+        path: String,
+    },
+    Mention {
+        path: String,
+        name: String,
+    },
 }
 impl Input {
+    pub fn contexts(input: &[Self]) -> impl Iterator<Item = &crate::context::MessageContext> {
+        input.iter().filter_map(|part| match part {
+            Self::Context { context } => Some(context.as_ref()),
+            _ => None,
+        })
+    }
+    pub fn validate_contexts(input: &[Self]) -> Result<(), &'static str> {
+        crate::context::validate_contexts(Self::contexts(input))
+    }
     pub fn message_parts(input: &[Self]) -> Vec<crate::items::MessagePart> {
         use crate::items::MessagePart;
         input
             .iter()
             .map(|part| match part {
+                Self::Context { context } => MessagePart::Context {
+                    context: context.clone(),
+                },
                 Self::Text { text } => MessagePart::Text { text: text.clone() },
                 Self::LocalImage { path } => MessagePart::Image {
                     source: path.clone(),

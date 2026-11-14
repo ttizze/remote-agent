@@ -98,6 +98,7 @@ pub struct QueuedMessage {
     pub attachments: u32,
     /// Sent, and not yet in the Host's queue.
     pub pending: bool,
+    pub contexts: Vec<agent_protocol::context::MessageContext>,
 }
 
 fn follow_up_controls(
@@ -134,9 +135,18 @@ fn follow_up_controls(
         attachments: input
             .input
             .iter()
-            .filter(|part| !matches!(part, agent_protocol::operations::Input::Text { .. }))
+            .filter(|part| {
+                !matches!(
+                    part,
+                    agent_protocol::operations::Input::Text { .. }
+                        | agent_protocol::operations::Input::Context { .. }
+                )
+            })
             .count() as u32,
         pending: false,
+        contexts: agent_protocol::operations::Input::contexts(&input.input)
+            .cloned()
+            .collect(),
     });
     let key = session.map(crate::state::DraftKey::from);
     let mut sending: Vec<_> = snapshot
@@ -167,6 +177,7 @@ fn follow_up_controls(
                 text: pending.draft.text.clone(),
                 attachments: pending.draft.attachments.len() as u32,
                 pending: true,
+                contexts: pending.draft.contexts.clone(),
             }))
             .collect(),
         held: thread.queue.held,
@@ -397,7 +408,7 @@ impl ComposerPresentation {
     /// Whether core state lets the composer send `has_content`. Clients add
     /// their own media transfer, recording, and permission state.
     pub fn can_send(&self, has_content: bool) -> bool {
-        has_content
+        (has_content || !self.draft.contexts.is_empty())
             && self.accepts_input()
             && self.controls.provider.is_some()
             && self.controls.unavailable.is_none()
@@ -418,6 +429,7 @@ impl ComposerPresentation {
             && self.controls.question.is_none()
             && self.draft.text.trim().is_empty()
             && self.draft.attachments.is_empty()
+            && self.draft.contexts.is_empty()
             && follow_up.editing.is_none()
             && !follow_up.busy
             && (follow_up.resumable || follow_up.held && !follow_up.queue.is_empty())

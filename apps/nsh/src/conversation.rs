@@ -3,7 +3,8 @@ use crate::{Connection, shared::Shared};
 use agent_core::{
     presentation::conversation::{
         ActivityPresentation, ConversationRowContent, LANE_WIDTH, RenderedConversation,
-        RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress, lane_padding, turn_rows,
+        RenderedItem, RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress, lane_padding,
+        turn_rows,
     },
     state::{Intent, operations as op},
 };
@@ -111,6 +112,8 @@ struct Row {
     retry: Option<agent_protocol::operations::RetryPreparation>,
     images: Vec<String>,
     detail: Option<crate::activity::Item>,
+    /// Keep the immutable projection for structured context without copying its bodies.
+    message: Option<Shared<RenderedItem>>,
     /// A live status line in place of its body: thinking, setting up.
     status: Option<crate::activity::Status>,
     progress: Option<WorkProgress>,
@@ -150,6 +153,7 @@ impl Row {
             retry: None,
             images: Vec::new(),
             detail: None,
+            message: None,
             status: None,
             progress: None,
             time: None,
@@ -452,6 +456,7 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
         ConversationRowContent::User { item } => {
             shown.images = item.data.image_sources.clone();
             shown.unresolved = item.unknown_submission_id();
+            shown.message = Some(Shared(item));
         }
         ConversationRowContent::Response {
             item,
@@ -461,6 +466,7 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
             shown.images = item.data.image_sources.clone();
             shown.actions = show_actions;
             shown.fork = fork_turn_id;
+            shown.message = Some(Shared(item));
         }
         ConversationRowContent::Activity { item, .. } => {
             shown.images = item.data.image_sources.clone();

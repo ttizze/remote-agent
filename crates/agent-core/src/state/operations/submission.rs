@@ -176,6 +176,7 @@ impl Operation for StartSubmission {
                         &self.draft.text,
                         &self.draft.attachments,
                         &self.draft.invocations,
+                        &self.draft.contexts,
                         Some(self.provider),
                     ),
                     effort: self.draft.effort.clone(),
@@ -221,6 +222,7 @@ impl StartSubmission {
             text: String::new(),
             attachments: Vec::new(),
             invocations: Vec::new(),
+            contexts: Vec::new(),
             ..draft.as_ref().clone()
         });
         let remove_original = current_view || current == Some(&empty);
@@ -327,6 +329,7 @@ impl Operation for SendSubmission {
                     &self.draft.text,
                     &self.draft.attachments,
                     &self.draft.invocations,
+                    &self.draft.contexts,
                     provider,
                 ),
                 model: self.draft.model.clone(),
@@ -369,6 +372,7 @@ fn submission_input(
     text: &str,
     attachments: &[Attachment],
     invocations: &[agent_protocol::composer::Invocation],
+    contexts: &[agent_protocol::context::MessageContext],
     provider: Option<crate::session::ProviderKind>,
 ) -> Vec<Input> {
     let mut input = Vec::with_capacity(attachments.len() + usize::from(!text.is_empty()));
@@ -392,6 +396,9 @@ fn submission_input(
                 name: attachment.name.clone(),
             }
         }
+    }));
+    input.extend(contexts.iter().cloned().map(|context| Input::Context {
+        context: Box::new(context),
     }));
     input
 }

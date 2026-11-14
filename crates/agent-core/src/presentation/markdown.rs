@@ -1,10 +1,12 @@
-//! Every client renders Markdown from this crate's single GFM parse.
+//! Every client renders Markdown through this crate's common GFM parser.
 use ::markdown::{
     ParseOptions,
     mdast::{AlignKind, Node},
 };
 use std::{borrow::Cow, collections::HashMap};
 mod code;
+mod structure;
+use structure::{disclosures, without_disclosure_tags};
 #[cfg(feature = "diagrams")]
 mod diagram;
 #[cfg(feature = "diagrams")]
@@ -23,6 +25,17 @@ pub use links::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum MarkdownBlock {
+    Disclosure {
+        summary: Vec<MarkdownRun>,
+        open: bool,
+        blocks: Vec<MarkdownBlock>,
+        style: MarkdownStyle,
+    },
+    Callout {
+        kind: MarkdownCallout,
+        blocks: Vec<MarkdownBlock>,
+        style: MarkdownStyle,
+    },
     Visualization {
         path: String,
         style: MarkdownStyle,
@@ -37,6 +50,28 @@ pub enum MarkdownBlock {
         rows: Vec<Vec<MarkdownCell>>,
         style: MarkdownStyle,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum MarkdownCallout {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn markdown_callout_marker(kind: MarkdownCallout) -> String {
+    match kind {
+        MarkdownCallout::Note => "[!NOTE]",
+        MarkdownCallout::Tip => "[!TIP]",
+        MarkdownCallout::Important => "[!IMPORTANT]",
+        MarkdownCallout::Warning => "[!WARNING]",
+        MarkdownCallout::Caution => "[!CAUTION]",
+    }
+    .into()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,11 +90,31 @@ pub struct MarkdownStyle {
     pub header: Option<u8>,
     pub marker: Option<String>,
     pub code: bool,
+    pub math: bool,
     pub quoted: bool,
     pub list_depth: u32,
     pub language: Option<String>,
     pub filename: Option<String>,
     pub rule: bool,
+}
+
+/// Visible runs in reading order, including disclosure captions and nested
+/// content. File metadata, copy and summaries must not skip container bodies.
+pub fn markdown_runs(blocks: &[MarkdownBlock]) -> Vec<&MarkdownRun> {
+    blocks
+        .iter()
+        .flat_map(|block| match block {
+            MarkdownBlock::Paragraph { runs, .. } => runs.iter().collect(),
+            MarkdownBlock::Table { rows, .. } => {
+                rows.iter().flatten().flat_map(|cell| &cell.runs).collect()
+            }
+            MarkdownBlock::Disclosure {
+                summary, blocks, ..
+            } => summary.iter().chain(markdown_runs(blocks)).collect(),
+            MarkdownBlock::Callout { blocks, .. } => markdown_runs(blocks),
+            MarkdownBlock::Visualization { .. } => Vec::new(),
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -76,6 +131,8 @@ pub struct MarkdownRun {
     pub emphasis: bool,
     pub strikethrough: bool,
     pub code: bool,
+    /// LaTeX source, kept as selectable text independently of OS typesetting.
+    pub math: bool,
     pub link: Option<String>,
     pub image: Option<String>,
     pub file: Option<MarkdownFileReference>,
@@ -83,77 +140,16 @@ pub struct MarkdownRun {
     pub light_color: Option<u32>,
 }
 
+fn parse_options() -> ParseOptions {
+    let mut options = ParseOptions::gfm();
+    options.constructs.math_text = true;
+    options.constructs.math_flow = true;
+    options
+}
+
 fn parse(source: &str) -> Node {
     // GFM has no syntax errors; only the disabled MDX extensions can fail.
-    ::markdown::to_mdast(source, &ParseOptions::gfm()).expect("GFM is infallible")
-}
-
-fn is_disclosure_tag(source: &str) -> bool {
-    let Some(name) = source.strip_prefix('<') else {
-        return false;
-    };
-    let name = name.strip_prefix('/').unwrap_or(name);
-    let name = name
-        .split(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
-        .next()
-        .unwrap_or_default();
-    name.eq_ignore_ascii_case("details") || name.eq_ignore_ascii_case("summary")
-}
-
-/// Show disclosure captions and contents on every client without exposing HTML wrappers.
-/// Use parsed HTML positions so escaped text and code examples keep their literal tags.
-fn without_disclosure_tags(source: &str) -> Cow<'_, str> {
-    if !source
-        .match_indices('<')
-        .any(|(offset, _)| is_disclosure_tag(&source[offset..]))
-    {
-        return Cow::Borrowed(source);
-    }
-    fn tags(node: &Node, base: usize, ranges: &mut Vec<std::ops::Range<usize>>) {
-        if let Node::Html(html) = node
-            && is_disclosure_tag(&html.value)
-        {
-            let position = node.position().expect("parsed HTML has a source position");
-            ranges.push(base + position.start.offset..base + position.end.offset);
-        }
-        for child in node.children().into_iter().flatten() {
-            tags(child, base, ranges);
-        }
-    }
-    fn visit(node: &Node, source: &str, ranges: &mut Vec<std::ops::Range<usize>>) {
-        if let Node::Html(html) = node {
-            if is_disclosure_tag(html.value.trim_start()) {
-                let position = node.position().expect("parsed HTML has a source position");
-                // A flow HTML node can swallow the entire disclosure, including images.
-                // Read its tags as inline HTML while retaining Markdown code boundaries.
-                let mut options = ParseOptions::gfm();
-                options.constructs.html_flow = false;
-                let fragment = ::markdown::to_mdast(
-                    &source[position.start.offset..position.end.offset],
-                    &options,
-                )
-                .expect("GFM is infallible");
-                tags(&fragment, position.start.offset, ranges);
-            }
-            return;
-        }
-        for child in node.children().into_iter().flatten() {
-            visit(child, source, ranges);
-        }
-    }
-    let mut ranges = Vec::new();
-    visit(&parse(source), source, &mut ranges);
-    if ranges.is_empty() {
-        return Cow::Borrowed(source);
-    }
-    let mut text = String::new();
-    let mut previous = 0;
-    for range in ranges {
-        text.push_str(&source[previous..range.start]);
-        previous = range.end;
-    }
-    text.push_str(&source[previous..]);
-    Cow::Owned(text)
+    ::markdown::to_mdast(source, &parse_options()).expect("GFM is infallible")
 }
 
 fn definitions(node: &Node) -> HashMap<&str, &str> {
@@ -228,24 +224,108 @@ pub fn workspace_markdown_blocks(
 /// definitions, and the workspace desktop chips resolve against.
 struct Context<'a> {
     definitions: HashMap<&'a str, &'a str>,
+    reference_source: String,
     workspace: Option<links::chips::Workspace<'a>>,
 }
 
 fn document(source: &str, workspace: Option<links::chips::Workspace<'_>>) -> Vec<MarkdownBlock> {
-    let source = without_disclosure_tags(source);
-    let root = parse(&source);
+    let normalized = without_disclosure_tags(source);
+    let root = parse(&normalized);
     let context = Context {
         definitions: definitions(&root),
+        reference_source: reference_source(&root, &normalized),
         workspace,
     };
+    let containers = disclosures(source);
+    if containers.is_empty() {
+        let mut blocks = Vec::new();
+        block(
+            &root,
+            &normalized,
+            &context,
+            MarkdownStyle::default(),
+            &mut blocks,
+        );
+        return blocks;
+    }
+    structured_blocks(source, containers, &context, MarkdownStyle::default(), 0)
+}
+
+fn reference_source(node: &Node, source: &str) -> String {
+    if matches!(node, Node::Definition(_)) {
+        let position = node.position().expect("a definition has source positions");
+        return format!(
+            "\n\n{}",
+            &source[position.start.offset..position.end.offset]
+        );
+    }
+    node.children()
+        .into_iter()
+        .flatten()
+        .map(|child| reference_source(child, source))
+        .collect()
+}
+
+fn fragment_source<'a>(source: &'a str, context: &Context<'_>) -> Cow<'a, str> {
+    if context.reference_source.is_empty() {
+        Cow::Borrowed(source)
+    } else {
+        Cow::Owned(format!("{source}{}", context.reference_source))
+    }
+}
+
+fn append_fragment(
+    source: &str,
+    context: &Context<'_>,
+    style: MarkdownStyle,
+    blocks: &mut Vec<MarkdownBlock>,
+) {
+    if source.trim().is_empty() {
+        return;
+    }
+    let source = fragment_source(source, context);
+    block(&parse(&source), &source, context, style, blocks);
+}
+
+fn structured_blocks(
+    source: &str,
+    containers: Vec<structure::Disclosure>,
+    context: &Context<'_>,
+    style: MarkdownStyle,
+    depth: usize,
+) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
-    block(
-        &root,
-        &source,
-        &context,
-        MarkdownStyle::default(),
-        &mut blocks,
-    );
+    // Keep adversarial nesting bounded without losing its readable contents.
+    if depth == 32 {
+        let source = without_disclosure_tags(source);
+        append_fragment(&source, context, style, &mut blocks);
+        return blocks;
+    }
+    let mut offset = 0;
+    for disclosure in containers {
+        let prefix = &source[offset..disclosure.range.start];
+        append_fragment(prefix, context, style.clone(), &mut blocks);
+        let caption = without_disclosure_tags(&source[disclosure.summary.clone()]);
+        let caption = fragment_source(&caption, context);
+        let summary = inline_runs(&parse(&caption), &caption, context, MarkdownRun::default());
+        let body = disclosure
+            .body
+            .into_iter()
+            .flat_map(|range| {
+                let body = &source[range];
+                structured_blocks(body, disclosures(body), context, style.clone(), depth + 1)
+            })
+            .collect();
+        blocks.push(MarkdownBlock::Disclosure {
+            summary,
+            open: disclosure.open,
+            blocks: body,
+            style: style.clone(),
+        });
+        offset = disclosure.range.end;
+    }
+    let suffix = without_disclosure_tags(&source[offset..]);
+    append_fragment(&suffix, context, style, &mut blocks);
     blocks
 }
 
@@ -292,7 +372,65 @@ pub fn markdown_code_block(
     }
 }
 
-fn inline(node: &Node, context: &Context<'_>, mut style: MarkdownRun, runs: &mut Vec<MarkdownRun>) {
+fn literal_dollars(node: &Node, source: &str) -> bool {
+    let Node::InlineMath(math) = node else {
+        return false;
+    };
+    let Some(position) = node.position() else {
+        return false;
+    };
+    let next = source
+        .get(position.end.offset..)
+        .and_then(|rest| rest.chars().next());
+    // A dollar starting a price or the next invocation is not the preceding
+    // expression's closing delimiter. Keep the original GFM meaning.
+    next.is_some_and(|next| {
+        next.is_ascii_digit()
+            || (next.is_alphanumeric() || next == '_') && math.value.ends_with(char::is_whitespace)
+    })
+}
+
+fn math_presence(node: &Node, source: &str) -> (bool, bool) {
+    if matches!(node, Node::InlineMath(_)) {
+        let literal = literal_dollars(node, source);
+        return (!literal, literal);
+    }
+    node.children()
+        .into_iter()
+        .flatten()
+        .fold((false, false), |(formula, literal), child| {
+            let (next_formula, next_literal) = math_presence(child, source);
+            (formula || next_formula, literal || next_literal)
+        })
+}
+
+fn inline_runs(
+    node: &Node,
+    source: &str,
+    context: &Context<'_>,
+    style: MarkdownRun,
+) -> Vec<MarkdownRun> {
+    let mut runs = Vec::new();
+    if math_presence(node, source) == (false, true) {
+        let position = node
+            .position()
+            .expect("parsed inline content has a source position");
+        let source = fragment_source(&source[position.start.offset..position.end.offset], context);
+        let node = ::markdown::to_mdast(&source, &ParseOptions::gfm()).expect("GFM is infallible");
+        inline(&node, &source, context, style, &mut runs);
+    } else {
+        inline(node, source, context, style, &mut runs);
+    }
+    runs
+}
+
+fn inline(
+    node: &Node,
+    source: &str,
+    context: &Context<'_>,
+    mut style: MarkdownRun,
+    runs: &mut Vec<MarkdownRun>,
+) {
     let definitions = &context.definitions;
     if let Some((url, alt)) = image(node, |id| definitions.get(id).copied()) {
         style.image = Some(url.to_owned());
@@ -318,11 +456,11 @@ fn inline(node: &Node, context: &Context<'_>, mut style: MarkdownRun, runs: &mut
                 ..style.clone()
             };
             for child in node.children().into_iter().flatten() {
-                inline(child, context, caption.clone(), runs);
+                inline(child, source, context, caption.clone(), runs);
             }
         }
+        // The document pass assigns chip text after collecting every file path.
         runs.push(MarkdownRun {
-            text: file.label.clone(),
             link: Some(destination.into()),
             file: Some(file),
             ..style
@@ -374,6 +512,15 @@ fn inline(node: &Node, context: &Context<'_>, mut style: MarkdownRun, runs: &mut
                 }
             }
         }
+        Node::InlineMath(math) => {
+            if literal_dollars(node, source) {
+                let position = node.position().expect("parsed math has source positions");
+                style.text = source[position.start.offset..position.end.offset].into();
+            } else {
+                style.math = true;
+                style.text = math.value.clone();
+            }
+        }
         Node::Text(text) => style.text = text.value.clone(),
         Node::Break(_) => style.text = "\n".into(),
         Node::Html(html) => style.text = html.value.clone(),
@@ -382,10 +529,22 @@ fn inline(node: &Node, context: &Context<'_>, mut style: MarkdownRun, runs: &mut
     }
     if let Some(children) = node.children() {
         for child in children {
-            inline(child, context, style.clone(), runs);
+            inline(child, source, context, style.clone(), runs);
         }
     } else if !style.text.is_empty() {
         runs.push(style);
+    }
+}
+
+fn math_block(text: &str, mut style: MarkdownStyle) -> MarkdownBlock {
+    style.math = true;
+    MarkdownBlock::Paragraph {
+        runs: vec![MarkdownRun {
+            text: text.into(),
+            math: true,
+            ..Default::default()
+        }],
+        style,
     }
 }
 
@@ -396,8 +555,27 @@ fn block(
     mut style: MarkdownStyle,
     blocks: &mut Vec<MarkdownBlock>,
 ) {
+    if let Node::Blockquote(quote) = node
+        && let Some((kind, children)) = structure::callout(quote, source)
+    {
+        style.quoted = true;
+        let mut content = Vec::new();
+        for child in &children {
+            block(child, source, context, style.clone(), &mut content);
+        }
+        blocks.push(MarkdownBlock::Callout {
+            kind,
+            blocks: content,
+            style,
+        });
+        return;
+    }
     match node {
         Node::Definition(_) => return,
+        Node::Math(math) => {
+            blocks.push(math_block(&math.value, style));
+            return;
+        }
         Node::Table(table) => {
             let columns: Vec<_> = table
                 .align
@@ -419,15 +597,14 @@ fn block(
                         .flatten()
                         .take(columns.len())
                         .map(|cell| {
-                            let mut runs = Vec::new();
-                            inline(
+                            let runs = inline_runs(
                                 cell,
+                                source,
                                 context,
                                 MarkdownRun {
                                     strong: row_index == 0,
                                     ..Default::default()
                                 },
-                                &mut runs,
                             );
                             MarkdownCell { runs }
                         })
@@ -467,6 +644,14 @@ fn block(
         }
         Node::Blockquote(_) => style.quoted = true,
         Node::Code(code) => {
+            if code
+                .lang
+                .as_deref()
+                .is_some_and(|language| language.eq_ignore_ascii_case("math"))
+            {
+                blocks.push(math_block(&code.value, style));
+                return;
+            }
             style.code = true;
             style.language = code.lang.clone();
             style.filename = code::fence_filename(code.meta.as_deref())
@@ -501,8 +686,7 @@ fn block(
         return;
     }
     if matches!(node, Node::Paragraph(_) | Node::Heading(_) | Node::Html(_)) {
-        let mut runs = Vec::new();
-        inline(node, context, MarkdownRun::default(), &mut runs);
+        let runs = inline_runs(node, source, context, MarkdownRun::default());
         blocks.push(MarkdownBlock::Paragraph { runs, style });
     } else {
         for child in node.children().into_iter().flatten() {
@@ -525,6 +709,7 @@ fn visualization_reference(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::borrow::Cow;
     #[test]
     fn table_copy_preserves_original_markdown_and_quotes_csv() {
         let original = "| **太字** *斜体* ~~削除~~ | ``a`b`` |\n| :--- | ---: |\n| [資料](https://example.com) | a\\|b |";
@@ -829,13 +1014,7 @@ mod tests {
                     "Before\n\n{open}{separator}{summary}**東映の解約完了画面**{close_summary}{separator}![証拠][receipt]{separator}{close}\n\nAfter\n\n[receipt]: images/receipt.png"
                 );
                 let blocks = markdown_blocks(source.clone());
-                let runs: Vec<_> = blocks
-                    .iter()
-                    .flat_map(|block| match block {
-                        MarkdownBlock::Paragraph { runs, .. } => runs.as_slice(),
-                        _ => panic!("unexpected block"),
-                    })
-                    .collect();
+                let runs = markdown_runs(&blocks);
                 assert_eq!(
                     runs.iter()
                         .filter_map(|run| run.image.as_deref())
@@ -862,7 +1041,10 @@ mod tests {
         let source = "<details><summary>説明だけ</summary>本文</details>";
         assert_eq!(without_disclosure_tags(source), "説明だけ本文");
         assert_eq!(
-            paragraph_text(&markdown_blocks(source.into())[0]),
+            markdown_runs(&markdown_blocks(source.into()))
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
             "説明だけ本文"
         );
         assert_eq!(without_disclosure_tags("<details/>本文<summary/>"), "本文");
@@ -872,23 +1054,33 @@ mod tests {
     fn disclosure_wrappers_preserve_code_and_nested_contents() {
         let source = "<details>\n<summary>外側</summary>\n```html\n<summary>![literal](code.png)</summary>\n```\n<details>\n<summary>内側</summary>\n\n![画像](nested.png)\n</details>\n</details>";
         let blocks = markdown_blocks(source.into());
-        let code = blocks
-            .iter()
-            .find(|block| {
-                matches!(block,
-                    MarkdownBlock::Paragraph { style, .. } if style.code
-                )
-            })
-            .expect("code remains code inside a disclosure");
+        let [
+            MarkdownBlock::Disclosure {
+                summary,
+                blocks: body,
+                ..
+            },
+        ] = blocks.as_slice()
+        else {
+            panic!("outer disclosure");
+        };
+        let code = &body[0];
+        assert!(matches!(code, MarkdownBlock::Paragraph {style, ..} if style.code));
         assert_eq!(
             paragraph_text(code),
             "<summary>![literal](code.png)</summary>"
         );
-        assert!(blocks.iter().any(|block| paragraph_text(block) == "外側"));
-        assert!(
-            blocks
+        assert_eq!(
+            summary
                 .iter()
-                .any(|block| paragraph_text(block).trim() == "内側")
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            "外側"
+        );
+        assert!(
+            markdown_runs(body)
+                .iter()
+                .any(|run| run.text.trim() == "内側")
         );
         assert_eq!(markdown_images(source), ["nested.png"]);
         assert_eq!(

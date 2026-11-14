@@ -1414,6 +1414,7 @@ async fn prompt(input: &[op::Input]) -> Result<Vec<Value>, Failure> {
     let mut prompt = vec![];
     for part in input {
         prompt.push(match part {
+        op::Input::Context {context}=>json!({"type":"text","text":context.provider_text()}),
         op::Input::Text {text}=>json!({"type":"text","text":text}),
         op::Input::Mention {path,name}|op::Input::Skill {path,name}=>json!({"type":"text","text":format!("{name}: {path}")}),
         op::Input::LocalImage {path}=>{let bytes=tokio::fs::read(path).await.map_err(failure)?;let format=image::guess_format(&bytes).map_err(failure)?;json!({"type":"image","mimeType":format.to_mime_type(),"data":base64::engine::general_purpose::STANDARD.encode(bytes)})},
@@ -1441,6 +1442,27 @@ fn permission_choice(option: &Value) -> Option<Choice> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[tokio::test]
+    async fn structured_context_is_provider_data_and_does_not_read_the_referenced_path() {
+        use agent_protocol::context::{ContextContent, MessageContext};
+        let context = MessageContext {
+            id: "file".into(),
+            label: "Source".into(),
+            content: ContextContent::File {
+                path: "/unread/source.rs".into(),
+            },
+        };
+        let input = prompt(&[op::Input::Context {
+            context: Box::new(context.clone()),
+        }])
+        .await
+        .unwrap();
+        assert_eq!(
+            input,
+            [json!({"type":"text", "text":context.provider_text()})]
+        );
+    }
 
     #[tokio::test]
     async fn conversation_search_keeps_unicode_whitespace_paging_and_saved_history() {

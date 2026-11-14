@@ -10,7 +10,7 @@ enum ConversationMarkdownContent {
     }
 
     struct Part: Identifiable, Sendable {
-        let id: Int
+        var id: Int
         let blocks: [Block]
         let tableRows: [[[Block]]]
         var visualizationPath: String?
@@ -35,6 +35,19 @@ enum ConversationMarkdownContent {
         var paragraphs: [Block] = []
         for block in sourceBlocks {
             switch block {
+            case let .disclosure(summary, _, children, style):
+                paragraphs.append(contentsOf: blocks(summary, style: style, startingID: paragraphs.count))
+                appendParts(paragraphs, to: &result)
+                paragraphs.removeAll(keepingCapacity: true)
+                appendChildren(children, to: &result)
+            case let .callout(kind, children, style):
+                let marker = MarkdownRun(text: markdownCalloutMarker(kind: kind), strong: false, emphasis: false,
+                                         strikethrough: false, code: false, math: false, link: nil, image: nil,
+                                         file: nil, darkColor: nil, lightColor: nil)
+                paragraphs.append(contentsOf: blocks([marker], style: style, startingID: paragraphs.count))
+                appendParts(paragraphs, to: &result)
+                paragraphs.removeAll(keepingCapacity: true)
+                appendChildren(children, to: &result)
             case let .paragraph(runs, style):
                 paragraphs.append(contentsOf: blocks(runs, style: style, startingID: paragraphs.count))
             case let .visualization(path, _):
@@ -47,7 +60,7 @@ enum ConversationMarkdownContent {
                 let cells = rows.map { cells in
                     cells.enumerated().map { column, cell in
                         blocks(cell.runs, style: MarkdownStyle(alignment: columns[column],
-                                                               header: nil, marker: nil, code: false, quoted: false,
+                                                               header: nil, marker: nil, code: false, math: false, quoted: false,
                                                                listDepth: 0, language: nil, filename: nil,
                                                                rule: false))
                     }
@@ -60,6 +73,13 @@ enum ConversationMarkdownContent {
         }
         appendParts(paragraphs, to: &result)
         return result
+    }
+
+    private nonisolated static func appendChildren(_ children: [MarkdownBlock], to result: inout [Part]) {
+        for var child in parts(children) {
+            child.id = result.count
+            result.append(child)
+        }
     }
 
     private nonisolated static func blocks(_ runs: [MarkdownRun], style: MarkdownStyle,

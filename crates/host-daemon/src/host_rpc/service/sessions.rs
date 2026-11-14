@@ -252,6 +252,8 @@ impl HostRpcService {
         target: &agent_protocol::session::SessionRef,
         input: &op::Submission,
     ) -> Result<op::SubmissionReceipt, Failure> {
+        op::Input::validate_contexts(&input.input)
+            .map_err(|reason| Failure::new("invalid_params", reason))?;
         self.capacity_input(target);
         let mut row = self.inner.conversations.get(target)?;
         if let Some(current) = row.as_ref().filter(|row| {

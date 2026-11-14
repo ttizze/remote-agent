@@ -35,6 +35,8 @@ impl HostRpcService {
             .initial_input
             .as_ref()
             .expect("task admission has input");
+        op::Input::validate_contexts(&initial.input)
+            .map_err(|reason| Failure::new("invalid_params", reason))?;
         if let Some(workspace) = &initial.workspace {
             workspace
                 .validate()

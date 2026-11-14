@@ -370,7 +370,7 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
                 Some(report) => ItemBody::Notification {
                     reports: vec![report],
                 },
-                None => ItemBody::UserMessage { text, content },
+                None => agent_protocol::context::user_message(text, content),
             }
         }
         "agentMessage" => ItemBody::AssistantText {
@@ -731,6 +731,9 @@ pub(super) fn encode_input(input: &[agent_protocol::operations::Input]) -> Vec<V
     input
         .iter()
         .map(|part| match part {
+            Input::Context { context } => {
+                serde_json::json!({"type":"text","text":context.provider_text()})
+            }
             Input::Text { text } => serde_json::json!({"type":"text","text":text}),
             Input::Skill { name, path } => {
                 serde_json::json!({"type":"skill","name":name,"path":path})
@@ -747,6 +750,32 @@ pub(super) fn encode_input(input: &[agent_protocol::operations::Input]) -> Vec<V
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn structured_context_survives_the_native_input_and_history_boundary() {
+        use agent_protocol::{
+            context::{ContextContent, MessageContext},
+            operations::Input,
+        };
+        let context = MessageContext {
+            id: "file".into(),
+            label: "Source".into(),
+            content: ContextContent::File {
+                path: "/unread/source.rs".into(),
+            },
+        };
+        let input = encode_input(&[Input::Context {
+            context: Box::new(context.clone()),
+        }]);
+        assert_eq!(input[0]["type"], "text");
+        let item = parse_item(
+            json!({"type":"userMessage","id":"item","status":"completed","content":input}),
+        )
+        .unwrap();
+        assert!(
+            matches!(item.body(), ItemBody::UserMessage { text: None, content } if content == &[MessagePart::Context {context: Box::new(context)}])
+        );
+    }
 
     #[test]
     fn the_prompt_that_wakes_codex_for_its_command_reads_as_that_commands_notification() {

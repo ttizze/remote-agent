@@ -232,6 +232,8 @@ impl HostRpcService {
                 client_user_message_id,
                 input,
             } => {
+                op::Input::validate_contexts(input)
+                    .map_err(|reason| Failure::new("invalid_params", reason))?;
                 if input.is_empty() {
                     return Err(Failure::new(
                         "invalid_params",

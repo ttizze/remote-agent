@@ -21,6 +21,8 @@ pub struct Draft {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub invocations: Vec<agent_protocol::composer::Invocation>,
+    #[serde(default)]
+    pub contexts: Vec<agent_protocol::context::MessageContext>,
     pub model: Option<crate::models::ModelRef>,
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1103,6 +1105,16 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.input.drafts).insert(thread_id, Arc::new(draft));
         }
+        Intent::ChangeContext { storage_scope, thread_id, action } => {
+            if storage_scope == previous.connection.storage_scope {
+                let current = previous.input.drafts.get(&thread_id).map_or(&[][..], |draft| &draft.contexts);
+                match crate::composer::context::change(current, action) {
+                    Ok(contexts) if contexts != current => Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default()).contexts = contexts,
+                    Ok(_) => {}
+                    Err(reason) => Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists")).error = Some(reason.into()),
+                }
+            }
+        }
         Intent::SelectWorkspace { thread_id, workspace } => {
             Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default()).workspace = workspace;
         }
@@ -1418,23 +1430,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                         .entry(pending.draft_key.clone())
                         .or_default(),
                 );
-                let mut restored = pending.draft.text.clone();
-                append_transcript(&mut restored, &draft.text);
-                draft.text = restored;
-                for invocation in &pending.draft.invocations {
-                    if !draft.invocations.contains(invocation) {
-                        draft.invocations.push(invocation.clone());
-                    }
-                }
-                for attachment in &pending.draft.attachments {
-                    if !draft
-                        .attachments
-                        .iter()
-                        .any(|current| current.path == attachment.path)
-                    {
-                        draft.attachments.push(attachment.clone());
-                    }
-                }
+                *draft = restore_sent_draft(draft, &pending.draft);
             }
         }
         Event::ConnectionChecked { failure } => next.connection.connection_failure = failure,
@@ -1898,6 +1894,15 @@ fn submission(
         return (next, Vec::new());
     }
     let mut next = previous.clone();
+    if let Err(reason) = agent_protocol::context::validate_contexts(&draft.contexts) {
+        next.fail_operation(
+            op::OperationKey::Submission {
+                draft_key: draft_key.clone(),
+            },
+            reason.into(),
+        );
+        return (next, Vec::new());
+    }
     if let Some(reason) = thread_id
         .as_ref()
         .and_then(|id| previous.submission_unavailable_reason(id, provider))
@@ -1922,6 +1927,9 @@ fn submission(
                 .iter()
                 .any(|sent| sent.path == attachment.path)
         });
+        current
+            .contexts
+            .retain(|context| !cleared.contexts.contains(context));
     }
     let anchor = thread_id
         .as_ref()
@@ -2170,6 +2178,36 @@ mod submission_tests {
             assert_eq!(effects.len(), 1);
         }
     }
+}
+
+fn restore_sent_draft(current: &Draft, sent: &Draft) -> Draft {
+    let mut restored = current.clone();
+    restored.text = sent.text.clone();
+    append_transcript(&mut restored.text, &current.text);
+    for invocation in &sent.invocations {
+        if !restored.invocations.contains(invocation) {
+            restored.invocations.push(invocation.clone());
+        }
+    }
+    for context in &sent.contexts {
+        if !restored
+            .contexts
+            .iter()
+            .any(|current| current.id == context.id)
+        {
+            restored.contexts.push(context.clone());
+        }
+    }
+    for attachment in &sent.attachments {
+        if !restored
+            .attachments
+            .iter()
+            .any(|current| current.path == attachment.path)
+        {
+            restored.attachments.push(attachment.clone());
+        }
+    }
+    restored
 }
 
 fn append_transcript(text: &mut String, transcript: &str) {
