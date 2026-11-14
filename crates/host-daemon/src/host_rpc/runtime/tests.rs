@@ -343,7 +343,7 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
             assert_ne!(injected[0].0, injected[1].0);
         }
         assert_eq!(injected.last().unwrap().0, active.id);
-        let context = injected.last().unwrap().1.render();
+        let context = serde_json::to_string(&injected.last().unwrap().1).unwrap();
         assert!(context.contains("second-provider-marker"));
         assert_eq!(context.contains("first-provider-marker"), rebuilt);
         assert!(!context.contains("third-provider-marker"));

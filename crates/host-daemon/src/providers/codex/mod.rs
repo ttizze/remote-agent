@@ -1032,7 +1032,7 @@ impl Agent for Codex {
     async fn inject_history(
         &self,
         id: &str,
-        context: &agent_protocol::handoff::Context,
+        items: &[Value],
     ) -> Result<bool, Failure> {
         let state = self.state(id).await?;
         self.resume(
@@ -1045,7 +1045,7 @@ impl Agent for Codex {
         match self
             .request::<_, Value>(
                 "thread/inject_items",
-                &serde_json::json!({"threadId":id,"items":context.native_items()}),
+                &serde_json::json!({"threadId":id,"items":items}),
             )
             .await
         {

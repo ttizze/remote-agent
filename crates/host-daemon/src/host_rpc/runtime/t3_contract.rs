@@ -216,13 +216,14 @@ async fn switching_providers_carries_prior_history_without_duplicate_input() {
     assert_eq!(claude.inputs.lock().unwrap().len(), 1);
     assert_eq!(second.projection.thread.id, first.projection.thread.id);
     assert!(!second.projection.context_handoffs.is_empty());
-    let injected = claude.injected.lock().unwrap();
-    assert_eq!(injected.len(), 1);
-    assert!(
-        serde_json::to_string(&injected[0].1)
-            .unwrap()
-            .contains("prior-history-marker")
-    );
+    // ContextHandoffDelivery uses inline history when the adapter explicitly
+    // declines native injection (Claude's fixture, like the real adapter).
+    let delivered = serde_json::to_string(&(
+        &*claude.injected.lock().unwrap(),
+        &*claude.inputs.lock().unwrap(),
+    ))
+    .unwrap();
+    assert!(delivered.contains("prior-history-marker"));
 }
 
 #[tokio::test]

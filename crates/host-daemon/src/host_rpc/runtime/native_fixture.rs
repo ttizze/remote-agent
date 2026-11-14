@@ -17,11 +17,11 @@ use agent_protocol::{
     session::{Capabilities, SessionChange},
 };
 use agent_protocol::{
-    handoff,
     models::{Thread, ThreadResponse},
     session::HistoryPage,
 };
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -100,7 +100,7 @@ pub(in crate::host_rpc) struct NativeAgent {
     pub(in crate::host_rpc) continue_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) continue_started: tokio::sync::Notify,
     pub(in crate::host_rpc) interrupts: Mutex<Vec<(String, TurnId)>>,
-    pub(in crate::host_rpc) injected: Arc<Mutex<Vec<(String, handoff::Context)>>>,
+    pub(in crate::host_rpc) injected: Arc<Mutex<Vec<(String, Vec<Value>)>>>,
     pub(in crate::host_rpc) released: Arc<Mutex<Vec<String>>>,
     pub(in crate::host_rpc) unload_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) next: Arc<AtomicUsize>,
@@ -467,14 +467,14 @@ impl Agent for NativeAgent {
             needs_reload: self.needs_reload,
         })
     }
-    async fn inject_history(&self, id: &str, context: &handoff::Context) -> Result<bool, Failure> {
+    async fn inject_history(&self, id: &str, items: &[Value]) -> Result<bool, Failure> {
         if self.provider != ProviderKind::Codex {
             return Ok(false);
         }
         self.injected
             .lock()
             .unwrap()
-            .push((id.into(), context.clone()));
+            .push((id.into(), items.to_vec()));
         if self.fail_inject.swap(0, Ordering::SeqCst) != 0 {
             return Err(Failure::unknown(
                 "injection_unknown",

@@ -391,7 +391,7 @@ pub(crate) trait Agent: Send + Sync {
     async fn inject_history(
         &self,
         _id: &str,
-        _context: &agent_protocol::handoff::Context,
+        _items: &[Value],
     ) -> Result<bool, Failure> {
         Ok(false)
     }

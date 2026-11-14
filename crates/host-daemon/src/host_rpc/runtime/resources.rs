@@ -462,7 +462,7 @@ impl Runtime {
                 agent_protocol::handoff::DEFAULT_BUDGET,
             )
             .map_err(|error| Failure::new("history_handoff_failed", error))?;
-            inline = if agent.inject_history(&native.id, &context).await? {None} else {Some(context)};
+            inline = if agent.inject_history(&native.id, &context.native_items()).await? {None} else {Some(context)};
         }
         service
             .inner
