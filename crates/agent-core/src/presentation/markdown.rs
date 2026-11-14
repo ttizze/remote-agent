@@ -410,17 +410,26 @@ fn inline_runs(
     context: &Context<'_>,
     style: MarkdownRun,
 ) -> Vec<MarkdownRun> {
-    let mut runs = Vec::new();
     if math_presence(node, source) == (false, true) {
         let position = node
             .position()
             .expect("parsed inline content has a source position");
-        let source = fragment_source(&source[position.start.offset..position.end.offset], context);
-        let node = ::markdown::to_mdast(&source, &ParseOptions::gfm()).expect("GFM is infallible");
-        inline(&node, &source, context, style, &mut runs);
-    } else {
-        inline(node, source, context, style, &mut runs);
+        return literal_runs(
+            &source[position.start.offset..position.end.offset],
+            context,
+            style,
+        );
     }
+    let mut runs = Vec::new();
+    inline(node, source, context, style, &mut runs);
+    runs
+}
+
+fn literal_runs(source: &str, context: &Context<'_>, style: MarkdownRun) -> Vec<MarkdownRun> {
+    let source = fragment_source(source, context);
+    let node = ::markdown::to_mdast(&source, &ParseOptions::gfm()).expect("GFM is infallible");
+    let mut runs = Vec::new();
+    inline(&node, &source, context, style, &mut runs);
     runs
 }
 
@@ -515,7 +524,12 @@ fn inline(
         Node::InlineMath(math) => {
             if literal_dollars(node, source) {
                 let position = node.position().expect("parsed math has source positions");
-                style.text = source[position.start.offset..position.end.offset].into();
+                runs.extend(literal_runs(
+                    &source[position.start.offset..position.end.offset],
+                    context,
+                    style,
+                ));
+                return;
             } else {
                 style.math = true;
                 style.text = math.value.clone();

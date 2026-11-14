@@ -51,6 +51,7 @@ import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownRun
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.markdownBlocks
+import dev.remoteagent.core.markdownCalloutMarker
 
 private const val RGB_MASK = 0xFFFFFFu
 private const val OPAQUE_ALPHA_MASK = 0xFF000000L
@@ -89,18 +90,7 @@ internal fun ConversationBlocks(
     }
     SelectionContainer {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            blocks.forEachIndexed { index, block ->
-                when (block) {
-                    is MarkdownBlock.Paragraph ->
-                        when {
-                            block.style.rule -> HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                            block.style.code -> MarkdownCode(block, index)
-                            else -> MarkdownParagraph(block, cwd, openFile)
-                        }
-                    is MarkdownBlock.Visualization -> ConversationVisualization(block.path, cwd, perform)
-                    is MarkdownBlock.Table -> MarkdownTable(block, index, openFile, cwd)
-                }
-            }
+            MarkdownBlocks(blocks, cwd, perform, openFile)
         }
     }
     shareError?.let {
@@ -113,6 +103,48 @@ internal fun ConversationBlocks(
         dev.remoteagent.core.markdownFileTarget(source, cwd, dev.remoteagent.core.MarkdownFileSurface.MOBILE)?.let {
             target ->
             ConversationFileViewer(target, perform, source = source, workspaceRoot = cwd) { file = null }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownBlocks(
+    blocks: List<MarkdownBlock>,
+    cwd: String,
+    perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)?,
+    openFile: (String, dev.remoteagent.core.MobileFileMenuItem?) -> Unit,
+) {
+    blocks.forEachIndexed { index, block ->
+        when (block) {
+            is MarkdownBlock.Paragraph ->
+                when {
+                    block.style.rule -> HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                    block.style.code -> MarkdownCode(block, index)
+                    else -> MarkdownParagraph(block, cwd, openFile)
+                }
+            is MarkdownBlock.Visualization -> ConversationVisualization(block.path, cwd, perform)
+            is MarkdownBlock.Table -> MarkdownTable(block, index, openFile, cwd)
+            is MarkdownBlock.Disclosure -> {
+                MarkdownParagraph(MarkdownBlock.Paragraph(block.summary, block.style), cwd, openFile)
+                MarkdownBlocks(block.blocks, cwd, perform, openFile)
+            }
+            is MarkdownBlock.Callout -> {
+                val marker = MarkdownRun(
+                    text = markdownCalloutMarker(block.kind),
+                    strong = false,
+                    emphasis = false,
+                    strikethrough = false,
+                    code = false,
+                    math = false,
+                    link = null,
+                    image = null,
+                    file = null,
+                    darkColor = null,
+                    lightColor = null,
+                )
+                MarkdownParagraph(MarkdownBlock.Paragraph(listOf(marker), block.style), cwd, openFile)
+                MarkdownBlocks(block.blocks, cwd, perform, openFile)
+            }
         }
     }
 }

@@ -291,6 +291,11 @@ mod tests {
                 .any(|run| run.math && run.text == "x")
         );
         assert!(text(&mixed).contains("$5 or $10"));
+        let mixed = markdown_blocks("$x$ $fixture-review **bold** costs $5".into());
+        let runs = markdown_runs(&mixed);
+        assert!(runs.iter().any(|run| run.math && run.text == "x"));
+        assert!(runs.iter().any(|run| run.strong && run.text == "bold"));
+        assert_eq!(text(&mixed), "x $fixture-review bold costs $5");
         for source in ["$x$です", "$x$coefficient", "$x + y $!"] {
             assert!(
                 markdown_runs(&markdown_blocks(source.into()))
