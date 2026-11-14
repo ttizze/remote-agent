@@ -72,6 +72,9 @@ pub fn activate_queued(
             ..root.clone()
         }),
     ];
+    changes.extend(state.pending_fork().map(|transfer| {
+        Change::ContextTransfer(transfer.for_run(&run.id, &run.provider_instance_id, context.now))
+    }));
     for item in state
         .turn_items
         .values()

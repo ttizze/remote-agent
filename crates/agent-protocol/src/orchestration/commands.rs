@@ -345,12 +345,7 @@ pub fn admit(
         Change::TurnItem(item),
     ];
     changes.extend(fork.map(|transfer| {
-        Change::ContextTransfer(ContextTransfer {
-            target_run_id: Some(run_id.clone()),
-            target_provider_instance_id: Some(selection.instance_id.clone()),
-            updated_at: context.now.into(),
-            ..transfer.clone()
-        })
+        Change::ContextTransfer(transfer.for_run(&run_id, &selection.instance_id, context.now))
     }));
     changes.extend(preparation.map(Change::TurnItem));
     if !queued {

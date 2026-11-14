@@ -1,5 +1,16 @@
 use super::*;
 
+impl ContextTransfer {
+    pub(super) fn for_run(&self, run_id: &str, provider_instance_id: &str, now: &str) -> Self {
+        Self {
+            target_run_id: Some(run_id.into()),
+            target_provider_instance_id: Some(provider_instance_id.into()),
+            updated_at: now.into(),
+            ..self.clone()
+        }
+    }
+}
+
 /// ThreadForkService: freeze the source point, inherit the header, and leave
 /// provider resources unresolved until the fork receives its first input.
 pub fn fork_thread(

@@ -9,7 +9,7 @@ impl Storage {
         self.with(|connection| {
             let tx = connection.transaction().map_err(failure)?;
             let target = projections::metadata(&tx, &target.application_id())?;
-            let Some(fork) = target.pending_fork() else {
+            let Some(fork) = target.unconsumed_fork() else {
                 return Ok(None);
             };
             let source = projections::metadata(&tx, &fork.source_thread_id)?;

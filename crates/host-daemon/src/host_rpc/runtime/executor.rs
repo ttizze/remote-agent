@@ -356,6 +356,12 @@ impl Runtime {
             .provider_threads
             .get(&attempt.provider_thread_id)
             .ok_or_else(|| Failure::new("invalid_run", "provider thread is missing"))?;
+        if state.unconsumed_fork().is_some() && thread.forked_from.is_none() {
+            return Err(Failure::new(
+                "fork_context_unavailable",
+                "fork context must be prepared before starting a native input",
+            ));
+        }
         let native = if let Some(id) = thread
             .native_thread_ref
             .as_ref()
