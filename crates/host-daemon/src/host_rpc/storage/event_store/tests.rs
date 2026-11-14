@@ -213,3 +213,56 @@ fn run_start_is_reserved_before_items_and_appends_after_the_slot_is_taken() {
     let events = read(&db, Some("thread"), 0, saved.sequence, 10).unwrap();
     assert_eq!(events, [message, saved]);
 }
+
+#[test]
+fn committed_content_updates_the_thread_clock_but_explicit_metadata_keeps_its_timestamp() {
+    let mut db = database();
+    let later = "2026-11-14T01:00:00.000Z";
+    let mut observation = event("content-clock", item("content-clock", "first"));
+    observation.occurred_at = later.into();
+    let tx = db.transaction().unwrap();
+    append(&tx, &observation, None, Some(1)).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        projections::read::<model::Thread>(&db, "thread")
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        later
+    );
+    let indexed: String = db
+        .query_row(
+            "SELECT updated_at FROM orchestration_v2_projection_threads WHERE thread_id='thread'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, later);
+    let mut thread = projections::read::<model::Thread>(&db, "thread")
+        .unwrap()
+        .unwrap();
+    thread.updated_at = NOW.into();
+    let metadata = Event {
+        id: "metadata-clock".into(),
+        change: model::Change::Thread(thread),
+        ..observation
+    };
+    let tx = db.transaction().unwrap();
+    append(&tx, &metadata, None, None).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        projections::read::<model::Thread>(&db, "thread")
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        NOW
+    );
+    let indexed: String = db
+        .query_row(
+            "SELECT updated_at FROM orchestration_v2_projection_threads WHERE thread_id='thread'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed, NOW);
+}

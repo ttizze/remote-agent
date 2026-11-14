@@ -582,3 +582,32 @@ fn snapshot_frames_keep_t3s_flat_wire_contract() {
         frame
     );
 }
+
+#[test]
+fn content_events_update_the_thread_clock_without_rewriting_explicit_metadata_or_foreign_threads() {
+    let before = projection();
+    let later = "2026-11-14T01:00:00.000Z";
+    let mut observation = event(Change::RunCreated(run("running")));
+    observation.occurred_at = later.into();
+    let current = apply_event(&before, &observation, ApplyOptions::default());
+    assert_eq!(current.updated_at, later);
+    assert_eq!(current.thread.updated_at, later);
+    let mut explicit = current.thread.clone();
+    explicit.updated_at = NOW.into();
+    let metadata = Event {
+        id: "metadata-clock".into(),
+        change: Change::Thread(explicit),
+        ..observation.clone()
+    };
+    assert_eq!(
+        apply_event(&current, &metadata, ApplyOptions::default())
+            .thread
+            .updated_at,
+        NOW
+    );
+    observation.thread_id = "foreign".into();
+    assert_eq!(
+        apply_event(&current, &observation, ApplyOptions::default()),
+        current
+    );
+}
