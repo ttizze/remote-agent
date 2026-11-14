@@ -149,10 +149,13 @@ impl Fixture {
                                 .download_bytes(
                                     OWNER,
                                     agent_protocol::protocol::encode(
-                                        serde_json::from_value::<agent_protocol::models::Item>(
-                                            item(id, true),
-                                        )
-                                        .unwrap(),
+                                        output.lock().await.detail(
+                                            &serde_json::from_value(
+                                                request["params"]["session"].clone(),
+                                            )
+                                            .unwrap(),
+                                            &serde_json::from_value(item(id, true)).unwrap(),
+                                        ),
                                     )
                                     .unwrap(),
                                 )
@@ -540,7 +543,7 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
             let completion = fixture.store.dispatch(intent);
             let request = fixture.requests.recv().await.unwrap();
             assert!(matches!(request["method"].as_str(), Some("host/conversation/change")));
-            fixture.output.lock().await.reply(&request, json!({"result":{"outcome":"Accepted","cursor":{"store":"00000000-0000-0000-0000-000000000001","sequence":8}}})).await.unwrap();
+            fixture.output.lock().await.reply(&request, json!({"result":{"sequence":8,"acceptedAt":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
             completion.await.unwrap();
         }
         assert_eq!(fixture.files.grants.lock().unwrap().len(), 4, "stalled bodies must retain their slots");
@@ -585,21 +588,19 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
         for iteration in 0..=12 {
             let request = fixture.requests.recv().await.unwrap();
             assert_eq!(request["method"], "host/conversation/hydrate");
-            let target = serde_json::from_value(request["params"]["session"].clone()).unwrap();
-            let replica = fixture.output.lock().await.replica(&target);
-            let version = replica.rows()[&agent_protocol::sync::Key::Item {
-                thread: target,
-                id: "item-0".into(),
-            }]
-                .version;
-            let cursor = replica.cursor().unwrap();
+            let target: agent_protocol::session::SessionRef =
+                serde_json::from_value(request["params"]["session"].clone()).unwrap();
             let body = command(&format!("complete-{iteration}:{}", "x".repeat(BODY_SIZE)));
             let grant = fixture
                 .files
                 .download_bytes(
                     OWNER,
                     agent_protocol::protocol::encode(
-                        serde_json::from_value::<agent_protocol::models::Item>(body).unwrap(),
+                        fixture
+                            .output
+                            .lock()
+                            .await
+                            .detail(&target, &serde_json::from_value(body).unwrap()),
                     )
                     .unwrap(),
                 )
@@ -636,10 +637,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
                 .output
                 .lock()
                 .await
-                .reply(
-                    &request,
-                    json!({"result":{"cursor":cursor,"version":version,"transfer":grant}}),
-                )
+                .reply(&request, json!({"result":{"item":null,"transfer":grant}}))
                 .await
                 .unwrap();
             let stream = fixture.session.accept_stream().await.unwrap();

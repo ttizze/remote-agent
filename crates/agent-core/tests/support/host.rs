@@ -16,11 +16,7 @@ use agent_transport::{
     transport::{Endpoint, Identity, Relays, Trust},
 };
 use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tokio::sync::mpsc;
 
 pub struct Request {
@@ -164,11 +160,10 @@ impl Session {
 struct State {
     sessions: HashMap<SessionRef, uuid::Uuid>,
     sequence: u64,
-    pending_rows: Vec<(uuid::Uuid, agent_protocol::conversation::records::Message)>,
     list_subscription: Option<uuid::Uuid>,
     list_replica: Option<agent_protocol::conversation::records::Replica>,
     threads: HashMap<SessionRef, Value>,
-    replicas: HashMap<SessionRef, agent_protocol::conversation::records::Replica>,
+    projections: HashMap<SessionRef, agent_protocol::orchestration::projection::ThreadSnapshot>,
 }
 pub struct Writer {
     state: Mutex<State>,
@@ -268,8 +263,18 @@ async fn reader_closed(session: &Session) -> bool {
     session.blobs.lock().await.recv().await.is_none()
 }
 impl Writer {
-    pub fn replica(&self, id: &SessionRef) -> agent_protocol::conversation::records::Replica {
-        self.state.lock().unwrap().replicas[id].clone()
+    pub fn detail(
+        &self,
+        session: &SessionRef,
+        item: &agent_protocol::items::Item,
+    ) -> agent_protocol::orchestration::TurnItem {
+        self.state.lock().unwrap().detail(session, item)
+    }
+    pub fn projection(
+        &self,
+        id: &SessionRef,
+    ) -> agent_protocol::orchestration::projection::ThreadSnapshot {
+        self.state.lock().unwrap().projections[id].clone()
     }
     pub async fn finish_updates(&self) {
         // Only end the latest subscriptions. Closing a replaced stream before
@@ -332,13 +337,13 @@ impl Writer {
                         .active_provider
                         .or_else(|| response.thread.id.as_ref().and_then(|id| id.provider));
                     response.thread.id = Some(target.clone());
-                    state.rows(response, None, false)?;
+                    state.capture(response)?;
                     value["result"] = json!(target);
                 }
                 if request.call.method() == "host/conversation/change"
                     && value
                         .get("result")
-                        .is_some_and(|result| result.get("outcome").is_none())
+                        .is_some_and(|result| result.get("sequence").is_none())
                 {
                     state.sequence = state.sequence.max(7) + 1;
                     value["result"] = json!(agent_protocol::conversation::records::Acknowledged {
@@ -363,41 +368,7 @@ impl Writer {
                         serde_json::from_value(request["params"]["session"].clone())?;
                     let item: agent_protocol::items::Item =
                         serde_json::from_value(value["result"]["item"].clone())?;
-                    let id: agent_protocol::ids::ItemId =
-                        serde_json::from_value(request["params"]["item"].clone())?;
-                    let replica = &state.replicas[&target];
-                    let row = &replica.rows()[&agent_protocol::sync::Key::Item {
-                        thread: target.clone(),
-                        id,
-                    }];
-                    let record = match &row.content {
-                        agent_protocol::sync::Content::Full(record)
-                        | agent_protocol::sync::Content::Summary(record) => record,
-                    };
-                    let agent_protocol::conversation::records::Record::Item(original) =
-                        record.as_ref()
-                    else {
-                        unreachable!();
-                    };
-                    let provider = target
-                        .provider
-                        .or_else(|| {
-                            state
-                                .threads
-                                .get(&target)
-                                .and_then(|value| {
-                                    serde_json::from_value::<ThreadResponse>(value.clone()).ok()
-                                })
-                                .and_then(|response| response.thread.active_provider)
-                        })
-                        .unwrap();
-                    let item = orchestration::item_record(
-                        &target.application_id(),
-                        Some(original.turn.as_str()),
-                        &item,
-                        provider,
-                        false,
-                    );
+                    let item = state.detail(&target, &item);
                     let transfer: Option<agent_protocol::models::TransferGrant> =
                         serde_json::from_value(value["result"]["transfer"].clone())?;
                     value["result"] = json!(agent_protocol::conversation::records::Hydrated {
@@ -442,10 +413,10 @@ impl Writer {
         }
         Ok(Some(value))
     }
-    pub async fn send_rows(
+    pub async fn send_stream(
         &self,
         subscription: uuid::Uuid,
-        message: agent_protocol::conversation::records::Message,
+        message: impl serde::Serialize,
     ) -> std::io::Result<()> {
         let latest = {
             let state = self.state.lock().unwrap();
@@ -517,10 +488,6 @@ impl Writer {
         } else {
             None
         };
-        let pending_rows = std::mem::take(&mut self.state.lock().unwrap().pending_rows);
-        for (subscription, message) in pending_rows {
-            self.send_rows(subscription, message).await?;
-        }
         let response = protocol::json_boundary::response(request.call.method(), &value.to_string())
             .map_err(std::io::Error::other)?;
         let mut send = request
@@ -536,7 +503,7 @@ impl Writer {
         if let Call::CreateConversation(request) = &request.call {
             let change = self.state.lock().unwrap().list_change(&request.session)?;
             if let Some((subscription, message)) = change {
-                self.send_rows(subscription, message).await?;
+                self.send_stream(subscription, message).await?;
             }
         }
         Ok(())
@@ -546,7 +513,7 @@ impl Writer {
         let Some(value) = prepared else {
             return Ok(());
         };
-        let row_messages = {
+        let messages = {
             let mut state = self.state.lock().unwrap();
             let id = serde_json::from_value::<SessionRef>(value["fixtureChanged"].clone()).ok();
             if let Some(id) = id {
@@ -555,26 +522,26 @@ impl Writer {
                     return Ok(());
                 };
                 let response: ThreadResponse = serde_json::from_value(thread.clone())?;
-                let cached = state.replicas.get(&id).and_then(|replica| replica.cursor());
-                let message = state.rows(response, cached, false)?;
-                let mut messages = state
-                    .sessions
-                    .get(&id)
-                    .map(|subscription| vec![(*subscription, message)])
-                    .unwrap_or_default();
-                if let Some(list) = state.list_change(&id)? {
-                    messages.push(list);
-                }
-                Some(messages)
+                let snapshot = state.capture(response)?;
+                Some((
+                    state.sessions.get(&id).copied(),
+                    snapshot,
+                    state.list_change(&id)?,
+                ))
             } else {
                 None
             }
         };
-        if let Some(messages) = row_messages {
-            for (id, message) in messages {
-                if let Some(send) = self.streams.lock().await.get_mut(&id) {
-                    agent_transport::framing::write(send, message).await?;
-                }
+        if let Some((subscription, snapshot, list)) = messages {
+            if let Some(subscription) = subscription {
+                self.send_stream(
+                    subscription,
+                    agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(snapshot),
+                )
+                .await?;
+            }
+            if let Some((subscription, message)) = list {
+                self.send_stream(subscription, message).await?;
             }
             return Ok(());
         }
@@ -627,11 +594,25 @@ impl State {
         else {
             return Ok(None);
         };
-        let Some(header) = self
-            .replicas
-            .get(id)
-            .and_then(|replica| replica.rows().get(&Key::Thread(id.clone())))
-            .cloned()
+        let Some(thread) = self.threads.get(id) else {
+            return Ok(None);
+        };
+        let response: ThreadResponse = serde_json::from_value(thread.clone())?;
+        let Message::Snapshot { rows, .. } = rows::catalog(
+            agent_protocol::models::ThreadList {
+                data: vec![response.thread],
+                ..Default::default()
+            },
+            Cursor {
+                store: uuid::Uuid::from_u128(1),
+                sequence: self.sequence,
+            },
+        ) else {
+            unreachable!()
+        };
+        let Some(header) = rows
+            .into_iter()
+            .find(|row| row.key == Key::Thread(id.clone()))
         else {
             return Ok(None);
         };
@@ -686,9 +667,7 @@ impl State {
             if self.list_replica.is_some() {
                 self.sequence += 1;
             }
-            let cached: Option<agent_protocol::sync::Cursor> =
-                serde_json::from_value(request["params"]["cached"].clone()).unwrap_or(None);
-            if cached.is_some() {
+            if request["params"]["afterSequence"].as_u64().is_some() {
                 self.sequence += 1;
             }
             let provider = response
@@ -697,8 +676,7 @@ impl State {
                 .or(response.thread.id.as_ref().and_then(|id| id.provider))
                 .unwrap();
             let capabilities = response.thread.capabilities.unwrap_or_default();
-            let snapshot = orchestration::snapshot(response.clone(), self.sequence);
-            self.rows(response, cached, false)?;
+            let snapshot = self.capture(response)?;
             value["result"] = json!(agent_protocol::conversation::records::Opened {
                 session: target,
                 subscription_id: uuid::Uuid::nil(),
@@ -733,10 +711,10 @@ impl State {
                     &Default::default(),
                 )
                 .map_err(std::io::Error::other)?;
-                let replica = rows::replica(response.clone(), 1);
                 self.threads
                     .insert(opened.session.clone(), serde_json::to_value(response)?);
-                self.replicas.insert(opened.session, replica);
+                self.sequence = self.sequence.max(snapshot.snapshot_sequence);
+                self.projections.insert(opened.session, snapshot);
             }
         }
         Ok(())
@@ -744,192 +722,96 @@ impl State {
 }
 
 impl State {
-    // A scripted Host owns canonical positions independently of a native
-    // fixture's page boundaries. Reserve room only in this small test corpus
-    // for older pages whose total native count is deliberately unknown.
-    fn rows(
+    fn detail(
+        &self,
+        session: &SessionRef,
+        native: &agent_protocol::items::Item,
+    ) -> agent_protocol::orchestration::TurnItem {
+        let (identity, snapshot) = self
+            .projections
+            .iter()
+            .find(|(identity, _)| identity.application_id() == session.application_id())
+            .unwrap();
+        let original = snapshot
+            .projection
+            .turn_items
+            .iter()
+            .find(|item| item.id == native.id.as_str())
+            .expect("hydrated item exists");
+        let response: ThreadResponse =
+            serde_json::from_value(self.threads[identity].clone()).unwrap();
+        let provider = response
+            .thread
+            .active_provider
+            .or(identity.provider)
+            .unwrap();
+        let mut item = orchestration::item_record(
+            &original.thread_id,
+            original.run_id.as_deref(),
+            native,
+            provider,
+            false,
+        );
+        item.id = original.id.clone();
+        item.ordinal = original.ordinal;
+        item.status = original.status;
+        item.updated_at = original.updated_at.clone();
+        item.started_at = original.started_at.clone();
+        item.completed_at = original.completed_at.clone();
+        item
+    }
+
+    fn capture(
         &mut self,
         response: ThreadResponse,
-        cached: Option<agent_protocol::sync::Cursor>,
-        extension: bool,
-    ) -> std::io::Result<agent_protocol::conversation::records::Message> {
-        use agent_protocol::{
-            conversation::records::{self, Record},
-            sync::{Content, Cursor, Key, Message, Position, Scope, Window},
-        };
+    ) -> std::io::Result<agent_protocol::orchestration::projection::ThreadSnapshot> {
         let id = response.thread.id.clone().unwrap();
-        let has_more = rows::history_has_more(
-            response.thread.history_has_more,
-            response.thread.history_cursor.as_deref(),
-        );
-        let fresh = rows::replica_at(response, 1, self.sequence.max(7));
-        let Message::Snapshot {
-            rows: mut incoming, ..
-        } = fresh.snapshot().unwrap()
-        else {
-            unreachable!()
-        };
-        let previous = self.replicas.get(&id);
-        let previous_rows = previous.map(|replica| replica.rows());
-        let first_known = incoming
+        let mut snapshot = orchestration::snapshot(response.clone(), self.sequence.max(7));
+        if snapshot.has_more_history && snapshot.history_cursor.is_none() {
+            snapshot.history_cursor =
+                Some(format!("fixture-history:{}", snapshot.snapshot_sequence));
+        }
+        // Preserve positions while native fixture pages expand backwards.
+        let previous = self.projections.get(&id);
+        let offset = snapshot
+            .projection
+            .visible_turn_items
             .iter()
-            .filter_map(|row| match &row.position {
-                Position::Turn { ordinal } => previous_rows
-                    .and_then(|rows| rows.get(&row.key))
-                    .and_then(|old| match old.position {
-                        Position::Turn { ordinal: saved } => saved.checked_sub(*ordinal),
-                        _ => None,
-                    }),
-                _ => None,
+            .enumerate()
+            .find_map(|(index, incoming)| {
+                previous?
+                    .projection
+                    .visible_turn_items
+                    .iter()
+                    .find(|saved| saved.source_item_id == incoming.source_item_id)
+                    .and_then(|saved| saved.position.checked_sub(index as u64 + 1))
             })
-            .next();
-        let maximum = previous_rows
-            .into_iter()
-            .flat_map(|rows| rows.values())
-            .filter_map(|row| match row.position {
-                Position::Turn { ordinal } => Some(ordinal),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(if has_more { 1_000 } else { 0 });
-        let offset = first_known.unwrap_or(maximum);
-        let mut positions = std::collections::HashMap::new();
-        let sequence = extension
-            .then_some(cached)
-            .flatten()
-            .map(|cursor| cursor.sequence)
-            .unwrap_or(self.sequence.max(7));
-        let cursor = Cursor {
-            store: uuid::Uuid::from_u128(1),
-            sequence,
-        };
-        let item_offset = incoming
-            .iter()
-            .find_map(|row| match row.position {
-                Position::Item { position, .. } => previous_rows
-                    .and_then(|rows| rows.get(&row.key))
-                    .and_then(|old| match old.position {
-                        Position::Item {
-                            position: saved, ..
-                        } => saved.checked_sub(position),
-                        _ => None,
-                    }),
-                _ => None,
-            })
-            .unwrap_or(if has_more { 1_000 } else { 0 });
-        for row in &mut incoming {
-            row.version = sequence;
-            if let Position::Turn { ordinal } = &mut row.position {
-                *ordinal += offset;
-                if let Key::Turn { id, .. } = &row.key {
-                    positions.insert(id.clone(), *ordinal);
-                }
-                let value = match &mut row.content {
-                    Content::Full(value) | Content::Summary(value) => Arc::make_mut(value),
-                };
-                if let Record::Turn(turn) = value {
-                    turn.ordinal = *ordinal;
-                }
-            }
+            .unwrap_or(if snapshot.has_more_history { 1_000 } else { 0 });
+        for item in &mut snapshot.projection.visible_turn_items {
+            item.position += offset;
         }
-        incoming.sort_by_key(|row| match row.position {
-            Position::Unordered | Position::Project { .. } => (0, 0, 0),
-            Position::Turn { ordinal } => (1, ordinal, 0),
-            Position::Item {
-                ordinal, position, ..
-            } => (2, ordinal, position),
-        });
-        for row in &mut incoming {
-            if let Position::Item {
-                turn,
-                ordinal,
-                position,
-            } = &mut row.position
-            {
-                *ordinal = positions[turn];
-                let natural = position.saturating_add(item_offset);
-                *position = previous_rows
-                    .and_then(|rows| rows.get(&row.key))
-                    .and_then(|old| match old.position {
-                        Position::Item { position, .. } => Some(position),
-                        _ => None,
-                    })
-                    .unwrap_or(natural);
-                let value = match &mut row.content {
-                    Content::Full(value) | Content::Summary(value) => Arc::make_mut(value),
-                };
-                if let Record::Item(item) = value {
-                    item.position = *position;
-                }
-            }
-        }
-        let floor = Window {
-            turn: if has_more {
-                positions.values().copied().min().unwrap_or(0)
-            } else {
-                0
-            },
-            item: 0,
-        };
-        let message = if extension {
-            Message::Extend {
-                cursor,
-                window: floor,
-                rows: incoming,
-            }
-        } else if cached
-            .is_some_and(|cursor| previous.and_then(|replica| replica.cursor()) == Some(cursor))
-        {
-            Message::Events {
-                through: cursor,
-                events: vec![agent_protocol::sync::Event {
-                    sequence: cursor.sequence,
-                    rows: incoming,
-                    removed: vec![],
-                }],
-            }
-        } else {
-            Message::Snapshot {
-                cursor,
-                window: Some(floor),
-                rows: incoming,
-            }
-        };
-        let base = previous
-            .cloned()
-            .unwrap_or_else(|| records::Replica::new(Scope::Conversation(id.clone()), 1));
-        let replica = base
-            .apply(1, message.clone())
-            .map_err(std::io::Error::other)?;
-        if let Some(projected) = records::project(&replica) {
-            self.threads
-                .insert(id.clone(), serde_json::to_value(projected)?);
-        }
-        self.replicas.insert(id, replica);
-        Ok(message)
+        self.threads
+            .insert(id.clone(), serde_json::to_value(response)?);
+        self.projections.insert(id, snapshot.clone());
+        Ok(snapshot)
     }
-}
 
-impl State {
     fn extended(&mut self, request: &Request, value: &mut Value) -> std::io::Result<()> {
-        if value["result"].is_array() {
+        if value["result"].get("snapshotSequence").is_some() {
             return Ok(());
         }
         let id: SessionRef = serde_json::from_value(request["params"]["session"].clone())?;
         let mut response: ThreadResponse = serde_json::from_value(self.threads[&id].clone())?;
-        let (turns, more) = if value["result"].get("thread").is_some() {
+        let (turns, next) = if value["result"].get("thread").is_some() {
             let page: ThreadResponse = serde_json::from_value(value["result"].clone())?;
-            (
-                page.thread.turns.unwrap_or_default(),
-                rows::history_has_more(
-                    page.thread.history_has_more,
-                    page.thread.history_cursor.as_deref(),
-                ),
-            )
+            let next = page.thread.history_cursor.or_else(|| {
+                (page.thread.history_has_more == Some(true)).then(|| "fixture-older".into())
+            });
+            (page.thread.turns.unwrap_or_default(), next)
         } else {
             let page: agent_protocol::session::HistoryPage =
                 serde_json::from_value(value["result"].clone())?;
-            (page.turns, page.next_cursor.is_some())
+            (page.turns, page.next_cursor)
         };
         let incoming_ids: std::collections::HashSet<_> =
             turns.iter().map(|turn| turn.id.clone()).collect();
@@ -944,13 +826,26 @@ impl State {
                 .filter(|turn| !incoming_ids.contains(&turn.id)),
         );
         response.thread.turns = Some(joined);
-        response.thread.history_cursor = more.then(|| "older".into());
-        response.thread.history_has_more = Some(more);
-        let current = self.replicas[&id].cursor().unwrap();
-        let message = self.rows(response, Some(current), true)?;
-        let subscription = serde_json::from_value(request["params"]["subscription"].clone())?;
-        self.pending_rows.push((subscription, message));
-        value["result"] = json!({});
+        response.thread.history_cursor = next.clone();
+        response.thread.history_has_more = Some(next.is_some());
+        let snapshot = self.capture(response)?;
+        value["result"] = json!(
+            agent_protocol::orchestration::projection::ThreadHistoryPage {
+                snapshot_sequence: snapshot.snapshot_sequence,
+                items: snapshot
+                    .projection
+                    .visible_turn_items
+                    .into_iter()
+                    .filter(|item| item
+                        .item
+                        .run_id
+                        .as_ref()
+                        .is_some_and(|run| incoming_ids.iter().any(|id| id.as_str() == run)))
+                    .collect(),
+                next_cursor: next.clone(),
+                has_more_history: next.is_some(),
+            }
+        );
         Ok(())
     }
 }
