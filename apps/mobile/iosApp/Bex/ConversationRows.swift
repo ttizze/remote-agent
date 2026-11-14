@@ -252,7 +252,7 @@
                             let body = item.data.deferred ? "" : item.source.expandedBody()
                             if let error = detail.error, !item.data.deferred {
                                 ErrorTextView(text: error).font(.caption).foregroundStyle(.red)
-                            } else if detail.loading && !item.data.deferred {
+                            } else if detail.loading, !item.data.deferred {
                                 ProgressView("詳細を読み込み中…")
                             }
                             if item.data.deferred {
@@ -299,9 +299,17 @@
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .contain)
-            .onAppear { if isExpanded { watchOutput(true) } }
+            .onAppear {
+                if isExpanded {
+                    watchOutput(true)
+                }
+            }
             .onChange(of: isExpanded) { _, expanded in watchOutput(expanded) }
-            .onDisappear { if isExpanded { watchOutput(false) } }
+            .onDisappear {
+                if isExpanded {
+                    watchOutput(false)
+                }
+            }
         }
     }
 

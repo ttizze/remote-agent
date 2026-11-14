@@ -3466,7 +3466,15 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 scope: rpc::ListDecorationScope::Root,
             };
             assert!(snapshot.operation_error(key.clone()).is_none());
-            if !snapshot.operation_running(key) {
+            if !snapshot.operation_running(key)
+                && !snapshot
+                    .operation_running(agent_core::state::operations::OperationKey::SessionList)
+                && snapshot
+                    .lists
+                    .replica
+                    .as_deref()
+                    .is_some_and(agent_protocol::conversation::records::catalog_ready)
+            {
                 return;
             }
             updates.changed().await.unwrap();

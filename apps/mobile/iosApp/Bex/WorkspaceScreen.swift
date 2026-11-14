@@ -70,7 +70,12 @@ extension ConversationModel {
         let before = snapshot.panelScope(host: host, draft: coreDraftKey)
         let after = next.panelScope(host: host, draft: navigation.draftKey)
         let welcome = next.welcomeTransition(before: coreDraftKey, after: navigation.draftKey)
-        panels = panels.inheritVisibility(before: before, after: after, newDraft: navigation.threadId == nil, welcome: welcome)
+        panels = panels.inheritVisibility(
+            before: before,
+            after: after,
+            newDraft: navigation.threadId == nil,
+            welcome: welcome
+        )
     }
 
     func openWorkbench(_ kind: PanelKind, scope: PanelScope, directory: String) {

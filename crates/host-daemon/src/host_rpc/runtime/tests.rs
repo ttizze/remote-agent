@@ -133,63 +133,160 @@ async fn child_discovery_uses_the_public_parent_and_preserves_already_received_w
     .expect("child observation commits before following native work");
 }
 
+#[rstest::rstest]
 #[tokio::test]
-async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history() {
+async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history(
+    #[values(
+        "reuse",
+        "compacted",
+        "import_incomplete",
+        "busy",
+        "state_error",
+        "injection_unknown"
+    )]
+    mode: &str,
+) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        for mode in [
-            "reuse",
-            "compacted",
-            "import_incomplete",
-            "busy",
-            "state_error",
-            "injection_unknown",
+        let compacted = mode == "compacted";
+        let directory = tempfile::tempdir().unwrap();
+        let mut codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        Arc::get_mut(&mut codex).unwrap().metadata_only_state = compacted;
+        let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+        let service = HostRpcService::new(
+            [codex.backend(), claude.backend()],
+            directory.path().join("projects.json"),
+        );
+        let connection = service.open_session();
+        let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let input = |provider, text: &str| decision::InputContent {
+            parts: vec![op::Input::Text { text: text.into() }],
+            model: Some(agent_protocol::models::ModelRef {
+                provider,
+                id: "fixture".into(),
+            }),
+            ..content()
+        };
+        let _: records::Opened = call(
+            &service,
+            connection.id(),
+            Call::CreateConversation(records::Create {
+                workspace: None,
+                provider: ProviderKind::Codex,
+                session: target.clone(),
+                subscription: Uuid::new_v4(),
+                cwd: Some(directory.path().to_str().unwrap().into()),
+                selection: Default::default(),
+                initial: Some((
+                    Uuid::new_v4().to_string().into(),
+                    input(ProviderKind::Codex, "first-provider-marker"),
+                )),
+            }),
+        )
+        .await
+        .unwrap();
+        completed(&service, &target, 1).await;
+        let original = service
+            .inner
+            .conversation
+            .storage
+            .active_source(&target)
+            .unwrap()
+            .unwrap();
+        if mode == "import_incomplete" {
+            codex
+                .records
+                .lock()
+                .unwrap()
+                .get_mut(&original.id)
+                .unwrap()
+                .thread
+                .history_read_state = Some(agent_protocol::session::HistoryReadState::new(
+                agent_protocol::session::HistoryReadKind::Incomplete,
+                vec!["compaction boundary".into()],
+            ));
+            reimported(
+                &service,
+                &target,
+                agent_protocol::session::HistoryReadKind::Incomplete,
+            )
+            .await;
+        }
+        for (provider, text, count) in [
+            (ProviderKind::Claude, "second-provider-marker", 2),
+            (ProviderKind::Codex, "third-provider-marker", 3),
         ] {
-            let compacted = mode == "compacted";
-            let directory = tempfile::tempdir().unwrap();
-            let mut codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-            Arc::get_mut(&mut codex).unwrap().metadata_only_state = compacted;
-            let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
-            let service = HostRpcService::new(
-                [codex.backend(), claude.backend()],
-                directory.path().join("projects.json"),
-            );
-            let connection = service.open_session();
-            let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
-            let input = |provider, text: &str| decision::InputContent {
-                parts: vec![op::Input::Text { text: text.into() }],
-                model: Some(agent_protocol::models::ModelRef {
-                    provider,
-                    id: "fixture".into(),
-                }),
-                ..content()
-            };
-            let _: records::Opened = call(
+            let before = codex.next.load(std::sync::atomic::Ordering::SeqCst);
+            if provider == ProviderKind::Codex {
+                match mode {
+                    "busy" => {
+                        codex
+                            .records
+                            .lock()
+                            .unwrap()
+                            .get_mut(&original.id)
+                            .unwrap()
+                            .thread
+                            .status = agent_protocol::models::SessionStatus::Running
+                    }
+                    "state_error" => {
+                        *codex.state_error.lock().unwrap() =
+                            Some(Failure::unknown("resume_unavailable", "lost native state"))
+                    }
+                    "injection_unknown" => codex
+                        .fail_inject
+                        .store(1, std::sync::atomic::Ordering::SeqCst),
+                    _ => {}
+                }
+            }
+            let operation = Uuid::new_v4();
+            let acknowledged: records::Acknowledged = call(
                 &service,
                 connection.id(),
-                Call::CreateConversation(records::Create {
-                    workspace: None,
-                    provider: ProviderKind::Codex,
+                Call::ChangeConversation(records::Change {
                     session: target.clone(),
-                    subscription: Uuid::new_v4(),
-                    cwd: Some(directory.path().to_str().unwrap().into()),
-                    selection: Default::default(),
-                    initial: Some((
-                        Uuid::new_v4().to_string().into(),
-                        input(ProviderKind::Codex, "first-provider-marker"),
-                    )),
+                    operation,
+                    command: Command::Submit {
+                        id: operation.to_string().into(),
+                        content: input(provider, text),
+                    },
                 }),
             )
             .await
             .unwrap();
-            completed(&service, &target, 1).await;
-            let original = service
-                .inner
-                .conversation
-                .storage
-                .active_source(&target)
-                .unwrap()
+            assert_eq!(acknowledged.outcome, Outcome::Accepted);
+            if provider == ProviderKind::Codex && matches!(mode, "busy" | "injection_unknown") {
+                let storage = &service.inner.conversation.storage;
+                let mut changes = storage.changes();
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if let Some(input) = storage
+                            .input(&target, &operation.to_string().into())
+                            .unwrap()
+                            && let decision::InputState::Failed {
+                                error: Some(error), ..
+                            } = input.state
+                        {
+                            assert_eq!(
+                                error.message,
+                                if mode == "busy" {
+                                    "切り替え先のAIがまだ実行中です。完了を待ってください。"
+                                } else {
+                                    "connection lost after writing history"
+                                }
+                            );
+                            break;
+                        }
+                        changes.changed().await.unwrap();
+                    }
+                })
+                .await
                 .unwrap();
-            if mode == "import_incomplete" {
+                assert_eq!(codex.next.load(std::sync::atomic::Ordering::SeqCst), before);
+                assert_eq!(
+                    codex.inputs.lock().unwrap().len(),
+                    1,
+                    "failed preparation must not send the input"
+                );
                 codex
                     .records
                     .lock()
@@ -197,156 +294,61 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
                     .get_mut(&original.id)
                     .unwrap()
                     .thread
-                    .history_read_state = Some(agent_protocol::session::HistoryReadState::new(
-                    agent_protocol::session::HistoryReadKind::Incomplete,
-                    vec!["compaction boundary".into()],
-                ));
-                reimported(
-                    &service,
-                    &target,
-                    agent_protocol::session::HistoryReadKind::Incomplete,
-                )
-                .await;
-            }
-            for (provider, text, count) in [
-                (ProviderKind::Claude, "second-provider-marker", 2),
-                (ProviderKind::Codex, "third-provider-marker", 3),
-            ] {
-                let before = codex.next.load(std::sync::atomic::Ordering::SeqCst);
-                if provider == ProviderKind::Codex {
-                    match mode {
-                        "busy" => {
-                            codex
-                                .records
-                                .lock()
-                                .unwrap()
-                                .get_mut(&original.id)
-                                .unwrap()
-                                .thread
-                                .status = agent_protocol::models::SessionStatus::Running
-                        }
-                        "state_error" => {
-                            *codex.state_error.lock().unwrap() =
-                                Some(Failure::unknown("resume_unavailable", "lost native state"))
-                        }
-                        "injection_unknown" => codex
-                            .fail_inject
-                            .store(1, std::sync::atomic::Ordering::SeqCst),
-                        _ => {}
-                    }
-                }
-                let operation = Uuid::new_v4();
-                let acknowledged: records::Acknowledged = call(
+                    .status = agent_protocol::models::SessionStatus::Idle;
+                let retried: records::Acknowledged = call(
                     &service,
                     connection.id(),
                     Call::ChangeConversation(records::Change {
                         session: target.clone(),
-                        operation,
-                        command: Command::Submit {
+                        operation: Uuid::new_v4(),
+                        command: Command::RetryInput {
                             id: operation.to_string().into(),
-                            content: input(provider, text),
+                            work_locally: false,
                         },
                     }),
                 )
                 .await
                 .unwrap();
-                assert_eq!(acknowledged.outcome, Outcome::Accepted);
-                if provider == ProviderKind::Codex && matches!(mode, "busy" | "injection_unknown") {
-                    let storage = &service.inner.conversation.storage;
-                    let mut changes = storage.changes();
-                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                        loop {
-                            if let Some(input) = storage
-                                .input(&target, &operation.to_string().into())
-                                .unwrap()
-                                && let decision::InputState::Failed {
-                                    error: Some(error), ..
-                                } = input.state
-                            {
-                                assert_eq!(
-                                    error.message,
-                                    if mode == "busy" {
-                                        "切り替え先のAIがまだ実行中です。完了を待ってください。"
-                                    } else {
-                                        "connection lost after writing history"
-                                    }
-                                );
-                                break;
-                            }
-                            changes.changed().await.unwrap();
-                        }
-                    })
-                    .await
-                    .unwrap();
-                    assert_eq!(codex.next.load(std::sync::atomic::Ordering::SeqCst), before);
-                    assert_eq!(
-                        codex.inputs.lock().unwrap().len(),
-                        1,
-                        "failed preparation must not send the input"
-                    );
-                    codex
-                        .records
-                        .lock()
-                        .unwrap()
-                        .get_mut(&original.id)
-                        .unwrap()
-                        .thread
-                        .status = agent_protocol::models::SessionStatus::Idle;
-                    let retried: records::Acknowledged = call(
-                        &service,
-                        connection.id(),
-                        Call::ChangeConversation(records::Change {
-                            session: target.clone(),
-                            operation: Uuid::new_v4(),
-                            command: Command::RetryInput {
-                                id: operation.to_string().into(),
-                                work_locally: false,
-                            },
-                        }),
-                    )
-                    .await
-                    .unwrap();
-                    assert_eq!(retried.outcome, Outcome::Accepted);
-                }
-                completed(&service, &target, count).await;
+                assert_eq!(retried.outcome, Outcome::Accepted);
             }
-            let active = service
-                .inner
-                .conversation
-                .storage
-                .active_source(&target)
-                .unwrap()
-                .unwrap();
-            let rebuilt = matches!(
-                mode,
-                "state_error" | "injection_unknown" | "import_incomplete"
-            );
-            assert_eq!(active == original, !rebuilt, "{mode}");
-            assert_eq!(
-                codex.records.lock().unwrap().len(),
-                if rebuilt { 2 } else { 1 }
-            );
-            assert_eq!(
-                codex.inputs.lock().unwrap().len(),
-                2,
-                "each user input is delivered exactly once: {mode}"
-            );
-            let injected = codex.injected.lock().unwrap();
-            assert_eq!(
-                injected.len(),
-                if mode == "injection_unknown" { 2 } else { 1 }
-            );
-            if mode == "injection_unknown" {
-                assert_ne!(injected[0].0, injected[1].0);
-            }
-            assert_eq!(injected.last().unwrap().0, active.id);
-            let context = injected.last().unwrap().1.render();
-            assert!(context.contains("second-provider-marker"));
-            assert_eq!(context.contains("first-provider-marker"), rebuilt);
-            assert!(!context.contains("third-provider-marker"));
-            assert!(codex.released.lock().unwrap().contains(&original.id));
-            assert!(!claude.released.lock().unwrap().is_empty());
+            completed(&service, &target, count).await;
         }
+        let active = service
+            .inner
+            .conversation
+            .storage
+            .active_source(&target)
+            .unwrap()
+            .unwrap();
+        let rebuilt = matches!(
+            mode,
+            "state_error" | "injection_unknown" | "import_incomplete"
+        );
+        assert_eq!(active == original, !rebuilt, "{mode}");
+        assert_eq!(
+            codex.records.lock().unwrap().len(),
+            if rebuilt { 2 } else { 1 }
+        );
+        assert_eq!(
+            codex.inputs.lock().unwrap().len(),
+            2,
+            "each user input is delivered exactly once: {mode}"
+        );
+        let injected = codex.injected.lock().unwrap();
+        assert_eq!(
+            injected.len(),
+            if mode == "injection_unknown" { 2 } else { 1 }
+        );
+        if mode == "injection_unknown" {
+            assert_ne!(injected[0].0, injected[1].0);
+        }
+        assert_eq!(injected.last().unwrap().0, active.id);
+        let context = injected.last().unwrap().1.render();
+        assert!(context.contains("second-provider-marker"));
+        assert_eq!(context.contains("first-provider-marker"), rebuilt);
+        assert!(!context.contains("third-provider-marker"));
+        assert!(codex.released.lock().unwrap().contains(&original.id));
+        assert!(!claude.released.lock().unwrap().is_empty());
     })
     .await
     .expect("provider round trip settles");
@@ -2469,15 +2471,17 @@ async fn cancellation_between_stages_discards_the_owned_checkout_without_an_acti
     );
 }
 
+#[rstest::rstest]
 #[tokio::test]
-async fn delivery_proof_before_a_waiting_fence_keeps_command_output_running() {
+async fn delivery_proof_before_a_waiting_fence_keeps_command_output_running(
+    #[values(false, true)] proven: bool,
+) {
     use agent_protocol::{
         execution::ItemStatus,
         items::ItemBody,
         sync::{Output, OutputUpdate},
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        for proven in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
         agent
@@ -2572,7 +2576,7 @@ async fn delivery_proof_before_a_waiting_fence_keeps_command_output_running() {
             drop(unloading);
             fencing.await.unwrap();
             assert!(runtime.storage.input(&target, &input).unwrap().is_none());
-            continue;
+            return;
         }
         // This lock is the provider callback's commit boundary. Delivery proof
         // wins while the fence is waiting, before any output can be settled.
@@ -2656,7 +2660,6 @@ async fn delivery_proof_before_a_waiting_fence_keeps_command_output_running() {
         .unwrap();
         let final_tail: Output = initial.apply(update);
         assert_eq!(final_tail.text, "running more");
-        }
     })
     .await
     .unwrap();

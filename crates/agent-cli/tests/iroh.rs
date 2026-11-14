@@ -59,10 +59,10 @@ async fn exercise(command: &[&str], expected: Value) {
                 }
                 Some("host/list/search") => {
                     assert_eq!(mode, "list");
-                    assert_eq!(request["params"], json!({"term":"CLI search","limit":null}));
+                    assert_eq!(request["params"], json!({"term":"CLI search","limit":50}));
                     assert!(!handled);
                     handled = true;
-                    json!({"data":[{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"projects":[],"limit":10000,"hasMore":false,"hasMoreProjects":false})
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"projects":[],"limit":50,"hasMore":false,"hasMoreProjects":false})
                 }
                 Some("host/conversation/subscribe") => {
                     reads += 1;

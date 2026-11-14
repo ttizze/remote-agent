@@ -486,6 +486,8 @@ jobs:
         with:
           cmd-format: nix develop .#native --command {0}
           key: nsh-apple-xcode-26.6-${{ hashFiles('flake.lock') }}
+          cache-targets: false
+          cache-directories: ~/.cargo/targets
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       # These builds must not delay publication of the shared iPhone test app.

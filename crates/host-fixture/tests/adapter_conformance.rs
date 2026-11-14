@@ -1158,6 +1158,11 @@ async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_r
     let local = host.local().await.unwrap();
     let mut catalog = conversations::Catalog::open(&local.peer).await;
     catalog.wait_rows(2000).await;
+    // A full final page can publish all rows before its empty terminal page.
+    // Isolate local paging only after native discovery has actually completed.
+    while !agent_protocol::conversation::records::catalog_ready(&catalog.replica) {
+        catalog.next().await;
+    }
     let mut initial = catalog.page(ListQuery::default());
     assert_eq!(initial.thread_list().unwrap().threads.len(), 5);
     let projects = initial

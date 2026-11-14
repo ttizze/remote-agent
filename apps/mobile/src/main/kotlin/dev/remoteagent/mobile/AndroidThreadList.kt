@@ -358,11 +358,7 @@ private fun LazyListScope.projectSection(
         items(project.threads, key = { "project:${project.listKey}:${it.id.listKey}" }) { SummaryRow(it, dispatch) }
         if (project.hasMore)
             item(key = "more:${project.listKey}") {
-                TextButton(
-                    onClick = { dispatch(Intent.ExpandThreadList(project.id)) },
-                ) {
-                    Text(language.text("もっと見る"))
-                }
+                TextButton(onClick = { dispatch(Intent.ExpandThreadList(project.id)) }) { Text(language.text("もっと見る")) }
             }
     }
 }
