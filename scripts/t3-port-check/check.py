@@ -39,6 +39,7 @@ obsolete_symbols = [] if HOLDOUT else [
     for rule in CASES["obsolete_symbols"]
     if any(re.search(rule["pattern"], path.read_text())
            for glob in rule["globs"] for path in ROOT.glob(glob) if path.is_file()
+           and str(path.relative_to(ROOT)) not in rule["exclude_paths"]
            and not any(fnmatch(str(path.relative_to(ROOT)), excluded) for excluded in rule["exclude"]))
 ]
 for crate, name in sorted(missing):

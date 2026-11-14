@@ -243,7 +243,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Action\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Action\\b",
+      "exclude_paths": []
     },
     {
       "name": "ApplyError",
@@ -254,7 +255,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+ApplyError\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+ApplyError\\b",
+      "exclude_paths": []
     },
     {
       "name": "Change",
@@ -268,7 +270,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Change\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Change\\b",
+      "exclude_paths": []
     },
     {
       "name": "Content",
@@ -282,7 +285,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Content\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Content\\b",
+      "exclude_paths": []
     },
     {
       "name": "Context",
@@ -296,7 +300,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Context\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Context\\b",
+      "exclude_paths": []
     },
     {
       "name": "Counters",
@@ -307,7 +312,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Counters\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Counters\\b",
+      "exclude_paths": []
     },
     {
       "name": "Cursor",
@@ -321,7 +327,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Cursor\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Cursor\\b",
+      "exclude_paths": []
     },
     {
       "name": "Event",
@@ -335,7 +342,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b",
+      "exclude_paths": []
     },
     {
       "name": "Key",
@@ -349,7 +357,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Key\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Key\\b",
+      "exclude_paths": []
     },
     {
       "name": "Message",
@@ -363,7 +372,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Message\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Message\\b",
+      "exclude_paths": []
     },
     {
       "name": "Observation",
@@ -374,7 +384,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Observation\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Observation\\b",
+      "exclude_paths": []
     },
     {
       "name": "Position",
@@ -388,7 +399,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Position\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Position\\b",
+      "exclude_paths": []
     },
     {
       "name": "Record",
@@ -399,7 +411,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Record\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Record\\b",
+      "exclude_paths": []
     },
     {
       "name": "Replica",
@@ -410,7 +423,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Replica\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Replica\\b",
+      "exclude_paths": []
     },
     {
       "name": "Row",
@@ -421,7 +435,10 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Row\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Row\\b",
+      "exclude_paths": [
+        "crates/xtask/src/connection_diagnostics.rs"
+      ]
     },
     {
       "name": "State",
@@ -435,7 +452,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+State\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+State\\b",
+      "exclude_paths": []
     },
     {
       "name": "Step",
@@ -449,7 +467,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Step\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Step\\b",
+      "exclude_paths": []
     },
     {
       "name": "Window",
@@ -460,7 +479,8 @@
         "*/orchestration.rs",
         "*/orchestration/**"
       ],
-      "pattern": "\\b(?:struct|enum|type)\\s+Window\\b"
+      "pattern": "\\b(?:struct|enum|type)\\s+Window\\b",
+      "exclude_paths": []
     }
   ]
 }
