@@ -2590,6 +2590,46 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
 }
 
 #[tokio::test]
+async fn gallery_reads_markdown_images_and_deduplicates_against_canonical_tool_paths() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let id = SessionRef::new(ProviderKind::Codex, "markdown-gallery".into()).unwrap();
+    let session = id.clone();
+    let server = tokio::spawn(async move {
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/conversation/subscribe");
+        writer.reply(&request, json!({"result":{"thread":{"id":session,"turns":[{"id":"turn","status":"completed","items":[
+            {"id":"tool","status":"completed","body":{"inline":{"body":{"imageGeneration":{"savedPath":"/tmp/literal%20image.png","data":null,"revisedPrompt":null}}}}},
+            {"id":"windows-tool","status":"completed","body":{"inline":{"body":{"imageGeneration":{"savedPath":"C:\\Images\\Shot%20A.png","data":null,"revisedPrompt":null}}}}},
+            {"id":"answer","status":"completed","body":{"inline":{"body":{"assistantText":{"text":"![first](/tmp/literal%2520image.png)\n\n![second](/tmp/literal%20image.png)\n\n![windows](c:/images/shot%2520a.png)","phase":"final"}}}}}
+        ]}]}}})).await.unwrap();
+        (reader, writer)
+    });
+    let Outcome::SessionImages { images } = store
+        .dispatch(Intent::LoadSessionImages(op::LoadSessionImages {
+            thread_id: id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected images");
+    };
+    assert!(images.iter().all(|image| !image.encoded));
+    assert_eq!(
+        images
+            .iter()
+            .map(|image| image.source.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "/tmp/literal%20image.png",
+            "/tmp/literal image.png",
+            "c:/images/shot%20a.png"
+        ]
+    );
+    let _host = server.await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn gallery_history_reads_do_not_block_conversation_notifications() {
     let (store, mut reader, writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {

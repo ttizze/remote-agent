@@ -70,7 +70,8 @@
       "gallery_restarts_paging_after_a_history_reset",
       "gallery_drains_live_frames_while_image_hydration_waits_for_the_host",
       "gallery_finishes_with_an_error_when_the_hydrated_image_was_removed",
-      "gallery_history_reads_do_not_block_conversation_notifications"
+      "gallery_history_reads_do_not_block_conversation_notifications",
+      "gallery_reads_markdown_images_and_deduplicates_against_canonical_tool_paths"
     ]
   },
   "guards": {
