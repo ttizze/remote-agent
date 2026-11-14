@@ -51,7 +51,6 @@ pub fn fork_thread(
         settled_override: None,
         settled_at: None,
         last_visited_at: None,
-        deleted_at: None,
         ..source.clone()
     };
     let error = point
@@ -243,5 +242,45 @@ mod tests {
                 strength == NativeRefStrength::Strong
             );
         }
+    }
+
+    #[test]
+    fn a_fork_starts_its_own_lifecycle_and_keeps_the_source_provenance() {
+        let (mut source, mut run, point) = source();
+        run.status = RunStatus::Completed;
+        source.created_by = Actor::System;
+        source.creation_source = CreationSource::Provider;
+        source.active_provider_thread_id = Some("parent-native-thread".into());
+        source.created_at = "2026-10-01T00:00:00.000Z".into();
+        source.updated_at = source.created_at.clone();
+        source.archived_at = Some(source.created_at.clone());
+        source.settled_override = Some("settled".into());
+        source.settled_at = Some(source.created_at.clone());
+        source.last_visited_at = Some(source.created_at.clone());
+        let (target, transfer) =
+            fork_thread(&source, &run, point, "target", "transfer", NOW).unwrap();
+        assert_eq!(target.id, "target");
+        assert_eq!(target.title, "Source fork");
+        assert_eq!(target.created_by, Actor::User);
+        assert_eq!(target.creation_source, CreationSource::Mobile);
+        assert_eq!(target.created_at, NOW);
+        assert_eq!(target.updated_at, NOW);
+        assert!(target.archived_at.is_none());
+        assert!(target.settled_override.is_none());
+        assert!(target.settled_at.is_none());
+        assert!(target.last_visited_at.is_none());
+        assert!(target.active_provider_thread_id.is_none());
+        assert!(target.deleted_at.is_none());
+        assert_eq!(
+            target.forked_from,
+            Some(ThreadForkSource::Run {
+                thread_id: source.id.clone(),
+                run_id: run.id.clone()
+            })
+        );
+        assert_eq!(target.model_selection, source.model_selection);
+        assert_eq!(target.worktree_path, source.worktree_path);
+        assert_eq!(transfer.target_thread_id, target.id);
+        assert_eq!(transfer.source_thread_id, source.id);
     }
 }
