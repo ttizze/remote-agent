@@ -89,14 +89,22 @@ fn provider_switch_projects_only_the_active_provider_sessions_capabilities() {
     next.projection.thread.active_provider_thread_id = Some("current-thread".into());
     let mut foreign = next.projection.provider_sessions[0].clone();
     foreign.id = "foreign-session".into();
-    foreign.provider_instance_id = "codex".into();
+    foreign.capabilities.turns.supports_active_steering = false;
     foreign
         .capabilities
         .sessions
         .supports_model_switch_in_session = true;
-    next.projection.provider_sessions.push(foreign);
+    next.projection.provider_sessions.insert(0, foreign);
+    let mut foreign_thread = next.projection.provider_threads[0].clone();
+    foreign_thread.id = "foreign-thread".into();
+    foreign_thread.provider_session_id = Some("foreign-session".into());
+    next.projection.provider_threads.insert(0, foreign_thread);
     for change_model in [false, true] {
-        next.projection.provider_sessions[0]
+        next.projection
+            .provider_sessions
+            .iter_mut()
+            .find(|session| session.id == "current-session")
+            .unwrap()
             .capabilities
             .sessions
             .supports_model_switch_in_session = change_model;
@@ -110,6 +118,38 @@ fn provider_switch_projects_only_the_active_provider_sessions_capabilities() {
         let caps = snapshot.sessions.conversations[&id].capabilities.unwrap();
         assert!(caps.steer && caps.fork && caps.rename);
         assert_eq!(caps.model_change, change_model);
+    }
+    for wrong in ["session", "thread"] {
+        next.projection
+            .provider_sessions
+            .iter_mut()
+            .find(|session| session.id == "current-session")
+            .unwrap()
+            .provider_instance_id = if wrong == "session" {
+            "codex"
+        } else {
+            "claude"
+        }
+        .into();
+        next.projection
+            .provider_threads
+            .iter_mut()
+            .find(|thread| thread.id == "current-thread")
+            .unwrap()
+            .provider_instance_id = if wrong == "thread" { "codex" } else { "claude" }.into();
+        next.snapshot_sequence += 1;
+        apply(
+            &mut snapshot,
+            &id,
+            vec![ThreadStreamItem::Snapshot(next.clone())],
+        )
+        .unwrap();
+        let caps = snapshot.sessions.conversations[&id].capabilities.unwrap();
+        assert!(
+            !caps.steer && !caps.model_change,
+            "a matching ID from a different provider cannot supply capabilities"
+        );
+        assert!(caps.fork && caps.rename);
     }
 }
 
