@@ -910,7 +910,11 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
             if previous.input.drafts.get(&draft_key).is_some_and(|draft| index < draft.attachments.len())
                 && let Some(draft) = shared_mut(&mut next.input.drafts, &draft_key)
             {
-                draft.attachments.remove(index);
+                let removed = draft.attachments.remove(index);
+                if !draft.attachments.iter().any(|attachment| attachment.path == removed.path) {
+                    draft.contexts.retain(|context| !matches!(&context.content,
+                        agent_protocol::context::ContextContent::SnapShot { image_path, .. } if image_path == &removed.path));
+                }
             }
         }
 

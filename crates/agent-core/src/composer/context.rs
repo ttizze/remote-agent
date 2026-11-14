@@ -100,6 +100,28 @@ impl Snapshot {
 /// readable in plain-text copy/export and clients without the specialized chip.
 pub(crate) fn display_text(context: &MessageContext) -> String {
     match &context.content {
+        ContextContent::SnapShot { source, .. } => {
+            let title = if source.window_title.trim().is_empty() {
+                literal(&source.app_name)
+            } else {
+                format!(
+                    "{} — {}",
+                    literal(&source.app_name),
+                    literal(&source.window_title)
+                )
+            };
+            if let Some(details) =
+                crate::presentation::snapshot::snapshot_accessibility_details(source.clone())
+            {
+                let language = match details.format {
+                    crate::presentation::snapshot::SnapShotDetailsFormat::Text => "text",
+                    crate::presentation::snapshot::SnapShotDetailsFormat::Json => "json",
+                };
+                format!("{title}\n\n{}", code(&details.content, language))
+            } else {
+                title
+            }
+        }
         ContextContent::Citation { citation } => {
             let quote = citation
                 .text

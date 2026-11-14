@@ -26,6 +26,7 @@ pub mod project_clone;
 pub mod project_menu;
 pub mod settings;
 pub mod sidebar;
+pub mod snapshot;
 
 use crate::localization::{UiLanguage, localized_ui_format};
 use crate::models::{

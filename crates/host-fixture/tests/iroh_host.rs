@@ -450,6 +450,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         .unwrap();
         store
             .dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                snapshot: None,
                 draft_key: "transfer-draft".into(),
                 attachment: Attachment {
                     path: source.to_str().unwrap().into(),
@@ -509,6 +510,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         assert!(store.snapshot().panes.primary().navigation.cwd.is_empty());
         store
             .dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                snapshot: None,
                 draft_key: "unscoped-draft".into(),
                 attachment: Attachment {
                     path: source.to_str().unwrap().into(),
@@ -564,6 +566,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
             [&agent_core::state::DraftKey::from("transfer-draft")]
             .clone();
         let retry = op::UploadAttachment {
+            snapshot: None,
             draft_key: "transfer-draft".into(),
             attachment: Attachment {
                 path: directory
@@ -1061,6 +1064,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
             store.dispatch(Intent::SetDraftText { thread_id: key.clone(), text: prompt.clone() }).await.unwrap();
             let uploaded = if photo {
                 store.dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                    snapshot: None,
                     draft_key: key,
                     attachment: Attachment { path: source.to_str().unwrap().into(), name: "photo.png".into(), is_image: true },
                 })).await.unwrap();

@@ -914,6 +914,7 @@ fn durable_upload_and_pairing_results_survive_navigation() {
     )
     .0;
     op::UploadAttachment {
+        snapshot: None,
         draft_key: "old".into(),
         attachment: agent_core::state::Attachment {
             path: "/local".into(),
@@ -921,7 +922,8 @@ fn durable_upload_and_pairing_results_survive_navigation() {
             is_image: true,
         },
     }
-    .stale(&mut snapshot, "", "/uploaded".into());
+    .complete(&mut snapshot, "", "/uploaded".into(), false)
+    .unwrap();
     assert_eq!(
         snapshot.input.drafts[&DraftKey::from("old")].attachments[0].path,
         "/uploaded"

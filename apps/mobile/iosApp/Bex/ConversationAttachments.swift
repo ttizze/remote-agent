@@ -75,7 +75,8 @@ extension ConversationModel {
                                     isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true)
         _ = try await outcome(for: .uploadAttachment(UploadAttachment(
             draftKey: coreDraftKey,
-            attachment: attachment
+            attachment: attachment,
+            snapshot: nil
         )))
     }
 }

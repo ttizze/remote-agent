@@ -540,7 +540,7 @@ internal class AndroidAppModel(private val context: Context, private val prefere
                     withContext(Dispatchers.IO) { importAttachment(context, uri).also { local = File(it.path) } }
                 if (selection != selectionKey) return@launch
                 uploading = true
-                perform(Intent.UploadAttachment(UploadAttachment(key, attachment))) { finish() }
+                perform(Intent.UploadAttachment(UploadAttachment(key, attachment, null))) { finish() }
             } catch (error: SecurityException) {
                 if (selection == selectionKey) notice = error.displayMessage()
             } catch (error: IOException) {

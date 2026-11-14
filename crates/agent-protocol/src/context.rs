@@ -55,7 +55,7 @@ fn byte_offset(text: &str, units: u32) -> Option<usize> {
     (offset == units).then_some(text.len())
 }
 
-fn bounded(text: &str, limit: usize) -> bool {
+pub(crate) fn bounded(text: &str, limit: usize) -> bool {
     text.encode_utf16().take(limit + 1).count() <= limit
 }
 fn identifier(value: &str) -> bool {
@@ -262,6 +262,10 @@ pub struct ReviewContext {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ContextContent {
+    SnapShot {
+        image_path: String,
+        source: crate::snapshot::SnapShotSource,
+    },
     /// Only a deferred transcript item contains this. Read the original item
     /// before editing or submitting its context again.
     Summary {
@@ -315,6 +319,7 @@ pub enum ContextContent {
 impl ContextContent {
     pub fn kind(&self) -> &str {
         match self {
+            Self::SnapShot { .. } => "snapshot",
             Self::Summary { kind } => kind,
             Self::Citation { .. } => "citation",
             Self::File { .. } => "file",
@@ -344,14 +349,13 @@ impl MessageContext {
         if !identifier(&self.id) || !bounded(&self.label, 2_048) {
             return Err("invalid context identity or label");
         }
-        // A single record cannot grow the draft or queued input without bound.
-        let size = serde_json::to_vec(self)
-            .map_err(|_| "invalid context")?
-            .len();
-        if size > 256 * 1024 {
-            return Err("context is too large");
-        }
         match &self.content {
+            ContextContent::SnapShot { image_path, source } => {
+                if !crate::paths::is_absolute_host_path(image_path) || !bounded(image_path, 2_048) {
+                    return Err("invalid snapshot image path");
+                }
+                source.validate()
+            }
             ContextContent::Summary { .. } => Err("load the original context before submitting"),
             ContextContent::Citation { citation } => citation.validate(),
             ContextContent::File { path } if path.trim().is_empty() || !bounded(path, 2_048) => {
@@ -401,6 +405,13 @@ impl MessageContext {
             }
             _ => Ok(()),
         }?;
+        // Validate recursive payload bounds before serializing them.
+        let size = serde_json::to_vec(self)
+            .map_err(|_| "invalid context")?
+            .len();
+        if size > 256 * 1024 {
+            return Err("context is too large");
+        }
         Ok(size)
     }
 

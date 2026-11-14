@@ -240,6 +240,22 @@ async fn attachments_outlive_worktrees_while_linked_images_fail_only_their_downl
         let upload = fixture
             .store
             .dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                snapshot: Some(agent_core::composer::snapshot::SnapShotCapture {
+                    id: "capture".into(),
+                    source: agent_protocol::snapshot::SnapShotSource {
+                        captured_at_ms: 1,
+                        app_name: "Editor".into(),
+                        window_title: "Project".into(),
+                        app_identifier: None,
+                        app_icon_data_url: None,
+                        accessibility: Some(
+                            agent_protocol::snapshot::SnapShotAccessibility::FlatText {
+                                text: "Captured document".into(),
+                                truncated: false,
+                            },
+                        ),
+                    },
+                }),
                 draft_key: draft_key.clone(),
                 attachment: agent_core::state::Attachment {
                     path: source.to_str().unwrap().into(),
@@ -282,6 +298,11 @@ async fn attachments_outlive_worktrees_while_linked_images_fail_only_their_downl
             .unwrap();
         upload.await.unwrap();
         let attached = fixture.store.snapshot().input.drafts[&draft_key].attachments[0].clone();
+        assert!(
+            matches!(&fixture.store.snapshot().input.drafts[&draft_key].contexts[0].content,
+            agent_protocol::context::ContextContent::SnapShot {image_path,source}
+                if image_path == &attached.path && source.app_name == "Editor")
+        );
         assert!(
             std::path::Path::new(&attached.path)
                 .starts_with(dunce::canonicalize(fixture.files.upload_directory.as_ref()).unwrap())
@@ -385,6 +406,7 @@ async fn uploading_a_named_pipe_fails_without_waiting_or_reserving_host_storage(
     );
     let mut upload = Box::pin(fixture.store.dispatch(Intent::UploadAttachment(
         op::UploadAttachment {
+            snapshot: None,
             draft_key: "draft".into(),
             attachment: agent_core::state::Attachment {
                 path: path.to_str().unwrap().into(),
@@ -440,6 +462,7 @@ async fn file_operations_preserve_remote_reasons_and_download_can_retry_after_fa
         for (intent, method) in [
             (download(), "host/blob/download"),
             (Intent::UploadAttachment(op::UploadAttachment {
+                snapshot: None,
                 draft_key: Default::default(),
                 attachment: agent_core::state::Attachment {
                     path: source.to_str().unwrap().into(),

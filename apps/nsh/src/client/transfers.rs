@@ -181,6 +181,7 @@ impl Client {
             host,
             pane,
             Intent::UploadAttachment(UploadAttachment {
+                snapshot: None,
                 draft_key,
                 attachment,
             }),

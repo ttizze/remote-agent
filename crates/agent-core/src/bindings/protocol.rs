@@ -12,9 +12,68 @@ use agent_protocol::permissions::*;
 use agent_protocol::project_clone::*;
 use agent_protocol::project_import::ScanProjects;
 use agent_protocol::providers::*;
+use agent_protocol::snapshot::*;
 use agent_protocol::workspace::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
+#[uniffi::remote(Record)]
+struct SnapShotSource {
+    pub captured_at_ms: u64,
+    pub app_name: String,
+    pub window_title: String,
+    pub app_identifier: Option<String>,
+    pub app_icon_data_url: Option<String>,
+    pub accessibility: Option<SnapShotAccessibility>,
+}
+#[uniffi::remote(Enum)]
+enum SnapShotAccessibility {
+    FlatText {
+        text: String,
+        truncated: bool,
+    },
+    ElementTree {
+        image_width: u32,
+        image_height: u32,
+        truncated: bool,
+        root: Box<SnapShotNode>,
+    },
+}
+#[uniffi::remote(Record)]
+struct SnapShotNode {
+    pub role: String,
+    pub name: Option<String>,
+    pub value: Option<String>,
+    pub description: Option<String>,
+    pub bounds: Option<SnapShotBounds>,
+    pub state: Option<SnapShotState>,
+    pub actions: Vec<String>,
+    pub children: Vec<SnapShotNode>,
+}
+#[uniffi::remote(Record)]
+struct SnapShotBounds {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+#[uniffi::remote(Enum)]
+enum SnapShotChecked {
+    On,
+    Off,
+    Mixed,
+}
+#[uniffi::remote(Record)]
+struct SnapShotState {
+    pub active: Option<bool>,
+    pub busy: Option<bool>,
+    pub checked: Option<SnapShotChecked>,
+    pub editable: Option<bool>,
+    pub enabled: Option<bool>,
+    pub expanded: Option<bool>,
+    pub focused: Option<bool>,
+    pub selected: Option<bool>,
+    pub visible: Option<bool>,
+}
 #[uniffi::remote(Record)]
 struct CloneProject {
     pub id: String,
@@ -1148,6 +1207,10 @@ struct ReviewContext {
 }
 #[uniffi::remote(Enum)]
 enum ContextContent {
+    SnapShot {
+        image_path: String,
+        source: SnapShotSource,
+    },
     Summary {
         kind: String,
     },

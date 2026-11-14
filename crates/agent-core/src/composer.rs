@@ -1,6 +1,7 @@
 use crate::localization::UiLanguage;
 use agent_protocol::composer::*;
 pub mod context;
+pub mod snapshot;
 pub mod stash;
 pub(crate) mod template;
 
