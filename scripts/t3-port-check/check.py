@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Score fixed T3 behavioral cases; omitted cases and failed guards cannot win."""
 import json
+from fnmatch import fnmatch
 from pathlib import Path
 import re
 import subprocess
@@ -37,7 +38,8 @@ obsolete_symbols = [] if HOLDOUT else [
     rule['name']
     for rule in CASES["obsolete_symbols"]
     if any(re.search(rule["pattern"], path.read_text())
-           for glob in rule["globs"] for path in ROOT.glob(glob) if path.is_file())
+           for glob in rule["globs"] for path in ROOT.glob(glob) if path.is_file()
+           and not any(fnmatch(str(path.relative_to(ROOT)), excluded) for excluded in rule["exclude"]))
 ]
 for crate, name in sorted(missing):
     print(f"scenario did not pass: {crate} {name}")

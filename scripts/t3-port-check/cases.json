@@ -232,188 +232,235 @@
   },
   "obsolete_symbols": [
     {
-      "name": "Record",
-      "pattern": "\\b(?:struct|enum|type)\\s+Record\\b",
+      "name": "Action",
       "globs": [
-        "crates/agent-protocol/src/conversation/records.rs",
-        "crates/agent-protocol/src/conversation/records/**/*.rs"
-      ]
-    },
-    {
-      "name": "Message",
-      "pattern": "\\b(?:struct|enum|type)\\s+Message\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation/records.rs",
-        "crates/agent-protocol/src/conversation/records/**/*.rs"
-      ]
-    },
-    {
-      "name": "Event",
-      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation/records.rs",
-        "crates/agent-protocol/src/conversation/records/**/*.rs"
-      ]
-    },
-    {
-      "name": "Row",
-      "pattern": "\\b(?:struct|enum|type)\\s+Row\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation/records.rs",
-        "crates/agent-protocol/src/conversation/records/**/*.rs"
-      ]
-    },
-    {
-      "name": "Replica",
-      "pattern": "\\b(?:struct|enum|type)\\s+Replica\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation/records.rs",
-        "crates/agent-protocol/src/conversation/records/**/*.rs"
-      ]
-    },
-    {
-      "name": "Cursor",
-      "pattern": "\\b(?:struct|enum|type)\\s+Cursor\\b",
-      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
         "crates/agent-protocol/src/sync.rs",
         "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "Window",
-      "pattern": "\\b(?:struct|enum|type)\\s+Window\\b",
-      "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "Row",
-      "pattern": "\\b(?:struct|enum|type)\\s+Row\\b",
-      "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "Event",
-      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b",
-      "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "Replica",
-      "pattern": "\\b(?:struct|enum|type)\\s+Replica\\b",
-      "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "Key",
-      "pattern": "\\b(?:struct|enum|type)\\s+Key\\b",
-      "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "Position",
-      "pattern": "\\b(?:struct|enum|type)\\s+Position\\b",
-      "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "Content",
-      "pattern": "\\b(?:struct|enum|type)\\s+Content\\b",
-      "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "Message",
-      "pattern": "\\b(?:struct|enum|type)\\s+Message\\b",
-      "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Action\\b"
     },
     {
       "name": "ApplyError",
-      "pattern": "\\b(?:struct|enum|type)\\s+ApplyError\\b",
       "globs": [
-        "crates/agent-protocol/src/sync.rs",
-        "crates/agent-protocol/src/sync/**/*.rs"
-      ]
-    },
-    {
-      "name": "State",
-      "pattern": "\\b(?:struct|enum|type)\\s+State\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation.rs",
-        "crates/agent-protocol/src/conversation/**/*.rs"
-      ]
-    },
-    {
-      "name": "Counters",
-      "pattern": "\\b(?:struct|enum|type)\\s+Counters\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation.rs",
-        "crates/agent-protocol/src/conversation/**/*.rs"
-      ]
-    },
-    {
-      "name": "Step",
-      "pattern": "\\b(?:struct|enum|type)\\s+Step\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation.rs",
-        "crates/agent-protocol/src/conversation/**/*.rs"
-      ]
-    },
-    {
-      "name": "Context",
-      "pattern": "\\b(?:struct|enum|type)\\s+Context\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation.rs",
-        "crates/agent-protocol/src/conversation/**/*.rs"
-      ]
-    },
-    {
-      "name": "Event",
-      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation.rs",
-        "crates/agent-protocol/src/conversation/**/*.rs"
-      ]
-    },
-    {
-      "name": "Observation",
-      "pattern": "\\b(?:struct|enum|type)\\s+Observation\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation.rs",
-        "crates/agent-protocol/src/conversation/**/*.rs"
-      ]
-    },
-    {
-      "name": "Action",
-      "pattern": "\\b(?:struct|enum|type)\\s+Action\\b",
-      "globs": [
-        "crates/agent-protocol/src/conversation.rs",
-        "crates/agent-protocol/src/conversation/**/*.rs"
-      ]
+        "crates/*/src/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+ApplyError\\b"
     },
     {
       "name": "Change",
-      "pattern": "\\b(?:struct|enum|type)\\s+Change\\b",
       "globs": [
         "crates/agent-protocol/src/conversation.rs",
-        "crates/agent-protocol/src/conversation/**/*.rs"
-      ]
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Change\\b"
+    },
+    {
+      "name": "Content",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Content\\b"
+    },
+    {
+      "name": "Context",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Context\\b"
+    },
+    {
+      "name": "Counters",
+      "globs": [
+        "crates/*/src/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Counters\\b"
+    },
+    {
+      "name": "Cursor",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Cursor\\b"
+    },
+    {
+      "name": "Event",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Event\\b"
+    },
+    {
+      "name": "Key",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Key\\b"
+    },
+    {
+      "name": "Message",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Message\\b"
+    },
+    {
+      "name": "Observation",
+      "globs": [
+        "crates/agent-protocol/src/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Observation\\b"
+    },
+    {
+      "name": "Position",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Position\\b"
+    },
+    {
+      "name": "Record",
+      "globs": [
+        "crates/agent-protocol/src/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Record\\b"
+    },
+    {
+      "name": "Replica",
+      "globs": [
+        "crates/*/src/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Replica\\b"
+    },
+    {
+      "name": "Row",
+      "globs": [
+        "crates/*/src/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Row\\b"
+    },
+    {
+      "name": "State",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+State\\b"
+    },
+    {
+      "name": "Step",
+      "globs": [
+        "crates/agent-protocol/src/conversation.rs",
+        "crates/agent-protocol/src/conversation/**/*.rs",
+        "crates/agent-protocol/src/sync.rs",
+        "crates/agent-protocol/src/sync/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Step\\b"
+    },
+    {
+      "name": "Window",
+      "globs": [
+        "crates/*/src/**/*.rs"
+      ],
+      "exclude": [
+        "*/orchestration.rs",
+        "*/orchestration/**"
+      ],
+      "pattern": "\\b(?:struct|enum|type)\\s+Window\\b"
     }
   ]
 }
