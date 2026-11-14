@@ -1664,6 +1664,26 @@ async fn accepted_attempts_record_the_native_identity_used_for_context_coverage(
 }
 
 #[tokio::test]
+async fn attached_provider_sessions_publish_the_native_model_switch_capability() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("capability fixture"),
+    )
+    .await;
+    let current = settled(&service, &session, 1).await;
+    assert!(current.projection.provider_sessions.iter().any(|session| {
+        session
+            .capabilities
+            .sessions
+            .supports_model_switch_in_session
+    }));
+}
+
+#[tokio::test]
 async fn switching_back_replaces_a_full_native_context_before_appending_history() {
     let directory = tempfile::tempdir().unwrap();
     let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));

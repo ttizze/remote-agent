@@ -52,7 +52,8 @@
       "host_rpc::runtime::t3_contract::a_source_busy_after_admission_keeps_its_native_plan_until_fresh_allocation_succeeds",
       "host_rpc::runtime::t3_contract::failed_recovery_allocation_keeps_the_existing_native_reference_and_uncommitted_recovery",
       "host_rpc::runtime::t3_contract::recovery_context_precedes_the_run_input_and_uses_a_stable_run_identity",
-      "host_rpc::runtime::t3_contract::later_input_carries_unsent_failed_requests_once_without_resending_their_inputs"
+      "host_rpc::runtime::t3_contract::later_input_carries_unsent_failed_requests_once_without_resending_their_inputs",
+      "host_rpc::runtime::t3_contract::attached_provider_sessions_publish_the_native_model_switch_capability"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
@@ -150,7 +151,9 @@
       "state::operations::sessions::tests::reopening_uses_latest_settings_despite_cached_defaults::catalog_at_3___after__::cached_2_true::provider_1_ProviderKind__Codex",
       "state::operations::sessions::tests::reopening_uses_latest_settings_despite_cached_defaults::catalog_at_3___after__::cached_2_true::provider_2_ProviderKind__Claude",
       "state::operations::sessions::tests::reopening_uses_latest_settings_despite_cached_defaults::catalog_at_3___after__::cached_2_true::provider_3_ProviderKind__DeepSeek",
-      "store::tests::new_task_admits_the_initial_input_in_one_rpc"
+      "store::tests::new_task_admits_the_initial_input_in_one_rpc",
+      "state::conversations::tests::stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed",
+      "state::conversations::tests::provider_switch_projects_only_the_active_provider_sessions_capabilities"
     ]
   },
   "guards": {

@@ -6,6 +6,99 @@ use agent_protocol::{
 };
 
 #[test]
+fn stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed() {
+    let id = SessionRef::new(None, "root-checkout".into()).unwrap();
+    let mut snapshot = Snapshot::default();
+    let mut opened = crate::test_conversations::opened(
+        serde_json::from_value(serde_json::json!({"thread":{"id":id,"cwd":"/project/worktree"}}))
+            .unwrap(),
+        &mut snapshot,
+    );
+    opened.project_root = Some("/project".into());
+    op::ReadThread::open(id.clone()).apply(&mut snapshot, "", opened);
+    assert_eq!(snapshot.panes.primary().navigation.cwd, "/project/worktree");
+    let mut next = snapshot.sessions.projections[&id].as_ref().clone();
+    next.snapshot_sequence += 1;
+    next.projection.thread.worktree_path = None;
+    apply(&mut snapshot, &id, vec![ThreadStreamItem::Snapshot(next)]).unwrap();
+    assert_eq!(
+        snapshot.sessions.conversations[&id].cwd.as_deref(),
+        Some("/project")
+    );
+    assert_eq!(snapshot.panes.primary().navigation.cwd, "/project");
+}
+
+#[test]
+fn provider_switch_projects_only_the_active_provider_sessions_capabilities() {
+    let id = SessionRef::new(None, "provider-caps".into()).unwrap();
+    let mut snapshot = Snapshot::default();
+    let opened=crate::test_conversations::opened(serde_json::from_value(serde_json::json!({"thread":{"id":id,"activeProvider":"codex","capabilities":{"steer":true,"modelChange":true,"fork":true,"rename":true}}})).unwrap(),&mut snapshot);
+    op::ReadThread::open(id.clone()).apply(&mut snapshot, "", opened);
+    let mut next = snapshot.sessions.projections[&id].as_ref().clone();
+    next.projection.thread.provider_instance_id = "claude".into();
+    next.projection.thread.model_selection.instance_id = "claude".into();
+    next.snapshot_sequence += 1;
+    apply(
+        &mut snapshot,
+        &id,
+        vec![ThreadStreamItem::Snapshot(next.clone())],
+    )
+    .unwrap();
+    let caps = snapshot.sessions.conversations[&id].capabilities.unwrap();
+    assert!(
+        !caps.steer && !caps.model_change,
+        "the previous provider must not supply unsupported controls"
+    );
+    assert!(
+        caps.fork && caps.rename,
+        "portable operations belong to the Host"
+    );
+    let mut capabilities = model::ProviderCapabilities::default();
+    capabilities.turns.supports_active_steering = true;
+    capabilities.sessions.supports_model_switch_in_session = false;
+    next.projection
+        .provider_sessions
+        .push(model::ProviderSession {
+            id: "current-session".into(),
+            driver: "claude".into(),
+            provider_instance_id: "claude".into(),
+            status: model::ProviderSessionStatus::Ready,
+            cwd: "/project".into(),
+            model: Some("example".into()),
+            capabilities: capabilities.clone(),
+            created_at: next.projection.thread.created_at.clone(),
+            updated_at: next.projection.thread.updated_at.clone(),
+            last_error: None,
+        });
+    next.projection.provider_threads.push(serde_json::from_value(serde_json::json!({"id":"current-thread","driver":"claude","providerInstanceId":"claude","providerSessionId":"current-session","appThreadId":id.application_id(),"ownerNodeId":null,"nativeThreadRef":null,"nativeConversationHeadRef":null,"status":"idle","firstRunOrdinal":null,"lastRunOrdinal":null,"handoffIds":[],"forkedFrom":null,"createdAt":next.projection.thread.created_at,"updatedAt":next.projection.thread.updated_at})).unwrap());
+    next.projection.thread.active_provider_thread_id = Some("current-thread".into());
+    let mut foreign = next.projection.provider_sessions[0].clone();
+    foreign.id = "foreign-session".into();
+    foreign.provider_instance_id = "codex".into();
+    foreign
+        .capabilities
+        .sessions
+        .supports_model_switch_in_session = true;
+    next.projection.provider_sessions.push(foreign);
+    for change_model in [false, true] {
+        next.projection.provider_sessions[0]
+            .capabilities
+            .sessions
+            .supports_model_switch_in_session = change_model;
+        next.snapshot_sequence += 1;
+        apply(
+            &mut snapshot,
+            &id,
+            vec![ThreadStreamItem::Snapshot(next.clone())],
+        )
+        .unwrap();
+        let caps = snapshot.sessions.conversations[&id].capabilities.unwrap();
+        assert!(caps.steer && caps.fork && caps.rename);
+        assert_eq!(caps.model_change, change_model);
+    }
+}
+
+#[test]
 fn detail_queries_select_the_exact_item_and_keep_newer_full_content_without_retrying() {
     let session = crate::session::SessionRef::new(
         crate::session::ProviderKind::Codex,
