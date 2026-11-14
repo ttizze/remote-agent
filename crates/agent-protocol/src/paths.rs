@@ -73,6 +73,82 @@ pub fn is_network_host_path(path: &str) -> bool {
         .is_some_and(|prefix| prefix.iter().all(|byte| matches!(byte, b'/' | b'\\')))
 }
 
+/// A drive prefix is lexical metadata; a bare drive is not an absolute file path.
+pub(crate) fn windows_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(1) == Some(&b':')
+        && (bytes.len() == 2 || matches!(bytes.get(2), Some(b'/' | b'\\')))
+}
+
+/// Comparison only, never a path to open. Keep literal percent escapes intact.
+pub fn comparison_key(path: &str) -> String {
+    let path = path.trim();
+    let root = matches!(path, "/" | "\\") || windows_drive(path) && path.len() == 3;
+    let trimmed = if root {
+        path
+    } else if path.starts_with('/') {
+        path.trim_end_matches('/')
+    } else {
+        path.trim_end_matches(['/', '\\'])
+    };
+    let value = if trimmed.is_empty() {
+        path.to_owned()
+    } else if windows_drive(trimmed) && trimmed.len() == 2 && path.len() > 2 {
+        format!("{trimmed}\\")
+    } else {
+        trimmed.to_owned()
+    };
+    if windows_drive(&value) || value.starts_with(r"\\") || is_network_host_path(&value) {
+        value.replace('\\', "/").to_lowercase()
+    } else {
+        value
+    }
+}
+
+pub fn decode_link_path(source: &str) -> String {
+    if source.match_indices('%').any(|(index, _)| {
+        source
+            .as_bytes()
+            .get(index + 1..index + 3)
+            .is_none_or(|digits| !digits.iter().all(u8::is_ascii_hexdigit))
+    }) {
+        return source.into();
+    }
+    percent_encoding::percent_decode_str(source)
+        .decode_utf8()
+        .map_or_else(|_| source.to_owned(), |value| value.into_owned())
+}
+
+/// Decode a Markdown destination once; file URLs retain their remote host.
+pub fn markdown_destination_host_path(source: &str) -> Option<String> {
+    let path = if source
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"))
+    {
+        let url = url::Url::parse(source).ok()?;
+        match url
+            .host_str()
+            .filter(|host| !host.is_empty() && !host.eq_ignore_ascii_case("localhost"))
+        {
+            Some(host) => format!(r"\\{host}{}", url.path().replace('/', r"\")),
+            None => url.path().to_owned(),
+        }
+    } else {
+        source
+            .split(['#', '?'])
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let path = decode_link_path(&path);
+    Some(if path.starts_with('/') && windows_drive(&path[1..]) {
+        path[1..].into()
+    } else {
+        path
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

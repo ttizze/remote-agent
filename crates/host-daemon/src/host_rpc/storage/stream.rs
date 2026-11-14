@@ -76,6 +76,17 @@ impl Storage {
         })
     }
 
+    pub(in crate::host_rpc) fn assistant_item_ids(
+        &self,
+        id: &SessionRef,
+        turn: &str,
+    ) -> Result<Vec<String>, String> {
+        self.with(|connection| {
+            let mut query=connection.prepare("SELECT turn_item_id FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND provider_turn_id=?2 AND type='assistant_message' ORDER BY ordinal").map_err(failure)?;
+            query.query_map(params![id.application_id(),turn],|row|row.get(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)
+        })
+    }
+
     pub(in crate::host_rpc) fn thread_project_root(
         &self,
         id: &SessionRef,

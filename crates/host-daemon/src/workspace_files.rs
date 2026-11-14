@@ -25,6 +25,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::SessionId;
 mod attachments;
+mod generated_images;
 mod metadata;
 mod tree;
 

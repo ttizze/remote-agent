@@ -321,13 +321,7 @@ impl State {
                         .is_some_and(|thread| !thread.pending_background_tasks.is_empty())
                         || self.turn_items.values().any(|item| {
                             item.run_id.as_ref() == Some(&attempt.run_id)
-                                && matches!(item.body, TurnItemBody::Subagent { .. })
-                                && matches!(
-                                    item.status,
-                                    TurnItemStatus::Pending
-                                        | TurnItemStatus::Running
-                                        | TurnItemStatus::Waiting
-                                )
+                                && super::execution::is_pending_background_item(item)
                         }))
             })
     }

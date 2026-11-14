@@ -43,11 +43,13 @@ mod forks;
 pub mod handoffs;
 pub use execution::{
     Completion, activate_queued, cancel_start, cancel_uncertain, complete, fail_start,
-    finish_provider_turn, interrupt, observe_item, observe_plan, observe_subagent,
-    started, uncertain_delivery,
+    finish_provider_turn, interrupt, observe_item, observe_plan, observe_subagent, started,
+    uncertain_delivery,
 };
 pub use forks::fork_thread;
+mod generated_images;
 mod recovery;
+pub use generated_images::project_generated_images;
 pub use recovery::{continue_restarted, provider_stopped, runtime_restarted};
 mod checkpoints;
 pub use checkpoints::{checkpoint_captured, prepare_checkpoint_scope};

@@ -4,6 +4,7 @@ use agent_protocol::execution::{ExecutionError, TurnStatus};
 pub(super) fn native_context(
     state: &model::State,
     attempt_id: &str,
+    native_turn: &agent_protocol::ids::TurnId,
     now: &str,
     completed: bool,
 ) -> Result<Context, String> {
@@ -11,10 +12,18 @@ pub(super) fn native_context(
         .run_attempts
         .get(attempt_id)
         .ok_or("native attempt is missing")?;
-    let turn = attempt
-        .provider_turn_id
-        .as_ref()
-        .and_then(|id| state.provider_turns.get(id))
+    let turn = state
+        .provider_turns
+        .values()
+        .filter(|turn| {
+            turn.run_attempt_id.as_deref() == Some(attempt_id)
+                && turn
+                    .native_turn_ref
+                    .as_ref()
+                    .and_then(|reference| reference.native_id.as_deref())
+                    == Some(native_turn.as_str())
+        })
+        .max_by_key(|turn| turn.ordinal)
         .ok_or("native turn has not started")?;
     let native_turn_id = turn
         .native_turn_ref
@@ -157,20 +166,20 @@ impl Runtime {
                         source,
                         native,
                         &attempt_id,
-                        Some(&turn.id),
+                        &turn.id,
                         item,
                         completed,
                     )
                     .await?;
                 }
                 if completed {
-                    if matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted) {
-                        source.cancel_background(execution);
-                    } else {
-                        source
-                            .finish_foreground(execution, super::super::events::background(&turn));
-                    }
-                    Self::execution_background(service, source, execution)?;
+                    let image_context = native_context(&state, &attempt_id, &turn.id, &now, true)?;
+                    Self::project_generated_images(
+                        service,
+                        source,
+                        &attempt_id,
+                        &image_context.provider_turn_id,
+                    )?;
                     let completion = match turn.status {
                         TurnStatus::Failed => {
                             model::Completion::Failed(failure(turn.error.as_ref()))
@@ -178,6 +187,30 @@ impl Runtime {
                         TurnStatus::Interrupted => model::Completion::Interrupted,
                         _ => model::Completion::Completed,
                     };
+                    if state
+                        .run_attempts
+                        .get(&attempt_id)
+                        .and_then(|attempt| attempt.provider_turn_id.as_deref())
+                        != Some(image_context.provider_turn_id.as_str())
+                    {
+                        storage.observe_thread(&source.target.id, &[], &now, |state| {
+                            Ok(model::finish_provider_turn(
+                                state,
+                                &image_context.provider_turn_id,
+                                &source.session_id,
+                                completion,
+                                &now,
+                            ))
+                        })?;
+                        return Ok(());
+                    }
+                    if matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted) {
+                        source.cancel_background(execution);
+                    } else {
+                        source
+                            .finish_foreground(execution, super::super::events::background(&turn));
+                    }
+                    Self::execution_background(service, source, execution)?;
                     storage.observe_thread(&source.target.id, &[], &now, |state| {
                         model::complete(
                             state,
@@ -190,24 +223,17 @@ impl Runtime {
                 }
             }
             SessionChange::Item { turn_id, item } => {
-                Self::execution_item(
-                    service,
-                    source,
-                    native,
-                    &attempt_id,
-                    Some(&turn_id),
-                    &item,
-                    false,
-                )
-                .await?
+                Self::execution_item(service, source, native, &attempt_id, &turn_id, &item, false)
+                    .await?
             }
             SessionChange::Text {
+                turn_id,
                 item_id,
                 field,
                 delta,
                 ..
             } => {
-                let context = native_context(&state, &attempt_id, &now, false)?;
+                let context = native_context(&state, &attempt_id, &turn_id, &now, false)?;
                 if !foreground {
                     let id = super::text_item_id(
                         context.provider,
@@ -253,8 +279,8 @@ impl Runtime {
                 source.roster(execution, tasks);
                 Self::execution_background(service, source, execution)?;
             }
-            SessionChange::Error { error, .. } => {
-                let context = native_context(&state, &attempt_id, &now, true)?;
+            SessionChange::Error { turn_id, error } => {
+                let context = native_context(&state, &attempt_id, &turn_id, &now, true)?;
                 let artifact = context.artifact(
                     &format!("error:{command_id}"),
                     None,
@@ -349,7 +375,7 @@ impl Runtime {
         source: &resources::Source,
         native: &SessionRef,
         attempt_id: &str,
-        turn: Option<&agent_protocol::ids::TurnId>,
+        turn: &agent_protocol::ids::TurnId,
         item: &Item,
         completed: bool,
     ) -> Result<(), String> {
@@ -358,7 +384,6 @@ impl Runtime {
             return Ok(());
         }
         let full = if item.is_deferred() {
-            let turn = turn.ok_or("cannot read native body without a turn")?;
             Some(
                 Self::read_native_body(
                     service,
@@ -381,9 +406,85 @@ impl Runtime {
             .conversation
             .storage
             .thread_state(&source.target.id, &[])?;
-        let context = native_context(&state, attempt_id, &now, completed)?;
-        let artifacts = context.item(item)?;
-        Self::commit_artifacts(service, source, attempt_id, artifacts, &now)
+        let context = native_context(&state, attempt_id, turn, &now, completed)?;
+        let artifacts = if let ItemBody::ImageGeneration {
+            saved_path,
+            data,
+            revised_prompt,
+        } = item.body()
+        {
+            let mut status = super::item_status(item.status, completed);
+            let mut saved_path = saved_path.clone();
+            let mut failure = None;
+            if status == model::TurnItemStatus::Completed
+                && saved_path.is_none()
+                && let Some(data) = data
+            {
+                let files = service.files().clone();
+                let data = data.clone();
+                let owner = source.target.application_id();
+                let id = item.id.to_string();
+                let stored = tokio::task::spawn_blocking(move || {
+                    files.persist_generated_image(&owner, &id, &data)
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()));
+                match stored {
+                    Ok(path) => saved_path = Some(path),
+                    Err(error) => {
+                        status = model::TurnItemStatus::Failed;
+                        failure = Some(error);
+                    }
+                }
+            }
+            let terminal = !matches!(
+                status,
+                model::TurnItemStatus::Idle
+                    | model::TurnItemStatus::Pending
+                    | model::TurnItemStatus::Running
+                    | model::TurnItemStatus::Waiting
+            );
+            let output = terminal.then(|| {
+                let mut output = json!({"status":status});
+                if let Some(path) = saved_path {
+                    output["savedPath"] = path.into();
+                }
+                if let Some(failure) = failure {
+                    output["failure"] = failure.into();
+                }
+                output
+            });
+            let mut artifact = context.artifact(
+                item.id.as_str(),
+                Some(item.id.as_str()),
+                status,
+                model::NodeKind::ToolCall,
+                model::TurnItemBody::DynamicTool {
+                    tool_name: Some("image_gen.imagegen".into()),
+                    input: revised_prompt
+                        .as_ref()
+                        .map_or_else(|| json!({}), |prompt| json!({"prompt":prompt})),
+                    output,
+                    output_omitted: None,
+                    viewed_image_path: None,
+                },
+            );
+            artifact.item.title = Some("Generate image".into());
+            vec![artifact]
+        } else {
+            context.item(item)?
+        };
+        Self::commit_artifacts(service, source, attempt_id, artifacts, &now)?;
+        if matches!(item.body(), ItemBody::ImageGeneration { .. })
+            && state
+                .provider_turns
+                .get(&context.provider_turn_id)
+                .is_some_and(|turn| turn.status != model::ProviderTurnStatus::Running)
+        {
+            Self::project_generated_images(service, source, attempt_id, &context.provider_turn_id)?;
+        }
+        Ok(())
     }
 
     fn commit_artifacts(
@@ -441,6 +542,27 @@ impl Runtime {
                 continue;
             };
             source.replace_text(&item.id.clone().into());
+            if item.status == model::TurnItemStatus::Completed
+                && let model::TurnItemBody::DynamicTool {
+                    tool_name: Some(name),
+                    output: Some(output),
+                    ..
+                } = &item.body
+                && name == "image_gen.imagegen"
+                && output
+                    .get("savedPath")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|path| !path.trim().is_empty())
+                && output.get("failure").is_none_or(serde_json::Value::is_null)
+                && let Some(turn) = &item.provider_turn_id
+            {
+                source.record_generated_image(
+                    Uuid::parse_str(attempt_id).map_err(|error| error.to_string())?,
+                    turn,
+                    &item.id,
+                );
+            }
+
             if let model::TurnItemBody::CommandExecution {
                 output: Some(output),
                 ..
@@ -459,6 +581,35 @@ impl Runtime {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    fn project_generated_images(
+        service: &HostRpcService,
+        source: &resources::Source,
+        attempt_id: &str,
+        turn: &str,
+    ) -> Result<(), String> {
+        let attempt = Uuid::parse_str(attempt_id).map_err(|error| error.to_string())?;
+        let pending = source.generated_images(attempt, turn);
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let storage = &service.inner.conversation.storage;
+        let mut bodies = pending.clone();
+        bodies.extend(storage.assistant_item_ids(&source.target, turn)?);
+        let now = commands::at();
+        storage.observe_thread(&source.target.id, &bodies, &now, |state| {
+            model::project_generated_images(
+                state,
+                attempt_id,
+                &source.session_id,
+                turn,
+                &pending,
+                &now,
+            )
+        })?;
+        source.clear_generated_images(attempt, turn);
         Ok(())
     }
 

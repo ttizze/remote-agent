@@ -73,22 +73,34 @@ impl WorkspaceFiles {
         {
             return Err(anyhow!("invalid attachment owner"));
         }
+        self.persist_asset(&format!("{id}.{extension}"), &bytes, limit)?;
+        Ok(
+            serde_json::json!({"type":if is_image {"image"} else {"file"},"id":id,"name":name,"mimeType":mime,"sizeBytes":bytes.len()}),
+        )
+    }
+
+    pub(super) fn persist_asset(
+        &self,
+        file_name: &str,
+        bytes: &[u8],
+        limit: u64,
+    ) -> Result<PathBuf> {
         agent_local_host::create_state_directory(&self.upload_directory)?;
-        let target = self.upload_directory.join(format!("{id}.{extension}"));
+        let target = self.upload_directory.join(file_name);
         if target.try_exists()? {
-            if read_bounded(&target, limit)? != bytes {
+            if read_bounded(&target, limit)?.as_slice() != bytes {
                 return Err(anyhow!(
                     "attachment identity already contains different bytes"
                 ));
             }
         } else {
             let mut temporary = tempfile::NamedTempFile::new_in(&self.upload_directory)?;
-            temporary.write_all(&bytes)?;
+            temporary.write_all(bytes)?;
             temporary.as_file().sync_all()?;
             match temporary.persist_noclobber(&target) {
                 Ok(_) => {}
                 Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if read_bounded(&target, limit)? != bytes {
+                    if read_bounded(&target, limit)?.as_slice() != bytes {
                         return Err(anyhow!(
                             "attachment identity already contains different bytes"
                         ));
@@ -97,9 +109,7 @@ impl WorkspaceFiles {
                 Err(error) => return Err(error.error.into()),
             }
         }
-        Ok(
-            serde_json::json!({"type":if is_image {"image"} else {"file"},"id":id,"name":name,"mimeType":mime,"sizeBytes":bytes.len()}),
-        )
+        Ok(target)
     }
 
     pub(crate) fn is_uploaded_attachment(&self, path: &str) -> bool {

@@ -456,7 +456,7 @@ impl ClientExt for Client {
                     let key = if image.encoded {
                         image.source.clone()
                     } else {
-                        crate::presentation::media::image_path_key(&image.source)
+                        agent_protocol::paths::comparison_key(&image.source)
                     };
                     if sources.insert((image.encoded, key)) {
                         images.push(image);

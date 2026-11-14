@@ -8,6 +8,7 @@ pub(super) struct Source {
     pub(super) updates: AsyncMutex<()>,
     pub(super) text: Mutex<super::text::Text>,
     background: Mutex<HashMap<Uuid, Background>>,
+    images: Mutex<HashMap<(Uuid, String), Vec<String>>>,
 }
 
 #[derive(Default)]
@@ -25,6 +26,25 @@ pub(super) struct PendingRequest {
 }
 
 impl Source {
+    pub(super) fn record_generated_image(&self, attempt: Uuid, turn: &str, item: &str) {
+        let mut pending = self.images.lock().unwrap();
+        let images = pending.entry((attempt, turn.into())).or_default();
+        if !images.iter().any(|saved| saved == item) {
+            images.push(item.into());
+        }
+    }
+    pub(super) fn generated_images(&self, attempt: Uuid, turn: &str) -> Vec<String> {
+        self.images
+            .lock()
+            .unwrap()
+            .get(&(attempt, turn.into()))
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub(super) fn clear_generated_images(&self, attempt: Uuid, turn: &str) {
+        self.images.lock().unwrap().remove(&(attempt, turn.into()));
+    }
+
     pub(super) fn cancel_background(&self, execution: Uuid) {
         self.background.lock().unwrap().remove(&execution);
     }
@@ -288,6 +308,7 @@ impl Runtime {
                     updates: Default::default(),
                     text: Default::default(),
                     background: Default::default(),
+                    images: Default::default(),
                 })
             })
             .clone()
@@ -300,6 +321,7 @@ impl Runtime {
         if sources.get(native).is_some_and(|source| {
             Arc::strong_count(source) == 1
                 && source.background.lock().unwrap().is_empty()
+                && source.images.lock().unwrap().is_empty()
                 && source.text.lock().unwrap().is_empty()
         }) {
             sources.remove(native);
@@ -1336,6 +1358,7 @@ mod tests {
             updates: Default::default(),
             text: Default::default(),
             background: Default::default(),
+            images: Default::default(),
         };
         let attempt = |turn: &str| Attempt {
             id: Uuid::new_v4(),

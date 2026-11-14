@@ -201,7 +201,18 @@ impl Runtime {
         {
             return Ok(());
         }
-        let context = super::observations::native_context(&state, &attempt_id, &now, false)?;
+        let turn = match &request.target {
+            agent_protocol::requests::RequestTarget::Turn { turn_id, .. } => turn_id.clone(),
+            _ => state.run_attempts[&attempt_id]
+                .provider_turn_id
+                .as_ref()
+                .and_then(|id| state.provider_turns.get(id))
+                .and_then(|turn| turn.native_turn_ref.as_ref())
+                .and_then(|reference| reference.native_id.clone())
+                .ok_or("request has no native turn")?
+                .into(),
+        };
+        let context = super::observations::native_context(&state, &attempt_id, &turn, &now, false)?;
         let request_id = model::derived_id(
             "runtime-request",
             &[

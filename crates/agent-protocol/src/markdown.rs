@@ -2,9 +2,15 @@
 use ::markdown::{ParseOptions, mdast::Node};
 use std::collections::HashMap;
 
+mod generated;
+mod windows_paths;
+pub use generated::append_generated_image_embeds;
+
 pub fn parse(source: &str) -> Node {
     // GFM has no syntax errors; only the disabled MDX extensions can fail.
-    ::markdown::to_mdast(source, &ParseOptions::gfm()).expect("GFM is infallible")
+    let mut root = ::markdown::to_mdast(source, &ParseOptions::gfm()).expect("GFM is infallible");
+    windows_paths::preserve_destinations(&mut root, source);
+    root
 }
 
 pub fn definitions(node: &Node) -> HashMap<&str, &str> {

@@ -10,17 +10,7 @@ use crate::{
 pub(crate) fn image_key(source: &str) -> String {
     let path = markdown_file_target(source.into(), String::new(), MarkdownFileSurface::Mobile)
         .map_or_else(|| source.to_owned(), |file| file.path);
-    image_path_key(&path)
-}
-
-pub(crate) fn image_path_key(path: &str) -> String {
-    if agent_protocol::paths::is_windows_absolute_host_path(path)
-        || agent_protocol::paths::is_network_host_path(path)
-    {
-        path.replace('\\', "/").to_lowercase()
-    } else {
-        path.to_owned()
-    }
+    agent_protocol::paths::comparison_key(&path)
 }
 
 /// A generated image's encoded data as a source the image views load, as the

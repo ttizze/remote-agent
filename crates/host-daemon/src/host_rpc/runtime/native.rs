@@ -65,6 +65,24 @@ pub(super) struct Artifact {
     pub plan: Option<model::Plan>,
 }
 
+pub(super) fn item_status(status: ItemStatus, completed: bool) -> model::TurnItemStatus {
+    use model::TurnItemStatus as Status;
+    match status {
+        ItemStatus::Running => Status::Running,
+        ItemStatus::Completed => Status::Completed,
+        ItemStatus::Failed => Status::Failed,
+        ItemStatus::Declined => Status::Cancelled,
+        ItemStatus::Interrupted => Status::Interrupted,
+        ItemStatus::Unknown => {
+            if completed {
+                Status::Completed
+            } else {
+                Status::Running
+            }
+        }
+    }
+}
+
 impl Context {
     pub(super) fn artifact(
         &self,
@@ -152,20 +170,7 @@ impl Context {
         if item.is_deferred() {
             return Err("native item must be fully read before it is committed".into());
         }
-        let status = match item.status {
-            ItemStatus::Running => Status::Running,
-            ItemStatus::Completed => Status::Completed,
-            ItemStatus::Failed => Status::Failed,
-            ItemStatus::Declined => Status::Cancelled,
-            ItemStatus::Interrupted => Status::Interrupted,
-            ItemStatus::Unknown => {
-                if self.completed {
-                    Status::Completed
-                } else {
-                    Status::Running
-                }
-            }
-        };
+        let status = item_status(item.status, self.completed);
         let streaming = status == Status::Running;
         let id = item.id.as_str();
         let (kind, body) = match item.body() {

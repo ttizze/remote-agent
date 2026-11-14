@@ -1,8 +1,5 @@
 use super::{ConversationRow, ConversationRowContent};
-use crate::presentation::{
-    markdown::markdown_images,
-    media::{image_key, image_path_key},
-};
+use crate::presentation::{markdown::markdown_images, media::image_key};
 use std::collections::HashSet;
 
 /// A visible inline image takes over its earlier standalone preview. Only
@@ -39,7 +36,7 @@ pub(super) fn without_repeated_images(mut rows: Vec<ConversationRow>) -> Vec<Con
                         let key = if item.data.kind == "imageView" && source.starts_with("file:") {
                             image_key(source)
                         } else {
-                            image_path_key(source)
+                            agent_protocol::paths::comparison_key(source)
                         };
                         inline_images.contains(&key)
                     });

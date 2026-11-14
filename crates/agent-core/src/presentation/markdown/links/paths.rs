@@ -1,7 +1,6 @@
 use agent_protocol::paths::is_network_host_path;
 use std::sync::LazyLock;
 
-use percent_encoding::percent_decode_str;
 use regex::Regex;
 
 static POSITION: LazyLock<Regex> =
@@ -25,20 +24,6 @@ pub(super) fn position<'a>(path: &'a str, hash: &str) -> (&'a str, Option<u32>, 
         .as_ref()
         .map_or(path, |captures| &path[..captures.get(0).unwrap().start()]);
     (path, number(1), number(2))
-}
-
-pub(super) fn decode(source: &str) -> String {
-    if source.match_indices('%').any(|(index, _)| {
-        source
-            .as_bytes()
-            .get(index + 1..index + 3)
-            .is_none_or(|digits| !digits.iter().all(u8::is_ascii_hexdigit))
-    }) {
-        return source.into();
-    }
-    percent_decode_str(source)
-        .decode_utf8()
-        .map_or_else(|_| source.to_owned(), |value| value.into_owned())
 }
 
 pub(super) fn windows(path: &str) -> bool {

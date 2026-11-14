@@ -422,12 +422,7 @@ fn background_task_matches(task: &PendingBackgroundTask, item: &TurnItem) -> boo
 }
 
 fn is_background_item(state: &State, attempt: &RunAttempt, item: &TurnItem) -> bool {
-    (state.turn_items.contains_key(&item.id)
-        && matches!(item.body, TurnItemBody::Subagent { .. })
-        && matches!(
-            item.status,
-            TurnItemStatus::Pending | TurnItemStatus::Running | TurnItemStatus::Waiting
-        ))
+    (state.turn_items.contains_key(&item.id) && is_pending_background_item(item))
         || state
             .provider_threads
             .get(&attempt.provider_thread_id)
@@ -437,6 +432,15 @@ fn is_background_item(state: &State, attempt: &RunAttempt, item: &TurnItem) -> b
                     .iter()
                     .any(|task| background_task_matches(task, item))
             })
+}
+
+/// Image work can finish after the native turn's foreground terminal event.
+pub(super) fn is_pending_background_item(item: &TurnItem) -> bool {
+    matches!(
+        item.status,
+        TurnItemStatus::Pending | TurnItemStatus::Running | TurnItemStatus::Waiting
+    ) && (matches!(item.body, TurnItemBody::Subagent { .. })
+        || matches!(&item.body,TurnItemBody::DynamicTool {tool_name:Some(name),..} if name=="image_gen.imagegen"))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1002,7 +1006,8 @@ pub(super) fn lose_background_work(state: &State, provider: &str, now: &str) -> 
                     .pending_background_tasks
                     .iter()
                     .any(|task| background_task_matches(task, item))
-                    || matches!(&item.body,TurnItemBody::Subagent {origin,..} if origin=="native"))
+                    || matches!(&item.body,TurnItemBody::Subagent {origin,..} if origin=="native")
+                    || matches!(&item.body,TurnItemBody::DynamicTool {tool_name:Some(name),..} if name=="image_gen.imagegen"))
         }) {
             changes.push(Change::TurnItem(TurnItem {
                 status: TurnItemStatus::Interrupted,

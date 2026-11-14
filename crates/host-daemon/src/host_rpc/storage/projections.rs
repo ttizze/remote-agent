@@ -375,6 +375,8 @@ fn working_items(
             i.turn_item_id IN (SELECT value FROM json_each(?2))
             OR (i.run_id IN (SELECT run_id FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status IN ('preparing','queued','starting','running','waiting'))
                 AND (i.status IN ('pending','running','waiting') OR i.type='user_message'))
+            OR (i.status IN ('pending','running','waiting') AND i.type IN ('command_execution','dynamic_tool','subagent')
+                AND i.run_id IN (SELECT run_id FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status!='rolled_back'))
             OR (i.type='error' AND i.status='failed' AND json_extract(i.payload_json,'$.failure.class')='delivery_uncertain')
             OR i.turn_item_id IN (SELECT parent_item_id FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND type='error' AND status='failed' AND json_extract(payload_json,'$.failure.class')='delivery_uncertain')
             OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests r WHERE r.thread_id=?1 AND r.status='pending' AND r.node_id=i.node_id)

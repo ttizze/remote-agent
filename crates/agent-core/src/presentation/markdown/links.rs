@@ -124,9 +124,9 @@ pub(super) fn file_reference(source: &str, syntax: Syntax) -> Option<MarkdownFil
         return None;
     }
     let (path, hash) = source_parts(source)?;
-    let path = paths::decode(path.trim());
+    let path = agent_protocol::paths::decode_link_path(path.trim());
     let path = paths::strip_drive_slash(&path);
-    let hash = paths::decode(hash.trim());
+    let hash = agent_protocol::paths::decode_link_path(hash.trim());
     if path.is_empty() || detection::external_scheme(path) {
         return None;
     }

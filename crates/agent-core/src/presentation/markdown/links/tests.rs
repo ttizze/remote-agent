@@ -364,9 +364,18 @@ fn workspace_share_links_ignore_windows_path_casing_and_still_reject_escapes() {
 
 #[test]
 fn malformed_percent_encoding_remains_literal_and_is_not_partially_decoded() {
-    assert_eq!(paths::decode("src/a%20b%zz.rs"), "src/a%20b%zz.rs");
-    assert_eq!(paths::decode("src/%FF.rs"), "src/%FF.rs");
-    assert_eq!(paths::decode("src/%E6%97%A5.rs"), "src/日.rs");
+    assert_eq!(
+        agent_protocol::paths::decode_link_path("src/a%20b%zz.rs"),
+        "src/a%20b%zz.rs"
+    );
+    assert_eq!(
+        agent_protocol::paths::decode_link_path("src/%FF.rs"),
+        "src/%FF.rs"
+    );
+    assert_eq!(
+        agent_protocol::paths::decode_link_path("src/%E6%97%A5.rs"),
+        "src/日.rs"
+    );
 }
 
 #[rstest::rstest]
