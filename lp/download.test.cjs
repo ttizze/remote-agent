@@ -4,7 +4,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const source = fs.readFileSync(__dirname + '/public/download.generated.js', 'utf8');
 const download = 'https://github.com/ttizze/remote-agent/releases/download/prd-75/bex-windows-x86_64-setup.exe';
-const pinnedWindows = 'https://github.com/ttizze/remote-agent/releases/download/prd-133/bex-windows-x86_64-setup.exe';
+const pinnedWindows = 'https://github.com/TooriG/remote-agent/releases/download/windows-preview-20261110-venice-main-6cd2c1db/bex-windows-x86_64-setup.exe';
 
 async function renderDownloads({ language = 'en', platform = 'Win32', userAgent, assets = [], release = { tag_name: 'prd-75', assets }, ok = true, fail = false } = {}) {
   const element = () => ({ classList: { toggle() {} }, innerHTML: '', href: '' });
@@ -59,12 +59,12 @@ for (const language of ['en', 'ja']) {
   test(`Windows ${language} hero, menu and card download the uploaded EXE directly`, async () => {
     const result = await renderDownloads({ language, assets: [{ name: 'bex-windows-x86_64-setup.exe', state: 'uploaded', browser_download_url: download }] });
     for (const button of result.primary) {
-      assert.equal(button.href, download);
+      assert.equal(button.href, pinnedWindows);
       assert.match(button.innerHTML, language === 'ja' ? /Windows版をダウンロード/ : /Download for Windows/);
     }
-    assert.ok(result.grid.includes(`href="${download}"`));
+    assert.ok(result.grid.includes(`href="${pinnedWindows}"`));
     const mac = await renderDownloads({ language, platform: 'MacIntel', assets: [{ name: 'bex-windows-x86_64-setup.exe', state: 'uploaded', browser_download_url: download }] });
-    assert.ok(mac.menu.includes(`href="${download}"`));
+    assert.ok(mac.menu.includes(`href="${pinnedWindows}"`));
     assert.ok(!result.primary[0].innerHTML.includes('coming soon'));
   });
 }
@@ -95,12 +95,13 @@ for (const language of ['ja', 'en']) {
   });
 }
 
-test('the latest production release supplies the same packages for every platform', async () => {
+test('the latest production release preserves the fixed Windows installer', async () => {
   const prefix = 'https://github.com/ttizze/remote-agent/releases/download/prd-145/';
   const assets = ['bex-macOS-arm64.zip', 'bex-windows-x86_64-setup.exe', 'bex-android.apk', 'bex-linux-x86_64.tar.gz', 'release.json']
     .map(name => ({ name, state: 'uploaded', browser_download_url: prefix + name }));
   const result = await renderDownloads({ assets });
-  for (const asset of assets.filter(asset => asset.name !== 'release.json')) assert.ok(result.grid.includes(`href="${asset.browser_download_url}"`));
+  for (const asset of assets.filter(asset => !['release.json', 'bex-windows-x86_64-setup.exe'].includes(asset.name))) assert.ok(result.grid.includes(`href="${asset.browser_download_url}"`));
+  assert.ok(result.grid.includes(`href="${pinnedWindows}"`));
   assert.ok(result.grid.includes('https://testflight.apple.com/join/UJbK9Ww7'));
   assert.doesNotMatch(result.grid, /apps.apple.com/);
 });

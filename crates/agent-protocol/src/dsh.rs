@@ -14,6 +14,7 @@ pub enum KeyProvider {
     Groq,
     Mistral,
     Xai,
+    Venice,
 }
 
 impl KeyProvider {
@@ -25,7 +26,7 @@ impl KeyProvider {
         }
     }
 
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::DeepSeek,
         Self::OpenRouter,
         Self::NanoGpt,
@@ -36,6 +37,7 @@ impl KeyProvider {
         Self::Groq,
         Self::Mistral,
         Self::Xai,
+        Self::Venice,
     ];
 
     pub fn label(self) -> &'static str {
@@ -50,6 +52,7 @@ impl KeyProvider {
             Self::Groq => "Groq",
             Self::Mistral => "Mistral",
             Self::Xai => "xAI",
+            Self::Venice => "Venice AI",
         }
     }
 
@@ -65,6 +68,7 @@ impl KeyProvider {
             Self::Groq => "GROQ_API_KEY",
             Self::Mistral => "MISTRAL_API_KEY",
             Self::Xai => "XAI_API_KEY",
+            Self::Venice => "VENICE_API_KEY",
         }
     }
 
@@ -82,6 +86,7 @@ impl KeyProvider {
             Self::Groq => &["groq"],
             Self::Mistral => &["mistral"],
             Self::Xai => &["xai"],
+            Self::Venice => &["venice"],
         }
     }
 
@@ -97,6 +102,7 @@ impl KeyProvider {
             Self::Groq => "https://console.groq.com/keys",
             Self::Mistral => "https://console.mistral.ai/api-keys",
             Self::Xai => "https://console.x.ai/",
+            Self::Venice => "https://venice.ai/settings/api",
         }
     }
 }

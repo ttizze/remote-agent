@@ -35,6 +35,43 @@ fn route_label(provider: KeyProvider, route: &str) -> &'static str {
 
 pub(super) fn provider_profile(provider: KeyProvider) -> Value {
     let mut profile = json!({"apiKeyEnv":provider.reference()});
+    if provider == KeyProvider::Venice {
+        profile["displayName"] = json!("Venice AI");
+        profile["api"] = json!("openai-completions");
+        profile["baseURL"] = json!("https://api.venice.ai/api/v1");
+        profile["models"] = json!([
+            {
+                "id":"deepseek-v4-1-flash",
+                "name":"DeepSeek V4.1 Flash",
+                "contextWindow":1000000,
+                "maxTokens":32768,
+                "input":["text","image"],
+                "reasoningEfforts":{"off":"none","low":"low","high":"high","max":"max"}
+            },
+            {
+                "id":"qwen3-coder-480b-a35b-instruct-turbo",
+                "name":"Qwen 3 Coder 480B Turbo",
+                "contextWindow":256000,
+                "maxTokens":65536,
+                "input":["text"]
+            },
+            {
+                "id":"olafangensan-glm-4.7-flash-heretic",
+                "name":"GLM 4.7 Flash Heretic",
+                "contextWindow":200000,
+                "maxTokens":24000,
+                "input":["text"],
+                "reasoningEfforts":{"off":"none","low":"low","medium":"medium","high":"high"}
+            },
+            {
+                "id":"venice-uncensored-1-2",
+                "name":"Venice Uncensored 1.2",
+                "contextWindow":128000,
+                "maxTokens":8192,
+                "input":["text"]
+            }
+        ]);
+    }
     if provider == KeyProvider::NanoGpt {
         // NanoGPT is a custom OpenAI-compatible route outside the installed catalog.
         // Model capabilities: https://nano-gpt.com/api/v1/models?detailed=true
@@ -61,6 +98,10 @@ pub(super) fn provider_profile(provider: KeyProvider) -> Value {
                 "maxTokens":32768,
                 "input":["text","image"],
                 "reasoningEfforts":{"low":"low","high":"high","max":"max"}
+            },
+            {
+                "id":"z-ai/glm-5.3-flash-uncensored",
+                "name":"GLM 5.3 Flash Uncensored"
             }
         ]);
     }
@@ -274,6 +315,28 @@ mod tests {
         ] {
             assert_eq!(credential_route(id), None);
         }
+    }
+
+    #[test]
+    fn venice_sessions_keep_their_native_route_and_managed_credential() {
+        let id = r#"["venice","deepseek-v4-1-flash"]"#;
+        let profile = provider_profile(KeyProvider::Venice);
+        assert_eq!(profile["apiKeyEnv"], "VENICE_API_KEY");
+        assert_eq!(profile["baseURL"], "https://api.venice.ai/api/v1");
+        assert_eq!(profile["models"][0]["id"], "deepseek-v4-1-flash");
+        let created = json!({"configOptions":[{"id":"model","currentValue":id,"options":[
+            {"value":id,"name":"DeepSeek V4.1 Flash"}
+        ]}]});
+        let credentials = [CredentialRoute {
+            provider: KeyProvider::Venice,
+            source: CredentialSource::Managed,
+            needs_attention: false,
+        }];
+        let models = catalog(&created, &credentials);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model.id, id);
+        assert_eq!(models[0].credential_route, Some(KeyProvider::Venice));
+        assert_eq!(models[0].display_name, "Venice AI · DeepSeek V4.1 Flash");
     }
     #[test]
     fn nanogpt_uses_its_own_endpoint_credential_and_reasoning_wire_values() {

@@ -424,15 +424,21 @@ impl DeepSeek {
         agent_local_host::save_private_json(&self.0.directory.join("conversations.json"), records)
             .map_err(failure)
     }
-    async fn change(&self, id: &str, change: SessionChange) -> Result<(), Failure> {
+    async fn checkpoint(&self, id: &str, changes: &[SessionChange]) -> Result<(), Failure> {
         let mut records = self.0.records.lock().await;
         let record = records
             .get_mut(id)
             .ok_or_else(|| failure("Unknown DeepSeek conversation"))?;
-        record.thread = change.apply(&record.thread).map_err(failure)?;
-        record.thread.updated_at = Some(now());
-        self.save(&records).await?;
-        drop(records);
+        let mut thread = record.thread.clone();
+        for change in changes {
+            thread = change.apply(&thread).map_err(failure)?;
+        }
+        thread.updated_at = Some(now());
+        record.thread = thread;
+        self.save(&records).await
+    }
+    async fn change(&self, id: &str, change: SessionChange) -> Result<(), Failure> {
+        self.checkpoint(id, std::slice::from_ref(&change)).await?;
         emit(
             &self.0.events,
             AgentChange::Session {
@@ -1125,8 +1131,7 @@ impl Agent for DeepSeek {
             },
         );
         user.client_input_id = Some(input.client_user_message_id.clone());
-        self.change(
-            &id,
+        let started = [
             SessionChange::Turn {
                 turn: Turn {
                     id: turn_id.clone(),
@@ -1137,15 +1142,26 @@ impl Agent for DeepSeek {
                 },
                 completed: false,
             },
-        )
-        .await?;
-        self.change(
-            &id,
             SessionChange::Status {
                 status: SessionStatus::Running,
             },
-        )
-        .await?;
+        ];
+        self.checkpoint(&id, &started).await?;
+        // Admission must finish before waiting for Host event processing. Keep
+        // startup ahead of ACP callbacks on the same ordered event queue.
+        for change in started {
+            self.0
+                .events
+                .send(AgentEvent {
+                    change: AgentChange::Session {
+                        session: session(&id),
+                        change,
+                    },
+                    applied: None,
+                })
+                .await
+                .map_err(failure)?;
+        }
         let adapter = self.clone();
         let running_turn = turn_id.clone();
         self.0.workers.lock().await.spawn(async move {
@@ -1661,6 +1677,110 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors["deepseek"]["code"], "provider_timeout");
         assert!(!errors.contains_key("claude"));
+    }
+
+    #[tokio::test]
+    async fn submission_is_checkpointed_before_receipt_without_waiting_for_event_acknowledgements()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("harness.js");
+        std::fs::write(
+            &program,
+            r#"
+const readline = require('node:readline');
+readline.createInterface({input: process.stdin}).on('line', line => {
+    const request = JSON.parse(line);
+    const result = request.method === 'initialize'
+        ? {protocolVersion: 1}
+        : request.method === 'session/prompt' ? {stopReason: 'end_turn'} : {};
+    process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: request.id, result}) + '\n');
+});
+"#,
+        )
+        .unwrap();
+        let adapter = DeepSeek::load(program, root.path().join("state"), None, None)
+            .await
+            .unwrap();
+        let id = "existing-session";
+        adapter.0.records.lock().await.insert(
+            id.into(),
+            ThreadResponse {
+                thread: Thread {
+                    id: Some(session(id)),
+                    cwd: Some(root.path().to_str().unwrap().into()),
+                    status: SessionStatus::Idle,
+                    turns: Some(vec![]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let mut events = adapter.event_stream().unwrap();
+        let input = op::Submission {
+            thread_id: session(id),
+            client_user_message_id: "existing-input".into(),
+            input: vec![op::Input::Text {
+                text: "Connection check".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(5),
+            adapter.submit(
+                &input,
+                SubmissionTarget::Start {
+                    cwd: root.path().to_str().unwrap(),
+                },
+                false,
+                None,
+            ),
+        )
+        .await
+        .expect("admission must not wait for the Host's event consumer")
+        .unwrap();
+        let saved = adapter.open(id, 100, true).await.unwrap();
+        assert_eq!(saved.thread.status, SessionStatus::Running);
+        assert_eq!(
+            saved.thread.turns.unwrap().last().unwrap().id,
+            receipt.turn_id.unwrap()
+        );
+        let started = events.recv().await.unwrap();
+        assert!(matches!(
+            started.change,
+            AgentChange::Session {
+                change: SessionChange::Turn {
+                    completed: false,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(started.applied.is_none());
+        let running = events.recv().await.unwrap();
+        assert!(matches!(
+            running.change,
+            AgentChange::Session {
+                change: SessionChange::Status {
+                    status: SessionStatus::Running
+                },
+                ..
+            }
+        ));
+        assert!(running.applied.is_none());
+        for _ in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            event.applied.unwrap().send(Ok(())).unwrap();
+        }
+        assert_eq!(
+            adapter.open(id, 100, true).await.unwrap().thread.status,
+            SessionStatus::Idle
+        );
+        adapter.shutdown().await;
     }
 
     #[tokio::test]
