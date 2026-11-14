@@ -44,7 +44,9 @@
       "host_rpc::runtime::t3_contract::native_fork_provenance_survives_provider_switches",
       "host_rpc::runtime::t3_contract::first_injection_recovery_keeps_its_provider_without_inventing_a_source_model",
       "host_rpc::storage::commands::tests::a_context_preparation_rejection_is_durable_without_partial_admission",
-      "host_rpc::storage::commands::tests::queued_context_failure_preserves_the_preceding_native_completion"
+      "host_rpc::storage::commands::tests::queued_context_failure_preserves_the_preceding_native_completion",
+      "host_rpc::runtime::t3_contract::context_history_reads_canonical_full_bodies_with_exact_unicode_continuations",
+      "host_rpc::runtime::t3_contract::context_history_inherits_only_the_selected_fork_prefix_with_source_identity"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",

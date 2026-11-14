@@ -2008,3 +2008,141 @@ async fn first_injection_recovery_keeps_its_provider_without_inventing_a_source_
     assert!(from_model_selections.as_ref().unwrap().is_empty());
     assert_eq!(to_model.as_deref(), Some("fixture"));
 }
+
+#[tokio::test]
+async fn context_history_reads_canonical_full_bodies_with_exact_unicode_continuations() {
+    use agent_protocol::handoff;
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let text = "日".repeat(4205);
+    let session = create(&service, directory.path().to_str().unwrap(), Some(&text)).await;
+    let saved = settled(&service, &session, 1).await;
+    let assistant = saved
+        .projection
+        .visible_turn_items
+        .iter()
+        .find(|row| matches!(row.item.body, model::TurnItemBody::AssistantMessage { .. }))
+        .unwrap();
+    let storage = &service.inner.conversation.storage;
+    let mut full = storage
+        .thread_item(&session, &assistant.source_item_id)
+        .unwrap()
+        .unwrap();
+    let model::TurnItemBody::AssistantMessage { text: body, .. } = &mut full.body else {
+        panic!("assistant")
+    };
+    *body = "🦀".repeat(10001);
+    storage
+        .observe_thread(&session.application_id(), &[], &commands::at(), |_| {
+            Ok(model::Decision {
+                changes: vec![model::Change::TurnItem(full)],
+                effects: vec![],
+            })
+        })
+        .unwrap();
+    let connection = service.open_session();
+    let read = |offset, text_offset| {
+        Call::ReadHandoffHistory(handoff::ReadHistory {
+            session: session.clone(),
+            offset,
+            limit: 1,
+            text_offset,
+        })
+    };
+    let first: handoff::Page = call(&service, connection.id(), read(0, 0)).await.unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].message.role, handoff::Role::User);
+    assert_eq!(first.items[0].message.text, "日".repeat(4000));
+    assert_eq!(first.items[0].next_text_offset, Some(4000));
+    assert_eq!(first.next_offset, Some(1));
+    assert!(
+        first.items[0]
+            .message
+            .source
+            .contains(&session.application_id())
+    );
+    let tail: handoff::Page = call(&service, connection.id(), read(0, 4000))
+        .await
+        .unwrap();
+    assert_eq!(tail.items[0].message.text, "日".repeat(205));
+    assert_eq!(tail.items[0].next_text_offset, None);
+    let answer: handoff::Page = call(&service, connection.id(), read(1, 8000))
+        .await
+        .unwrap();
+    assert_eq!(answer.items[0].position, 1);
+    assert_eq!(answer.items[0].message.text, "🦀".repeat(2001));
+    assert_eq!(answer.items[0].next_text_offset, None);
+    assert_eq!(answer.next_offset, None);
+    assert!(
+        answer.items[0]
+            .message
+            .source
+            .contains(&assistant.source_item_id)
+    );
+    let end: handoff::Page = call(&service, connection.id(), read(usize::MAX, 0))
+        .await
+        .unwrap();
+    assert!(end.items.is_empty() && end.next_offset.is_none());
+    assert_eq!(
+        agent.inputs.lock().unwrap().len(),
+        1,
+        "history never submits native input"
+    );
+}
+
+#[tokio::test]
+async fn context_history_inherits_only_the_selected_fork_prefix_with_source_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let source = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("selected-context"),
+    )
+    .await;
+    let first = settled(&service, &source, 1).await;
+    send(&service, &source, ProviderKind::Codex, "later-context").await;
+    settled(&service, &source, 2).await;
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let connection = service.open_session();
+    let _: agent_protocol::models::Empty = call(
+        &service,
+        connection.id(),
+        Call::ForkConversation(records::Fork {
+            source: source.clone(),
+            target: target.clone(),
+            through: first.projection.runs[0].id.clone().into(),
+        }),
+    )
+    .await
+    .unwrap();
+    let history: agent_protocol::handoff::Page = call(
+        &service,
+        connection.id(),
+        Call::ReadHandoffHistory(agent_protocol::handoff::ReadHistory {
+            session: target.clone(),
+            offset: 0,
+            limit: 20,
+            text_offset: 0,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(history.items.len(), 2);
+    assert_eq!(history.items[0].message.text, "selected-context");
+    assert!(
+        history
+            .items
+            .iter()
+            .all(|item| item.message.source.contains(&source.application_id()))
+    );
+    assert!(
+        !serde_json::to_string(&history)
+            .unwrap()
+            .contains("later-context")
+    );
+    assert!(snapshot(&service, &target).projection.runs.is_empty());
+    assert_eq!(agent.inputs.lock().unwrap().len(), 2);
+}
