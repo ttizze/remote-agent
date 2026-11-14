@@ -61,6 +61,9 @@ impl Storage {
                     &tx, &state, run, thread, pending, fresh, now,
                 )?);
             }
+            if !fresh && let Some(retry) = prepare_retry(&tx, &state, run, thread, thread.native_thread_ref.as_ref().and_then(|reference| reference.native_id.as_deref()), now)? {
+                changes.push(model::Change::ContextHandoff(retry));
+            }
             let mut decision = model::Decision {changes,effects:Vec::new()};
             if !fresh && let Some(native)=thread.native_thread_ref.as_ref().and_then(|reference|reference.native_id.as_deref()) {
                 let candidate=state.apply(&decision);
@@ -110,7 +113,7 @@ impl Storage {
             }
             let fork = state.unconsumed_fork().filter(|fork| fork.target_run_id.as_ref() == Some(&run.id) && thread.forked_from.is_some());
             let replaced = thread.native_thread_ref.as_ref().and_then(|old| old.native_id.as_ref()).is_some_and(|old| native.native_id.as_ref() != Some(old));
-            let changes = if !native_fork && fork.is_some() {
+            let mut changes = if !native_fork && fork.is_some() {
                 prepare(&tx, &state, run, thread, fork, false, now)?
             } else if !native_fork && replaced {
                 let changes = prepare(&tx, &state, run, thread, None, true, now)?;
@@ -121,6 +124,9 @@ impl Storage {
                 }
                 changes
             } else {Vec::new()};
+            if !replaced && let Some(retry) = prepare_retry(&tx, &state, run, thread, native.native_id.as_deref(), now)? {
+                changes.push(model::Change::ContextHandoff(retry));
+            }
             let prepared_thread = changes.iter().rev().find_map(|change|match change {model::Change::ProviderThread(value) if value.id == thread.id => Some(value), _=>None}).unwrap_or(thread);
             session.created_at = state.provider_sessions.get(&session.id).map_or_else(|| now.into(), |existing| existing.created_at.clone());
             let cwd = session.cwd.clone();
@@ -269,6 +275,127 @@ impl Storage {
     }
 }
 
+fn selected_context(
+    thread_id: &str,
+    covered: &model::CoveredRunOrdinals,
+    items: &[(model::TurnItem, Option<model::RunStatus>)],
+) -> Result<(String, history::SelectedHistory), projections::ReadError> {
+    let messages: Vec<_> = items
+        .iter()
+        .filter_map(|(item, status)| history::historical_message(item, *status))
+        .collect();
+    let coverage = format!(
+        "Provider context handoff. Thread: {}. Covered app runs: {}-{}.\nSource item range: {} through {}.\nRecover omitted history only when the request needs it. Items included below need no read.",
+        thread_id,
+        covered.from,
+        covered.to,
+        items.first().map_or("none", |(item, _)| item.id.as_str()),
+        items.last().map_or("none", |(item, _)| item.id.as_str())
+    );
+    let selected =
+        history::select_history(&messages, &coverage, 0, &[], history::DEFAULT_TOKEN_CAP)?;
+    Ok((coverage, selected))
+}
+
+/// Failed requests without a native turn are history, never inputs to resend.
+/// Settled delivery covers both selected and intentionally omitted items.
+fn prepare_retry(
+    connection: &Connection,
+    state: &model::State,
+    run: &model::Run,
+    thread: &model::ProviderThread,
+    native_id: Option<&str>,
+    now: &str,
+) -> Result<Option<model::ContextHandoff>, projections::ReadError> {
+    let accepted: std::collections::BTreeSet<_> = state
+        .provider_turns
+        .values()
+        .filter_map(|turn| turn.run_attempt_id.as_deref())
+        .collect();
+    let missed: Vec<_> = state
+        .runs
+        .values()
+        .filter(|source| {
+            source.ordinal < run.ordinal
+                && source.provider_thread_id.as_ref() == Some(&thread.id)
+                && matches!(
+                    source.status,
+                    model::RunStatus::Failed | model::RunStatus::Interrupted
+                )
+                && !source
+                    .active_attempt_id
+                    .as_deref()
+                    .is_some_and(|id| accepted.contains(id))
+        })
+        .collect();
+    let (Some(from), Some(to)) = (
+        missed.iter().map(|run| run.ordinal).min(),
+        missed.iter().map(|run| run.ordinal).max(),
+    ) else {
+        return Ok(None);
+    };
+    let covered_ids: std::collections::BTreeSet<_> = state
+        .context_handoffs
+        .values()
+        .filter(|handoff| handoff.to_provider_thread_id == thread.id)
+        .filter_map(|handoff| handoff.delivery.as_ref())
+        .filter(|delivery| {
+            Some(delivery.native_thread_id.as_str()) == native_id
+                && delivery.status != model::HandoffDeliveryStatus::Pending
+        })
+        .flat_map(|delivery| delivery.item_ids.iter().chain(&delivery.omitted_item_ids))
+        .collect();
+    let missed_ids: std::collections::BTreeSet<_> =
+        missed.iter().map(|run| run.id.as_str()).collect();
+    let items: Vec<_> = timeline::handoff_items(
+        connection,
+        &state.thread.id,
+        from.saturating_sub(1),
+        to,
+        false,
+    )?
+    .into_iter()
+    .filter(|(item, _)| {
+        item.run_id
+            .as_deref()
+            .is_some_and(|id| missed_ids.contains(id))
+            && !covered_ids.contains(&item.id)
+    })
+    .collect();
+    let covered = model::CoveredRunOrdinals { from, to };
+    let (coverage, selected) = selected_context(&state.thread.id, &covered, &items)?;
+    if selected.messages.is_empty() && selected.omitted_items == 0 {
+        return Ok(None);
+    }
+    Ok(Some(model::ContextHandoff {
+        id: model::derived_id("context-handoff", &[&run.id, "retry"]),
+        transfer_id: None,
+        thread_id: state.thread.id.clone(),
+        target_run_id: run.id.clone(),
+        from_provider_thread_ids: vec![thread.id.clone()],
+        to_provider_thread_id: thread.id.clone(),
+        covered_run_ordinals: covered,
+        strategy: model::HandoffStrategy::DeltaSinceTargetLastSeen,
+        status: model::HandoffStatus::Ready,
+        summary_message_id: None,
+        history: Some(model::HandoffHistory {
+            messages: selected
+                .messages
+                .into_iter()
+                .map(|message| message.message)
+                .collect(),
+            coverage,
+            omitted_items: selected.omitted_items as u64,
+            omitted_item_ids: selected.omitted_item_ids,
+        }),
+        delivery: None,
+        detail_in_turn_item: false,
+        created_by_provider_instance_id: None,
+        created_at: now.into(),
+        updated_at: now.into(),
+    }))
+}
+
 fn prepare(
     connection: &Connection,
     state: &model::State,
@@ -310,13 +437,6 @@ fn prepare(
             .map_or(0, |run| run.ordinal)
     };
     let items = timeline::handoff_items(connection, &source.thread.id, after, through, after == 0)?;
-    let messages: Vec<_> = items
-        .iter()
-        .filter_map(|(item, status)| history::historical_message(item, *status))
-        .collect();
-    if messages.is_empty() && fork.is_none() && !fresh {
-        return Ok(Vec::new());
-    }
     let covered_runs: Vec<_> = source
         .runs
         .values()
@@ -350,16 +470,10 @@ fn prepare(
             to: ordinals.iter().max().copied().unwrap_or(1),
         }
     };
-    let coverage = format!(
-        "Provider context handoff. Thread: {}. Covered app runs: {}-{}.\nSource item range: {} through {}.\nRecover omitted history only when the request needs it. Items included below need no read.",
-        source.thread.id,
-        covered.from,
-        covered.to,
-        items.first().map_or("none", |(item, _)| item.id.as_str()),
-        items.last().map_or("none", |(item, _)| item.id.as_str())
-    );
-    let selected =
-        history::select_history(&messages, &coverage, 0, &[], history::DEFAULT_TOKEN_CAP)?;
+    let (coverage, selected) = selected_context(&source.thread.id, &covered, &items)?;
+    if selected.messages.is_empty() && selected.omitted_items == 0 && fork.is_none() && !fresh {
+        return Ok(Vec::new());
+    }
     let scope = if fresh {
         format!(
             "recovery:{}",
