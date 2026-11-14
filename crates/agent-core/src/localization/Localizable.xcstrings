@@ -2109,6 +2109,38 @@
         }
       }
     },
+    "表": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "表"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Table"
+          }
+        }
+      }
+    },
+    "表は最初の100行・30列までです。続きはソースで確認できます。": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "表は最初の100行・30列までです。続きはソースで確認できます。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Table limited to the first 100 rows and 30 columns. Source shows the rest."
+          }
+        }
+      }
+    },
     "表を表示": {
       "localizations": {
         "ja": {

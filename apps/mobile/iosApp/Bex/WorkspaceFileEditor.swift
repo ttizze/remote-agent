@@ -134,6 +134,13 @@ private struct WorkspaceFilePreview: View {
     }
 }
 
+/// What a Markdown file's preview reaches of the conversation it was opened from.
+struct WorkspaceFilePreviewAccess {
+    let media: @MainActor (ConversationMediaPresentation, @escaping (WorkspaceDestination) -> Void)
+        -> ConversationMediaAccess
+    let addToChat: (String) -> Void
+}
+
 struct WorkspaceFileSheet: View {
     let files: AgentCore.Files
     let paneId: String
@@ -142,6 +149,9 @@ struct WorkspaceFileSheet: View {
     let entry: FileEntry
     let line: UInt32?
     let download: @MainActor (String) async throws -> URL
+    let previewAccess: WorkspaceFilePreviewAccess
+    /// Opens a file a previewed Markdown file links to, in place of this one.
+    let openFile: (String, UInt32?) -> Void
     let aiEdit: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var error: String?
@@ -150,8 +160,26 @@ struct WorkspaceFileSheet: View {
     @State private var initialized = false
     @State private var confirmReload = false
     @State private var selection: TextSelection?
+    /// The reader's choice of preview or source; until then T3 Code's mobile default.
+    @State private var previewChosen: Bool?
+    @State private var mediaPresentation = ConversationMediaPresentation()
     private var controls: FileEditorPresentation {
         files.fileEditor(path: entry.path)
+    }
+
+    private var offeredPreview: MobileFilePreview? {
+        let preview = mobileFilePreview(path: entry.path)
+        #if BEX_NSH_CONVERSATION
+            // The message renderer a Markdown preview uses is not part of this build.
+            return preview == .markdown ? nil : preview
+        #else
+            return preview
+        #endif
+    }
+
+    private var previewing: Bool {
+        guard let offeredPreview else { return false }
+        return previewChosen ?? mobileFilePreviewOpens(preview: offeredPreview, line: line)
     }
 
     var body: some View {
@@ -174,6 +202,10 @@ struct WorkspaceFileSheet: View {
                 }
                 if controls.truncated {
                     AppText("file.preview.truncated").font(.caption).padding(.horizontal)
+                }
+                if let offeredPreview, previewing {
+                    preview(offeredPreview)
+                } else if controls.truncated {
                     FileTextPreview(text: controls.text, line: line)
                 } else {
                     BufferedTextInput(value: $text) { TextEditor(text: $0, selection: $selection) }
@@ -211,7 +243,22 @@ struct WorkspaceFileSheet: View {
                     }.disabled(busy || !controls.canSave)
                         .accessibilityIdentifier("file.save")
                 }
+                if let offeredPreview {
+                    // T3 Code's mobile file menu: Preview (Table for a delimited file) and Source.
+                    ToolbarItem(placement: .primaryAction) {
+                        Button { previewChosen = !previewing } label: {
+                            if previewing {
+                                Label("ソース", systemImage: "doc.text")
+                            } else if offeredPreview == .table {
+                                Label("表", systemImage: "tablecells")
+                            } else {
+                                Label("プレビュー", systemImage: "eye")
+                            }
+                        }.accessibilityIdentifier("file.preview.toggle")
+                    }
+                }
             }
+            .modifier(ConversationMediaPresenter(presentation: mediaPresentation))
             .onChange(of: controls.loadedRevision) { moveToLine() }
             .onAppear {
                 if !initialized {
@@ -224,6 +271,33 @@ struct WorkspaceFileSheet: View {
                 }
             }
             .sheet(item: $sharedFile) { ShareSheet(file: $0) }
+        }
+    }
+
+    @ViewBuilder private func preview(_ offered: MobileFilePreview) -> some View {
+        switch offered {
+        case .table:
+            FileTablePreview(table: mobileFileTable(text: controls.text, path: entry.path))
+        case .markdown:
+            #if BEX_NSH_CONVERSATION
+                EmptyView()
+            #else
+                FileMarkdownPreview(
+                    text: controls.text,
+                    path: entry.path,
+                    media: previewAccess.media(mediaPresentation) { destination in
+                        if let path = destination.filePath {
+                            openFile(path, destination.fileLine)
+                        }
+                    },
+                    addToChat: previewAccess.addToChat,
+                    refresh: {
+                        await withCheckedContinuation { continuation in
+                            load(restoreDraft: true) { continuation.resume() }
+                        }
+                    }
+                )
+            #endif
         }
     }
 
@@ -246,10 +320,11 @@ struct WorkspaceFileSheet: View {
         selection = TextSelection(range: start ..< start)
     }
 
-    private func load(restoreDraft: Bool) {
+    private func load(restoreDraft: Bool, completion: @escaping () -> Void = {}) {
         busy = true; error = nil
         perform(.readFile(ReadFile(path: entry.path, discardDraft: !restoreDraft))) { snapshot, result in
             busy = false
+            completion()
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
             }
@@ -258,6 +333,85 @@ struct WorkspaceFileSheet: View {
                 error = notice
             }
         }
+    }
+}
+
+#if !BEX_NSH_CONVERSATION
+    /// T3 Code's mobile `FileMarkdownPreview`: the file as a message renders it, 18 points in
+    /// and at most 760 wide; pulling it down reads the file again.
+    private struct FileMarkdownPreview: View {
+        let text: String
+        let path: String
+        let media: ConversationMediaAccess
+        let addToChat: (String) -> Void
+        let refresh: () async -> Void
+        @State private var parts: [ConversationMarkdownContent.Part] = []
+
+        var body: some View {
+            ScrollView {
+                ConversationMarkdown(
+                    blocks: parts,
+                    media: media,
+                    selection: ConversationSelectionActions(addToChat: addToChat, askInSideChat: nil),
+                    textIdentifier: "file.preview.markdown"
+                )
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                .padding(18)
+            }
+            .refreshable { await refresh() }
+            .task(id: text) {
+                let (text, path) = (text, path)
+                let parsed = await Task.detached(priority: .userInitiated) {
+                    ConversationMarkdownContent.parts(mobileFileMarkdownBlocks(source: text, path: path))
+                }.value
+                if !Task.isCancelled {
+                    parts = parsed
+                }
+            }
+        }
+    }
+#endif
+
+/// T3 Code's mobile `DelimitedFilePreview`: 12-rem cells with hairlines, the first row
+/// heading the columns, and a notice when the table leaves some of the file out.
+private struct FileTablePreview: View {
+    let table: MobileFileTable
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if table.truncated {
+                    AppText("表は最初の100行・30列までです。続きはソースで確認できます。")
+                        .font(.caption).foregroundStyle(.secondary).padding()
+                }
+                ScrollView(.horizontal) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(table.rows.indices, id: \.self) { row in
+                            HStack(alignment: .top, spacing: 0) {
+                                ForEach(table.rows[row].indices, id: \.self) { column in
+                                    Text(verbatim: table.rows[row][column])
+                                        .font(row == 0 ? .subheadline.weight(.semibold) : .subheadline)
+                                        .textSelection(.enabled)
+                                        .padding(.horizontal, 12).padding(.vertical, 8)
+                                        .frame(width: 192, alignment: .leading)
+                                        .frame(maxHeight: .infinity, alignment: .top)
+                                        .overlay(alignment: .trailing) { hairline.frame(width: 0.5) }
+                                }
+                            }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .background(row == 0 ? Color(UIColor.secondarySystemBackground) : Color.clear)
+                            .overlay(alignment: .bottom) { hairline.frame(height: 0.5) }
+                        }
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("file.preview.table")
+    }
+
+    private var hairline: some View {
+        Rectangle().fill(Color(UIColor.separator))
     }
 }
 
