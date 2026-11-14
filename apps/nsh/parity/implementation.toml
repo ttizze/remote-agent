@@ -3,7 +3,7 @@
 # Pure UI state does not require a new shared Rust business model.
 # This file is not a record of runtime acceptance results.
 
-revision = "f3f4c802bac275c13771f6caab3ce998430eec18"
+revision = "a626ca95d15402d3cc85e7c5c1b5d017e98c410b"
 
 [sources]
 agents = "crates/agent-core/src/presentation/agents.rs"
@@ -78,6 +78,7 @@ media = "crates/agent-core/src/presentation/media.rs"
 models = "crates/agent-protocol/src/models.rs"
 operations = "crates/agent-protocol/src/operations.rs"
 panels = "crates/agent-core/src/panels.rs"
+persistence = "crates/agent-core/src/persistence.rs"
 permissions = "crates/agent-core/src/presentation/permissions.rs"
 preparation = "crates/agent-core/src/presentation/conversation/preparation.rs"
 questions = "crates/agent-core/src/questions.rs"
@@ -88,6 +89,7 @@ search = "crates/agent-core/src/presentation/conversation/search.rs"
 settings = "crates/agent-core/src/presentation/model_settings.rs"
 shared_swift = "apps/native-ui/Sources/NativeUI/Conversation.swift"
 state = "crates/agent-core/src/state.rs"
+stash = "crates/agent-core/src/composer/stash.rs"
 terminals = "crates/agent-core/src/presentation/terminals.rs"
 timeline = "crates/agent-core/src/presentation/conversation/timeline.rs"
 tools = "crates/agent-core/src/presentation/body/tool_output.rs"
@@ -808,9 +810,9 @@ windows = { status = "partial", detail = "invocation候補と空/取得中はあ
 
 [[implementation]]
 components = ["stash", "stash-badge"]
-phase = "shared"
-next = "共通に退避下書き一覧と添付保存の操作を追加する。"
-rust = { status = "missing", detail = "通常の下書き保存はある。複数下書きの退避・復元・削除と添付の保存状態/退避時刻を持つ一覧がない。", evidence = ["state", "intents"] }
+phase = "restore"
+next = "共通の退避一覧・件数・添付の利用可否をネイティブ入力欄へ接続する。"
+rust = { status = "present", detail = "本文・画像/ファイル参照・invocation・構造化Contextを最大20件保持し、退避/追記復元/削除、退避時刻、件数、添付の確認状態を扱う。現在のモデル設定を保持し、Context IDと内部参照を再割当する。下書きと一体保存しHost保存領域で分離する。満杯時は既存の退避を残してエラーにする。", evidence = ["stash", "state", "composer", "persistence"] }
 mac = { status = "missing", detail = "退避一覧・復元/削除・件数バッジがない。", evidence = ["desktop_composer"] }
 iphone = { status = "missing", detail = "退避一覧・復元/削除・件数バッジがない。", evidence = ["iphone_composer"] }
 windows = { status = "missing", detail = "退避一覧・復元/削除・件数バッジがない。", evidence = ["desktop_composer"] }
