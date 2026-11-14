@@ -1,7 +1,7 @@
 use super::*;
 use crate::host_rpc::{
     routing::{HostSubscription, SessionId},
-    runtime::native_fixture::{NativeAgent, call},
+    runtime::native_fixture::{NativeAgent, Transcript, call},
 };
 use agent_protocol::{
     conversation::{Command, InputContent, records},
@@ -13,11 +13,11 @@ use std::{path::Path, sync::atomic::Ordering, time::Duration};
 
 struct Updates {
     stream: HostSubscription,
-    replica: records::Replica,
+    replica: Transcript,
 }
 impl Updates {
     fn view(&self) -> Thread {
-        records::project(&self.replica).unwrap().thread
+        self.replica.project().unwrap().thread
     }
 }
 fn request(cwd: &Path) -> Call {
@@ -52,14 +52,10 @@ async fn admit(host: &HostRpcService, client: SessionId, request: &Call) -> (Ses
     else {
         panic!("admission")
     };
-    let replica = records::Replica::new(
-        agent_protocol::sync::Scope::Conversation(result.session.clone()),
-        1,
-    )
-    .apply(1, result.initial)
-    .unwrap();
+    let session = result.session.clone();
+    let replica = Transcript::opened(result);
     (
-        result.session,
+        session,
         Updates {
             stream: reply.updates.unwrap(),
             replica,
@@ -75,7 +71,7 @@ async fn until(updates: &mut Updates, predicate: impl Fn(&Thread) -> bool) -> Th
             }
             let message =
                 agent_protocol::protocol::decode(&updates.stream.recv().await.unwrap()).unwrap();
-            updates.replica = updates.replica.apply(1, message).unwrap();
+            updates.replica = updates.replica.clone().apply(message).unwrap();
         }
     })
     .await
@@ -255,10 +251,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
     .await
     .unwrap();
     assert!(
-        matches!(
-            stopped.outcome,
-            agent_protocol::conversation::Outcome::Rejected(_)
-        ),
+        stopped.error.is_some(),
         "agent startup has passed the cancellation boundary"
     );
     assert_eq!(
@@ -280,8 +273,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         &Call::SubscribeConversation(records::Subscribe {
             session: opened.clone(),
             subscription: Uuid::new_v4(),
-            cached: None,
-            window: None,
+            after_sequence: None,
         }),
     )
     .await;
@@ -354,10 +346,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        rewound.outcome,
-        agent_protocol::conversation::Outcome::Accepted
-    );
+    assert_eq!(rewound.error, None);
     let operation = Uuid::new_v4();
     let next: records::Acknowledged = call(
         &fixture.host,
@@ -381,10 +370,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
     )
     .await
     .unwrap();
-    assert_eq!(
-        next.outcome,
-        agent_protocol::conversation::Outcome::Accepted
-    );
+    assert_eq!(next.error, None);
     let rebound = until(&mut updates, |thread| {
         thread.turns.as_ref().is_some_and(|turns| {
             turns.last().is_some_and(|latest| {
@@ -457,8 +443,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
             &Call::SubscribeConversation(records::Subscribe {
                 session: target.clone(),
                 subscription: Uuid::new_v4(),
-                cached: None,
-                window: None,
+                after_sequence: None,
             }),
         )
         .await;
@@ -1311,7 +1296,7 @@ async fn cancellation_between_stages_stops_an_async_script_before_discarding_its
         )
         .await
         .unwrap();
-        assert_eq!(result.outcome, decision::Outcome::Accepted);
+        assert_eq!(result.error, None);
         let mut changed = host.inner.conversation.storage.changes();
         loop {
             let workspace = host

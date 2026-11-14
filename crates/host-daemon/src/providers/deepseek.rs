@@ -641,6 +641,17 @@ impl Rpc {
 }
 #[async_trait::async_trait]
 impl AnswerSource for Rpc {
+    fn approval_decision(
+        &self,
+        choice: &Choice,
+    ) -> agent_protocol::orchestration::ApprovalDecision {
+        use agent_protocol::orchestration::ApprovalDecision as Decision;
+        if choice.effect == ChoiceEffect::AllowLasting {
+            Decision::AcceptAlways
+        } else {
+            super::requests::approval_decision(choice.effect)
+        }
+    }
     fn is_alive(&self) -> bool {
         !self.stop.is_cancelled()
     }

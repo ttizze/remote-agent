@@ -111,6 +111,15 @@ impl From<Claude> for Backend {
 #[async_trait::async_trait]
 pub(crate) trait AnswerSource: Send + Sync {
     fn is_alive(&self) -> bool;
+    fn request_kind(&self, body: &agent_protocol::requests::RequestBody) -> &'static str {
+        requests::request_kind(body)
+    }
+    fn approval_decision(
+        &self,
+        choice: &agent_protocol::requests::Choice,
+    ) -> agent_protocol::orchestration::ApprovalDecision {
+        requests::approval_decision(choice.effect)
+    }
     async fn prepare(
         &self,
         native_id: &Value,

@@ -32,6 +32,7 @@ impl Operation for ResolveFileReference {
         let path = &self.path;
         if !path.contains('\0')
             && (agent_protocol::paths::is_absolute_host_path(path)
+                || agent_protocol::paths::attachment_file_name(path).is_some()
                 || path == "~"
                 || path.starts_with("~/")
                 || path.starts_with("~\\"))

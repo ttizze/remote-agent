@@ -153,16 +153,9 @@ impl Operation for StartSubmission {
             draft_key: self.thread_id.clone().into(),
         })
     }
-    type Input = Arc<agent_protocol::conversation::records::Replica>;
+    type Input = super::super::conversations::Capture;
     fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
-        snapshot
-            .sessions
-            .replicas
-            .get(&self.thread_id)
-            .cloned()
-            .ok_or_else(|| {
-                PeerError::InvalidMessage("conversation creation was not scheduled".into())
-            })
+        super::super::conversations::capture(snapshot, &self.thread_id)
     }
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
@@ -175,10 +168,7 @@ impl Operation for StartSubmission {
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::StartedThread {
-            id: match output.replica.scope() {
-                agent_protocol::sync::Scope::Conversation(id) => id.clone(),
-                _ => unreachable!("conversation operation"),
-            },
+            id: output.session.clone(),
         }
     }
     async fn run(
@@ -254,7 +244,7 @@ impl Operation for SendSubmission {
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
     }
-    type Output = agent_protocol::sync::Cursor;
+    type Output = u64;
     fn outcome(_: &mut Self::Output) -> Outcome {
         Outcome::Submitted
     }

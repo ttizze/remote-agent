@@ -20,13 +20,6 @@ CREATE TABLE threads (
 CREATE UNIQUE INDEX threads_identity ON threads (ifnull(provider, ''), id);
 CREATE INDEX threads_children ON threads (parent) WHERE parent IS NOT NULL;
 
-CREATE TABLE projects (
-    id TEXT PRIMARY KEY,
-    position INTEGER NOT NULL,
-    body BLOB NOT NULL              -- 名前、フォルダ
-) STRICT;
-CREATE UNIQUE INDEX projects_position ON projects (position);
-
 CREATE TABLE inputs (
     id TEXT PRIMARY KEY,            -- 操作の識別子を兼ね、配送後は発言の項目の識別子になる
     thread INTEGER NOT NULL REFERENCES threads (key) ON DELETE CASCADE,
@@ -162,5 +155,3 @@ CREATE TABLE jobs (
 ) STRICT;
 CREATE INDEX jobs_due ON jobs (run_after, position) WHERE state = 'pending';
 CREATE INDEX jobs_lane ON jobs (lane, position);
-
-CREATE TABLE workspace_scripts (root TEXT PRIMARY KEY, body BLOB NOT NULL) STRICT;

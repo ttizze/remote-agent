@@ -8,7 +8,7 @@ use agent_protocol::{
 };
 
 #[tokio::test]
-async fn unreadable_details_keep_other_history_and_can_be_retried_individually() {
+async fn unreadable_message_body_can_be_retried_without_importing_native_tool_cards() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
         let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
@@ -69,47 +69,23 @@ async fn unreadable_details_keep_other_history_and_can_be_retried_individually()
             },
         );
         agent.unreadable.lock().unwrap().insert("answer".into());
-        let service = HostRpcService::new(
-            [agent.backend()],
-            directory.path().join("projects.json"),
-        );
+        let service =
+            HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         let imported = Runtime::native_history(&service, &native).await.unwrap();
         let items = imported.thread.turns.as_ref().unwrap()[0]
             .items
             .as_ref()
             .unwrap();
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 1);
         assert_eq!(items[0].id.as_str(), "answer");
         assert!(items[0].is_deferred());
-        assert!(items[1].is_image_output());
         assert_eq!(
             imported.thread.history_read_state.as_ref().unwrap().kind,
             agent_protocol::session::HistoryReadKind::Partial
         );
         own(&service, &public, &imported);
-        let connection = service.open_session();
-        let subscription = Uuid::new_v4();
-        let mut opened = service
-            .inner
-            .conversation
-            .owners
-            .subscribe(
-                &public,
-                connection.id(),
-                subscription,
-                None,
-                None,
-                service.inner.router.queue_budget(connection.id()).unwrap(),
-            )
-            .await
-            .unwrap();
-        let request = Call::HydrateConversation(records::Hydrate {
-            session: public.clone(),
-            subscription,
-            item: "answer".into(),
-        });
         assert!(
-            call::<records::Hydrated>(&service, connection.id(), request.clone())
+            Runtime::hydrate_native(&service, &public, &"answer".into())
                 .await
                 .is_err()
         );
@@ -124,24 +100,23 @@ async fn unreadable_details_keep_other_history_and_can_be_retried_individually()
                 .deferred
         );
         agent.unreadable.lock().unwrap().clear();
-        let response: records::Hydrated = call(&service, connection.id(), request).await.unwrap();
-        assert!(response.transfer.is_none());
-        let mut found = false;
-        while !found {
-            let message: records::Message = agent_protocol::protocol::decode(&opened.subscription.recv().await.unwrap()).unwrap();
-            if let records::Message::Hydrate { row, .. } = message {
-                let (agent_protocol::sync::Content::Full(record) | agent_protocol::sync::Content::Summary(record)) = row.content;
-                if let records::Record::Item(item) = record.as_ref() {
-                    found = !item.content.is_deferred() && matches!(item.content.body(), ItemBody::AssistantText { text, .. } if text == &body);
-                }
-            }
-        }
+        Runtime::hydrate_native(&service, &public, &"answer".into())
+            .await
+            .unwrap();
+        let saved = service
+            .inner
+            .conversation
+            .storage
+            .item(&public, &"answer".into())
+            .unwrap()
+            .unwrap();
+        assert!(!saved.deferred);
+        assert!(matches!(&saved.body,ItemBody::AssistantText {text,..} if text==&body));
         // Once canonical, reading no longer needs the native body.
         agent.unreadable.lock().unwrap().insert("answer".into());
         Runtime::hydrate_native(&service, &public, &"answer".into())
             .await
             .unwrap();
-        drop(opened.subscription);
     })
     .await
     .unwrap();

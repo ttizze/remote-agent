@@ -286,20 +286,15 @@ mod tests {
                     session.clone()
                 },
                 subscription_id: uuid::Uuid::from_u128(u128::MAX - 3),
-                initial: Message::Snapshot {
-                    cursor: Cursor {
-                        store: uuid::Uuid::from_u128(u128::MAX - 4),
-                        sequence: 1,
-                    },
-                    window: Some(Window { turn: 0, item: 0 }),
-                    rows: vec![],
-                },
+                initial: vec![crate::orchestration::projection::ThreadStreamItem::Synchronized],
+                provider: ProviderKind::Codex,
+                capabilities: Default::default(),
+                project_root: None,
             };
             let request = Subscribe {
                 session: session.clone(),
                 subscription: uuid::Uuid::from_u128(u128::MAX - 5),
-                cached: None,
-                window: None,
+                after_sequence: None,
             };
             assert_eq!(request.validate(&response), Err(expected));
             let create = Create {

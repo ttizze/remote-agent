@@ -18,19 +18,56 @@ impl Operation for ReadHistory {
             session: self.session.clone(),
         })
     }
-    type Input = uuid::Uuid;
+    type Input = (uuid::Uuid, String);
     fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
-        super::super::conversations::read_scope(snapshot, &self.session)
+        let scope = super::super::conversations::read_scope(snapshot, &self.session)?;
+        let cursor = snapshot
+            .sessions
+            .projections
+            .get(&self.session)
+            .and_then(|snapshot| snapshot.history_cursor.clone())
+            .ok_or_else(|| PeerError::InvalidMessage("no earlier history is available".into()))?;
+        Ok((scope, cursor))
     }
-    type Output = ();
-    async fn run(&self, scope: Self::Input, context: &mut Execution<'_>) -> Result<(), PeerError> {
-        context
+    type Output = (
+        Self::Input,
+        agent_protocol::orchestration::projection::ThreadHistoryPage,
+    );
+    async fn run(
+        &self,
+        input: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        let page = context
             .call(&agent_protocol::conversation::records::Extend {
                 session: self.session.clone(),
-                subscription: scope,
+                cursor: input.1.clone(),
             })
             .await?;
-        Ok(())
+        Ok((input, page))
+    }
+    fn complete(
+        self,
+        snapshot: &mut Snapshot,
+        _pane: &str,
+        ((subscription, cursor), page): Self::Output,
+        current: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
+        if !current || snapshot.sessions.subscriptions.get(&self.session) != Some(&subscription) {
+            return Ok(Vec::new());
+        }
+        let next = snapshot
+            .sessions
+            .projections
+            .get(&self.session)
+            .and_then(|snapshot| crate::orchestration::receive_history(snapshot, &cursor, page));
+        if let Some(next) = next {
+            Arc::make_mut(&mut snapshot.sessions.expanded_history).insert(self.session.clone());
+            Arc::make_mut(&mut snapshot.sessions.projections)
+                .insert(self.session.clone(), Arc::new(next));
+            return super::super::conversations::refresh(snapshot, &self.session);
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -87,34 +124,51 @@ impl Operation for ReadItem {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::Item { item: self.clone() })
     }
-    type Input = uuid::Uuid;
+    type Input = (uuid::Uuid, String);
     fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
         if item_source(self, snapshot).is_none() {
             return Err(PeerError::InvalidMessage(
                 "item does not belong to the requested turn".into(),
             ));
         }
-        super::super::conversations::read_scope(snapshot, &self.thread_id)
+        let source = snapshot
+            .sessions
+            .projections
+            .get(&self.thread_id)
+            .and_then(|snapshot| {
+                snapshot
+                    .projection
+                    .visible_turn_items
+                    .iter()
+                    .find(|row| row.source_item_id == self.item_id.as_str())
+            })
+            .map(|row| row.source_thread_id.clone())
+            .ok_or_else(|| PeerError::InvalidMessage("item source is missing".into()))?;
+        Ok((
+            super::super::conversations::read_scope(snapshot, &self.thread_id)?,
+            source,
+        ))
     }
     fn scheduling(&self) -> Scheduling {
         Scheduling::Item(self.clone())
     }
-    type Output = (uuid::Uuid, Option<(u64, crate::models::Item)>);
+    type Output = (uuid::Uuid, Option<agent_protocol::orchestration::TurnItem>);
     async fn run(
         &self,
-        scope: Self::Input,
+        (subscription, source): Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
         let response = context
             .call(&agent_protocol::conversation::records::Hydrate {
-                session: self.thread_id.clone(),
-                subscription: scope,
+                session: crate::session::SessionRef::new(None, source)
+                    .map_err(|error| PeerError::InvalidMessage(error.into()))?,
                 item: self.item_id.clone(),
             })
             .await?;
-        let body =
-            crate::client::resolve_hydration(response, &self.item_id, context.session).await?;
-        Ok((scope, body))
+        Ok((
+            subscription,
+            crate::client::resolve_hydration(response, &self.item_id, context.session).await?,
+        ))
     }
     fn complete(
         self,
@@ -126,29 +180,23 @@ impl Operation for ReadItem {
         if !current || snapshot.sessions.subscriptions.get(&self.thread_id) != Some(&subscription) {
             return Ok(Vec::new());
         }
-        if let Some((version, item)) = body {
+        if let Some(item) = body {
+            let key = (item.thread_id.clone(), item.id.clone());
             let valid = snapshot
                 .sessions
-                .replicas
+                .projections
                 .get(&self.thread_id)
-                .and_then(|replica| {
-                    replica.rows().get(&agent_protocol::sync::Key::Item {
-                        thread: self.thread_id.clone(),
-                        id: self.item_id.clone(),
+                .is_some_and(|snapshot| {
+                    snapshot.projection.visible_turn_items.iter().any(|row| {
+                        row.source_thread_id == key.0
+                            && row.source_item_id == key.1
+                            && crate::orchestration::same_detail_revision(&row.item, &item)
                     })
-                })
-                .is_some_and(|row| row.version == version);
-            if !valid && item_source(&self, snapshot).is_some_and(|item| item.is_deferred()) {
-                // This only retries invalidated large body bytes, never state
-                // frames: metadata and paging arrive once on the subscription.
-                return Ok(vec![Effect::continuation(self)]);
+                });
+            if valid {
+                Arc::make_mut(&mut snapshot.sessions.item_details).insert(key, Arc::new(item));
+                return super::super::conversations::refresh(snapshot, &self.thread_id);
             }
-            return super::super::conversations::hydrate_body(
-                snapshot,
-                &self.thread_id,
-                version,
-                item,
-            );
         }
         Ok(Vec::new())
     }
@@ -192,16 +240,9 @@ impl Operation for ReadThread {
             session: self.thread_id.clone(),
         })
     }
-    type Input = Arc<agent_protocol::conversation::records::Replica>;
+    type Input = super::super::conversations::Capture;
     fn capture(&self, snapshot: &Snapshot, _pane_id: &str) -> Result<Self::Input, PeerError> {
-        snapshot
-            .sessions
-            .replicas
-            .get(&self.thread_id)
-            .cloned()
-            .ok_or_else(|| {
-                PeerError::InvalidMessage("conversation subscription was not scheduled".into())
-            })
+        super::super::conversations::capture(snapshot, &self.thread_id)
     }
 
     type Output = super::super::conversations::Opened;
@@ -214,8 +255,10 @@ impl Operation for ReadThread {
             .call(&agent_protocol::conversation::records::Subscribe {
                 session: self.thread_id.clone(),
                 subscription: uuid::Uuid::nil(),
-                cached: replica.cursor(),
-                window: replica.window(),
+                after_sequence: replica
+                    .projection
+                    .as_ref()
+                    .map(|snapshot| snapshot.snapshot_sequence),
             })
             .await?;
         super::super::conversations::opened(&replica, response)
@@ -390,7 +433,7 @@ async fn command(
     context: &mut Execution<'_>,
     session: &crate::session::SessionRef,
     command: agent_protocol::conversation::Command,
-) -> Result<agent_protocol::sync::Cursor, PeerError> {
+) -> Result<u64, PeerError> {
     crate::client::command_result(
         context
             .call(&agent_protocol::conversation::records::Change {
@@ -485,7 +528,8 @@ fn sent_input(
         match part {
             MessagePart::Text { text } => texts.push(text.as_str()),
             MessagePart::Image { source }
-                if agent_protocol::paths::is_absolute_host_path(source) =>
+                if agent_protocol::paths::is_absolute_host_path(source)
+                    || agent_protocol::paths::attachment_file_name(source).is_some() =>
             {
                 attachments.push(Attachment {
                     name: file_name(source),
@@ -518,7 +562,7 @@ impl Operation for RewindSession {
         })
     }
     type Input = (String, Option<(String, Vec<Attachment>)>);
-    type Output = (Self::Input, agent_protocol::sync::Cursor);
+    type Output = (Self::Input, u64);
     fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
         let turns = snapshot
             .sessions
@@ -601,7 +645,7 @@ impl Operation for RetryPreparation {
         })
     }
     no_input!();
-    type Output = agent_protocol::sync::Cursor;
+    type Output = u64;
     async fn run(
         &self,
         _: Self::Input,
@@ -633,16 +677,9 @@ impl Operation for StartConversation {
             self.target.clone(),
         ))
     }
-    type Input = Arc<agent_protocol::conversation::records::Replica>;
+    type Input = super::super::conversations::Capture;
     fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
-        snapshot
-            .sessions
-            .replicas
-            .get(&self.target)
-            .cloned()
-            .ok_or_else(|| {
-                PeerError::InvalidMessage("conversation creation was not scheduled".into())
-            })
+        super::super::conversations::capture(snapshot, &self.target)
     }
     type Output = super::super::conversations::Opened;
     async fn run(
@@ -686,10 +723,7 @@ impl Operation for StartConversation {
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::StartedThread {
-            id: match output.replica.scope() {
-                agent_protocol::sync::Scope::Conversation(id) => id.clone(),
-                _ => unreachable!("conversation operation"),
-            },
+            id: output.session.clone(),
         }
     }
 }
@@ -707,7 +741,7 @@ impl Operation for Interrupt {
         })
     }
     no_input!();
-    type Output = agent_protocol::sync::Cursor;
+    type Output = u64;
     async fn run(
         &self,
         _: Self::Input,
@@ -733,7 +767,7 @@ impl Operation for ChangeQueue {
         })
     }
     no_input!();
-    type Output = agent_protocol::sync::Cursor;
+    type Output = u64;
     async fn run(
         &self,
         _: Self::Input,
@@ -978,14 +1012,7 @@ mod tests {
                 draft: snapshot.sessions.pending_submissions["input"].draft.clone(),
                 follow_up: Default::default(),
             }
-            .apply(
-                &mut snapshot,
-                "",
-                agent_protocol::sync::Cursor {
-                    store: uuid::Uuid::from_u128(1),
-                    sequence: 7,
-                },
-            );
+            .apply(&mut snapshot, "", 7);
             let mut response = crate::models::ThreadResponse {
                 thread: Thread {
                     id: Some(id.clone()),

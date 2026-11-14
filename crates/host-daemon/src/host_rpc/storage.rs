@@ -19,17 +19,27 @@ use uuid::Uuid;
 mod activity;
 mod bodies;
 mod catalog;
+pub(in crate::host_rpc) mod checkpoints;
 mod codec;
+pub(in crate::host_rpc) mod commands;
+mod event_store;
 mod executions;
 pub(in crate::host_rpc) mod history;
 mod imports;
 pub(super) mod jobs;
 mod journal;
 mod list;
+mod native_import;
+pub(in crate::host_rpc) mod outbox;
+mod projections;
 mod projects;
 mod rows;
+mod stream;
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;
+mod timeline;
 mod titles;
 pub(in crate::host_rpc) mod workspace;
 
@@ -92,7 +102,8 @@ impl Storage {
         &self,
         id: &agent_protocol::ids::RequestId,
     ) -> Result<Option<SessionRef>, String> {
-        self.with(|connection| connection.query_row("SELECT threads.provider,threads.id FROM requests JOIN threads ON threads.key=requests.thread WHERE requests.id=?1", [id.as_str()], |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,String>(1)?))).optional().map_err(failure)?.map(|(kind,id)| Ok(SessionRef { provider: kind.as_deref().map(provider).transpose()?, id })).transpose())
+        self.with(|connection| connection.query_row("SELECT thread_id FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id=?1 AND status='pending'",[id.as_str()],|row|row.get::<_,String>(0)).optional().map_err(failure)?
+            .map(|id|SessionRef::new(None,id).map_err(str::to_owned)).transpose())
     }
     pub(super) fn receipts(
         &self,
@@ -103,15 +114,12 @@ impl Storage {
             return Err("too many command receipts requested".into());
         }
         self.with(|connection| {
-            let transaction = connection.transaction().map_err(failure)?;
-            let current = cursor(&transaction)?;
-            let mut receipts = Vec::new();
+            let transaction=connection.transaction().map_err(failure)?;
+            let mut receipts=Vec::new();
             for operation in operations {
-                let receipt = transaction.query_row("SELECT seq,outcome FROM receipts WHERE operation_id=?1 AND provider IS ?2 AND thread_id=?3", params![operation.to_string(), id.provider.map(ProviderKind::key), id.id], |row| Ok((row.get::<_,i64>(0)?, row.get::<_,Vec<u8>>(1)?))).optional().map_err(failure)?;
-                if let Some((sequence, outcome)) = receipt {
-                    let sequence = u64::try_from(sequence).map_err(failure)?;
-                    if sequence > current.sequence { return Err("receipt exceeds storage cursor".into()); }
-                    receipts.push((*operation, decision::records::Acknowledged { cursor: Cursor { sequence, ..current }, outcome: protocol::decode(&outcome).map_err(failure)? }));
+                let receipt=transaction.query_row("SELECT result_sequence,accepted_at,error FROM orchestration_command_receipts WHERE command_id=?1 AND aggregate_kind='thread' AND aggregate_id=?2",params![operation.to_string(),id.application_id()],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?))).optional().map_err(failure)?;
+                if let Some((sequence,accepted_at,error))=receipt {
+                    receipts.push((*operation,decision::records::Acknowledged {sequence:sequence.try_into().map_err(failure)?,accepted_at,error}));
                 }
             }
             transaction.commit().map_err(failure)?;
@@ -276,7 +284,7 @@ impl Storage {
                 .map_err(failure)?;
             match version {
                 0 => Self::initialize(&mut connection)?,
-                3 => {}
+                4 => {}
                 _ => return Err(format!("conversation storage needs upgrade from {version}")),
             }
             connection
@@ -317,13 +325,16 @@ impl Storage {
             .execute_batch(include_str!("storage/schema.sql"))
             .map_err(failure)?;
         transaction
+            .execute_batch(include_str!("storage/orchestration.sql"))
+            .map_err(failure)?;
+        transaction
             .execute(
                 "INSERT INTO store VALUES (?1, 0, 0, 0)",
                 [Uuid::new_v4().to_string()],
             )
             .map_err(failure)?;
         transaction
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 4)
             .map_err(failure)?;
         transaction.commit().map_err(failure)?;
         Ok(())

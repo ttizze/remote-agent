@@ -15,6 +15,17 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    pub fn from_instance_id(instance: &str) -> Result<Self, String> {
+        serde_json::from_value(serde_json::Value::String(instance.into()))
+            .map_err(|error| error.to_string())
+    }
+    pub fn driver(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claudeAgent",
+            Self::DeepSeek => "dsh",
+        }
+    }
     pub fn key(self) -> &'static str {
         match self {
             Self::Codex => "codex",
@@ -48,6 +59,28 @@ impl TryFrom<SessionIdentity> for SessionRef {
 }
 
 impl SessionRef {
+    /// Native discovery can address a thread before it has been opened in Bex.
+    /// Its application ID is stable; the provider's original ID belongs in the
+    /// provider-thread native reference, independently of the application ID.
+    pub fn application_id(&self) -> String {
+        self.provider.map_or_else(
+            || self.id.clone(),
+            |provider| {
+                crate::orchestration::derived_id(
+                    "thread",
+                    &[
+                        "provider",
+                        provider.driver(),
+                        "provider-instance",
+                        provider.key(),
+                        "native-thread",
+                        &self.id,
+                    ],
+                )
+            },
+        )
+    }
+
     pub fn new(
         provider: impl Into<Option<ProviderKind>>,
         id: String,
@@ -63,9 +96,6 @@ impl SessionRef {
         self.provider.ok_or("native session requires a provider")
     }
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.provider.is_none() && uuid::Uuid::parse_str(&self.id).is_err() {
-            return Err("Bex conversation ID must be a UUID");
-        }
         if self.id.is_empty() || self.id.len() > 4096 || self.id.trim() != self.id {
             return Err("native session ID is required");
         }

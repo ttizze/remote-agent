@@ -12,13 +12,15 @@ use std::{
 use tokio::sync::mpsc;
 mod activity;
 mod connections;
+mod credit;
 pub use connections::HostSession;
 pub(super) use connections::Outbound;
 pub(in crate::host_rpc) use connections::{MAX_QUEUED_BYTES, frame_cost};
+pub(in crate::host_rpc) use credit::Credit;
 pub type SessionId = u64;
 pub enum HostSubscription {
     List(super::runtime::list::Subscription),
-    Conversation(super::owners::Subscription),
+    Conversation(super::runtime::stream::Subscription),
     Output(super::runtime::output::Subscription),
 }
 impl HostSubscription {

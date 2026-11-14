@@ -29,6 +29,7 @@ pub fn desktop_file_primary_action(
     let in_workspace =
         super::super::markdown::file_workspace_relative_path(path, workspace_root).is_some();
     let host_path = agent_protocol::paths::is_absolute_host_path(path)
+        || agent_protocol::paths::attachment_file_name(path).is_some()
         || path.starts_with("~/")
         || path.starts_with("~\\");
     if has_thread && (in_workspace || host_path) {

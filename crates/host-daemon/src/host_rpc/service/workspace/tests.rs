@@ -71,6 +71,36 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
     change(&first, &repo, save(None, " Build ", " echo build "))
         .await
         .unwrap();
+    let projects = first.inner.projects.load().await.unwrap();
+    assert!(
+        projects
+            .project_for_workspace(repo.to_str().unwrap())
+            .is_some(),
+        "saving the first script registers its project"
+    );
+    let database =
+        rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
+    let stored: String = database
+        .query_row(
+            "SELECT scripts_json FROM projection_projects WHERE workspace_root=?1",
+            [repo.to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    let script_id = stored[0]["id"].clone();
+    stored[0]["icon"] = "test".into();
+    stored[0]["runOnWorktreeCreate"] = true.into();
+    stored[0]["async"] = true.into();
+    database
+        .execute(
+            "UPDATE projection_projects SET scripts_json=?1 WHERE workspace_root=?2",
+            rusqlite::params![
+                serde_json::to_string(&stored).unwrap(),
+                repo.to_str().unwrap()
+            ],
+        )
+        .unwrap();
     assert_eq!(
         scripts(&first, &linked).await,
         [ProjectScript {
@@ -81,6 +111,19 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
     change(&first, &linked, save(Some("Build"), "Check", "echo check"))
         .await
         .unwrap();
+    let renamed: String = database
+        .query_row(
+            "SELECT scripts_json FROM projection_projects WHERE workspace_root=?1",
+            [repo.to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let renamed: serde_json::Value = serde_json::from_str(&renamed).unwrap();
+    assert_eq!(renamed[0]["id"], script_id);
+    assert_eq!(renamed[0]["icon"], "test");
+    assert_eq!(renamed[0]["runOnWorktreeCreate"], true);
+    assert_eq!(renamed[0]["async"], true);
+    assert_eq!(renamed[0]["name"], "Check");
     assert!(
         change(&first, &repo, save(Some("Build"), "Stale", "echo stale"))
             .await
@@ -144,7 +187,25 @@ async fn plain_folder_scripts_are_isolated_and_failed_writes_keep_the_previous_s
             .with_file_name("bex-conversations.sqlite"),
     )
     .unwrap();
-    database.execute_batch("CREATE TRIGGER reject_script_write BEFORE INSERT ON workspace_scripts BEGIN SELECT RAISE(ABORT,'script write failed'); END;").unwrap();
+    database.execute_batch("CREATE TRIGGER reject_script_write BEFORE UPDATE OF scripts_json ON projection_projects BEGIN SELECT RAISE(ABORT,'script write failed'); END;").unwrap();
+    let unregistered = directory.path().join("unregistered");
+    std::fs::create_dir(&unregistered).unwrap();
+    assert!(
+        change(&service, &unregistered, save(None, "Run", "echo new"))
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .inner
+            .projects
+            .load()
+            .await
+            .unwrap()
+            .project_for_workspace(unregistered.to_str().unwrap())
+            .is_none(),
+        "a failed first script save must roll back project registration too"
+    );
     assert!(
         change(&service, &first, save(Some("Run"), "Changed", "echo two"))
             .await
@@ -198,7 +259,7 @@ async fn script_validation_and_corrupt_storage_fail_without_replacing_saved_data
     assert!(validate_script("a".repeat(121), "echo a".into()).is_err());
     assert!(validate_script("a".into(), "x".repeat(16385)).is_err());
     assert!(validate_script("a".repeat(120), "x".repeat(16384)).is_ok());
-    let key = script_key(directory.path()).unwrap();
+    let key = source_script_root(directory.path()).unwrap().unwrap();
     let database = rusqlite::Connection::open(
         service
             .inner
@@ -209,10 +270,10 @@ async fn script_validation_and_corrupt_storage_fail_without_replacing_saved_data
     .unwrap();
     database
         .execute(
-            "INSERT INTO workspace_scripts(root,body) VALUES (?1,?2)",
+            "INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES ('broken','Broken',?1,?2,'2026-11-14T00:00:00.000Z','2026-11-14T00:00:00.000Z')",
             rusqlite::params![
                 key,
-                agent_protocol::protocol::encode(vec!["invalid record"]).unwrap()
+                r#"["invalid record"]"#
             ],
         )
         .unwrap();
@@ -232,12 +293,12 @@ async fn script_validation_and_corrupt_storage_fail_without_replacing_saved_data
             .is_err()
     );
     assert_eq!(
-        agent_protocol::protocol::decode::<Vec<String>>(
+        serde_json::from_str::<Vec<String>>(
             &database
                 .query_row(
-                    "SELECT body FROM workspace_scripts WHERE root=?1",
+                    "SELECT scripts_json FROM projection_projects WHERE workspace_root=?1",
                     [&key],
-                    |row| row.get::<_, Vec<u8>>(0)
+                    |row| row.get::<_, String>(0)
                 )
                 .unwrap()
         )

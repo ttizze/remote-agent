@@ -9,6 +9,7 @@ pub mod client;
 pub mod composer;
 pub mod conversation_cache;
 pub mod localization;
+pub mod orchestration;
 pub mod panels;
 pub mod persistence;
 pub mod presentation;

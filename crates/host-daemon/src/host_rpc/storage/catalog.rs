@@ -37,20 +37,6 @@ impl Storage {
             }))
         })
     }
-    pub(in crate::host_rpc) fn loaded(&self, id: &SessionRef) -> Result<bool, String> {
-        self.with(|connection| {
-            connection
-                .query_row(
-                    "SELECT loaded=1 FROM threads WHERE ifnull(provider,'')=ifnull(?1,'') AND id=?2",
-                    params![id.provider.map(ProviderKind::key), id.id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map(|loaded| loaded.unwrap_or(false))
-                .map_err(failure)
-        })
-    }
-
     pub(in crate::host_rpc) fn queue_catalog(
         &self,
         provider: ProviderKind,

@@ -381,14 +381,8 @@ impl Scheduled {
                 .1;
             match scope {
                 Scope::Conversation(target) => {
-                    let replicas = Arc::make_mut(&mut snapshot.sessions.replicas);
-                    let replica = match replicas.get(target) {
-                        Some(replica) => replica
-                            .resubscribe(generation)
-                            .expect("operation generations increase"),
-                        None => Replica::new(scope.clone(), generation),
-                    };
-                    replicas.insert(target.clone(), Arc::new(replica));
+                    Arc::make_mut(&mut snapshot.sessions.subscription_generations)
+                        .insert(target.clone(), generation);
                 }
                 Scope::List => {
                     let replica = match &snapshot.lists.replica {
@@ -1618,7 +1612,7 @@ async fn run(
                     subscriptions.insert(id, futures_util::stream::try_unfold(stream, move |mut stream| async move {
                         let event = match kind {
                             SubscriptionKind::List => stream.read::<agent_protocol::conversation::records::Message>().await?.map(|message| Event::ListRows { subscription_id: id, message: Box::new(message) }),
-                            SubscriptionKind::Conversation => stream.read::<agent_protocol::conversation::records::Message>().await?.map(|message| Event::ConversationRows { subscription_id: id, message: Box::new(message) }),
+                            SubscriptionKind::Conversation => stream.read::<agent_protocol::orchestration::projection::ThreadStreamItem>().await?.map(|message| Event::ConversationRows { subscription_id: id, message: Box::new(message) }),
                             SubscriptionKind::Output => stream.read::<agent_protocol::sync::OutputUpdate>().await.ok().flatten().map(|update| Event::CommandOutput { subscription_id: id, update: Box::new(update) }),
                         };
                         Ok(event.map(|event| (event, stream)))
@@ -2419,7 +2413,7 @@ mod tests {
     #[tokio::test]
     async fn saved_unknown_input_is_resolved_on_the_host_before_restoring_the_composer() {
         use agent_protocol::{
-            conversation::{Outcome as CommandOutcome, records},
+            conversation::records,
             session::{
                 PreparationStage, PreparationStatus, ProviderKind, SessionPreparation, SessionRef,
             },
@@ -2489,15 +2483,9 @@ mod tests {
                     }
                 );
                 let receipt = records::Acknowledged {
-                    outcome: if accepted {
-                        CommandOutcome::Accepted
-                    } else {
-                        CommandOutcome::Rejected("already resolved".into())
-                    },
-                    cursor: agent_protocol::sync::Cursor {
-                        store: uuid::Uuid::from_u128(1),
-                        sequence: 2,
-                    },
+                    error: (!accepted).then(|| "already resolved".into()),
+                    sequence: 2,
+                    accepted_at: String::new(),
                 };
                 writer
                     .reply(&request, json!({"result":receipt}))
@@ -2576,10 +2564,10 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let base = Arc::new(agent_protocol::conversation::records::Replica::new(
-            agent_protocol::sync::Scope::Conversation(operation.thread_id.clone()),
-            1,
-        ));
+        let base = crate::state::conversations::Capture {
+            generation: 1,
+            projection: None,
+        };
         let reply = async {
             let request = reader.read_request().await.unwrap().unwrap();
             assert_eq!(request["method"], "host/conversation/create");
@@ -2613,11 +2601,19 @@ mod tests {
                 ..Default::default()
             };
             response.model = operation.draft.model.clone();
-            let replica = crate::test_conversations::replica(response, 1);
+            let projection = crate::test_conversations::projection(response, 1);
             let opened = agent_protocol::conversation::records::Opened {
                 session: operation.thread_id.clone(),
                 subscription_id: uuid::Uuid::nil(),
-                initial: replica.snapshot().unwrap(),
+                initial: vec![
+                    agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(
+                        projection,
+                    ),
+                    agent_protocol::orchestration::projection::ThreadStreamItem::Synchronized,
+                ],
+                provider: operation.provider,
+                capabilities: Default::default(),
+                project_root: None,
             };
             writer
                 .reply(&request, json!({"result": opened}))
@@ -2626,7 +2622,8 @@ mod tests {
         };
         let (opened, ()) = tokio::join!(operation.run(base.clone(), &mut context), reply);
         let mut snapshot = Snapshot::default();
-        Arc::make_mut(&mut snapshot.sessions.replicas).insert(operation.thread_id.clone(), base);
+        Arc::make_mut(&mut snapshot.sessions.subscription_generations)
+            .insert(operation.thread_id.clone(), base.generation);
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             "00000000-0000-0000-0000-00000000002a".into(),
             Arc::new(crate::state::PendingSubmission {

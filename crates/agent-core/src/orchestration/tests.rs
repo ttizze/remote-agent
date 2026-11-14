@@ -1,0 +1,584 @@
+use super::*;
+use model::*;
+use serde_json::json;
+
+const NOW: &str = "2026-11-14T00:00:00.000Z";
+
+fn projection() -> ThreadProjection {
+    ThreadProjection {
+        thread:serde_json::from_value(json!({
+            "id":"thread","createdBy":"user","creationSource":"mobile","projectId":null,
+            "title":"Example","providerInstanceId":"codex","modelSelection":{"instanceId":"codex","model":"example"},
+            "runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":null,
+            "activeProviderThreadId":null,"lineage":{"parentThreadId":null,"relationshipToParent":null,"rootThreadId":"thread"},
+            "forkedFrom":null,"createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null
+        })).unwrap(),
+        runs:vec![],attempts:vec![],nodes:vec![],subagents:vec![],provider_sessions:vec![],provider_threads:vec![],
+        provider_turns:vec![],runtime_requests:vec![],plans:vec![],turn_items:vec![],checkpoint_scopes:vec![],
+        checkpoints:vec![],context_handoffs:vec![],context_transfers:vec![],visible_turn_items:vec![],updated_at:NOW.into(),
+    }
+}
+
+fn run(status: &str) -> Run {
+    serde_json::from_value(json!({
+        "id":"run","threadId":"thread","ordinal":1,"providerInstanceId":"codex",
+        "modelSelection":{"instanceId":"codex","model":"example"},"providerThreadId":null,
+        "userMessageId":"input","rootNodeId":null,"activeAttemptId":null,"status":status,
+        "queuePosition":null,"queueHeld":false,"requestedAt":NOW,"startedAt":null,"completedAt":null,
+        "checkpointId":null,"contextHandoffId":null
+    })).unwrap()
+}
+
+fn item(id: &str, ordinal: u64) -> TurnItem {
+    serde_json::from_value(json!({
+        "id":id,"threadId":"thread","runId":"run","nodeId":null,"providerThreadId":null,
+        "providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":ordinal,
+        "status":"completed","title":null,"startedAt":NOW,"completedAt":NOW,"updatedAt":NOW,
+        "type":"assistant_message","messageId":id,"text":id,"attachments":[],"streaming":false
+    }))
+    .unwrap()
+}
+
+fn event(change: Change) -> Event {
+    Event {
+        id: "event".into(),
+        thread_id: "thread".into(),
+        run_id: None,
+        node_id: None,
+        driver: None,
+        provider_instance_id: None,
+        raw_event_id: None,
+        occurred_at: NOW.into(),
+        change,
+    }
+}
+
+fn apply(projection: &ThreadProjection, change: Change) -> ThreadProjection {
+    apply_event(projection, &event(change), ApplyOptions::default())
+}
+
+fn row(item: TurnItem, visibility: Visibility, position: u64) -> ProjectedTurnItem {
+    ProjectedTurnItem {
+        source_thread_id: item.thread_id.clone(),
+        source_item_id: item.id.clone(),
+        position,
+        visibility,
+        item: Arc::new(item),
+    }
+}
+
+#[test]
+fn native_display_preserves_inherited_groups_without_creating_application_runs() {
+    use agent_protocol::{execution, items, session};
+    let identity =
+        session::SessionRef::new(session::ProviderKind::Codex, "native-thread".into()).unwrap();
+    let mut projection = projection();
+    projection.thread.id = identity.application_id();
+    projection.runs.push(run("running"));
+    let mut inherited = item("inherited", 9_000_001);
+    inherited.thread_id = "parent".into();
+    inherited.run_id = Some("parent-run".into());
+    let mut local = item("local", 1_000_001);
+    local.body = TurnItemBody::AssistantMessage {
+        message_id: "local".into(),
+        text: "answer".into(),
+        phase: Some("final_answer".into()),
+        attachments: vec![],
+        streaming: true,
+    };
+    projection.visible_turn_items = vec![
+        row(inherited, Visibility::Inherited, 0),
+        row(local, Visibility::Local, 1),
+    ];
+    let snapshot = ThreadSnapshot {
+        snapshot_sequence: 3,
+        projection,
+        history_cursor: None,
+        has_more_history: false,
+        latest_local_turn_ordinal: Some(1_000_001),
+    };
+    let displayed = project(
+        &snapshot,
+        &identity,
+        session::ProviderKind::Codex,
+        session::Capabilities::default(),
+        Some("/workspace"),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(displayed.thread.id, Some(identity));
+    assert_eq!(displayed.thread.cwd.as_deref(), Some("/workspace"));
+    let turns = displayed.thread.turns.unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].id.as_str(), "parent-run");
+    assert_eq!(turns[0].status, execution::TurnStatus::Completed);
+    assert_eq!(turns[1].id.as_str(), "run");
+    assert_eq!(turns[1].status, execution::TurnStatus::Running);
+    assert!(matches!(
+        turns[1].items.as_ref().unwrap()[0].body(),
+        items::ItemBody::AssistantText {
+            phase: items::AssistantPhase::Final,
+            ..
+        }
+    ));
+    assert_eq!(snapshot.projection.runs.len(), 1);
+}
+
+#[test]
+fn a_queued_input_is_displayed_once_in_the_queue_until_it_starts() {
+    use agent_protocol::{items, session};
+    let identity = session::SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+    let mut projection = projection();
+    projection.thread.id = identity.application_id();
+    projection.runs.push(run("queued"));
+    let mut user = item("user", 0);
+    user.status = TurnItemStatus::Pending;
+    user.body = TurnItemBody::UserMessage {
+        created_by: Actor::User,
+        creation_source: CreationSource::Mobile,
+        message_id: "input".into(),
+        input_intent: "queued_turn".into(),
+        text: "next".into(),
+        attachments: vec![],
+        context: None,
+    };
+    projection.turn_items.push(Arc::new(user));
+    let snapshot = ThreadSnapshot {
+        snapshot_sequence: 1,
+        projection,
+        history_cursor: None,
+        has_more_history: false,
+        latest_local_turn_ordinal: None,
+    };
+    let view = project(
+        &snapshot,
+        &identity,
+        session::ProviderKind::Codex,
+        session::Capabilities::default(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(view.thread.turns.unwrap().is_empty());
+    assert_eq!(view.thread.queue.inputs.len(), 1);
+    let activated = receive(
+        &snapshot.projection.thread.id,
+        Some(&snapshot),
+        ThreadStreamItem::Event {
+            sequence: 2,
+            event: Event {
+                thread_id: identity.application_id(),
+                ..event(Change::Run(run("running")))
+            },
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let view = project(
+        &activated,
+        &identity,
+        session::ProviderKind::Codex,
+        session::Capabilities::default(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    assert!(view.thread.queue.inputs.is_empty());
+    let turns = view.thread.turns.unwrap();
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].queued);
+    assert!(
+        matches!(turns[0].items.as_ref().unwrap()[0].body(),items::ItemBody::UserMessage {text:Some(text),..} if text=="next")
+    );
+}
+
+#[test]
+fn an_uncertain_steer_is_answerable_as_its_own_input_without_replacing_the_running_turn() {
+    use agent_protocol::session;
+    let identity = session::SessionRef::new(None, "thread".into()).unwrap();
+    let mut projection = projection();
+    projection.runs.push(run("running"));
+    let mut user = item("steer-item", 1_000_002);
+    user.body = TurnItemBody::UserMessage {
+        message_id: "steer-input".into(),
+        created_by: Actor::User,
+        creation_source: CreationSource::Mobile,
+        input_intent: "steer".into(),
+        text: "extra".into(),
+        attachments: vec![],
+        context: None,
+    };
+    let mut error = item("delivery-error", 1_000_003);
+    error.parent_item_id = Some(user.id.clone());
+    error.status = TurnItemStatus::Failed;
+    error.body = TurnItemBody::Error {
+        failure: ProviderFailure {
+            class: "delivery_uncertain".into(),
+            message: "ack lost".into(),
+            code: None,
+            retryable: Some(false),
+            reset_at: None,
+        },
+        retry: None,
+    };
+    projection.visible_turn_items = vec![
+        row(user.clone(), Visibility::Local, 0),
+        row(error.clone(), Visibility::Local, 1),
+    ];
+    projection.turn_items = vec![Arc::new(user), Arc::new(error)];
+    let mut snapshot = ThreadSnapshot {
+        snapshot_sequence: 1,
+        projection,
+        history_cursor: None,
+        has_more_history: false,
+        latest_local_turn_ordinal: None,
+    };
+    let display = |snapshot: &ThreadSnapshot| {
+        project(
+            snapshot,
+            &identity,
+            session::ProviderKind::Codex,
+            session::Capabilities::default(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap()
+    };
+    let view = display(&snapshot);
+    assert_eq!(view.thread.preparations.len(), 1);
+    assert_eq!(
+        view.thread.preparations[0]
+            .submission
+            .client_user_message_id
+            .as_str(),
+        "steer-input"
+    );
+    assert_eq!(
+        view.thread.preparations[0].status,
+        session::PreparationStatus::Unknown
+    );
+    assert_eq!(
+        view.thread.submissions["steer-input"],
+        session::SubmissionDelivery::Unknown
+    );
+    assert_eq!(snapshot.projection.runs[0].status, RunStatus::Running);
+    assert!(
+        view.thread.turns.as_ref().unwrap()[0].error.is_none(),
+        "unknown input has its own recovery control; the running turn has not failed"
+    );
+    let mut cancelled = snapshot.projection.turn_items[1].as_ref().clone();
+    cancelled.status = TurnItemStatus::Cancelled;
+    snapshot.projection = apply(&snapshot.projection, Change::TurnItem(cancelled));
+    let view = display(&snapshot);
+    assert!(view.thread.preparations.is_empty());
+    assert!(!view.thread.submissions.contains_key("steer-input"));
+    assert!(view.thread.turns.as_ref().unwrap()[0].error.is_none());
+}
+
+#[test]
+fn imported_messages_group_at_user_inputs_without_inventing_application_runs() {
+    use agent_protocol::session;
+    let identity = session::SessionRef::new(None, "thread".into()).unwrap();
+    let mut projection = projection();
+    for index in 0..4 {
+        let mut item = item(&format!("history-{index}"), index + 1);
+        item.run_id = None;
+        if index % 2 == 0 {
+            item.body = TurnItemBody::UserMessage {
+                message_id: format!("user-{index}"),
+                created_by: Actor::User,
+                creation_source: CreationSource::Server,
+                input_intent: "turn_start".into(),
+                text: format!("question {index}"),
+                attachments: vec![],
+                context: None,
+            };
+        }
+        projection
+            .visible_turn_items
+            .push(row(item.clone(), Visibility::Local, index));
+        projection.turn_items.push(Arc::new(item));
+    }
+    let snapshot = ThreadSnapshot {
+        snapshot_sequence: 1,
+        projection,
+        history_cursor: None,
+        has_more_history: false,
+        latest_local_turn_ordinal: None,
+    };
+    let view = project(
+        &snapshot,
+        &identity,
+        session::ProviderKind::Codex,
+        session::Capabilities::default(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let turns = view.thread.turns.unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].items.as_ref().unwrap().len(), 2);
+    assert_eq!(turns[1].items.as_ref().unwrap().len(), 2);
+    assert!(snapshot.projection.runs.is_empty());
+    assert!(snapshot.projection.attempts.is_empty());
+}
+
+#[test]
+fn fork_history_keeps_source_identity_and_orders_local_items_by_their_own_ordinal() {
+    let mut original = projection();
+    let mut inherited = item("parent-item", 9_000_001);
+    inherited.thread_id = "parent".into();
+    original
+        .visible_turn_items
+        .push(row(inherited, Visibility::Inherited, 0));
+    let next = apply(&original, Change::TurnItem(item("later", 1_000_002)));
+    let next = apply(&next, Change::TurnItem(item("earlier", 1_000_001)));
+    assert_eq!(
+        next.visible_turn_items
+            .iter()
+            .map(|row| (
+                row.source_thread_id.as_str(),
+                row.source_item_id.as_str(),
+                row.position
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("parent", "parent-item", 0),
+            ("thread", "earlier", 1),
+            ("thread", "later", 2)
+        ]
+    );
+    let mut parent_event = event(Change::TurnItem(item("parent-item", 9_000_001)));
+    parent_event.thread_id = "parent".into();
+    assert_eq!(
+        apply_event(&next, &parent_event, ApplyOptions::default()),
+        next
+    );
+    assert_eq!(original.visible_turn_items.len(), 1);
+}
+
+#[test]
+fn queued_input_is_hidden_until_activation_regardless_of_event_order_and_stays_hidden_if_cancelled()
+{
+    let mut initial = projection();
+    initial.runs.push(run("queued"));
+    let mut queued = item("input", 1_000_001);
+    queued.body = TurnItemBody::UserMessage {
+        created_by: Actor::User,
+        creation_source: CreationSource::Mobile,
+        message_id: "input".into(),
+        input_intent: "queued_turn".into(),
+        text: "hello".into(),
+        attachments: vec![],
+        context: None,
+    };
+    let queued_first = apply(&initial, Change::TurnItem(queued.clone()));
+    assert!(queued_first.visible_turn_items.is_empty());
+    let activated = apply(&queued_first, Change::Run(run("starting")));
+    assert_eq!(activated.visible_turn_items.len(), 1);
+    let run_first = apply(&initial, Change::Run(run("starting")));
+    let item_second = apply(&run_first, Change::TurnItem(queued));
+    assert_eq!(item_second, activated);
+    assert!(
+        apply(&queued_first, Change::Run(run("cancelled")))
+            .visible_turn_items
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_partial_timeline_drops_unloaded_old_updates_but_accepts_queued_runs_below_the_watermark() {
+    let mut initial = projection();
+    initial.runs.push(run("completed"));
+    let initial = apply(&initial, Change::TurnItem(item("newest", 2_000_001)));
+    let options = ApplyOptions {
+        partial_timeline: true,
+        latest_local_turn_ordinal: Some(2_000_001),
+    };
+    assert_eq!(
+        apply_event(
+            &initial,
+            &event(Change::TurnItem(item("old", 1_000_001))),
+            options
+        ),
+        initial
+    );
+    let queued = apply(&initial, Change::Run(run("queued")));
+    let incoming = apply_event(
+        &queued,
+        &event(Change::TurnItem(item("queued-low", 1_000_001))),
+        options,
+    );
+    assert_eq!(incoming.turn_items.len(), 2);
+    assert_eq!(incoming.visible_turn_items.len(), 2);
+    let mut native = item("native-old", 1);
+    native.run_id = None;
+    assert_eq!(
+        apply_event(&initial, &event(Change::TurnItem(native)), options),
+        initial
+    );
+}
+
+#[test]
+fn delayed_history_preserves_live_bodies_and_does_not_revive_rolled_back_items() {
+    let initial = apply(&projection(), Change::TurnItem(item("live", 2)));
+    let mut stale = item("live", 2);
+    stale.body = TurnItemBody::SystemNotice {
+        message: "stale".into(),
+    };
+    let older = [
+        row(item("old", 1), Visibility::Local, 0),
+        row(stale, Visibility::Local, 1),
+    ];
+    let merged = merge_older_history(&initial, &older);
+    assert_eq!(merged.visible_turn_items.len(), 2);
+    assert_eq!(
+        merged.visible_turn_items[1].item,
+        initial.visible_turn_items[0].item
+    );
+    let rolled_back = apply(&initial, Change::Run(run("rolled_back")));
+    let merged = merge_older_history(&rolled_back, &older[1..]);
+    assert!(merged.visible_turn_items.is_empty());
+    assert_eq!(merged.turn_items.len(), 1);
+}
+
+#[test]
+fn an_older_page_deduplicates_by_both_source_thread_and_item() {
+    let mut parent = item("same", 1);
+    parent.thread_id = "parent".into();
+    let rows = [
+        row(parent, Visibility::Inherited, 0),
+        row(item("same", 1), Visibility::Local, 1),
+    ];
+    let merged = merge_older_history(&projection(), &rows);
+    assert_eq!(merged.visible_turn_items.len(), 2);
+    assert_eq!(merged.turn_items.len(), 1);
+    assert_eq!(merge_older_history(&merged, &rows), merged);
+}
+
+#[test]
+fn superseded_interrupt_results_require_a_matching_stop_request() {
+    let mut initial = projection();
+    initial.attempts.push(serde_json::from_value(json!({
+        "id":"attempt","runId":"run","attemptOrdinal":1,"reason":"steering_restart","rootNodeId":"root",
+        "providerInstanceId":"codex","providerThreadId":"native","providerTurnId":null,"status":"superseded",
+        "startedAt":NOW,"completedAt":NOW,"error":null
+    })).unwrap());
+    let mut result = item("result", 2);
+    result.node_id = Some("root".into());
+    result.body = TurnItemBody::RunInterruptResult {
+        message: "stopped".into(),
+    };
+    let hidden = apply(&initial, Change::TurnItem(result));
+    assert!(hidden.visible_turn_items.is_empty());
+    let mut request = item("request", 1);
+    request.body = TurnItemBody::RunInterruptRequest {
+        message: "stop".into(),
+    };
+    // Like T3, request updates recheck existing rows; the result's next event restores it.
+    let with_request = apply(&hidden, Change::TurnItem(request));
+    let restored = apply(
+        &with_request,
+        Change::TurnItem(hidden.turn_items[0].as_ref().clone()),
+    );
+    assert_eq!(restored.visible_turn_items.len(), 2);
+}
+
+fn snapshot(sequence: u64) -> ThreadSnapshot {
+    ThreadSnapshot {
+        snapshot_sequence: sequence,
+        projection: projection(),
+        history_cursor: Some("cursor".into()),
+        has_more_history: true,
+        latest_local_turn_ordinal: None,
+    }
+}
+
+#[test]
+fn the_client_resumes_own_events_without_reapplying_overlap_and_accepts_a_replacement_snapshot() {
+    let original = snapshot(3);
+    let updated = receive(
+        "thread",
+        Some(&original),
+        ThreadStreamItem::Event {
+            sequence: 9,
+            event: event(Change::TurnItem(item("new", 100))),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(updated.snapshot_sequence, 9);
+    assert_eq!(updated.latest_local_turn_ordinal, Some(100));
+    assert_eq!(
+        receive(
+            "thread",
+            Some(&updated),
+            ThreadStreamItem::Event {
+                sequence: 8,
+                event: event(Change::TurnItem(item("old", 99)))
+            }
+        )
+        .unwrap()
+        .unwrap(),
+        updated
+    );
+    assert_eq!(
+        receive("thread", Some(&updated), ThreadStreamItem::Synchronized)
+            .unwrap()
+            .unwrap(),
+        updated
+    );
+    let reset = snapshot(0);
+    assert_eq!(
+        receive(
+            "thread",
+            Some(&updated),
+            ThreadStreamItem::Snapshot(reset.clone())
+        )
+        .unwrap(),
+        Some(reset)
+    );
+}
+
+#[test]
+fn a_missing_snapshot_or_wrong_thread_cannot_poison_the_resume_cursor() {
+    let frame = ThreadStreamItem::Event {
+        sequence: 4,
+        event: event(Change::Thread(projection().thread)),
+    };
+    assert!(receive("thread", None, frame.clone()).is_err());
+    assert!(receive("another", Some(&snapshot(3)), frame).is_err());
+    assert!(receive("another", None, ThreadStreamItem::Snapshot(snapshot(3))).is_err());
+}
+
+#[test]
+fn history_responses_are_cursor_fenced_and_do_not_acknowledge_live_events() {
+    let mut current = snapshot(3);
+    current.latest_local_turn_ordinal = Some(100);
+    let page = ThreadHistoryPage {
+        snapshot_sequence: 20,
+        items: vec![row(item("old", 1), Visibility::Local, 0)],
+        next_cursor: None,
+        has_more_history: false,
+    };
+    assert!(receive_history(&current, "obsolete-cursor", page.clone()).is_none());
+    let merged = receive_history(&current, "cursor", page).unwrap();
+    assert_eq!(merged.snapshot_sequence, 3);
+    assert_eq!(merged.latest_local_turn_ordinal, Some(100));
+    assert_eq!(merged.projection.visible_turn_items.len(), 1);
+    assert_eq!(merged.history_cursor, None);
+    assert!(!merged.has_more_history);
+}
+
+#[test]
+fn snapshot_frames_keep_t3s_flat_wire_contract() {
+    let frame = ThreadStreamItem::Snapshot(snapshot(3));
+    let json = serde_json::to_value(&frame).unwrap();
+    assert_eq!(json["kind"], "snapshot");
+    assert_eq!(json["snapshotSequence"], 3);
+    assert_eq!(json["projection"]["thread"]["id"], "thread");
+    assert_eq!(
+        serde_json::from_value::<ThreadStreamItem>(json).unwrap(),
+        frame
+    );
+}

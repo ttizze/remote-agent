@@ -76,6 +76,12 @@ impl ProjectStore {
     pub(crate) fn chat_directory(&self) -> PathBuf {
         self.path.with_file_name("bex-chats")
     }
+    pub(crate) async fn create_chat_directory(&self) -> anyhow::Result<PathBuf> {
+        let directory = self.chat_directory();
+        tokio::fs::create_dir_all(&directory).await?;
+        let directory = tokio::fs::canonicalize(&directory).await?;
+        Ok(dunce::simplified(&directory).to_owned())
+    }
 
     async fn read_projects(&self) -> anyhow::Result<Vec<Project>> {
         let storage = self.storage.clone();
@@ -249,8 +255,8 @@ mod tests {
             rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
         connection
             .execute(
-                "INSERT INTO projects(id,position,body) VALUES ('broken',1,?1)",
-                [vec![0xc1]],
+                "INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES ('broken','Broken','/broken',?1,'2026-11-14T00:00:00.000Z','2026-11-14T00:00:00.000Z')",
+                [r#"["invalid record"]"#],
             )
             .unwrap();
         assert!(store.load().await.is_err());
@@ -307,7 +313,7 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         let projects = serde_json::json!([
             {"id":"chats","name":"Chats","roots":[{"path":chats}]},
-            {"id":"mixed","name":"Workspace","roots":[{"path":chats},{"path":workspace}]}
+            {"id":"mixed","name":"Workspace","roots":[{"path":workspace}]}
         ]);
         let store = ProjectStore::fixture(root.join("bex-worktrees.json"));
         store

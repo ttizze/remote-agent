@@ -2,7 +2,7 @@ use super::*;
 use crate::state::operations::Operation;
 use agent_protocol::{
     conversation::Outcome,
-    sync::{Cursor, Message},
+    orchestration::{self as model, projection::ThreadStreamItem},
 };
 
 #[test]
@@ -160,13 +160,10 @@ fn durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_
         Outcome::Accepted,
     ] {
         let (mut snapshot, id, operation, scope) = pending();
-        let cursor = snapshot.sessions.replicas[&id].cursor().unwrap();
+        let cursor = snapshot.sessions.projections[&id].snapshot_sequence;
         let rejected = matches!(outcome, Outcome::Rejected(_));
         let unknown = outcome == Outcome::DeliveryUnknown;
-        let through = Cursor {
-            sequence: cursor.sequence + 1,
-            ..cursor
-        };
+        let through = cursor + 1;
         CheckReceipts {
             session: id.clone(),
             operations: vec![operation],
@@ -176,13 +173,21 @@ fn durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_
             "",
             (
                 scope,
-                vec![(
-                    operation,
-                    records::Acknowledged {
-                        outcome,
-                        cursor: through,
-                    },
-                )],
+                if unknown {
+                    vec![]
+                } else {
+                    vec![(
+                        operation,
+                        records::Acknowledged {
+                            error: match outcome {
+                                Outcome::Rejected(reason) => Some(reason),
+                                _ => None,
+                            },
+                            sequence: through,
+                            accepted_at: String::new(),
+                        },
+                    )]
+                },
             ),
         );
         assert_eq!(
@@ -198,19 +203,9 @@ fn durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_
             let input = &snapshot.sessions.pending_submissions[operation.to_string().as_str()];
             assert_eq!(input.delivery_unknown, unknown);
             assert_eq!(input.accepted, !unknown);
-            apply(
-                &mut snapshot,
-                &id,
-                vec![Message::Events {
-                    through,
-                    events: vec![agent_protocol::sync::Event {
-                        sequence: through.sequence,
-                        rows: vec![],
-                        removed: vec![],
-                    }],
-                }],
-            )
-            .unwrap();
+            let mut next = snapshot.sessions.projections[&id].as_ref().clone();
+            next.snapshot_sequence = through;
+            apply(&mut snapshot, &id, vec![ThreadStreamItem::Snapshot(next)]).unwrap();
             assert_eq!(snapshot.sessions.pending_submissions.is_empty(), !unknown);
         }
     }
@@ -219,7 +214,7 @@ fn durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_
 #[test]
 fn receipt_from_a_replaced_subscription_cannot_restore_or_discard_new_input() {
     let (mut snapshot, id, operation, _) = pending();
-    let cursor = snapshot.sessions.replicas[&id].cursor().unwrap();
+    let cursor = snapshot.sessions.projections[&id].snapshot_sequence;
     let scope = uuid::Uuid::new_v4();
     let before = snapshot.clone();
     CheckReceipts {
@@ -234,8 +229,9 @@ fn receipt_from_a_replaced_subscription_cannot_restore_or_discard_new_input() {
             vec![(
                 operation,
                 records::Acknowledged {
-                    outcome: Outcome::Rejected("old".into()),
-                    cursor,
+                    error: Some("old".into()),
+                    sequence: cursor,
+                    accepted_at: String::new(),
                 },
             )],
         ),
@@ -244,56 +240,39 @@ fn receipt_from_a_replaced_subscription_cannot_restore_or_discard_new_input() {
 }
 
 #[test]
-fn older_same_store_snapshot_cannot_replace_the_captured_conversation() {
+fn an_authoritative_t3_snapshot_replaces_the_captured_sequence_without_a_store_identity() {
     let (snapshot, id, _, scope) = pending();
-    let base = &snapshot.sessions.replicas[&id];
-    let mut initial = base.snapshot().unwrap();
-    if let Message::Snapshot { cursor, .. } = &mut initial {
-        cursor.sequence -= 1;
-    }
-    assert!(
-        opened(
-            base,
-            records::Opened {
-                session: id,
-                subscription_id: scope,
-                initial
-            }
-        )
-        .is_err()
-    );
+    let base = capture(&snapshot, &id).unwrap();
+    let mut initial = base.projection.as_deref().unwrap().clone();
+    initial.snapshot_sequence = 0;
+    let result = opened(
+        &base,
+        records::Opened {
+            session: id,
+            subscription_id: scope,
+            initial: vec![ThreadStreamItem::Snapshot(initial)],
+            provider: crate::session::ProviderKind::Codex,
+            capabilities: Default::default(),
+            project_root: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.projection.snapshot_sequence, 0);
+    assert!(result.replaced);
 }
 
 #[test]
 fn streaming_a_conversation_without_a_folder_keeps_the_panes_context_and_error() {
     let (mut snapshot, id, _, _) = pending();
-    let cursor = snapshot.sessions.replicas[&id].cursor().unwrap();
+    let mut next = snapshot.sessions.projections[&id].as_ref().clone();
+    next.snapshot_sequence += 1;
     let pane = Arc::make_mut(snapshot.panes.primary_mut());
     let navigation = Arc::make_mut(&mut pane.navigation);
     navigation.thread_id = Some(id.clone());
     navigation.cwd = "/previous-folder".into();
     pane.error = Some("Keep this operation error".into());
     let epoch = pane.epoch;
-    apply(
-        &mut snapshot,
-        &id,
-        vec![Message::Events {
-            through: Cursor {
-                sequence: cursor.sequence + 1,
-                ..cursor
-            },
-            events: vec![agent_protocol::sync::Event {
-                sequence: (Cursor {
-                    sequence: cursor.sequence + 1,
-                    ..cursor
-                })
-                .sequence,
-                rows: vec![],
-                removed: vec![],
-            }],
-        }],
-    )
-    .unwrap();
+    apply(&mut snapshot, &id, vec![ThreadStreamItem::Snapshot(next)]).unwrap();
     assert_eq!(snapshot.panes.primary().epoch, epoch);
     assert_eq!(snapshot.panes.primary().navigation.cwd, "/previous-folder");
     assert_eq!(
@@ -303,13 +282,13 @@ fn streaming_a_conversation_without_a_folder_keeps_the_panes_context_and_error()
 }
 
 #[test]
-fn hydration_finishes_after_unrelated_live_updates_without_restarting_the_read() {
+fn details_finish_after_unrelated_live_updates_without_mutating_the_canonical_stream() {
     use agent_protocol::{
-        execution::ItemStatus,
-        items::{AssistantPhase, Item, ItemBody},
+        execution::{ItemStatus, TurnStatus},
+        items::{Item, ItemBody},
         models::Turn,
     };
-    let id = crate::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+    let id = crate::session::SessionRef::new(None, "detail-thread".into()).unwrap();
     let mut snapshot = Snapshot::default();
     crate::test_conversations::open(
         &mut snapshot,
@@ -319,12 +298,16 @@ fn hydration_finishes_after_unrelated_live_updates_without_restarting_the_read()
                 active_provider: Some(crate::session::ProviderKind::Codex),
                 turns: Some(vec![Arc::new(Turn {
                     id: "turn".into(),
+                    status: TurnStatus::Completed,
                     items: Some(vec![Arc::new(Item::new(
-                        "answer".into(),
+                        "command".into(),
                         ItemStatus::Completed,
-                        ItemBody::AssistantText {
-                            text: "full answer".into(),
-                            phase: AssistantPhase::Final,
+                        ItemBody::CommandExecution {
+                            command: "echo result".into(),
+                            cwd: None,
+                            output: "full output".into(),
+                            exit_code: Some(0),
+                            output_omitted: false,
                         },
                     ))]),
                     ..Default::default()
@@ -334,75 +317,60 @@ fn hydration_finishes_after_unrelated_live_updates_without_restarting_the_read()
             ..Default::default()
         },
     );
-    let Message::Snapshot {
-        cursor,
-        window,
-        mut rows,
-    } = snapshot.sessions.replicas[&id].snapshot().unwrap()
-    else {
-        panic!("snapshot")
-    };
-    let full = rows.iter().find(|row| matches!(&row.key,agent_protocol::sync::Key::Item {id,..} if id.as_str()=="answer")).unwrap().clone();
-    records::defer(rows.iter_mut().find(|row| row.key == full.key).unwrap());
-    let generation = snapshot.sessions.replicas[&id].subscription();
-    let deferred = records::Replica::new(
-        agent_protocol::sync::Scope::Conversation(id.clone()),
-        generation,
-    )
-    .apply(
-        generation,
-        Message::Snapshot {
-            cursor,
-            window,
-            rows,
-        },
-    )
-    .unwrap();
-    Arc::make_mut(&mut snapshot.sessions.replicas).insert(id.clone(), Arc::new(deferred));
-    let latest = Cursor {
-        sequence: cursor.sequence + 1,
-        ..cursor
-    };
+    let full = snapshot.sessions.projections[&id].projection.turn_items[0]
+        .as_ref()
+        .clone();
+    let mut wire = snapshot.sessions.projections[&id].as_ref().clone();
+    let projected = Arc::new(model::wire::item(&full));
+    wire.projection.turn_items[0] = projected.clone();
+    wire.projection.visible_turn_items[0].item = projected;
+    wire.snapshot_sequence += 1;
     apply(
         &mut snapshot,
         &id,
-        vec![Message::Events {
-            through: latest,
-            events: vec![agent_protocol::sync::Event {
-                sequence: latest.sequence,
-                rows: vec![],
-                removed: vec![],
-            }],
-        }],
+        vec![ThreadStreamItem::Snapshot(wire.clone())],
     )
     .unwrap();
+    let query = || crate::state::operations::ReadItem {
+        thread_id: id.clone(),
+        turn_id: "turn".into(),
+        item_id: "command".into(),
+    };
+    let (subscription, _) = query().capture(&snapshot, "").unwrap();
+    wire.snapshot_sequence += 1;
+    wire.projection.thread.title = "unrelated update".into();
+    apply(&mut snapshot, &id, vec![ThreadStreamItem::Snapshot(wire)]).unwrap();
+    let canonical = snapshot.sessions.projections[&id].clone();
+    query()
+        .complete(&mut snapshot, "", (subscription, Some(full.clone())), true)
+        .unwrap();
+    assert!(Arc::ptr_eq(&canonical, &snapshot.sessions.projections[&id]));
+    assert_eq!(snapshot.sessions.projections[&id].snapshot_sequence, 3);
+    assert_eq!(
+        snapshot.sessions.item_details[&(id.application_id(), full.id.clone())].as_ref(),
+        &full
+    );
+    assert!(
+        matches!(snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(),ItemBody::CommandExecution {output,..} if output=="full output")
+    );
+    let mut revised = canonical.as_ref().clone();
+    revised.snapshot_sequence += 1;
+    Arc::make_mut(&mut revised.projection.turn_items[0]).updated_at =
+        "2026-11-14T00:00:01.000Z".into();
+    revised.projection.visible_turn_items[0].item = revised.projection.turn_items[0].clone();
     apply(
         &mut snapshot,
         &id,
-        vec![Message::Hydrate {
-            cursor,
-            row: full.clone(),
-        }],
+        vec![ThreadStreamItem::Snapshot(revised)],
     )
     .unwrap();
-    assert_eq!(snapshot.sessions.replicas[&id].rows()[&full.key], full);
-    assert_eq!(snapshot.sessions.replicas[&id].cursor(), Some(latest));
     let before = snapshot.clone();
-    let (agent_protocol::sync::Content::Full(record)
-    | agent_protocol::sync::Content::Summary(record)) = &full.content;
-    let records::Record::Item(item) = record.as_ref() else {
-        unreachable!()
-    };
-    hydrate_body(
-        &mut snapshot,
-        &id,
-        full.version.saturating_sub(1),
-        item.content.as_ref().clone(),
-    )
-    .unwrap();
+    query()
+        .complete(&mut snapshot, "", (subscription, Some(full)), true)
+        .unwrap();
     assert_eq!(
         snapshot, before,
-        "an obsolete body transfer cannot change a row or cursor"
+        "an obsolete body cannot change the current detail revision or stream"
     );
 }
 

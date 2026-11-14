@@ -57,7 +57,6 @@ fn merge_recovered_draft(recovered: &Draft, current: &Draft) -> Draft {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputRecovery {
     pub restore: bool,
-    pub store: uuid::Uuid,
     pub session: crate::session::SessionRef,
     pub operation: uuid::Uuid,
     pub draft: Arc<Draft>,
@@ -216,7 +215,7 @@ pub struct PendingSubmission {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_draft_slot: Option<String>,
     #[serde(default)]
-    pub cursor: Option<agent_protocol::sync::Cursor>,
+    pub cursor: Option<u64>,
     pub sequence: u64,
     pub submitted_at_ms: Option<u64>,
     pub draft_key: DraftKey,
@@ -454,7 +453,13 @@ group! {
         #[serde(skip)]
         pub live_outputs: Arc<BTreeMap<agent_protocol::conversation::records::OutputKey, (uuid::Uuid, agent_protocol::sync::Output)>>,
         #[serde(skip)]
-        pub replicas: Arc<BTreeMap<crate::session::SessionRef, Arc<agent_protocol::conversation::records::Replica>>>,
+        pub projections: Arc<BTreeMap<crate::session::SessionRef, Arc<agent_protocol::orchestration::projection::ThreadSnapshot>>>,
+        #[serde(skip)]
+        pub subscription_generations: Arc<BTreeMap<crate::session::SessionRef, u64>>,
+        #[serde(skip)]
+        pub item_details: Arc<BTreeMap<(String, String), Arc<agent_protocol::orchestration::TurnItem>>>,
+        #[serde(skip)]
+        pub expanded_history: Arc<BTreeSet<crate::session::SessionRef>>,
         #[serde(default)]
         #[serde(with = "crate::persistence::entries")]
         pub conversations: Arc<BTreeMap<crate::session::SessionRef, Arc<Thread>>>,
@@ -761,7 +766,7 @@ pub enum Event {
     Notification(crate::protocol::Notification),
     ConversationRows {
         subscription_id: uuid::Uuid,
-        message: Box<agent_protocol::conversation::records::Message>,
+        message: Box<agent_protocol::orchestration::projection::ThreadStreamItem>,
     },
     ConnectionChecked {
         failure: Option<String>,
@@ -959,7 +964,7 @@ fn reduce_intent(
         }
         Intent::ReadOlder { thread_id } => {
             if previous.operation_running(op::OperationKey::History { session: thread_id.clone() }) { return (next, Vec::new()); }
-            if previous.sessions.replicas.get(&thread_id).and_then(|replica| replica.window()).is_some_and(|window| window.turn != 0 || window.item != 0) {
+            if previous.sessions.projections.get(&thread_id).is_some_and(|snapshot| snapshot.has_more_history) {
                 return prepare(next, pane_id, op::ReadHistory { session: thread_id });
             }
         }
@@ -1498,7 +1503,10 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                         ..Default::default()
                     });
                 }
-                next.sessions.replicas = Arc::default();
+                next.sessions.projections = Arc::default();
+                next.sessions.subscription_generations = Arc::default();
+                next.sessions.item_details = Arc::default();
+                next.sessions.expanded_history = Arc::default();
                 next.sessions.conversations = Arc::default();
                 next.lists.replica = None;
                 next.lists.subscription = None;
@@ -2342,36 +2350,15 @@ fn append_transcript(text: &mut String, transcript: &str) {
 
 fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::SessionRef) {
     follow_up::reconcile_edit(snapshot, thread_id);
-    let Some(replica) = snapshot.sessions.replicas.get(thread_id) else {
+    let Some(projection) = snapshot.sessions.projections.get(thread_id) else {
         return;
     };
     let draft_key = DraftKey::from(thread_id);
-    let settled: Vec<_> = snapshot
-        .sessions
-        .pending_submissions
-        .iter()
-        .filter(|(_, pending)| pending.draft_key == draft_key)
-        .filter(|(id, pending)| {
-            let observed = replica
-                .rows()
-                .contains_key(&agent_protocol::sync::Key::Input {
-                    thread: thread_id.clone(),
-                    id: (*id).clone(),
-                })
-                || replica
-                    .rows()
-                    .contains_key(&agent_protocol::sync::Key::Item {
-                        thread: thread_id.clone(),
-                        id: id.to_string().into(),
-                    });
-            let covered =
-                pending
-                    .cursor
-                    .zip(replica.cursor())
-                    .is_some_and(|(accepted, current)| {
-                        accepted.store == current.store && accepted.sequence <= current.sequence
-                    });
-            observed || covered
+    let settled:Vec<_>=snapshot.sessions.pending_submissions.iter().filter(|(_,pending)|pending.draft_key==draft_key)
+        .filter(|(id,pending)|{
+            let observed=projection.projection.turn_items.iter().any(|item|matches!(&item.body,
+                agent_protocol::orchestration::TurnItemBody::UserMessage {message_id,..} if message_id==id.as_str()));
+            observed || pending.cursor.is_some_and(|accepted|accepted<=projection.snapshot_sequence)
         })
         .map(|(id, pending)| (id.clone(), pending.draft.clone()))
         .collect();
@@ -2450,7 +2437,7 @@ mod history_tests {
                     ),
                     ..Default::default()
                 };
-                let replica = crate::test_conversations::replica(
+                let replica = crate::test_conversations::projection(
                     crate::models::ThreadResponse {
                         thread: Thread {
                             id: Some(session.clone()),
@@ -2461,7 +2448,7 @@ mod history_tests {
                     },
                     1,
                 );
-                Arc::make_mut(&mut snapshot.sessions.replicas)
+                Arc::make_mut(&mut snapshot.sessions.projections)
                     .insert(session.clone(), Arc::new(replica));
                 let (next, effects) = reduce(
                     &snapshot,

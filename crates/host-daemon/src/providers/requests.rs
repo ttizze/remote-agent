@@ -27,7 +27,88 @@ pub(crate) struct NativeQuestion {
     choices: BTreeMap<String, String>,
 }
 
+pub(crate) fn approval_decision(
+    effect: ChoiceEffect,
+) -> agent_protocol::orchestration::ApprovalDecision {
+    use agent_protocol::orchestration::ApprovalDecision as Decision;
+    match effect {
+        ChoiceEffect::Allow => Decision::Accept,
+        ChoiceEffect::AllowLasting => Decision::AcceptForSession,
+        ChoiceEffect::Deny => Decision::Decline,
+    }
+}
+
+pub(crate) fn request_kind(body: &RequestBody) -> &'static str {
+    match body {
+        RequestBody::Approval {
+            kind: ApprovalKind::Command,
+            ..
+        } => "command",
+        RequestBody::Approval {
+            kind: ApprovalKind::FileChange,
+            ..
+        } => "file-change",
+        RequestBody::Approval { description, .. }
+            if matches!(
+                description.trim().to_ascii_lowercase().as_str(),
+                "read" | "glob" | "grep" | "ls"
+            ) =>
+        {
+            "file-read"
+        }
+        RequestBody::Approval { .. } => "command",
+        RequestBody::Permission { .. } => "permission",
+        RequestBody::Question { .. } => "user_input",
+        RequestBody::Elicitation { .. } => "mcp-elicitation",
+        RequestBody::ToolExecution { .. } => "dynamic_tool_call",
+    }
+}
+
 impl NativeAnswers {
+    pub(crate) fn request_kind(&self, body: &RequestBody) -> &'static str {
+        if let Self::Choices(choices) = self
+            && let Some(permissions) = choices.values().find_map(|value| value.get("permissions"))
+        {
+            let fs = &permissions["fileSystem"];
+            for (access, kind) in [("write", "file-change"), ("read", "file-read")] {
+                if fs
+                    .get(access)
+                    .and_then(Value::as_array)
+                    .is_some_and(|paths| !paths.is_empty())
+                    || fs
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .is_some_and(|entries| {
+                            entries.iter().any(|entry| {
+                                entry.get("access").and_then(Value::as_str) == Some(access)
+                            })
+                        })
+                {
+                    return kind;
+                }
+            }
+            return "command";
+        }
+        request_kind(body)
+    }
+    pub(crate) fn approval_decision(
+        &self,
+        choice: &Choice,
+    ) -> agent_protocol::orchestration::ApprovalDecision {
+        use agent_protocol::orchestration::ApprovalDecision as Decision;
+        let value = match self {
+            Self::Choices(choices) => choices.get(&choice.id),
+            _ => None,
+        };
+        if choice.effect == ChoiceEffect::AllowLasting
+            && value
+                .and_then(|value| value.get("decision"))
+                .is_some_and(|decision| decision.is_object())
+        {
+            return Decision::AcceptAlways;
+        }
+        approval_decision(choice.effect)
+    }
     pub(crate) fn translate(&self, body: &RequestBody, answer: &Answer) -> Result<Value, String> {
         validate_answer(body, answer)?;
         Ok(match (self, answer) {
@@ -916,6 +997,57 @@ fn form_choices(schema: &Value) -> Result<Vec<FormChoice>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_request_kinds_and_decisions_follow_the_native_permission_scope() {
+        let body = RequestBody::Permission {
+            description: String::new(),
+            details: String::new(),
+            choices: vec![],
+        };
+        for (permissions, kind) in [
+            (
+                json!({"fileSystem":{"entries":[{"path":"/project","access":"write"}]}}),
+                "file-change",
+            ),
+            (json!({"fileSystem":{"read":["/project"]}}), "file-read"),
+            (json!({"network":{"enabled":true}}), "command"),
+        ] {
+            let answers = NativeAnswers::Choices(BTreeMap::from([(
+                "allow".into(),
+                json!({"permissions":permissions,"scope":"turn"}),
+            )]));
+            assert_eq!(answers.request_kind(&body), kind);
+        }
+        let answers = NativeAnswers::Choices(BTreeMap::from([
+            (
+                "rule".into(),
+                json!({"decision":{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["git","status"]}}}),
+            ),
+            (
+                "deny-rule".into(),
+                json!({"decision":{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"action":"deny","host":"example.test"}}}}),
+            ),
+        ]));
+        assert_eq!(
+            answers.approval_decision(&Choice {
+                id: "rule".into(),
+                label: "Rule".into(),
+                description: String::new(),
+                effect: ChoiceEffect::AllowLasting
+            }),
+            agent_protocol::orchestration::ApprovalDecision::AcceptAlways
+        );
+        assert_eq!(
+            answers.approval_decision(&Choice {
+                id: "deny-rule".into(),
+                label: "Deny".into(),
+                description: String::new(),
+                effect: ChoiceEffect::Deny
+            }),
+            agent_protocol::orchestration::ApprovalDecision::Decline
+        );
+    }
 
     #[test]
     fn approval_choices_preserve_native_effects_and_leave_cancelling_to_stop() {

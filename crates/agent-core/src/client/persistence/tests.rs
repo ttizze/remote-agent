@@ -536,9 +536,9 @@ async fn a_change_in_the_copies_quiet_period_is_written_before_the_app_stops(
             })
         };
         Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), named("first"));
-        Arc::make_mut(&mut snapshot.sessions.replicas).insert(
+        Arc::make_mut(&mut snapshot.sessions.projections).insert(
             id.clone(),
-            Arc::new(crate::test_conversations::replica(
+            Arc::new(crate::test_conversations::projection(
                 crate::models::ThreadResponse {
                     thread: named("first").as_ref().clone(),
                     ..Default::default()
@@ -564,9 +564,9 @@ async fn a_change_in_the_copies_quiet_period_is_written_before_the_app_stops(
         // The copies now wait ten quiet seconds before their next write.
         let mut renamed = updates.borrow().as_ref().clone();
         Arc::make_mut(&mut renamed.sessions.conversations).insert(id.clone(), named("second"));
-        Arc::make_mut(&mut renamed.sessions.replicas).insert(
+        Arc::make_mut(&mut renamed.sessions.projections).insert(
             id.clone(),
-            Arc::new(crate::test_conversations::replica(
+            Arc::new(crate::test_conversations::projection(
                 crate::models::ThreadResponse {
                     thread: named("second").as_ref().clone(),
                     ..Default::default()
@@ -622,9 +622,9 @@ async fn conversation_copies_are_saved_restored_and_cleared_on_pairing() {
                 provider_errors: None,
             },
         );
-        Arc::make_mut(&mut snapshot.sessions.replicas).insert(
+        Arc::make_mut(&mut snapshot.sessions.projections).insert(
             id.clone(),
-            Arc::new(crate::test_conversations::replica(
+            Arc::new(crate::test_conversations::projection(
                 crate::models::ThreadResponse {
                     thread: thread.clone(),
                     ..Default::default()

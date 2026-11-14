@@ -46,38 +46,39 @@ impl Runtime {
             }
             Call::SubscribeCommandOutput(request) => {
                 let result = (|| {
-                    let item = service
-                        .inner
-                        .conversation
-                        .storage
-                        .item(&request.key.session, &request.key.item)
+                    let storage = &service.inner.conversation.storage;
+                    let item = storage
+                        .thread_item(&request.key.session, request.key.item.as_str())
                         .map_err(storage_failure)?
                         .ok_or_else(|| {
                             Failure::new("item_not_found", "command item does not exist")
                         })?;
-                    let agent_protocol::items::ItemBody::CommandExecution { output, .. } =
-                        item.body
+                    let agent_protocol::orchestration::TurnItemBody::CommandExecution {
+                        output,
+                        ..
+                    } = &item.body
                     else {
                         return Err(Failure::new("invalid_item", "item is not a command"));
                     };
                     let seed = if matches!(
                         item.status,
-                        agent_protocol::execution::ItemStatus::Running
-                            | agent_protocol::execution::ItemStatus::Unknown
+                        agent_protocol::orchestration::TurnItemStatus::Running
+                            | agent_protocol::orchestration::TurnItemStatus::Waiting
                     ) {
-                        service
-                            .inner
-                            .conversation
-                            .storage
-                            .turn_execution(&request.key.session, &item.turn)
+                        storage
+                            .thread_item_attempt(&item)
                             .map_err(storage_failure)?
-                            .map(|execution| execution.attempt.id)
                     } else {
                         None
                     };
+                    let output = output.as_deref().unwrap_or_default();
                     let tail = agent_protocol::sync::Output::new(0, &output);
                     let (initial, updates) = match service.inner.conversation.outputs.subscribe(
-                        &request.key,
+                        &records::OutputKey {
+                            session: SessionRef::new(None, request.key.session.application_id())
+                                .map_err(|error| Failure::new("invalid_session", error))?,
+                            item: request.key.item.clone(),
+                        },
                         seed.map(|execution| (execution, tail.clone())),
                     ) {
                         Some((initial, updates)) => (
@@ -102,58 +103,26 @@ impl Runtime {
                 return result.map(Some);
             }
             Call::SubscribeConversation(request) => {
-                let result = async {
-                    Self::ensure_imported(service, &request.session).await?;
-                    service
-                        .inner
-                        .conversation
-                        .owners
-                        .subscribe(
-                            &request.session,
-                            session,
-                            request.subscription,
-                            request.cached,
-                            request.window,
-                            service
-                                .inner
-                                .router
-                                .queue_budget(session)
-                                .map_err(storage_failure)?,
-                        )
-                        .await
-                        .map_err(storage_failure)
-                }
-                .await;
-                return Ok(Some(Self::opened(&request.session, result?)?));
+                Self::ensure_imported(service, &request.session).await?;
+                return Self::open(service, session, request).await.map(Some);
             }
             Call::CreateConversation(request) => {
-                let result = async {
-                    Self::create(service, request).await?;
-                    service
-                        .inner
-                        .conversation
-                        .owners
-                        .subscribe(
-                            &request.session,
-                            session,
-                            request.subscription,
-                            None,
-                            None,
-                            service
-                                .inner
-                                .router
-                                .queue_budget(session)
-                                .map_err(storage_failure)?,
-                        )
-                        .await
-                        .map_err(storage_failure)
-                }
-                .await;
-                return Ok(Some(Self::opened(&request.session, result?)?));
+                Self::create(service, request).await?;
+                return Self::open(
+                    service,
+                    session,
+                    &records::Subscribe {
+                        session: request.session.clone(),
+                        subscription: request.subscription,
+                        after_sequence: None,
+                    },
+                )
+                .await
+                .map(Some);
             }
             Call::ForkConversation(request) => {
                 let result = async {
-                    Self::await_import(service, &request.source).await?;
+                    Self::ensure_imported(service, &request.source).await?;
                     let _workspace = service.inner.worktree_access.read().await;
                     service.require_not_updating()?;
                     service
@@ -191,47 +160,42 @@ impl Runtime {
             }
             .into(),
             Call::ExtendConversation(request) => Response::Success {
-                result: (service
+                result: service
                     .inner
                     .conversation
-                    .owners
-                    .read(&request.session, session, request.subscription, None)
-                    .await
-                    .map(|_| agent_protocol::models::Empty {})
-                    .map_err(storage_failure)?)
-                .into(),
+                    .storage
+                    .thread_history(&request.session, &request.cursor)
+                    .map_err(storage_failure)?
+                    .into(),
             }
             .into(),
             Call::HydrateConversation(request) => {
-                let result = async {
-                    let mut read = service.inner.conversation.owners.read(
-                        &request.session, session, request.subscription, Some(request.item.clone()),
-                    ).await.map_err(storage_failure)?;
-                    if read.item.as_ref().is_some_and(|row| {
-                        let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = &row.content;
-                        matches!(value.as_ref(), records::Record::Item(item) if item.content.is_deferred())
-                    }) {
-                        Self::hydrate_native(service, &request.session, &request.item).await?;
-                        read = service.inner.conversation.owners.read(
-                            &request.session, session, request.subscription, Some(request.item.clone()),
-                        ).await.map_err(storage_failure)?;
+                let item = service
+                    .inner
+                    .conversation
+                    .storage
+                    .thread_item(&request.session, request.item.as_str())
+                    .map_err(storage_failure)?;
+                let mut reply = records::Hydrated {
+                    item,
+                    transfer: None,
+                };
+                if let Some(item) = &reply.item {
+                    let bytes = protocol::encode(item)
+                        .map_err(|error| storage_failure(error.to_string()))?;
+                    if bytes.len() > agent_protocol::models::MAX_INLINE_ITEM_BYTES {
+                        reply.transfer = Some(
+                            service
+                                .files()
+                                .download_bytes(session, bytes)
+                                .await
+                                .map_err(|error| Failure::new("item_transfer_failed", error))?,
+                        );
+                        reply.item = None;
                     }
-                    let mut transfer = None;
-                    let version = read.item.as_ref().map(|row| row.version);
-                    if let Some(row) = read.item {
-                        let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = row.content;
-                        if let records::Record::Item(item) = value.as_ref() {
-                            let bytes = protocol::encode(item.content.as_ref()).map_err(|error| storage_failure(error.to_string()))?;
-                            if bytes.len() > agent_protocol::models::MAX_INLINE_ITEM_BYTES {
-                                transfer = Some(service.files().download_bytes(session, bytes).await.map_err(|error| Failure::new("item_transfer_failed", error))?);
-                            }
-                        }
-                    }
-                    Ok::<_, Failure>(records::Hydrated { cursor: read.cursor, version, transfer })
                 }
-                .await;
                 Response::Success {
-                    result: result?.into(),
+                    result: reply.into(),
                 }
                 .into()
             }
@@ -240,130 +204,233 @@ impl Runtime {
         Ok(Some(reply))
     }
 
-    fn opened(
-        target: &SessionRef,
-        opened: super::super::owners::Opened,
+    async fn open(
+        service: &HostRpcService,
+        session: SessionId,
+        request: &records::Subscribe,
     ) -> Result<HostReply, Failure> {
-        Ok(HostReply {
-            initial: protocol::response_frame(Response::Success {
-                result: records::Opened {
-                    session: target.clone(),
-                    subscription_id: opened.subscription.id,
-                    initial: opened.initial,
-                }
-                .into(),
-            })
-            .map_err(|error| storage_failure(error.to_string()))?,
-            updates: Some(super::super::routing::HostSubscription::Conversation(
-                opened.subscription,
-            )),
-        })
+        let storage = &service.inner.conversation.storage;
+        let thread = storage
+            .thread_header(&request.session)
+            .map_err(storage_failure)?
+            .ok_or_else(|| Failure::new("conversation_not_found", "conversation does not exist"))?;
+        let provider =
+            serde_json::from_value(serde_json::Value::String(thread.provider_instance_id))
+                .map_err(|error| Failure::new("invalid_provider", error))?;
+        let capabilities =
+            records::capabilities(service.inner.providers.get(provider)?.capabilities());
+        let root = storage
+            .thread_project_root(&request.session)
+            .map_err(storage_failure)?;
+        super::stream::subscribe(
+            storage.clone(),
+            request,
+            provider,
+            capabilities,
+            root,
+            service
+                .inner
+                .router
+                .queue_budget(session)
+                .map_err(storage_failure)?,
+        )
+        .await
+        .map_err(storage_failure)
     }
 
     async fn create(service: &HostRpcService, request: &records::Create) -> Result<(), Failure> {
+        use agent_protocol::orchestration as model;
         request
             .validate_creation()
             .map_err(|error| Failure::new("invalid_params", error))?;
-        let event = match &request.initial {
-            Some((id, content)) => Event::Command {
-                id: decision::OperationId::Client(
-                    Uuid::parse_str(id.as_str()).expect("validated initial input"),
-                ),
-                command: Command::Submit {
-                    id: id.clone(),
-                    content: content.clone(),
-                },
-                receipt: None,
-            },
-            None => Event::Wake,
-        };
-        if service
-            .inner
-            .conversation
-            .storage
-            .lookup(&request.session)
+        let storage = &service.inner.conversation.storage;
+        if storage
+            .thread_header(&request.session)
             .map_err(storage_failure)?
             .is_some()
         {
-            if let Event::Command {
-                id: decision::OperationId::Client(operation),
-                command,
-                ..
-            } = event
-            {
-                let reply = Self::change(
+            if let Some((id, content)) = &request.initial {
+                Self::change(
                     service,
                     &records::Change {
                         session: request.session.clone(),
-                        operation,
-                        command,
+                        operation: Uuid::parse_str(id.as_str()).expect("validated message ID"),
+                        command: Command::Submit {
+                            id: id.clone(),
+                            content: content.clone(),
+                        },
                     },
                 )
-                .await?;
-                if let Outcome::Rejected(reason) = reply.outcome {
-                    return Err(Failure::new("input_rejected", reason));
-                }
+                .await?
+                .accepted()
+                .map_err(|error| Failure::new("command_rejected", error.message))?;
             }
             return Ok(());
         }
         let _workspace = service.inner.worktree_access.read().await;
         service.require_not_updating()?;
-        let agent = service.creation_agent(request.provider, request.selection.model.as_ref())?;
-        let cwd = request.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty());
-        let project_cwd = cwd.map(str::to_owned).unwrap_or_else(|| {
-            service
+        if let Some((_, content)) = &request.initial {
+            service.creation_agent(request.provider, content.model.as_ref())?;
+        }
+        let selected =
+            Self::default_selection(service, request.provider, &request.selection).await?;
+        let cwd = match request.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+            Some(cwd) => cwd.to_owned(),
+            None => service
                 .inner
                 .projects
-                .chat_directory()
-                .to_string_lossy()
-                .into_owned()
-        });
-        let strategy = request.workspace.clone().or_else(|| {
-            cwd.is_none()
-                .then_some(agent_protocol::workspace::WorkspaceStrategy::Root)
-        });
-        let mut workspace = service.workspace_preparation(project_cwd, strategy).await?;
-        workspace.visible &= request.initial.is_some();
-        let header = records::Header {
-            state: decision::Thread {
-                name: String::new(),
-                workspace: cwd
-                    .map(str::to_owned)
-                    .map(decision::Workspace::Folder)
-                    .unwrap_or(decision::Workspace::Missing),
-                provider: request.provider,
-                queue_held: false,
-            },
-            details: records::Details {
-                workspace: Some(Box::new(workspace)),
-                selection: request.selection.clone(),
-                capabilities: records::capabilities(agent.capabilities()),
-                updated_at: now(),
-                project: service.project_snapshot().await?.project_membership(cwd),
-                ..Default::default()
-            },
+                .create_chat_directory()
+                .await
+                .map_err(|error| Failure::new("workspace_unavailable", error))?
+                .to_str()
+                .ok_or_else(|| {
+                    Failure::new("workspace_unavailable", "workspace path is not UTF-8")
+                })?
+                .to_owned(),
         };
-        let runtime = &service.inner.conversation;
-        runtime
-            .recovery(&request.session)
-            .get_or_init(|| async {})
-            .await;
-        let (outcome, _) = runtime
-            .owners
-            .write(
-                &request.session,
-                Write::Event(
-                    event,
-                    Self::context(service, Some(request.provider)),
-                    Some(header),
-                ),
+        let projects = service.project_snapshot().await?;
+        let project_id = match projects.project_membership(Some(&cwd)) {
+            agent_protocol::models::ProjectMembership::Assigned(id) => Some(id),
+            _ => None,
+        };
+        let strategy = match &request.workspace {
+            Some(strategy) => Some(strategy.clone()),
+            None if request.cwd.is_none() => {
+                Some(agent_protocol::workspace::WorkspaceStrategy::Root)
+            }
+            None => {
+                let settings = service
+                    .inner
+                    .worktrees
+                    .settings(None)
+                    .await
+                    .map_err(|error| Failure::new("worktree_settings_failed", error))?;
+                settings.create_on_new_session.then_some(
+                    agent_protocol::workspace::WorkspaceStrategy::Worktree {
+                        base_ref: String::new(),
+                        start_from_origin: true,
+                    },
+                )
+            }
+        };
+        let preparation = match strategy {
+            Some(agent_protocol::workspace::WorkspaceStrategy::Worktree {
+                base_ref,
+                start_from_origin,
+            }) => Some(model::WorkspacePreparation::Worktree {
+                base_ref,
+                start_from_origin,
+                branch: None,
+            }),
+            Some(agent_protocol::workspace::WorkspaceStrategy::ExistingWorktree { path }) => {
+                Some(model::WorkspacePreparation::ExistingWorktree {
+                    worktree_path: path,
+                    branch: None,
+                })
+            }
+            _ => None,
+        };
+        let thread_id = request.session.application_id();
+        let now = super::commands::at();
+        let thread = model::Thread {
+            id: thread_id.clone(),
+            history_origin: None,
+            created_by: model::Actor::User,
+            creation_source: model::CreationSource::Mobile,
+            project_id,
+            title: String::new(),
+            provider_instance_id: request.provider.key().into(),
+            model_selection: selected,
+            runtime_mode: "full-access".into(),
+            interaction_mode: "default".into(),
+            branch: None,
+            worktree_path: Some(cwd),
+            active_provider_thread_id: None,
+            lineage: model::Lineage {
+                parent_thread_id: None,
+                relationship_to_parent: None,
+                root_thread_id: thread_id.clone(),
+                side_chat: None,
+            },
+            forked_from: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            archived_at: None,
+            settled_override: None,
+            settled_at: None,
+            last_visited_at: None,
+            deleted_at: None,
+        };
+        let message = if let Some((id, content)) = &request.initial {
+            Some(Self::message_content(service, &thread_id, id.as_str(), &content.parts).await?)
+        } else {
+            None
+        };
+        let operation = request
+            .initial
+            .as_ref()
+            .map(|(id, _)| id.to_string())
+            .unwrap_or_else(|| {
+                Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("thread.create:{thread_id}").as_bytes(),
+                )
+                .to_string()
+            });
+        let receipt = storage
+            .thread_command(
+                super::super::storage::commands::Command {
+                    id: &operation,
+                    thread_id: &thread_id,
+                    kind: if message.is_some() {
+                        "message.dispatch"
+                    } else {
+                        "thread.create"
+                    },
+                    now: &now,
+                    item_ids: &[],
+                },
+                Some(&thread),
+                |state| {
+                    let Some((id, options)) = &request.initial else {
+                        return Ok(model::Decision::default());
+                    };
+                    let content = message.as_ref().ok_or("message was not prepared")?;
+                    let selected = super::commands::selection(
+                        &thread.model_selection,
+                        &records::Selection {
+                            model: options.model.clone(),
+                            effort: options.effort.clone(),
+                            service_tier: options.service_tier.clone(),
+                        },
+                    );
+                    model::admit(
+                        state,
+                        model::Input {
+                            message_id: id.to_string(),
+                            created_by: model::Actor::User,
+                            creation_source: model::CreationSource::Mobile,
+                            text: content.text.clone(),
+                            attachments: content.attachments.clone(),
+                            context: content.context.clone(),
+                            model_selection: selected,
+                            driver: request.provider.driver().into(),
+                            workspace_preparation: preparation.clone(),
+                        },
+                        model::Admission::Queue,
+                        model::Context {
+                            command_id: &operation,
+                            now: &now,
+                            next_run_ordinal: 1,
+                            can_steer: false,
+                        },
+                    )
+                },
             )
-            .await
             .map_err(storage_failure)?;
-        if let Outcome::Rejected(reason) = outcome {
-            return Err(Failure::new("input_rejected", reason));
+        if let Some(error) = receipt.error {
+            return Err(Failure::new("input_rejected", error));
         }
-
         Ok(())
     }
 
@@ -375,63 +442,19 @@ impl Runtime {
             .inner
             .conversation
             .storage
-            .native_owner(target)
+            .thread_header(target)
             .map_err(storage_failure)?
-            .is_some_and(|owner| owner != *target)
-        {
-            return Err(Failure::new(
-                "native_session_bound",
-                "This native session belongs to another conversation",
-            ));
-        }
-        if service
-            .inner
-            .conversation
-            .storage
-            .loaded(target)
-            .map_err(storage_failure)?
+            .is_some()
         {
             return Ok(());
         }
-        service.inner.providers.get(
-            target
-                .native_provider()
-                .map_err(|error| Failure::new("invalid_session", error))?,
-        )?;
-        let runtime = &service.inner.conversation;
-        runtime.recovery(target).get_or_init(|| async {}).await;
-        runtime
-            .owners
-            .write(target, Write::ImportStatus { now: now() })
-            .await
-            .map_err(storage_failure)?;
-        Ok(())
-    }
-    pub(in crate::host_rpc) async fn await_import(
-        service: &HostRpcService,
-        target: &SessionRef,
-    ) -> Result<(), Failure> {
-        Self::ensure_imported(service, target).await?;
-        let storage = &service.inner.conversation.storage;
-        let mut changed = storage.changes();
-        loop {
-            if storage.loaded(target).map_err(storage_failure)? {
-                return Ok(());
-            }
-            if let Some(state) = storage
-                .header(target)
-                .map_err(storage_failure)?
-                .details
-                .history_read_state
-                && state.kind == agent_protocol::session::HistoryReadKind::Unavailable
-            {
-                return Err(Failure::new("history_unavailable", state.issues.join("\n")));
-            }
-            changed
-                .changed()
-                .await
-                .map_err(|error| storage_failure(error.to_string()))?;
+        if target.provider.is_none() {
+            return Err(Failure::new(
+                "session_not_found",
+                "conversation does not exist",
+            ));
         }
+        Self::import_native(service, target).await
     }
 
     pub(super) async fn native_history(
@@ -485,12 +508,20 @@ impl Runtime {
             state.issues.sort();
             state.issues.dedup();
         }
+        let is_message = |item: &agent_protocol::items::Item| {
+            matches!(
+                item.body(),
+                agent_protocol::items::ItemBody::UserMessage { .. }
+                    | agent_protocol::items::ItemBody::AssistantText { .. }
+                    | agent_protocol::items::ItemBody::Reasoning { .. }
+            )
+        };
         let mut issues = Vec::new();
         for turn in response.thread.turns.iter_mut().flatten() {
             let turn = Arc::make_mut(turn);
             let mut kept = Vec::new();
             for item in turn.items.take().unwrap_or_default() {
-                if !item.is_history_message() {
+                if !is_message(&item) {
                     continue;
                 }
                 let item = if item.is_deferred() {
@@ -513,7 +544,7 @@ impl Runtime {
                 } else {
                     item
                 };
-                if item.is_history_message() {
+                if is_message(&item) {
                     kept.push(item);
                 }
             }

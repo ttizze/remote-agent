@@ -110,7 +110,7 @@ impl HostRpcService {
         &self,
         params: &agent_protocol::handoff::ReadHistory,
     ) -> Result<agent_protocol::handoff::Page, Failure> {
-        super::super::runtime::Runtime::await_import(self, &params.session).await?;
+        super::super::runtime::Runtime::ensure_imported(self, &params.session).await?;
         let (history, _) =
             super::super::runtime::Runtime::handoff_history(self, &params.session, 0).await?;
         let messages = history

@@ -1,5 +1,6 @@
 #[path = "conversation_rows.rs"]
 pub mod rows;
+pub use rows::orchestration;
 // Scripted unit-test Host over the actual QUIC/MessagePack transport.
 // JSON values below are fixture data, never an alternate transport.
 use agent_core::state::Snapshot;
@@ -341,11 +342,9 @@ impl Writer {
                 {
                     state.sequence = state.sequence.max(7) + 1;
                     value["result"] = json!(agent_protocol::conversation::records::Acknowledged {
-                        outcome: agent_protocol::conversation::Outcome::Accepted,
-                        cursor: agent_protocol::sync::Cursor {
-                            store: uuid::Uuid::from_u128(1),
-                            sequence: state.sequence
-                        }
+                        sequence: state.sequence,
+                        accepted_at: "2026-11-14T00:00:00.000Z".into(),
+                        error: None,
                     });
                 }
                 if matches!(
@@ -360,43 +359,49 @@ impl Writer {
                 } else if request.call.method() == "host/conversation/hydrate"
                     && value["result"].get("item").is_some()
                 {
-                    use agent_protocol::{
-                        conversation::records,
-                        sync::{Content, Key, Message},
-                    };
                     let target: SessionRef =
                         serde_json::from_value(request["params"]["session"].clone())?;
-                    let item: agent_protocol::models::Item =
+                    let item: agent_protocol::items::Item =
                         serde_json::from_value(value["result"]["item"].clone())?;
+                    let id: agent_protocol::ids::ItemId =
+                        serde_json::from_value(request["params"]["item"].clone())?;
                     let replica = &state.replicas[&target];
-                    let mut row = replica.rows()[&Key::Item {
-                        thread: target,
-                        id: serde_json::from_value(request["params"]["item"].clone())?,
-                    }]
-                        .clone();
-                    let original = match &row.content {
-                        Content::Full(value) | Content::Summary(value) => value,
+                    let row = &replica.rows()[&agent_protocol::sync::Key::Item {
+                        thread: target.clone(),
+                        id,
+                    }];
+                    let record = match &row.content {
+                        agent_protocol::sync::Content::Full(record)
+                        | agent_protocol::sync::Content::Summary(record) => record,
                     };
-                    let records::Record::Item(original) = original.as_ref() else {
+                    let agent_protocol::conversation::records::Record::Item(original) =
+                        record.as_ref()
+                    else {
                         unreachable!();
                     };
-                    let mut record = original.clone();
-                    record.content = Arc::new(item);
-                    row.content = Content::Full(Arc::new(records::Record::Item(record)));
+                    let provider = target
+                        .provider
+                        .or_else(|| {
+                            state
+                                .threads
+                                .get(&target)
+                                .and_then(|value| {
+                                    serde_json::from_value::<ThreadResponse>(value.clone()).ok()
+                                })
+                                .and_then(|response| response.thread.active_provider)
+                        })
+                        .unwrap();
+                    let item = orchestration::item_record(
+                        &target.application_id(),
+                        Some(original.turn.as_str()),
+                        &item,
+                        provider,
+                        false,
+                    );
                     let transfer: Option<agent_protocol::models::TransferGrant> =
                         serde_json::from_value(value["result"]["transfer"].clone())?;
-                    let cursor = replica.cursor().unwrap();
-                    let version = row.version;
-                    let subscription =
-                        serde_json::from_value(request["params"]["subscription"].clone())?;
-                    if transfer.is_none() {
-                        state
-                            .pending_rows
-                            .push((subscription, Message::Hydrate { cursor, row }));
-                    }
-                    value["result"] = json!(records::Hydrated {
-                        cursor,
-                        version: Some(version),
+                    value["result"] = json!(agent_protocol::conversation::records::Hydrated {
+                        item: transfer.is_none().then_some(item),
                         transfer
                     });
                 }
@@ -498,10 +503,15 @@ impl Writer {
             if let Ok(opened) = serde_json::from_value::<
                 agent_protocol::conversation::records::Opened,
             >(value["result"].clone())
-                && let agent_protocol::conversation::records::Message::Snapshot { cursor, .. } =
-                    opened.initial
             {
-                state.sequence = state.sequence.max(cursor.sequence);
+                for item in opened.initial {
+                    if let agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(
+                        snapshot,
+                    ) = item
+                    {
+                        state.sequence = state.sequence.max(snapshot.snapshot_sequence);
+                    }
+                }
             }
             Some(subscription)
         } else {
@@ -681,27 +691,53 @@ impl State {
             if cached.is_some() {
                 self.sequence += 1;
             }
-            let message = self.rows(response, cached, false)?;
+            let provider = response
+                .thread
+                .active_provider
+                .or(response.thread.id.as_ref().and_then(|id| id.provider))
+                .unwrap();
+            let capabilities = response.thread.capabilities.unwrap_or_default();
+            let snapshot = orchestration::snapshot(response.clone(), self.sequence);
+            self.rows(response, cached, false)?;
             value["result"] = json!(agent_protocol::conversation::records::Opened {
                 session: target,
                 subscription_id: uuid::Uuid::nil(),
-                initial: message,
+                initial: vec![
+                    agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(snapshot),
+                    agent_protocol::orchestration::projection::ThreadStreamItem::Synchronized
+                ],
+                provider,
+                capabilities,
+                project_root: None,
             });
         } else if let Ok(opened) = serde_json::from_value::<
             agent_protocol::conversation::records::Opened,
         >(value["result"].clone())
         {
-            let replica = agent_protocol::conversation::records::Replica::new(
-                agent_protocol::sync::Scope::Conversation(opened.session.clone()),
-                1,
-            )
-            .apply(1, opened.initial)
-            .unwrap();
-            if let Some(response) = agent_protocol::conversation::records::project(&replica) {
+            let mut snapshot = None;
+            for item in opened.initial {
+                snapshot = agent_core::orchestration::receive(
+                    &opened.session.application_id(),
+                    snapshot.as_ref(),
+                    item,
+                )
+                .map_err(std::io::Error::other)?;
+            }
+            if let Some(snapshot) = snapshot {
+                let response = agent_core::orchestration::project(
+                    &snapshot,
+                    &opened.session,
+                    opened.provider,
+                    opened.capabilities,
+                    opened.project_root.as_deref(),
+                    &Default::default(),
+                )
+                .map_err(std::io::Error::other)?;
+                let replica = rows::replica(response.clone(), 1);
                 self.threads
                     .insert(opened.session.clone(), serde_json::to_value(response)?);
+                self.replicas.insert(opened.session, replica);
             }
-            self.replicas.insert(opened.session, replica);
         }
         Ok(())
     }

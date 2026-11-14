@@ -206,7 +206,6 @@ impl HostRpcService {
     }
 
     pub fn close_session(&self, session: SessionId) {
-        self.inner.conversation.owners.disconnect(session);
         self.inner.router.close_session(session);
         self.inner.terminals.close_session(session);
         self.inner.files.clear_session(session);
@@ -1016,10 +1015,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            renamed.outcome,
-            agent_protocol::conversation::Outcome::Accepted
-        );
+        assert_eq!(renamed.error, None);
         assert_eq!(
             service
                 .inner

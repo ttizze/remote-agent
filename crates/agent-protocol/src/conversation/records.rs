@@ -352,8 +352,7 @@ fn validate_row(row: &Row) -> Result<(), crate::sync::ApplyError> {
 pub struct Subscribe {
     pub session: SessionRef,
     pub subscription: uuid::Uuid,
-    pub cached: Option<crate::sync::Cursor>,
-    pub window: Option<crate::sync::Window>,
+    pub after_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,7 +360,10 @@ pub struct Opened {
     pub session: SessionRef,
     #[serde(skip)]
     pub subscription_id: uuid::Uuid,
-    pub initial: Message,
+    pub initial: Vec<crate::orchestration::projection::ThreadStreamItem>,
+    pub provider: crate::session::ProviderKind,
+    pub capabilities: Capabilities,
+    pub project_root: Option<String>,
 }
 
 impl crate::operations::RpcMethod for Subscribe {
@@ -373,23 +375,45 @@ impl crate::operations::RpcMethod for Subscribe {
         output.subscription_id = id;
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        validate_opened(&self.session, output)
+        validate_opened(&self.session, output, self.after_sequence.is_none())
     }
 }
 
-fn validate_opened(expected: &SessionRef, output: &Opened) -> Result<(), &'static str> {
+fn validate_opened(
+    expected: &SessionRef,
+    output: &Opened,
+    require_snapshot: bool,
+) -> Result<(), &'static str> {
     if expected != &output.session {
         return Err("conversation identity changed");
     }
-    match &output.initial {
-        Message::Snapshot { rows, .. }
-            if rows
-                .iter()
-                .any(|row| row.key == crate::sync::Key::Thread(expected.clone())) => {}
-        Message::Events { .. } => {}
-        _ => return Err("conversation header is missing"),
+    let expected = expected.application_id();
+    for item in &output.initial {
+        match item {
+            crate::orchestration::projection::ThreadStreamItem::Snapshot(snapshot)
+                if snapshot.projection.thread.id != expected =>
+            {
+                return Err("conversation identity changed");
+            }
+            crate::orchestration::projection::ThreadStreamItem::Event { event, .. }
+                if event.thread_id != expected =>
+            {
+                return Err("conversation event belongs to another thread");
+            }
+            _ => {}
+        }
     }
-    validate_message(&output.initial).map_err(|_| "conversation row identity changed")
+    if require_snapshot
+        && !output.initial.iter().any(|item| {
+            matches!(
+                item,
+                crate::orchestration::projection::ThreadStreamItem::Snapshot(_)
+            )
+        })
+    {
+        return Err("conversation header is missing");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,7 +439,7 @@ impl crate::operations::RpcMethod for Create {
         output.subscription_id = id;
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        validate_opened(&self.session, output)
+        validate_opened(&self.session, output, true)
     }
 }
 
@@ -426,7 +450,7 @@ impl Create {
             workspace.validate()?;
         }
         if self.session.provider.is_some() {
-            return Err("new conversations require a provider-independent UUID");
+            return Err("new conversations require a provider-independent ID");
         }
         if let Some((id, _)) = &self.initial {
             uuid::Uuid::parse_str(id.as_str()).map_err(|_| "input ID must be a UUID")?;
@@ -442,30 +466,23 @@ pub struct Change {
     pub command: decision::Command,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Acknowledged {
-    pub outcome: decision::Outcome,
-    pub cursor: crate::sync::Cursor,
+    pub sequence: u64,
+    pub accepted_at: String,
+    pub error: Option<String>,
 }
 
 impl Acknowledged {
-    pub fn accepted(self) -> Result<crate::sync::Cursor, crate::error::RpcFailure> {
-        match self.outcome {
-            decision::Outcome::DeliveryUnknown => Err(crate::error::RpcFailure {
-                code: "submission_delivery_unknown".into(),
-                message:
-                    "以前の送信結果を確認できません。履歴を確認してから再送または破棄してください。"
-                        .into(),
-                delivery: crate::error::Delivery::Unknown,
-                execution: None,
-            }),
-            decision::Outcome::Rejected(message) => Err(crate::error::RpcFailure {
+    pub fn accepted(self) -> Result<u64, crate::error::RpcFailure> {
+        match self.error {
+            Some(message) => Err(crate::error::RpcFailure {
                 code: "command_rejected".into(),
                 message,
                 delivery: crate::error::Delivery::NotSent,
                 execution: None,
             }),
-            _ => Ok(self.cursor),
+            None => Ok(self.sequence),
         }
     }
 }
@@ -473,13 +490,12 @@ impl Acknowledged {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Extend {
     pub session: SessionRef,
-    pub subscription: uuid::Uuid,
+    pub cursor: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hydrate {
     pub session: SessionRef,
-    pub subscription: uuid::Uuid,
     pub item: crate::ids::ItemId,
 }
 
@@ -503,40 +519,9 @@ pub struct Fork {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hydrated {
-    pub cursor: crate::sync::Cursor,
-    pub version: Option<u64>,
-    /// Only large body bytes travel separately; rows are ordered on the subscription.
+    pub item: Option<crate::orchestration::TurnItem>,
+    /// Oversized detail bodies use the existing one-use blob transfer.
     pub transfer: Option<crate::models::TransferGrant>,
-}
-
-/// Attach separately transferred bytes only to the exact row that granted them.
-/// This never introduces an item, position or row version through an RPC reply.
-pub fn hydrate_body(replica: &Replica, version: u64, item: crate::models::Item) -> Option<Row> {
-    let crate::sync::Scope::Conversation(id) = replica.scope() else {
-        return None;
-    };
-    let mut row = replica
-        .rows()
-        .get(&crate::sync::Key::Item {
-            thread: id.clone(),
-            id: item.id.clone(),
-        })?
-        .clone();
-    if row.version != version {
-        return None;
-    }
-    let (crate::sync::Content::Full(value) | crate::sync::Content::Summary(value)) = &row.content;
-    let Record::Item(saved) = value.as_ref() else {
-        return None;
-    };
-    if item.is_deferred() {
-        return None;
-    }
-    row.content = crate::sync::Content::Full(std::sync::Arc::new(Record::Item(Item {
-        content: std::sync::Arc::new(item),
-        ..saved.clone()
-    })));
-    Some(row)
 }
 
 /// Deferred bodies keep their identity, position and saved row version.

@@ -1,7 +1,7 @@
 //! Device copies of the conversation list and opened conversations, one
 //! directory per Host, shown before the Host confirms them.
 //!
-//! A copy contains the newest window of rows and its resumable cursor.
+//! A copy contains the newest T3 snapshot and its resumable event sequence.
 //! Writes follow the
 //! first change after half a second, then at most every ten seconds, keeping
 //! only the latest state; an app about to stop flushes what is pending. Copies have no count or size limit. A damaged or
@@ -28,7 +28,7 @@ use tokio::sync::watch;
 /// Copies restored at startup, most recently saved first.
 const RESTORED: usize = 20;
 /// Copies in another format are discarded instead of migrated.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const LIST_FORMAT: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
@@ -36,7 +36,7 @@ struct Copy {
     format: u32,
     storage_scope: String,
     session: SessionRef,
-    snapshot: records::Message,
+    snapshot: agent_protocol::orchestration::projection::ThreadSnapshot,
 }
 
 /// Like T3 Code's separate shell/thread caches (cefb544a), the list has no
@@ -89,16 +89,26 @@ fn file(directory: &Path, id: &SessionRef) -> PathBuf {
     ))
 }
 
-fn copy(storage_scope: &str, id: &SessionRef, replica: &records::Replica) -> Option<Copy> {
-    Some(Copy {
+fn copy(
+    storage_scope: &str,
+    id: &SessionRef,
+    projection: &agent_protocol::orchestration::projection::ThreadSnapshot,
+) -> Copy {
+    Copy {
         format: FORMAT,
         storage_scope: storage_scope.into(),
         session: id.clone(),
-        snapshot: replica.snapshot()?,
-    })
+        snapshot: projection.clone(),
+    }
 }
 
-fn read(path: &Path, storage_scope: &str) -> Option<(SessionRef, records::Replica)> {
+fn read(
+    path: &Path,
+    storage_scope: &str,
+) -> Option<(
+    SessionRef,
+    agent_protocol::orchestration::projection::ThreadSnapshot,
+)> {
     let copy = std::fs::read(path)
         .ok()
         .and_then(|bytes| agent_protocol::protocol::decode::<Copy>(&bytes).ok());
@@ -108,14 +118,12 @@ fn read(path: &Path, storage_scope: &str) -> Option<(SessionRef, records::Replic
     {
         return None;
     }
-    let copy = copy.filter(|copy| copy.format == FORMAT);
-    let loaded = copy.and_then(|copy| {
-        let replica = records::Replica::new(Scope::Conversation(copy.session.clone()), 0)
-            .apply(0, copy.snapshot)
-            .ok()?;
-        records::project(&replica)?;
-        Some((copy.session, replica))
-    });
+    let loaded = copy
+        .filter(|copy| {
+            copy.format == FORMAT
+                && copy.session.application_id() == copy.snapshot.projection.thread.id
+        })
+        .map(|copy| (copy.session, copy.snapshot));
     if loaded.is_none() {
         let _ = std::fs::remove_file(path);
     }
@@ -126,12 +134,9 @@ fn write(
     directory: &Path,
     storage_scope: &str,
     id: &SessionRef,
-    replica: &records::Replica,
+    projection: &agent_protocol::orchestration::projection::ThreadSnapshot,
 ) -> std::io::Result<()> {
-    let Some(copy) = copy(storage_scope, id, replica) else {
-        return Ok(());
-    };
-    write_value(&file(directory, id), copy)
+    write_value(&file(directory, id), copy(storage_scope, id, projection))
 }
 
 fn write_value(path: &Path, value: impl Serialize) -> std::io::Result<()> {
@@ -175,13 +180,30 @@ pub fn restore(directory: &Path, snapshot: &mut Snapshot) {
     for (_, path) in files.into_iter().take(RESTORED) {
         if let Some((id, replica)) = read(&path, &snapshot.connection.storage_scope) {
             if snapshot.sessions.conversations.contains_key(&id)
-                || snapshot.sessions.replicas.contains_key(&id)
+                || snapshot.sessions.projections.contains_key(&id)
             {
                 continue;
             }
-            let mut thread = records::project(&replica)
-                .expect("validated cache projection")
-                .thread;
+            let provider = serde_json::from_value(serde_json::Value::String(
+                replica.projection.thread.provider_instance_id.clone(),
+            ));
+            let metadata = snapshot.thread_metadata(&id);
+            let Ok(provider) = provider else {
+                continue;
+            };
+            let Ok(projected) = crate::orchestration::project(
+                &replica,
+                &id,
+                provider,
+                metadata
+                    .and_then(|thread| thread.capabilities)
+                    .unwrap_or_default(),
+                metadata.and_then(|thread| thread.cwd.as_deref()),
+                &BTreeMap::new(),
+            ) else {
+                continue;
+            };
+            let mut thread = projected.thread;
             thread.status = SessionStatus::Unknown;
             thread.requests.clear();
             thread.submissions.clear();
@@ -190,7 +212,7 @@ pub fn restore(directory: &Path, snapshot: &mut Snapshot) {
             thread.queue = Default::default();
             Arc::make_mut(&mut snapshot.sessions.conversations)
                 .insert(id.clone(), Arc::new(thread));
-            Arc::make_mut(&mut snapshot.sessions.replicas).insert(id, Arc::new(replica));
+            Arc::make_mut(&mut snapshot.sessions.projections).insert(id, Arc::new(replica));
         }
     }
 }
@@ -203,7 +225,8 @@ pub fn clear(directory: &Path) {
 /// What the copies on disk hold, to write only what changed.
 #[derive(Default)]
 struct Saved {
-    conversations: BTreeMap<SessionRef, Arc<records::Replica>>,
+    conversations:
+        BTreeMap<SessionRef, Arc<agent_protocol::orchestration::projection::ThreadSnapshot>>,
     list: Option<ListCopy>,
 }
 
@@ -241,20 +264,21 @@ impl Saved {
         }
         let changed: Vec<_> = snapshot
             .sessions
-            .replicas
+            .projections
             .iter()
             .filter(|(id, thread)| {
                 self.conversations
                     .get(*id)
                     .is_none_or(|previous| !Arc::ptr_eq(previous, thread))
-                    && thread.cursor().is_some()
-                    && !thread.expanded()
-                    // As T3 shouldPersistThread, keep the last settled copy while
-                    // active work runs. A cold client resumes its durable cursor.
-                    && !thread.rows().values().any(|row| {
-                        let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = &row.content;
-                        matches!(value.as_ref(), records::Record::Turn(turn) if matches!(turn.state, records::Execution::Running { .. } | records::Execution::Waiting(agent_protocol::conversation::Wait::Retry { .. })))
-                            || matches!(value.as_ref(), records::Record::Input(input) if matches!(input.state, records::Delivery::Preparing(_) | records::Delivery::Delivering))
+                    && !snapshot.sessions.expanded_history.contains(*id)
+                    && !thread.projection.runs.iter().any(|run| {
+                        matches!(
+                            run.status,
+                            agent_protocol::orchestration::RunStatus::Preparing
+                                | agent_protocol::orchestration::RunStatus::Starting
+                                | agent_protocol::orchestration::RunStatus::Running
+                                | agent_protocol::orchestration::RunStatus::Waiting
+                        )
                     })
             })
             .map(|(id, thread)| (id.clone(), thread.clone()))
@@ -367,14 +391,14 @@ mod tests {
         let mut snapshot = Snapshot::default();
         for thread in threads {
             let id = thread.id.clone().unwrap();
-            let replica = crate::test_conversations::replica(
+            let replica = crate::test_conversations::projection(
                 crate::models::ThreadResponse {
                     thread: thread.clone(),
                     ..Default::default()
                 },
                 1,
             );
-            Arc::make_mut(&mut snapshot.sessions.replicas).insert(id.clone(), Arc::new(replica));
+            Arc::make_mut(&mut snapshot.sessions.projections).insert(id.clone(), Arc::new(replica));
             Arc::make_mut(&mut snapshot.sessions.conversations).insert(id, Arc::new(thread));
         }
         Arc::new(snapshot)
@@ -382,7 +406,7 @@ mod tests {
 
     fn save_thread(directory: &Path, thread: Thread) {
         let id = thread.id.clone().unwrap();
-        let replica = crate::test_conversations::replica(
+        let replica = crate::test_conversations::projection(
             crate::models::ThreadResponse {
                 thread,
                 ..Default::default()
@@ -634,9 +658,18 @@ mod tests {
             }),
         );
         let live = snapshot([running.clone()]);
-        let live = records::project(live.sessions.replicas.values().next().unwrap())
-            .unwrap()
-            .thread;
+        let projection = live.sessions.projections.values().next().unwrap();
+        let session = live.sessions.projections.keys().next().unwrap();
+        let live = crate::orchestration::project(
+            projection,
+            session,
+            ProviderKind::Claude,
+            crate::session::Capabilities::default(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .thread;
         assert!(
             !live.requests.is_empty()
                 && !live.submissions.is_empty()
@@ -662,20 +695,7 @@ mod tests {
             Some(vec![Arc::new(command.clone())]);
         let mut incoming = snapshot([settled, running, expanded]);
         let id = SessionRef::new(ProviderKind::Claude, "expanded".into()).unwrap();
-        let old = &incoming.sessions.replicas[&id];
-        let expanded = old
-            .apply(
-                1,
-                Message::Extend {
-                    cursor: old.cursor().unwrap(),
-                    window: agent_protocol::sync::Window { turn: 0, item: 0 },
-                    rows: vec![],
-                },
-            )
-            .unwrap();
-        assert!(expanded.expanded());
-        Arc::make_mut(&mut Arc::make_mut(&mut incoming).sessions.replicas)
-            .insert(id, Arc::new(expanded));
+        Arc::make_mut(&mut Arc::make_mut(&mut incoming).sessions.expanded_history).insert(id);
         updates.send_replace(incoming);
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(

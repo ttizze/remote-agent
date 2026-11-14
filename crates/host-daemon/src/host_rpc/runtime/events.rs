@@ -5,7 +5,7 @@ use agent_protocol::{
     models::Turn,
 };
 
-fn background(turn: &Turn) -> Vec<BackgroundTask> {
+pub(super) fn background(turn: &Turn) -> Vec<BackgroundTask> {
     turn.items
         .iter()
         .flatten()
@@ -68,6 +68,7 @@ impl Runtime {
             id.clone(),
             bytes,
             resources::PendingRequest {
+                body: request.body.clone(),
                 target: source.target.clone(),
                 attempt: attempt.clone(),
                 origin,
@@ -123,6 +124,11 @@ impl Runtime {
                 runtime.retire_source(&native);
             }
         });
+        if let Some(execution) = execution
+            && let Some(target) = runtime.storage.attempt_owner(&execution.to_string())?
+        {
+            return Self::observe_execution(service, &target, event, execution).await;
+        }
         match event {
             AgentChange::Session { session, change } => {
                 let source = runtime.resources.lock().unwrap().get(&session).cloned();
@@ -197,6 +203,32 @@ impl Runtime {
                     .collect();
                 for (id, target, attempt) in requests {
                     runtime.requests.lock().unwrap().remove(&id);
+                    if runtime
+                        .storage
+                        .attempt_owner(&attempt.to_string())?
+                        .is_some()
+                    {
+                        let now = commands::at();
+                        runtime
+                            .storage
+                            .observe_thread(&target.id, &[], &now, |state| {
+                                if native_id.is_some() {
+                                    agent_protocol::orchestration::resolve_request(
+                                        state,
+                                        id.as_str(),
+                                        None,
+                                        &now,
+                                    )
+                                } else {
+                                    agent_protocol::orchestration::request_source_closed(
+                                        state,
+                                        id.as_str(),
+                                        &now,
+                                    )
+                                }
+                            })?;
+                        continue;
+                    }
                     Self::event(
                         service,
                         &target,

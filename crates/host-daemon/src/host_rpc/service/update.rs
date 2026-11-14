@@ -41,7 +41,7 @@ impl HostRpcService {
             }
             tokio::time::timeout(
                 SESSION_LIST_TIMEOUT,
-                super::super::runtime::Runtime::await_import(self, &session),
+                super::super::runtime::Runtime::ensure_imported(self, &session),
             )
             .await
             .map_err(|_| anyhow::Error::msg(super::activity::incomplete()))?

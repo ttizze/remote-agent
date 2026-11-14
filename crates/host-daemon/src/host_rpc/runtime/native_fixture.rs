@@ -31,6 +31,57 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+#[derive(Clone)]
+pub(in crate::host_rpc) struct Transcript {
+    pub snapshot: agent_protocol::orchestration::projection::ThreadSnapshot,
+    session: SessionRef,
+    provider: ProviderKind,
+    capabilities: Capabilities,
+    project_root: Option<String>,
+}
+impl Transcript {
+    pub(in crate::host_rpc) fn opened(opened: records::Opened) -> Self {
+        let mut snapshot = None;
+        for item in opened.initial {
+            snapshot = agent_core::orchestration::receive(
+                &opened.session.application_id(),
+                snapshot.as_ref(),
+                item,
+            )
+            .unwrap();
+        }
+        Self {
+            snapshot: snapshot.expect("opening includes a snapshot"),
+            session: opened.session,
+            provider: opened.provider,
+            capabilities: opened.capabilities,
+            project_root: opened.project_root,
+        }
+    }
+    pub(in crate::host_rpc) fn apply(
+        mut self,
+        item: agent_protocol::orchestration::projection::ThreadStreamItem,
+    ) -> Result<Self, String> {
+        self.snapshot = agent_core::orchestration::receive(
+            &self.session.application_id(),
+            Some(&self.snapshot),
+            item,
+        )?
+        .ok_or("snapshot disappeared")?;
+        Ok(self)
+    }
+    pub(in crate::host_rpc) fn project(&self) -> Result<ThreadResponse, String> {
+        agent_core::orchestration::project(
+            &self.snapshot,
+            &self.session,
+            self.provider,
+            records::capabilities(self.capabilities),
+            self.project_root.as_deref(),
+            &Default::default(),
+        )
+    }
+}
+
 /// Independent native sessions, including persisted history and provider
 /// acknowledgements. Assertions observe the Host boundary, not a reimplementation
 /// of its handoff/routing decisions.
@@ -190,7 +241,18 @@ impl crate::providers::Configuration for NativeAgent {
     }
     async fn models(&self, _: &op::ListModels) -> Result<op::ModelPage, Failure> {
         Ok(op::ModelPage {
-            data: vec![],
+            data: vec![agent_protocol::models::Model {
+                id: "fixture-model".into(),
+                model: ModelRef {
+                    provider: self.provider,
+                    id: "fixture-model".into(),
+                },
+                display_name: "Fixture model".into(),
+                credential_route: None,
+                settings: None,
+                settings_discovery: false,
+                is_default: Some(true),
+            }],
             next_cursor: None,
             provider_errors: None,
         })
@@ -434,7 +496,8 @@ impl Agent for NativeAgent {
         _: Option<serde_json::Value>,
         execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
-        match self.fail_submit.swap(0, Ordering::SeqCst) {
+        let failure = self.fail_submit.swap(0, Ordering::SeqCst);
+        match failure {
             1 => return Err(Failure::new("refused", "prompt refused before consumption")),
             2 => {
                 return Err(Failure::unknown(
@@ -504,6 +567,12 @@ impl Agent for NativeAgent {
         )
         .await
         .map_err(|error| Failure::new("event_failed", error))?;
+        if failure == 3 {
+            return Err(Failure::unknown(
+                "submission_unknown",
+                "native callback preceded a lost acknowledgement",
+            ));
+        }
         Ok(op::SubmissionReceipt {
             turn_id: Some(turn_id),
         })

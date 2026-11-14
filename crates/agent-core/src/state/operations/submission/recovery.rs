@@ -75,8 +75,8 @@ impl ResolveSavedInput {
         snapshot: &'a Snapshot,
     ) -> Result<
         (
-            Option<agent_protocol::session::ProviderKind>,
-            &'a [agent_protocol::operations::Input],
+            crate::session::ProviderKind,
+            &'a agent_protocol::orchestration::TurnItemBody,
         ),
         PeerError,
     > {
@@ -85,18 +85,31 @@ impl ResolveSavedInput {
             .conversations
             .get(&self.session)
             .ok_or_else(|| PeerError::InvalidMessage("conversation is no longer open".into()))?;
-        let input = thread
-            .preparations
-            .iter()
-            .find(|preparation| {
-                preparation.submission.client_user_message_id == self.input
-                    && preparation.status == PreparationStatus::Unknown
-            })
-            .ok_or_else(|| PeerError::InvalidMessage("input is no longer unresolved".into()))?;
-        Ok((
-            thread.active_provider.or(self.session.provider),
-            &input.submission.input,
-        ))
+        if !thread.preparations.iter().any(|preparation| {
+            preparation.submission.client_user_message_id == self.input
+                && preparation.status == PreparationStatus::Unknown
+        }) {
+            return Err(PeerError::InvalidMessage(
+                "input is no longer unresolved".into(),
+            ));
+        }
+        let projection = &snapshot
+            .sessions
+            .projections
+            .get(&self.session)
+            .ok_or_else(|| PeerError::InvalidMessage("conversation snapshot is missing".into()))?
+            .projection;
+        let item=projection.turn_items.iter().find(|item|matches!(&item.body,agent_protocol::orchestration::TurnItemBody::UserMessage {message_id,..} if message_id==self.input.as_str())).ok_or_else(||PeerError::InvalidMessage("unresolved input is missing".into()))?;
+        let instance = item
+            .run_id
+            .as_ref()
+            .and_then(|id| projection.runs.iter().find(|run| &run.id == id))
+            .map_or(&projection.thread.provider_instance_id, |run| {
+                &run.provider_instance_id
+            });
+        let provider = crate::session::ProviderKind::from_instance_id(instance)
+            .map_err(PeerError::InvalidMessage)?;
+        Ok((provider, &item.body))
     }
 }
 
@@ -110,25 +123,19 @@ impl Operation for ResolveSavedInput {
     fn navigation_bound(&self) -> bool {
         false
     }
-    fn prepare(&mut self, snapshot: &mut Snapshot, pane: &str) -> Result<(), String> {
+    fn prepare(&mut self, snapshot: &mut Snapshot, _pane: &str) -> Result<(), String> {
         if self.restore {
             if let Some(recovery) = snapshot.input.input_recoveries.get(&self.input) {
                 self.operation = recovery.operation;
             } else {
-                let (_, store) = self
-                    .capture(snapshot, pane)
-                    .map_err(|error| error.to_string())?;
                 let (provider, input) = self
                     .unresolved(snapshot)
                     .map_err(|error| error.to_string())?;
-                let provider =
-                    provider.ok_or_else(|| "conversation provider is missing".to_string())?;
-                let draft = recover_draft(input, provider);
+                let draft = recover_draft(input, provider)?;
                 Arc::make_mut(&mut snapshot.input.input_recoveries).insert(
                     self.input.clone(),
                     Arc::new(InputRecovery {
                         restore: true,
-                        store,
                         session: self.session.clone(),
                         operation: self.operation,
                         draft: Arc::new(draft),
@@ -138,25 +145,17 @@ impl Operation for ResolveSavedInput {
         }
         Ok(())
     }
-    type Input = (String, uuid::Uuid);
+    type Input = (String, u64);
     fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
-        if let Some(recovery) = snapshot.input.input_recoveries.get(&self.input) {
-            return Ok((snapshot.connection.storage_scope.clone(), recovery.store));
+        if !snapshot.input.input_recoveries.contains_key(&self.input) {
+            self.unresolved(snapshot)?;
         }
-        let store = snapshot
-            .sessions
-            .replicas
-            .get(&self.session)
-            .and_then(|replica| replica.cursor())
-            .map(|cursor| cursor.store)
-            .ok_or_else(|| {
-                PeerError::InvalidMessage("conversation store identity is missing".into())
-            })?;
-        self.unresolved(snapshot)?;
-        Ok((snapshot.connection.storage_scope.clone(), store))
+        Ok((
+            snapshot.connection.storage_scope.clone(),
+            snapshot.connection.epoch,
+        ))
     }
-
-    type Output = ((String, uuid::Uuid), records::Acknowledged);
+    type Output = (Self::Input, records::Acknowledged);
     async fn run(
         &self,
         recovered: Self::Input,
@@ -180,16 +179,11 @@ impl Operation for ResolveSavedInput {
         self,
         snapshot: &mut Snapshot,
         _pane: &str,
-        ((scope, store), acknowledged): Self::Output,
+        ((scope, epoch), acknowledged): Self::Output,
         _current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
-        if snapshot.connection.storage_scope != scope {
+        if snapshot.connection.storage_scope != scope || snapshot.connection.epoch != epoch {
             return Ok(Vec::new());
-        }
-        if acknowledged.cursor.store != store {
-            return Err(PeerError::InvalidMessage(
-                "conversation store changed during input recovery".into(),
-            ));
         }
         if self.restore && !snapshot.input.input_recoveries.contains_key(&self.input) {
             return Ok(Vec::new());
@@ -199,12 +193,12 @@ impl Operation for ResolveSavedInput {
         {
             return Ok(Vec::new());
         }
+        crate::client::command_result(acknowledged)?;
         let recovered =
             match Arc::make_mut(&mut snapshot.input.input_recoveries).remove(&self.input) {
                 Some(saved) => saved.restore.then(|| (*saved.draft).clone()),
                 None => None,
             };
-        crate::client::command_result(acknowledged)?;
         if let Some(recovered) = recovered {
             let current = Arc::make_mut(&mut snapshot.input.drafts)
                 .entry(self.session.into())
@@ -303,8 +297,8 @@ impl Operation for ResolveLocalInput {
         {
             return Vec::new();
         }
-        match reply.outcome {
-            agent_protocol::conversation::Outcome::Rejected(_) => {
+        match reply.error {
+            Some(_) => {
                 if self.restore {
                     *snapshot = super::super::super::reduce_event(
                         snapshot,
@@ -316,12 +310,11 @@ impl Operation for ResolveLocalInput {
                 }
                 Vec::new()
             }
-            agent_protocol::conversation::Outcome::Accepted
-            | agent_protocol::conversation::Outcome::Ignored => {
+            None => {
                 if let Some(pending) =
                     shared_mut(&mut snapshot.sessions.pending_submissions, &self.input)
                 {
-                    pending.cursor = Some(reply.cursor);
+                    pending.cursor = Some(reply.sequence);
                     pending.accepted = true;
                     pending.delivery_unknown = false;
                 }
@@ -331,47 +324,77 @@ impl Operation for ResolveLocalInput {
                     vec![Effect::execute(ReadThread::new(session))]
                 }
             }
-            agent_protocol::conversation::Outcome::DeliveryUnknown => Vec::new(),
         }
     }
 }
 
 fn recover_draft(
-    input: &[agent_protocol::operations::Input],
+    body: &agent_protocol::orchestration::TurnItemBody,
     provider: crate::session::ProviderKind,
-) -> Draft {
-    use agent_protocol::operations::Input;
-    let mut draft = Draft::default();
-    for part in input {
+) -> Result<Draft, String> {
+    use agent_protocol::{items::MessagePart, orchestration::TurnItemBody};
+    let TurnItemBody::UserMessage {
+        text,
+        attachments,
+        context,
+        ..
+    } = body
+    else {
+        return Err("input is not a user message".into());
+    };
+    let mut draft = Draft {
+        text: text.clone(),
+        ..Default::default()
+    };
+    for (attachment, part) in attachments
+        .iter()
+        .zip(crate::orchestration::attachment_parts(attachments)?)
+    {
+        let name = attachment["name"]
+            .as_str()
+            .ok_or("attachment name is missing")?
+            .to_owned();
         match part {
-            Input::Text { text } => append_transcript(&mut draft.text, text),
-            Input::Skill { name, path } => draft.invocations.push(Invocation {
+            MessagePart::Image { source } => draft.attachments.push(Attachment {
+                name,
+                path: source,
+                is_image: true,
+            }),
+            MessagePart::Attachment { path, .. } => draft.attachments.push(Attachment {
+                name,
+                path,
+                is_image: false,
+            }),
+            _ => unreachable!("attachments contain image or file references"),
+        }
+    }
+    for part in crate::orchestration::context_parts(context.as_ref())? {
+        match part {
+            MessagePart::Invocation { name, path } => draft.invocations.push(Invocation {
                 provider,
                 kind: InvocationKind::Skill,
-                name: name.clone(),
-                path: path.clone(),
+                name,
+                path,
             }),
-            Input::Mention { name, path } if agent_protocol::composer::is_plugin_path(path) => {
+            MessagePart::Attachment { name, path }
+                if agent_protocol::composer::is_plugin_path(&path) =>
+            {
                 draft.invocations.push(Invocation {
                     provider,
                     kind: InvocationKind::Plugin,
-                    name: name.clone(),
-                    path: path.clone(),
-                });
+                    name,
+                    path,
+                })
             }
-            Input::Mention { name, path } => draft.attachments.push(Attachment {
-                path: path.clone(),
-                name: name.clone(),
+            MessagePart::Attachment { name, path } => draft.attachments.push(Attachment {
+                name,
+                path,
                 is_image: false,
             }),
-            Input::LocalImage { path } => draft.attachments.push(Attachment {
-                name: super::super::sessions::file_name(path),
-                path: path.clone(),
-                is_image: true,
-            }),
+            _ => unreachable!("context contains mentions or skills"),
         }
     }
-    draft
+    Ok(draft)
 }
 
 #[cfg(test)]
@@ -395,7 +418,6 @@ mod tests {
             input.clone(),
             Arc::new(InputRecovery {
                 restore: true,
-                store: uuid::Uuid::from_u128(1),
                 session: session.clone(),
                 operation,
                 draft: Arc::new(Draft {
@@ -432,24 +454,18 @@ mod tests {
         );
         let captured = replay.capture(&reopened, "").unwrap();
         let acknowledged = records::Acknowledged {
-            outcome: agent_protocol::conversation::Outcome::Accepted,
-            cursor: agent_protocol::sync::Cursor {
-                store: uuid::Uuid::from_u128(1),
-                sequence: 12,
-            },
+            sequence: 12,
+            accepted_at: String::new(),
+            error: None,
         };
-        let mut wrong_store = acknowledged.clone();
-        wrong_store.cursor.store = uuid::Uuid::new_v4();
-        assert!(
-            make_operation()
-                .complete(
-                    &mut reopened,
-                    "",
-                    ((captured.0.clone(), captured.1), wrong_store),
-                    true
-                )
-                .is_err()
-        );
+        make_operation()
+            .complete(
+                &mut reopened,
+                "",
+                (("another-host".into(), captured.1), acknowledged.clone()),
+                true,
+            )
+            .unwrap();
         assert!(reopened.input.input_recoveries.contains_key(&input));
         if discard {
             assert!(resolve_saved_input(&mut reopened, &input, false).is_some());
@@ -539,15 +555,9 @@ mod tests {
             (
                 captured,
                 records::Acknowledged {
-                    outcome: if accepted {
-                        agent_protocol::conversation::Outcome::Accepted
-                    } else {
-                        agent_protocol::conversation::Outcome::Rejected("not sent".into())
-                    },
-                    cursor: agent_protocol::sync::Cursor {
-                        store: uuid::Uuid::new_v4(),
-                        sequence: 10,
-                    },
+                    error: (!accepted).then(|| "not sent".into()),
+                    sequence: 10,
+                    accepted_at: String::new(),
                 },
             ),
         );
@@ -660,11 +670,9 @@ mod tests {
                     (
                         (captured.0, captured.1),
                         records::Acknowledged {
-                            outcome: agent_protocol::conversation::Outcome::Accepted,
-                            cursor: agent_protocol::sync::Cursor {
-                                store: uuid::Uuid::from_u128(1),
-                                sequence: 1
-                            },
+                            sequence: 1,
+                            accepted_at: String::new(),
+                            error: None,
                         }
                     ),
                     true

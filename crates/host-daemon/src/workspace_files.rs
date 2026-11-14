@@ -24,6 +24,7 @@ use ring::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::SessionId;
+mod attachments;
 mod metadata;
 mod tree;
 
@@ -217,7 +218,7 @@ impl WorkspaceFiles {
             Call::ResolveFile(params) => {
                 // Preserve the link's filename and extension, including symlinks;
                 // clients use them to select their existing file presentation.
-                let path = absolute_path(&params.path)?;
+                let path = self.read_path(&params.path)?;
                 let metadata = fs::metadata(&path)?;
                 Ok(Body::from(FileEntry {
                     name: path
@@ -225,14 +226,22 @@ impl WorkspaceFiles {
                         .unwrap_or(path.as_os_str())
                         .to_string_lossy()
                         .into_owned(),
-                    path: path.to_str().context("file path is not UTF-8")?.into(),
+                    path: if params.path.starts_with(attachments::SCHEME) {
+                        params.path
+                    } else {
+                        path.to_str().context("file path is not UTF-8")?.into()
+                    },
                     directory: metadata.is_dir(),
                     size: metadata.len(),
                 }))
             }
             Call::ReadFile(params) => {
-                let requested = absolute_path(&params.path)?;
-                let path = dunce::canonicalize(&requested)?;
+                let requested = if params.path.starts_with(attachments::SCHEME) {
+                    PathBuf::from(&params.path)
+                } else {
+                    absolute_path(&params.path)?
+                };
+                let path = dunce::canonicalize(self.read_path(&params.path)?)?;
                 read_file(&path, &requested).map(Body::from)
             }
             Call::WriteFile(params) => {
@@ -323,7 +332,7 @@ impl WorkspaceFiles {
                 .map(Body::from)
             }
             Call::Download(params) => {
-                let path = absolute_path(&params.path)?;
+                let path = self.read_path(&params.path)?;
                 let (mut file, _) = open_regular_file(&path)?;
                 let (size, digest) = digest_file(&mut file)?;
                 use std::io::{Seek, SeekFrom};
@@ -442,13 +451,10 @@ impl WorkspaceFiles {
                     }
                     writer.sync_all().await?;
                     drop(writer);
-                    let random = output
-                        .path()
-                        .file_name()
-                        .context("temporary upload path missing")?
-                        .to_string_lossy();
-                    let path =
-                        directory.join(format!("{}-{}", random.trim_start_matches('.'), file_name));
+                    let path = directory.join(attachments::pending_file_name(
+                        &output.reopen()?,
+                        &file_name,
+                    )?);
                     output.persist_noclobber(&path)?;
                     let response =
                         agent_protocol::protocol::encode(agent_protocol::models::UploadedFile {

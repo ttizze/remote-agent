@@ -1,6 +1,5 @@
 use super::*;
 use crate::session::{ProviderKind, SessionRef};
-use agent_protocol::sync::{Cursor, Message};
 
 fn pending(session: &SessionRef) -> Arc<PendingSubmission> {
     Arc::new(PendingSubmission {
@@ -34,7 +33,7 @@ fn canonical(snapshot: &mut Snapshot, id: &SessionRef, inputs: &[&str]) {
             ))
         })
         .collect();
-    let replica = crate::test_conversations::replica(
+    let replica = crate::test_conversations::projection(
         crate::models::ThreadResponse {
             thread: Thread {
                 id: Some(id.clone()),
@@ -49,7 +48,7 @@ fn canonical(snapshot: &mut Snapshot, id: &SessionRef, inputs: &[&str]) {
         },
         1,
     );
-    Arc::make_mut(&mut snapshot.sessions.replicas).insert(id.clone(), Arc::new(replica));
+    Arc::make_mut(&mut snapshot.sessions.projections).insert(id.clone(), Arc::new(replica));
 }
 
 #[test]
@@ -96,54 +95,36 @@ fn unrelated_rows_preserve_the_shared_pending_snapshot() {
 }
 
 #[test]
-fn a_receipt_needs_the_same_store_and_coverage_before_retiring_an_input() {
+fn a_receipt_needs_its_conversations_sequence_coverage_before_retiring_an_input() {
     let own = session(ProviderKind::Codex);
     let other = session(ProviderKind::Claude);
-    for wrong_store in [false, true] {
-        let mut state = Snapshot::default();
-        canonical(&mut state, &own, &[]);
-        let current = state.sessions.replicas[&own].cursor().unwrap();
-        let accepted = Cursor {
-            store: if wrong_store {
-                uuid::Uuid::new_v4()
-            } else {
-                current.store
-            },
-            sequence: current.sequence + 1,
-        };
-        let mut input = pending(&own);
-        Arc::make_mut(&mut input).cursor = Some(accepted);
-        Arc::make_mut(&mut state.sessions.pending_submissions)
-            .extend([("owned".into(), input), ("foreign".into(), pending(&other))]);
-        reconcile_pending(&mut state, &own);
-        assert_eq!(state.sessions.pending_submissions.len(), 2);
-        let replica = &state.sessions.replicas[&own];
-        let next = replica
-            .apply(
-                replica.subscription(),
-                Message::Events {
-                    through: Cursor {
-                        sequence: current.sequence + 1,
-                        ..current
-                    },
-                    events: vec![agent_protocol::sync::Event {
-                        sequence: (Cursor {
-                            sequence: current.sequence + 1,
-                            ..current
-                        })
-                        .sequence,
-                        rows: vec![],
-                        removed: vec![],
-                    }],
-                },
-            )
-            .unwrap();
-        Arc::make_mut(&mut state.sessions.replicas).insert(own.clone(), Arc::new(next));
-        reconcile_pending(&mut state, &own);
-        assert_eq!(
-            state.sessions.pending_submissions.contains_key("owned"),
-            wrong_store
-        );
-        assert!(state.sessions.pending_submissions.contains_key("foreign"));
-    }
+    let mut state = Snapshot::default();
+    canonical(&mut state, &own, &[]);
+    canonical(&mut state, &other, &[]);
+    let current = state.sessions.projections[&own].snapshot_sequence;
+    let accepted = current + 1;
+    let mut input = pending(&own);
+    Arc::make_mut(&mut input).cursor = Some(accepted);
+    Arc::make_mut(&mut state.sessions.pending_submissions)
+        .extend([("owned".into(), input), ("foreign".into(), pending(&other))]);
+    reconcile_pending(&mut state, &own);
+    assert_eq!(state.sessions.pending_submissions.len(), 2);
+    // Advancing another conversation cannot cover this conversation's receipt.
+    Arc::make_mut(
+        Arc::make_mut(&mut state.sessions.projections)
+            .get_mut(&other)
+            .unwrap(),
+    )
+    .snapshot_sequence = accepted + 10;
+    reconcile_pending(&mut state, &own);
+    assert!(state.sessions.pending_submissions.contains_key("owned"));
+    Arc::make_mut(
+        Arc::make_mut(&mut state.sessions.projections)
+            .get_mut(&own)
+            .unwrap(),
+    )
+    .snapshot_sequence = accepted;
+    reconcile_pending(&mut state, &own);
+    assert!(!state.sessions.pending_submissions.contains_key("owned"));
+    assert!(state.sessions.pending_submissions.contains_key("foreign"));
 }

@@ -68,19 +68,16 @@ impl HostRpcService {
         let mut review = crate::inspect_workspace(params.cwd.clone(), params.base_ref.clone())
             .await
             .map_err(|error| Failure::new("workspace_review_failed", error))?;
-        let store = self.inner.conversation.storage.clone();
-        let cwd = params.cwd.clone();
-        review.controls.scripts = tokio::task::spawn_blocking(move || {
-            match std::fs::metadata(&cwd) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-                Err(error) => return Err(error.to_string()),
-                Ok(_) => {}
+        review.controls.scripts = match self.script_project_root(&params.cwd).await? {
+            Some(root) => {
+                let store = self.inner.conversation.storage.clone();
+                tokio::task::spawn_blocking(move || store.workspace_scripts(&root))
+                    .await
+                    .map_err(|error| Failure::new("workspace_review_failed", error))?
+                    .map_err(|error| Failure::new("workspace_review_failed", error))?
             }
-            store.workspace_scripts(&script_key(Path::new(&cwd))?)
-        })
-        .await
-        .map_err(|error| Failure::new("workspace_review_failed", error))?
-        .map_err(|error| Failure::new("workspace_review_failed", error))?;
+            None => Vec::new(),
+        };
         if params.include_options {
             review.options = Some(self.workspace_options(&params.cwd).await?);
         }
@@ -93,30 +90,43 @@ impl HostRpcService {
     ) -> Result<Empty, Failure> {
         let _access = self.inner.workspace_access.lock().await;
         let params = params.clone();
+        let script = match &params.action {
+            WorkspaceAction::SaveScript { name, command, .. } => Some(
+                validate_script(name.clone(), command.clone())
+                    .map_err(|error| Failure::new("workspace_change_failed", error))?,
+            ),
+            _ => None,
+        };
+        let script_root = if matches!(
+            params.action,
+            WorkspaceAction::SaveScript { .. } | WorkspaceAction::RemoveScript { .. }
+        ) {
+            let root = self
+                .script_project_root(&params.cwd)
+                .await?
+                .ok_or_else(|| {
+                    Failure::new(
+                        "workspace_change_failed",
+                        "Project scripts are unavailable for this workspace.",
+                    )
+                })?;
+            Some(root)
+        } else {
+            None
+        };
         let store = self.inner.conversation.storage.clone();
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             let cwd = Path::new(&params.cwd);
             match params.action {
-                WorkspaceAction::SaveScript {
-                    previous_name,
-                    name,
-                    command,
-                } => {
-                    let script = validate_script(name, command)?;
-                    let key = script_key(cwd)?;
-                    let mut scripts = store.workspace_scripts(&key)?;
-                    save_script(&mut scripts, previous_name.as_deref(), script)?;
-                    store.save_workspace_scripts(&key, &scripts)
-                }
-                WorkspaceAction::RemoveScript { name } => {
-                    let key = script_key(cwd)?;
-                    let scripts = store
-                        .workspace_scripts(&key)?
-                        .into_iter()
-                        .filter(|script| script.name != name)
-                        .collect::<Vec<_>>();
-                    store.save_workspace_scripts(&key, &scripts)
-                }
+                WorkspaceAction::SaveScript { previous_name, .. } => store.save_workspace_script(
+                    script_root.as_deref().expect("script root resolved"),
+                    previous_name.as_deref(),
+                    script.expect("script validated"),
+                ),
+                WorkspaceAction::RemoveScript { name } => store.remove_workspace_script(
+                    script_root.as_deref().expect("script root resolved"),
+                    &name,
+                ),
                 action => crate::workspace_review::controls::change(cwd, &params.branch, &action)
                     .map_err(|error| error.to_string()),
             }
@@ -126,20 +136,57 @@ impl HostRpcService {
         .map_err(|error| Failure::new("workspace_change_failed", error))?;
         Ok(Empty {})
     }
+    async fn script_project_root(&self, cwd: &str) -> Result<Option<String>, Failure> {
+        let directory = cwd.to_owned();
+        let source = tokio::task::spawn_blocking(move || source_script_root(Path::new(&directory)))
+            .await
+            .map_err(|error| Failure::new("project_read_failed", error))?
+            .map_err(|error| Failure::new("project_read_failed", error))?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let projects = self.project_snapshot().await?;
+        if projects.is_chat_directory(Path::new(cwd))
+            || projects.is_chat_directory(Path::new(&source))
+        {
+            return Ok(None);
+        }
+        let project = projects
+            .project_for_workspace(cwd)
+            .or_else(|| projects.project_for_workspace(&source))
+            .and_then(|id| projects.projects.iter().find(|project| project.id == id));
+        Ok(Some(
+            match project.and_then(|project| project.roots.first()) {
+                Some(root) => root.path.clone(),
+                None => source,
+            },
+        ))
+    }
 }
 
-fn script_key(cwd: &Path) -> Result<String, String> {
-    // Linked worktrees share scripts with their source checkout. Plain folders
-    // use their canonical path; no project files are created or modified.
-    let common = crate::git::text(
-        cwd,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .ok()
-    .map(|path| std::path::PathBuf::from(path.trim()));
-    let path =
-        dunce::canonicalize(common.as_deref().unwrap_or(cwd)).map_err(|error| error.to_string())?;
-    Ok(format!("project-scripts:{}", path.to_string_lossy()))
+fn source_script_root(cwd: &Path) -> Result<Option<String>, String> {
+    let cwd = match dunce::canonicalize(cwd) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !cwd.is_dir() {
+        return Err("project path must be a directory".into());
+    }
+    // The first Git worktree is the source checkout, including for manually
+    // created linked worktrees. Plain folders own their project scripts directly.
+    let source = crate::git::text(&cwd, &["worktree", "list", "--porcelain", "-z"])
+        .ok()
+        .and_then(|text| {
+            text.strip_prefix("worktree ")
+                .and_then(|text| text.split('\0').next())
+                .map(std::path::PathBuf::from)
+        })
+        .unwrap_or(cwd);
+    source
+        .to_str()
+        .map(|path| Some(path.into()))
+        .ok_or("project path is not UTF-8".into())
 }
 
 fn validate_script(name: String, command: String) -> Result<ProjectScript, String> {
@@ -155,29 +202,6 @@ fn validate_script(name: String, command: String) -> Result<ProjectScript, Strin
         name: name.into(),
         command: command.into(),
     })
-}
-
-fn save_script(
-    scripts: &mut Vec<ProjectScript>,
-    previous_name: Option<&str>,
-    script: ProjectScript,
-) -> Result<(), String> {
-    if scripts
-        .iter()
-        .any(|s| s.name == script.name && Some(s.name.as_str()) != previous_name)
-    {
-        return Err("A script with this name already exists.".into());
-    }
-    if let Some(previous_name) = previous_name {
-        let existing = scripts
-            .iter_mut()
-            .find(|s| s.name == previous_name)
-            .ok_or("The script changed. Refresh and try again.")?;
-        *existing = script;
-    } else {
-        scripts.push(script);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

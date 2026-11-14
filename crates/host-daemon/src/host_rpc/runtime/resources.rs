@@ -3,6 +3,7 @@ use agent_protocol::requests::Answer;
 
 pub(super) struct Source {
     pub target: SessionRef,
+    pub session_id: String,
     pub io: AsyncMutex<()>,
     pub(super) updates: AsyncMutex<()>,
     pub(super) text: Mutex<super::text::Text>,
@@ -15,10 +16,12 @@ struct Background {
     native_ended: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct PendingRequest {
     pub target: SessionRef,
     pub attempt: Attempt,
     pub origin: RequestOrigin,
+    pub body: agent_protocol::requests::RequestBody,
 }
 
 impl Source {
@@ -259,6 +262,17 @@ impl Runtime {
             .or_insert_with(|| {
                 Arc::new(Source {
                     target: target.clone(),
+                    session_id: agent_protocol::orchestration::derived_id(
+                        "provider-session",
+                        &[
+                            "provider-instance",
+                            native
+                                .native_provider()
+                                .expect("native resource has a provider")
+                                .key(),
+                            "shared",
+                        ],
+                    ),
                     io: Default::default(),
                     updates: Default::default(),
                     text: Default::default(),
@@ -1234,6 +1248,7 @@ mod tests {
         );
         let answer = Arc::new(super::super::native_fixture::AnswerResource);
         let pending = |conversation: usize| PendingRequest {
+            body: agent_protocol::requests::RequestBody::Question { questions: vec![] },
             target: SessionRef::new(None, Uuid::from_u128(conversation as u128 + 1).to_string())
                 .unwrap(),
             attempt: Attempt {
@@ -1305,6 +1320,7 @@ mod tests {
     fn a_new_foreground_turn_cannot_inherit_or_hide_the_previous_turns_background_work() {
         let source = Source {
             target: SessionRef::new(ProviderKind::Codex, "conversation".into()).unwrap(),
+            session_id: Uuid::new_v4().to_string(),
             io: Default::default(),
             updates: Default::default(),
             text: Default::default(),

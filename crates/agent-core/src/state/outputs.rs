@@ -265,7 +265,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let replica = state.sessions.replicas[&session].clone();
+        let replica = state.sessions.projections[&session].clone();
         assert_eq!(watch(&mut state, "", key.clone(), true).len(), 1);
         Arc::make_mut(&mut state.operations).insert(
             op::OperationKey::CommandOutput {
@@ -322,8 +322,11 @@ mod tests {
             },
         );
         assert!(effects.is_empty());
-        assert!(Arc::ptr_eq(&live.sessions.replicas[&session], &replica));
-        assert_eq!(live.sessions.replicas[&session].cursor(), replica.cursor());
+        assert!(Arc::ptr_eq(&live.sessions.projections[&session], &replica));
+        assert_eq!(
+            live.sessions.projections[&session].snapshot_sequence,
+            replica.snapshot_sequence
+        );
         assert!(
             matches!(live.sessions.conversations[&session].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), ItemBody::CommandExecution { output, .. } if output == "live command bytes")
         );

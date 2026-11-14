@@ -66,6 +66,7 @@ fn prepared_workspace_updates_only_its_open_panel_without_losing_new_draft_edits
                     Arc::new(Thread {
                         id: Some(id.clone()),
                         cwd: Some("/project".into()),
+                        project_id: crate::models::ProjectMembership::Assigned("project".into()),
                         ..Default::default()
                     }),
                 )]
@@ -148,6 +149,7 @@ fn a_preparing_task_reviews_no_changes_until_its_turn_starts() {
                     Arc::new(Thread {
                         id: Some(id.clone()),
                         cwd: Some("/project".into()),
+                        project_id: crate::models::ProjectMembership::Assigned("project".into()),
                         preparations: vec![SessionPreparation {
                             submission: agent_protocol::operations::Submission {
                                 thread_id: id.clone(),
@@ -196,18 +198,21 @@ fn a_preparing_task_reviews_no_changes_until_its_turn_starts() {
     assert!(effects.is_empty());
     assert!(moved.panes.primary().workspace.review_cwd.is_none());
     let finish_preparation = |previous: &Snapshot| {
-        let current = &previous.sessions.replicas[&id];
+        let current = &previous.sessions.projections[&id];
         let mut thread = previous.sessions.conversations[&id].as_ref().clone();
         thread.preparations.clear();
-        let replica = crate::test_conversations::replica_at(
+        let next = crate::test_conversations::projection(
             crate::models::ThreadResponse {
                 thread,
                 ..Default::default()
             },
-            current.subscription(),
-            current.cursor().unwrap().sequence + 1,
+            current.snapshot_sequence + 1,
         );
-        super::super::conversations::received(previous, subscription, replica.snapshot().unwrap())
+        super::super::conversations::received(
+            previous,
+            subscription,
+            agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(next),
+        )
     };
     let (started, effects) = finish_preparation(&moved);
     assert_eq!(
@@ -267,25 +272,24 @@ fn replacing_history_drops_removed_turns_pages_and_late_reads_without_losing_the
                 ..Default::default()
             }),
         );
-        let replica = crate::test_conversations::replica_at(
+        let projection = crate::test_conversations::projection(
             crate::models::ThreadResponse {
                 thread: before.clone(),
                 ..Default::default()
             },
             1,
-            1,
         );
-        Arc::make_mut(&mut state.sessions.replicas).insert(id.clone(), Arc::new(replica));
-        let replacement = crate::test_conversations::replica_at(
-            crate::models::ThreadResponse {
-                thread: replacement,
-                ..Default::default()
-            },
-            1,
-            2,
-        )
-        .snapshot()
-        .unwrap();
+        Arc::make_mut(&mut state.sessions.projections).insert(id.clone(), Arc::new(projection));
+        Arc::make_mut(&mut state.sessions.subscription_generations).insert(id.clone(), 1);
+        let replacement = agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(
+            crate::test_conversations::projection(
+                crate::models::ThreadResponse {
+                    thread: replacement,
+                    ..Default::default()
+                },
+                2,
+            ),
+        );
         let (mut next, effects) = crate::state::reduce(
             &state,
             "",
@@ -300,23 +304,20 @@ fn replacing_history_drops_removed_turns_pages_and_late_reads_without_losing_the
         );
         assert_eq!(next.sessions.subscriptions, state.sessions.subscriptions);
         assert_eq!(next.input.drafts, state.input.drafts);
-        let late = crate::test_conversations::Opened {
-            replica: crate::test_conversations::replica_at(
-                crate::models::ThreadResponse {
-                    thread: before,
-                    ..Default::default()
-                },
-                0,
-                1,
-            ),
-            subscription: uuid::Uuid::new_v4(),
-        };
+        let mut late = crate::test_conversations::opened(
+            crate::models::ThreadResponse {
+                thread: before,
+                ..Default::default()
+            },
+            &mut next,
+        );
+        late.generation = 0;
         op::ReadThread::new(id.clone()).stale(&mut next, "", late);
         let held = &next.sessions.conversations[&id];
         assert!(held.turns.as_ref().unwrap().is_empty());
         assert_eq!(held.history_cursor, None);
         assert_eq!(held.history_has_more, Some(false));
-        assert_eq!(next.sessions.replicas[&id].cursor().unwrap().sequence, 2);
+        assert_eq!(next.sessions.projections[&id].snapshot_sequence, 2);
     }
 }
 

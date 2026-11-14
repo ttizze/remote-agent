@@ -1,5 +1,7 @@
-//! Test inputs use the same ordered rows as the Host, while display assertions
-//! can keep their small, readable conversation fixtures.
+#[path = "orchestration.rs"]
+pub mod orchestration;
+// Test inputs use the same ordered rows as the Host, while display assertions
+// can keep their small, readable conversation fixtures.
 use agent_protocol::models::ThreadResponse;
 use agent_protocol::{
     conversation::{self as decision, records},

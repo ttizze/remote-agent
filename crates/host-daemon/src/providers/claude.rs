@@ -2114,6 +2114,12 @@ pub(crate) fn request_origin(
 }
 #[async_trait::async_trait]
 impl crate::providers::AnswerSource for RequestSource {
+    fn approval_decision(
+        &self,
+        choice: &agent_protocol::requests::Choice,
+    ) -> agent_protocol::orchestration::ApprovalDecision {
+        self.answers.approval_decision(choice)
+    }
     fn is_alive(&self) -> bool {
         !self.input.is_closed()
     }

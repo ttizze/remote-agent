@@ -216,7 +216,7 @@ pub async fn resolve_item(
     grant: TransferGrant,
     expected: &agent_protocol::ids::ItemId,
     session: Option<&crate::transport::Session>,
-) -> Result<crate::models::Item, PeerError> {
+) -> Result<agent_protocol::orchestration::TurnItem, PeerError> {
     let session = session.ok_or_else(|| {
         PeerError::InvalidMessage("item transfer requires an iroh session".into())
     })?;
@@ -225,9 +225,9 @@ pub async fn resolve_item(
     })
     .await
     .map_err(PeerError::from)?;
-    let item: crate::models::Item = crate::protocol::decode(&bytes)
+    let item: agent_protocol::orchestration::TurnItem = crate::protocol::decode(&bytes)
         .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    if item.id != *expected {
+    if item.id != expected.as_str() {
         return Err(PeerError::InvalidMessage(
             "transferred item ID does not match".into(),
         ));

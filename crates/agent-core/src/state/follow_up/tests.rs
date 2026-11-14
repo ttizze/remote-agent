@@ -348,31 +348,26 @@ fn removing_moving_steering_and_resuming_ask_the_host() {
 
 #[test]
 fn a_queued_message_removed_before_its_admission_frame_arrives_does_not_return_to_the_composer() {
-    use agent_protocol::sync::{Cursor, Key, Message};
     let state = snapshot(thread(true, true, Vec::new()), "withdraw me");
     let input = uuid::Uuid::from_u128(10).to_string();
     let (mut state, _) = submit(&state, &input, false);
-    let replica = crate::test_conversations::replica(
+    let replica = crate::test_conversations::projection(
         crate::models::ThreadResponse {
             thread: thread(true, true, Vec::new()),
             ..Default::default()
         },
         1,
     );
-    let from = replica.cursor().unwrap();
-    // The Submit ACK precedes a later removal by another device. This device
-    // resumes after both commits, so it sees a tombstone rather than the input.
-    let accepted = Cursor {
-        sequence: from.sequence + 1,
-        ..from
-    };
+    // The ACK precedes another device's removal. The replacement contains no
+    // input, but its sequence covers the receipt, so the composer stays empty.
+    let accepted = replica.snapshot_sequence + 1;
     Arc::make_mut(
         Arc::make_mut(&mut state.sessions.pending_submissions)
             .get_mut(input.as_str())
             .unwrap(),
     )
     .cursor = Some(accepted);
-    Arc::make_mut(&mut state.sessions.replicas).insert(session(), Arc::new(replica));
+    Arc::make_mut(&mut state.sessions.projections).insert(session(), Arc::new(replica));
     super::super::reconcile_pending(&mut state, &session());
     assert!(
         state
@@ -380,31 +375,12 @@ fn a_queued_message_removed_before_its_admission_frame_arrives_does_not_return_t
             .pending_submissions
             .contains_key(input.as_str())
     );
-    let replica = &state.sessions.replicas[&session()];
-    let next = replica
-        .apply(
-            replica.subscription(),
-            Message::Events {
-                through: Cursor {
-                    sequence: accepted.sequence + 1,
-                    ..accepted
-                },
-                events: vec![agent_protocol::sync::Event {
-                    sequence: (Cursor {
-                        sequence: accepted.sequence + 1,
-                        ..accepted
-                    })
-                    .sequence,
-                    rows: Vec::new(),
-                    removed: vec![Key::Input {
-                        thread: session(),
-                        id: input.into(),
-                    }],
-                }],
-            },
-        )
-        .unwrap();
-    Arc::make_mut(&mut state.sessions.replicas).insert(session(), Arc::new(next));
+    Arc::make_mut(
+        Arc::make_mut(&mut state.sessions.projections)
+            .get_mut(&session())
+            .unwrap(),
+    )
+    .snapshot_sequence = accepted + 1;
     super::super::reconcile_pending(&mut state, &session());
     assert!(state.sessions.pending_submissions.is_empty());
     assert!(text(&state).is_empty());

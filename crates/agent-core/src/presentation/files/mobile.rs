@@ -36,7 +36,8 @@ pub fn mobile_file_menu(
     };
     let path = file_host_path(file.path, home);
     let relative = file_workspace_relative_path(&path, &cwd);
-    let full = agent_protocol::paths::is_absolute_host_path(&path);
+    let full = agent_protocol::paths::is_absolute_host_path(&path)
+        || agent_protocol::paths::attachment_file_name(&path).is_some();
     if !full && relative.is_none() {
         return Vec::new();
     }

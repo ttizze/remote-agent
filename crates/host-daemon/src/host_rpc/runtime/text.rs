@@ -121,6 +121,36 @@ impl Runtime {
         field: TextField,
         entry: &Buffered,
     ) -> Result<(), String> {
+        if let Some(mut item) = service
+            .inner
+            .conversation
+            .storage
+            .thread_item(&source.target, id.as_str())?
+        {
+            let Some(text) = super::native::text_part(&mut item.body, field) else {
+                return Ok(());
+            };
+            *text = entry.text.clone();
+            item.updated_at = commands::at();
+            return service
+                .inner
+                .conversation
+                .storage
+                .observe_thread(
+                    &source.target.id,
+                    &[item.id.clone()],
+                    &item.updated_at.clone(),
+                    |state| {
+                        agent_protocol::orchestration::observe_item(
+                            state,
+                            &entry.attempt.id.to_string(),
+                            &source.session_id,
+                            item,
+                        )
+                    },
+                )
+                .map(|_| ());
+        }
         let Some(mut item) = service
             .inner
             .conversation
@@ -234,7 +264,18 @@ impl Runtime {
         field: TextField,
         delta: &str,
     ) -> Result<(), String> {
-        let id = decision::provider_item_id(attempt.id, native);
+        let canonical = service
+            .inner
+            .conversation
+            .storage
+            .attempt_owner(&attempt.id.to_string())?
+            .is_some();
+        let id = if canonical {
+            super::native::text_item_id(attempt.provider, attempt.turn.as_str(), native, field)
+                .into()
+        } else {
+            decision::provider_item_id(attempt.id, native)
+        };
         if field == TextField::CommandOutput {
             return service.inner.conversation.outputs.write(
                 attempt.id,
@@ -245,26 +286,43 @@ impl Runtime {
                 super::output::Change::Append(delta),
             );
         }
+        if canonical && field == TextField::FileOutput {
+            return Ok(());
+        }
         // The resource update lock serializes producers and its flush worker.
         let key = (id, field);
         let pending = source.text.lock().unwrap().pending.remove(&key);
         let mut entry = match pending {
             Some(entry) => entry,
             None => {
-                let Some(mut item) = service
-                    .inner
-                    .conversation
-                    .storage
-                    .item(&source.target, &key.0)?
-                else {
+                let seed = if canonical {
+                    service
+                        .inner
+                        .conversation
+                        .storage
+                        .thread_item(&source.target, key.0.as_str())?
+                        .and_then(|mut item| {
+                            super::native::text_part(&mut item.body, field).map(std::mem::take)
+                        })
+                } else {
+                    service
+                        .inner
+                        .conversation
+                        .storage
+                        .item(&source.target, &key.0)?
+                        .and_then(|mut item| {
+                            agent_protocol::session::text_part(&mut item.body, field)
+                                .ok()
+                                .map(std::mem::take)
+                        })
+                };
+                let Some(text) = seed else {
                     return Ok(());
                 };
-                let text = agent_protocol::session::text_part(&mut item.body, field)
-                    .map_err(|error| error.to_string())?;
                 Buffered {
                     attempt: attempt.clone(),
                     delivered: text.len(),
-                    text: std::mem::take(text),
+                    text,
                     changed: Instant::now(),
                     last_flush: None,
                     boundary: false,
@@ -312,24 +370,12 @@ impl Runtime {
                         Self::publish_text(&service, &source, &id, field, &entry).await
                     {
                         tracing::error!(target: "agent", operation="conversation.text", %error);
-                        let delivered = service
-                            .inner
-                            .conversation
-                            .storage
-                            .item(&source.target, &id)
-                            .ok()
-                            .flatten()
-                            .and_then(|mut item| {
-                                agent_protocol::session::text_part(&mut item.body, field)
-                                    .ok()
-                                    .map(|text| text.len())
-                            });
                         let mut text = source.text.lock().unwrap();
                         text.worker = Some(token);
                         if let Some(pending) = text.pending.get_mut(&(id, field)) {
                             pending.boundary = false;
                             pending.changed = Instant::now();
-                            pending.delivered = delivered.unwrap_or(0);
+                            pending.delivered = 0;
                         }
                     }
                 }

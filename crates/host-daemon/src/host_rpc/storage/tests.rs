@@ -1,3 +1,7 @@
+fn loaded(storage: &Storage, id: &SessionRef) -> Result<bool, String> {
+    storage.with(|connection| connection.query_row("SELECT EXISTS(SELECT 1 FROM threads WHERE ifnull(provider,'')=ifnull(?1,'') AND id=?2 AND loaded=1)",params![id.provider.map(ProviderKind::key),id.id],|row|row.get(0)).map_err(failure))
+}
+
 pub(super) fn events_since(
     storage: &Storage,
     id: &SessionRef,
@@ -291,7 +295,7 @@ fn importing_children_preserves_unlisted_parents_and_resolves_owned_native_paren
         storage.header(&child).unwrap().details.parent.as_ref(),
         Some(&parent)
     );
-    assert!(!storage.loaded(&parent).unwrap());
+    assert!(!loaded(&storage, &parent).unwrap());
     assert!(
         storage
             .summaries("", false)
@@ -463,7 +467,7 @@ fn catalog_claims_survive_restart_and_do_not_restore_superseded_native_sources()
         storage.header(&child).unwrap().details.parent,
         Some(id.clone())
     );
-    assert!(!storage.loaded(&id).unwrap());
+    assert!(!loaded(&storage, &id).unwrap());
     let owner = address("owned");
     storage.create(&owner, &header()).unwrap();
     ready(&storage, &owner);
@@ -686,10 +690,16 @@ fn creation_and_first_input_are_one_recoverable_transaction() {
             .all(|event| event.sequence == created.cursor.sequence)
     );
     assert_eq!(
-        storage.receipts(&id, &[Uuid::from_u128(800)]).unwrap()[0]
-            .1
-            .cursor,
-        created.cursor
+        storage
+            .with(|connection| connection
+                .query_row(
+                    "SELECT seq FROM receipts WHERE operation_id=?1",
+                    [Uuid::from_u128(800).to_string()],
+                    |row| row.get::<_, i64>(0)
+                )
+                .map_err(failure))
+            .unwrap() as u64,
+        created.cursor.sequence
     );
     let before_replay = storage
         .with(|connection| super::cursor(connection))
@@ -1743,7 +1753,7 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
             .contains("import commit failed")
     );
     assert_eq!(storage.history(&id, 0).unwrap(), before);
-    assert!(!storage.loaded(&id).unwrap());
+    assert!(!loaded(&storage, &id).unwrap());
     drop(storage);
     let storage = Storage::open(&path);
     storage
@@ -1767,7 +1777,7 @@ fn initial_import_commits_history_with_its_job_and_recovers_after_a_failed_commi
     storage
         .reimport(&id, &id, current.id, current.attempt, &before, 104)
         .unwrap();
-    assert!(storage.loaded(&id).unwrap());
+    assert!(loaded(&storage, &id).unwrap());
     assert!(storage.claim(104, 1).unwrap().is_empty());
     let cursor = storage
         .with(|connection| super::cursor(connection))
@@ -2652,7 +2662,7 @@ fn a_claimed_legacy_import_failure_is_unavailable_and_can_be_retried() {
     header.details.history_read_state =
         Some(HistoryReadState::new(HistoryReadKind::Loading, vec![]));
     storage.create(&target, &header).unwrap();
-    assert!(storage.loaded(&target).unwrap());
+    assert!(loaded(&storage, &target).unwrap());
     ready(&storage, &target);
     let source = storage.active_source(&target).unwrap().unwrap();
     storage.queue_import(&target, &source, 100).unwrap();
@@ -3420,6 +3430,32 @@ fn projects_keep_registration_order_in_storage_and_synced_positions() {
             Position::Project { position: 3 },
         ]
     );
+    let created = storage
+        .with(|connection| {
+            connection
+                .query_row(
+                    "SELECT created_at FROM projection_projects WHERE project_id='z'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(failure)
+        })
+        .unwrap();
+    let mut projects = storage.projects().unwrap();
+    projects[0].name = "Renamed".into();
+    storage.replace_projects(&projects).unwrap();
+    assert_eq!(
+        storage
+            .with(|connection| connection
+                .query_row(
+                    "SELECT created_at FROM projection_projects WHERE project_id='z'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .map_err(failure))
+            .unwrap(),
+        created
+    );
 }
 
 #[test]
@@ -3637,7 +3673,7 @@ fn projected_steerability_tracks_compaction_stop_and_capacity_waits() {
 
 #[test]
 fn unsupported_destinations_are_rejected_without_rewriting_their_bytes() {
-    for version in [0, 2, 4] {
+    for version in [0, 2, 3, 5] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite");
         let connection = Connection::open(&path).unwrap();
@@ -3813,10 +3849,16 @@ fn journal_failure_rolls_back_projection_receipt_and_notification_then_retry_rep
     assert_eq!(rejected.cursor, before_noop);
     assert!(events_since(&storage, &id, before_noop).is_empty());
     assert_eq!(
-        storage.receipts(&id, &[Uuid::from_u128(33)]).unwrap()[0]
-            .1
-            .cursor,
-        before_noop
+        storage
+            .with(|connection| connection
+                .query_row(
+                    "SELECT seq FROM receipts WHERE operation_id=?1",
+                    [Uuid::from_u128(33).to_string()],
+                    |row| row.get::<_, i64>(0)
+                )
+                .map_err(failure))
+            .unwrap() as u64,
+        before_noop.sequence
     );
 }
 
@@ -3861,6 +3903,9 @@ fn list_replay_counts_sequence_positions_instead_of_projection_rows() {
         .map(|index| agent_protocol::models::Project {
             id: format!("p-{index}"),
             name: format!("Project {index}"),
+            roots: vec![agent_protocol::models::ProjectRoot {
+                path: format!("/projects/{index}"),
+            }],
             ..Default::default()
         })
         .collect();
@@ -3985,6 +4030,9 @@ fn list_replay_obeys_its_byte_budget(#[case] bytes: usize, #[case] reset: bool) 
         .replace_projects(&[agent_protocol::models::Project {
             id: "large".into(),
             name: "x".repeat(bytes),
+            roots: vec![agent_protocol::models::ProjectRoot {
+                path: "/large".into(),
+            }],
             ..Default::default()
         }])
         .unwrap();

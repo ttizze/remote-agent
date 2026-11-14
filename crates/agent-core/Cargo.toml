@@ -26,6 +26,7 @@ uuid = { version = "1", features = ["v4", "serde", "v5"] }
 futures-util.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 tokio.workspace = true
 tokio-util.workspace = true
 tokio-stream = { version = "0.1", default-features = false }

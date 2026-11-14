@@ -24,7 +24,7 @@ pub(crate) fn error(reason: impl std::fmt::Display) -> AgentError {
 
 pub(crate) fn command_result(
     reply: agent_protocol::conversation::records::Acknowledged,
-) -> Result<agent_protocol::sync::Cursor, PeerError> {
+) -> Result<u64, PeerError> {
     reply.accepted().map_err(|error| PeerError::Remote {
         delivery: error.delivery,
         error: serde_json::to_string(&error).expect("command failure serializes"),
@@ -36,137 +36,64 @@ pub(crate) async fn resolve_hydration(
     response: agent_protocol::conversation::records::Hydrated,
     expected: &agent_protocol::ids::ItemId,
     session: Option<&crate::transport::Session>,
-) -> Result<Option<(u64, crate::models::Item)>, PeerError> {
-    let Some(grant) = response.transfer else {
-        return Ok(None);
+) -> Result<Option<agent_protocol::orchestration::TurnItem>, PeerError> {
+    let item = if let Some(grant) = response.transfer {
+        Some(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                crate::transfers::resolve_item(grant, expected, session),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(PeerError::RequestTimeout {
+                    method: "item body transfer".into(),
+                })
+            })?,
+        )
+    } else {
+        response.item
     };
-    // Consume one-use grants even when the requesting subscription became obsolete.
-    let resolved = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        crate::transfers::resolve_item(grant, expected, session),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        Err(PeerError::RequestTimeout {
-            method: "item body transfer".into(),
-        })
-    })?;
-    if resolved.is_deferred() {
-        return Err(PeerError::InvalidMessage("hydration item changed".into()));
+    if item
+        .as_ref()
+        .is_some_and(|item| item.id != expected.as_str())
+    {
+        return Err(PeerError::InvalidMessage(
+            "item detail identity changed".into(),
+        ));
     }
-    let version = response
-        .version
-        .ok_or_else(|| PeerError::InvalidMessage("hydration body version is missing".into()))?;
-    Ok(Some((version, resolved)))
+    Ok(item)
 }
 
 async fn gallery_frame(
-    replica: &mut agent_protocol::conversation::records::Replica,
+    snapshot: &mut agent_protocol::orchestration::projection::ThreadSnapshot,
     stream: &mut agent_transport::framing::Reader,
-) -> Result<bool, PeerError> {
+) -> Result<(), PeerError> {
     let message = stream
-        .read::<agent_protocol::conversation::records::Message>()
+        .read::<agent_protocol::orchestration::projection::ThreadStreamItem>()
         .await
         .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?
         .ok_or_else(|| PeerError::ConnectionClosed("gallery subscription ended".into()))?;
-    agent_protocol::conversation::records::validate_message(&message)
-        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    let extended = matches!(
-        message,
-        agent_protocol::conversation::records::Message::Extend { .. }
-    );
-    *replica = replica
-        .apply(1, message)
-        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    Ok(extended)
+    *snapshot =
+        crate::orchestration::receive(&snapshot.projection.thread.id, Some(snapshot), message)
+            .map_err(|error| PeerError::InvalidMessage(error.into()))?
+            .ok_or_else(|| PeerError::InvalidMessage("gallery snapshot is missing".into()))?;
+    Ok(())
 }
 
-// Keep consuming the one state stream while an RPC or large transfer is in
-// flight; both otherwise share the connection's finite queued-byte budget.
+// Read the one state stream during RPCs and transfers so its byte budget stays
+// available. History RPCs return pages; they never acknowledge live events.
 async fn gallery_request<T>(
-    replica: &mut agent_protocol::conversation::records::Replica,
+    snapshot: &mut agent_protocol::orchestration::projection::ThreadSnapshot,
     stream: &mut agent_transport::framing::Reader,
     request: impl std::future::Future<Output = Result<T, PeerError>>,
 ) -> Result<T, PeerError> {
     tokio::pin!(request);
     loop {
         tokio::select! {
-            result = &mut request => return result,
-            result = gallery_frame(replica, stream) => { result?; },
+            result=&mut request=>return result,
+            result=gallery_frame(snapshot,stream)=>{result?;},
         }
     }
-}
-
-async fn gallery_item(
-    client: &Client,
-    request: agent_protocol::conversation::records::Hydrate,
-    replica: &mut agent_protocol::conversation::records::Replica,
-    stream: &mut agent_transport::framing::Reader,
-    session: Option<&crate::transport::Session>,
-) -> Result<std::sync::Arc<crate::models::Item>, PeerError> {
-    use agent_protocol::conversation::records;
-    let response = gallery_request(replica, stream, client.call(&request)).await?;
-    let cursor = response.cursor;
-    let version = response.version;
-    let transferred = response.transfer.is_some();
-    let body = gallery_request(
-        replica,
-        stream,
-        resolve_hydration(response, &request.item, session),
-    )
-    .await?;
-    let key = agent_protocol::sync::Key::Item {
-        thread: request.session.clone(),
-        id: request.item.clone(),
-    };
-    loop {
-        let caught_up = replica.cursor().is_some_and(|current| {
-            current.store == cursor.store && current.sequence >= cursor.sequence
-        });
-        let ready = replica.rows().get(&key).is_none_or(|row| {
-                                let (agent_protocol::sync::Content::Full(value) | agent_protocol::sync::Content::Summary(value)) = &row.content;
-                                transferred || Some(row.version) != version || matches!(value.as_ref(), records::Record::Item(item) if !item.content.is_deferred())
-                            });
-        if caught_up && ready {
-            break;
-        }
-        gallery_frame(replica, stream).await?;
-    }
-    if let Some((version, item)) = body
-        && let Some(row) = records::hydrate_body(replica, version, item)
-    {
-        *replica = replica
-            .apply(
-                1,
-                records::Message::Hydrate {
-                    cursor: replica.cursor().expect("gallery cursor"),
-                    row,
-                },
-            )
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    }
-    let row = replica
-        .rows()
-        .get(&agent_protocol::sync::Key::Item {
-            thread: request.session.clone(),
-            id: request.item.clone(),
-        })
-        .ok_or_else(|| PeerError::InvalidMessage("gallery item is no longer available".into()))?;
-    let value = match &row.content {
-        agent_protocol::sync::Content::Full(value)
-        | agent_protocol::sync::Content::Summary(value) => value,
-    };
-    let records::Record::Item(value) = value.as_ref() else {
-        return Err(PeerError::InvalidMessage(
-            "gallery hydration is not an item".into(),
-        ));
-    };
-    if value.content.is_deferred() {
-        return Err(PeerError::InvalidMessage(
-            "gallery item changed while reading its body".into(),
-        ));
-    }
-    Ok(value.content.clone())
 }
 
 /// A recording owns its prepared connection until transcription finishes or
@@ -249,7 +176,7 @@ pub trait ClientExt {
     async fn session_images(
         &self,
         thread_id: &crate::session::SessionRef,
-        session: Option<&crate::transport::Session>,
+        _session: Option<&crate::transport::Session>,
     ) -> Result<Vec<SessionImage>, PeerError>;
 }
 impl ClientExt for Client {
@@ -358,19 +285,18 @@ impl ClientExt for Client {
     async fn session_images(
         &self,
         thread_id: &crate::session::SessionRef,
-        session: Option<&crate::transport::Session>,
+        _session: Option<&crate::transport::Session>,
     ) -> Result<Vec<SessionImage>, PeerError> {
-        // Gallery reads follow bounded history pages independently of the
-        // Store's visible window, retaining their subscription until paging ends.
-        use agent_protocol::{conversation::records, sync::Scope};
-        let subscription = uuid::Uuid::new_v4();
+        use agent_protocol::{
+            conversation::records,
+            orchestration::{self as model},
+        };
         let (opened, mut stream) = self
             .request_stream::<records::Opened>(&crate::protocol::Call::SubscribeConversation(
                 records::Subscribe {
                     session: thread_id.clone(),
-                    subscription,
-                    cached: None,
-                    window: None,
+                    subscription: uuid::Uuid::new_v4(),
+                    after_sequence: None,
                 },
             ))
             .await?;
@@ -379,94 +305,74 @@ impl ClientExt for Client {
                 "gallery conversation identity changed".into(),
             ));
         }
-        records::validate_message(&opened.initial)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        let mut replica = records::Replica::new(Scope::Conversation(thread_id.clone()), 1)
-            .apply(1, opened.initial)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        loop {
-            if replica
-                .window()
-                .is_none_or(|window| window.turn == 0 && window.item == 0)
-            {
-                break;
-            }
-            let extend = records::Extend {
-                session: thread_id.clone(),
-                subscription,
-            };
-            tokio::try_join!(self.call(&extend), async {
-                while !gallery_frame(&mut replica, &mut stream).await? {}
-                Ok::<_, PeerError>(())
-            },)?;
+        let mut snapshot = None;
+        for message in opened.initial {
+            snapshot = crate::orchestration::receive(
+                &thread_id.application_id(),
+                snapshot.as_ref(),
+                message,
+            )
+            .map_err(|error| PeerError::InvalidMessage(error.into()))?;
         }
-        let thread = records::project(&replica)
-            .ok_or_else(|| PeerError::InvalidMessage("gallery conversation disappeared".into()))?
-            .thread;
+        let mut snapshot = snapshot
+            .ok_or_else(|| PeerError::InvalidMessage("gallery snapshot is missing".into()))?;
+        while let Some(cursor) = snapshot.history_cursor.clone() {
+            let page = gallery_request(
+                &mut snapshot,
+                &mut stream,
+                self.call(&records::Extend {
+                    session: thread_id.clone(),
+                    cursor: cursor.clone(),
+                }),
+            )
+            .await?;
+            if page.has_more_history && page.next_cursor.as_ref() == Some(&cursor) {
+                return Err(PeerError::InvalidMessage(
+                    "history cursor did not advance".into(),
+                ));
+            }
+            if let Some(next) = crate::orchestration::receive_history(&snapshot, &cursor, page) {
+                snapshot = next;
+            }
+        }
         let mut images = Vec::new();
         let mut sources = std::collections::HashSet::new();
-        let mut bytes = 0usize;
-        for turn in thread.turns.as_deref().unwrap_or_default().iter().rev() {
-            for item in turn.items.as_deref().unwrap_or_default().iter().rev() {
-                if !matches!(item.body(), crate::models::ItemBody::ImageGeneration { .. }) {
-                    continue;
-                }
-                let detail;
-                let item = if item.is_deferred() {
-                    detail = gallery_item(
-                        self,
-                        records::Hydrate {
-                            session: thread_id.clone(),
-                            subscription,
-                            item: item.id.clone(),
-                        },
-                        &mut replica,
-                        &mut stream,
-                        session,
-                    )
-                    .await?;
-                    detail.as_ref()
-                } else {
-                    item.as_ref()
-                };
-                let crate::models::ItemBody::ImageGeneration {
-                    saved_path, data, ..
-                } = item.body()
-                else {
-                    continue;
-                };
-                let image = saved_path
-                    .as_deref()
-                    .filter(|path| !path.trim().is_empty())
-                    .map(|path| (path, false))
-                    .or_else(|| {
-                        data.as_deref()
-                            .filter(|data| !data.trim().is_empty())
-                            .map(|data| (data, true))
-                    });
-                if let Some((source, encoded)) = image
-                    && sources.insert(source.to_owned())
-                {
-                    bytes = bytes.saturating_add(source.len());
-                    if bytes > 16 * 1024 * 1024 {
-                        return Err(PeerError::InvalidMessage("画像一覧が16 MiBの上限に達しました。会話内の画像から個別に開いてください。".into()));
+        for row in snapshot.projection.visible_turn_items.iter().rev() {
+            if let model::TurnItemBody::AssistantMessage { attachments, .. } = &row.item.body {
+                for attachment in attachments.iter().rev() {
+                    if attachment.get("type").and_then(Value::as_str) != Some("image") {
+                        continue;
                     }
-                    images.push(SessionImage {
-                        source: source.into(),
-                        encoded,
-                    });
+                    let id = attachment
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            PeerError::InvalidMessage("image attachment ID is missing".into())
+                        })?;
+                    let extension = agent_protocol::paths::attachment_extension(
+                        attachment
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image"),
+                        attachment.get("mimeType").and_then(Value::as_str),
+                    );
+                    let source = format!(
+                        "{}{id}.{extension}",
+                        agent_protocol::paths::ATTACHMENT_SCHEME
+                    );
+                    if sources.insert(source.clone()) {
+                        images.push(SessionImage {
+                            source,
+                            encoded: false,
+                        });
+                    }
                 }
             }
         }
-        if thread.history_has_more == Some(true)
-            || thread
-                .history_read_state
-                .as_ref()
-                .is_some_and(|state| state.kind != crate::session::HistoryReadKind::Complete)
-        {
+        if snapshot.has_more_history {
             return Err(PeerError::InvalidMessage("履歴が部分取得のため、画像一覧を完全には取得できません。会話内の画像から個別に開いてください。".into()));
         }
-        images.reverse();
+
         Ok(images)
     }
 }

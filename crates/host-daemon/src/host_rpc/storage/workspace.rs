@@ -84,29 +84,107 @@ impl Storage {
         root: &str,
     ) -> Result<Vec<agent_protocol::models::ProjectScript>, String> {
         self.with(|connection| {
-            let body: Option<Vec<u8>> = connection
-                .query_row(
-                    "SELECT body FROM workspace_scripts WHERE root=?1",
-                    [root],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(failure)?;
-            body.map(|body| protocol::decode(&body).map_err(failure))
-                .transpose()
-                .map(Option::unwrap_or_default)
+            scripts(connection, root).map(|scripts| {
+                scripts
+                    .into_iter()
+                    .map(|script| agent_protocol::models::ProjectScript {
+                        name: script.name,
+                        command: script.command,
+                    })
+                    .collect()
+            })
         })
     }
-    pub(in crate::host_rpc) fn save_workspace_scripts(
+
+    pub(in crate::host_rpc) fn save_workspace_script(
         &self,
         root: &str,
-        scripts: &[agent_protocol::models::ProjectScript],
+        previous_name: Option<&str>,
+        script: agent_protocol::models::ProjectScript,
     ) -> Result<(), String> {
         self.with(|connection| {
-            connection.execute("INSERT INTO workspace_scripts(root,body) VALUES (?1,?2) ON CONFLICT(root) DO UPDATE SET body=excluded.body", params![root, protocol::encode(scripts).map_err(failure)?]).map_err(failure)?;
-            Ok(())
+            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
+            let mut saved = scripts(&transaction, root)?;
+            if saved.iter().any(|saved| {
+                saved.name == script.name && Some(saved.name.as_str()) != previous_name
+            }) {
+                return Err("A script with this name already exists.".into());
+            }
+            if let Some(previous) = previous_name {
+                let saved = saved
+                    .iter_mut()
+                    .find(|script| script.name == previous)
+                    .ok_or("The script changed. Refresh and try again.")?;
+                saved.name = script.name;
+                saved.command = script.command;
+            } else {
+                saved.push(agent_protocol::orchestration::ProjectScript {
+                    id: Uuid::new_v4().to_string(),
+                    name: script.name,
+                    command: script.command,
+                    icon: "play".into(),
+                    run_on_worktree_create: false,
+                    run_on_settle: None,
+                    stop_on_settle: None,
+                    asynchronous: None,
+                    preview_url: None,
+                    auto_open_preview: None,
+                });
+            }
+            let registered:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM projection_projects WHERE workspace_root=?1 AND deleted_at IS NULL)",[root],|row|row.get(0)).map_err(failure)?;
+            let mut updated=Vec::new();
+            if !registered {
+                let project=agent_protocol::models::Project {id:Uuid::new_v4().to_string(),
+                    name:std::path::Path::new(root).file_name().and_then(|name|name.to_str()).unwrap_or(root).into(),
+                    roots:vec![agent_protocol::models::ProjectRoot {path:root.into()}],icon:None};
+                updated.push(projects::write(&transaction,&project)?);
+                jobs::enqueue(&transaction,Uuid::new_v4(),"projects",super::super::runtime::now(),&jobs::Work::ProjectsChanged)?;
+            }
+            save_scripts(&transaction, root, &saved)?;
+            Self::commit(transaction,None,Step::default(),updated,Vec::new(),false).map(|_|())
         })
     }
+
+    pub(in crate::host_rpc) fn remove_workspace_script(
+        &self,
+        root: &str,
+        name: &str,
+    ) -> Result<(), String> {
+        self.with(|connection| {
+            let transaction = connection.transaction().map_err(failure)?;
+            let mut saved = scripts(&transaction, root)?;
+            let before = saved.len();
+            saved.retain(|script| script.name != name);
+            if saved.len() != before {
+                save_scripts(&transaction, root, &saved)?;
+            }
+            transaction.commit().map_err(failure)
+        })
+    }
+}
+
+fn scripts(
+    connection: &Connection,
+    root: &str,
+) -> Result<Vec<agent_protocol::orchestration::ProjectScript>, String> {
+    let body=connection.query_row("SELECT scripts_json FROM projection_projects WHERE workspace_root=?1 AND deleted_at IS NULL",[root],|row|row.get::<_,String>(0)).optional().map_err(failure)?;
+    body.map(|body| serde_json::from_str(&body).map_err(failure))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn save_scripts(
+    transaction: &Transaction<'_>,
+    root: &str,
+    scripts: &[agent_protocol::orchestration::ProjectScript],
+) -> Result<(), String> {
+    let now = super::projects::timestamp();
+    let count=transaction.execute("UPDATE projection_projects SET scripts_json=?1,updated_at=?2 WHERE workspace_root=?3 AND deleted_at IS NULL",
+        params![serde_json::to_string(scripts).map_err(failure)?,now,root]).map_err(failure)?;
+    if count != 1 {
+        return Err("Scripts require a registered project.".into());
+    }
+    Ok(())
 }
 
 fn apply(

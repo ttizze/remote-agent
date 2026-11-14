@@ -7,6 +7,44 @@ pub fn is_absolute_host_path(path: &str) -> bool {
     is_windows_absolute_host_path(path)
 }
 
+/// Native clients use authenticated file RPCs for T3's attachment assets. The
+/// reference names one file; it never carries an absolute Host path.
+pub const ATTACHMENT_SCHEME: &str = "bex-attachment://";
+
+pub fn attachment_file_name(source: &str) -> Option<&str> {
+    let file = source.strip_prefix(ATTACHMENT_SCHEME)?;
+    let (id, extension) = file.rsplit_once('.')?;
+    (!id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && !extension.is_empty()
+        && extension.len() <= 10
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    .then_some(file)
+}
+
+pub fn attachment_extension(name: &str, image_mime: Option<&str>) -> String {
+    match image_mime.map(str::to_ascii_lowercase).as_deref() {
+        Some("image/png") => return "png".into(),
+        Some("image/jpeg") => return "jpg".into(),
+        Some("image/gif") => return "gif".into(),
+        Some("image/webp") => return "webp".into(),
+        _ => {}
+    }
+    name.rsplit_once('.')
+        .map(|(_, extension)| extension)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 10
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                && !value.eq_ignore_ascii_case("part")
+        })
+        .unwrap_or("bin")
+        .to_ascii_lowercase()
+}
+
 pub fn is_windows_absolute_host_path(path: &str) -> bool {
     if path.contains('\0') {
         return false;

@@ -658,6 +658,15 @@ pub(crate) fn request_origin(
 }
 #[async_trait::async_trait]
 impl crate::providers::AnswerSource for RequestSource {
+    fn request_kind(&self, body: &agent_protocol::requests::RequestBody) -> &'static str {
+        self.answers.request_kind(body)
+    }
+    fn approval_decision(
+        &self,
+        choice: &agent_protocol::requests::Choice,
+    ) -> agent_protocol::orchestration::ApprovalDecision {
+        self.answers.approval_decision(choice)
+    }
     fn is_alive(&self) -> bool {
         !self.stopped.is_cancelled()
     }

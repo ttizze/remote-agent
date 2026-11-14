@@ -12,11 +12,15 @@ pub(crate) struct Snapshot {
     pub(super) chat_directories: BTreeSet<PathBuf>,
 }
 impl Snapshot {
+    pub(crate) fn is_chat_directory(&self, path: &Path) -> bool {
+        self.chat_directories.contains(path)
+    }
+
     pub(crate) fn project_membership(&self, cwd: Option<&str>) -> ProjectMembership {
         let Some(cwd) = cwd else {
             return ProjectMembership::Unknown {};
         };
-        if self.chat_directories.contains(Path::new(cwd)) {
+        if self.is_chat_directory(Path::new(cwd)) {
             ProjectMembership::Unassigned {}
         } else {
             self.project_for_workspace(cwd)

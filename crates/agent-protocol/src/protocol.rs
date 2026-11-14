@@ -104,6 +104,7 @@ results! {
     List(crate::conversation::records::OpenedList),
     CommandOutput(crate::conversation::records::OpenedOutput),
     ConversationHydration(crate::conversation::records::Hydrated),
+    ConversationHistory(crate::orchestration::projection::ThreadHistoryPage),
     ConversationReceipts(crate::conversation::records::Receipts),
     ProviderSettings(crate::providers::ProviderSettings),
     HostSoftware(crate::operations::HostSoftware),

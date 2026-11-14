@@ -1,5 +1,5 @@
-//! The client owns one replica per conversation. Display models are disposable
-//! projections; only ordered rows can change saved conversation state.
+//! Each conversation holds T3's canonical snapshot. Display DTOs and queried
+//! details are disposable; only the thread stream advances its saved sequence.
 use super::*;
 use crate::{peer::PeerError, session::SessionRef};
 use agent_protocol::conversation::records;
@@ -9,46 +9,65 @@ mod context_tests;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug)]
-pub struct Opened {
-    pub replica: records::Replica,
-    pub subscription: uuid::Uuid,
+#[derive(Debug, Clone)]
+pub struct Capture {
+    pub generation: u64,
+    pub projection: Option<Arc<agent_protocol::orchestration::projection::ThreadSnapshot>>,
 }
 
-pub(crate) fn opened(
-    base: &records::Replica,
-    response: records::Opened,
-) -> Result<Opened, PeerError> {
-    records::validate_message(&response.initial)
-        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    if let records::Message::Snapshot { cursor, .. } = &response.initial
-        && base
-            .cursor()
-            .is_some_and(|current| cursor.precedes(current))
-    {
-        return Err(PeerError::InvalidMessage(
-            "conversation snapshot precedes its cached cursor".into(),
-        ));
-    }
-    let replica = base
-        .apply(base.subscription(), response.initial)
-        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    let agent_protocol::sync::Scope::Conversation(id) = replica.scope() else {
-        return Err(PeerError::InvalidMessage(
-            "expected a conversation scope".into(),
-        ));
-    };
-    if !replica
-        .rows()
-        .contains_key(&agent_protocol::sync::Key::Thread(id.clone()))
-    {
-        return Err(PeerError::InvalidMessage(
-            "conversation header is missing".into(),
-        ));
+pub(crate) fn capture(snapshot: &Snapshot, id: &SessionRef) -> Result<Capture, PeerError> {
+    let generation = snapshot
+        .sessions
+        .subscription_generations
+        .get(id)
+        .copied()
+        .ok_or_else(|| {
+            PeerError::InvalidMessage("conversation subscription was not scheduled".into())
+        })?;
+    Ok(Capture {
+        generation,
+        projection: snapshot.sessions.projections.get(id).cloned(),
+    })
+}
+
+#[derive(Debug)]
+pub struct Opened {
+    pub session: SessionRef,
+    pub projection: agent_protocol::orchestration::projection::ThreadSnapshot,
+    pub subscription: uuid::Uuid,
+    pub generation: u64,
+    pub provider: crate::session::ProviderKind,
+    pub capabilities: crate::session::Capabilities,
+    pub project_root: Option<String>,
+    pub replaced: bool,
+}
+
+pub(crate) fn opened(base: &Capture, response: records::Opened) -> Result<Opened, PeerError> {
+    let replaced = response.initial.iter().any(|item| {
+        matches!(
+            item,
+            agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(_)
+        )
+    });
+    let mut projection = base.projection.as_deref().cloned();
+    for message in response.initial {
+        projection = crate::orchestration::receive(
+            &response.session.application_id(),
+            projection.as_ref(),
+            message,
+        )
+        .map_err(|error| PeerError::InvalidMessage(error.into()))?;
     }
     Ok(Opened {
-        replica,
+        session: response.session,
+        projection: projection
+            .ok_or_else(|| PeerError::InvalidMessage("conversation snapshot is missing".into()))?,
         subscription: response.subscription_id,
+        generation: base.generation,
+        provider: response.provider,
+        capabilities: response.capabilities,
+        project_root: response.project_root,
+        replaced,
     })
 }
 
@@ -132,12 +151,7 @@ impl op::Operation for CheckReceipts {
             let Some(id) = id else {
                 continue;
             };
-            if receipt.outcome == agent_protocol::conversation::Outcome::DeliveryUnknown {
-                if let Some(pending) = shared_mut(&mut snapshot.sessions.pending_submissions, &id) {
-                    pending.delivery_unknown = true;
-                }
-            } else if let agent_protocol::conversation::Outcome::Rejected(reason) = receipt.outcome
-            {
+            if let Some(reason) = receipt.error {
                 *snapshot = super::reduce_event(snapshot, Event::SubmissionFailed(id)).0;
                 snapshot.fail_operation(
                     op::OperationKey::Submission {
@@ -148,7 +162,7 @@ impl op::Operation for CheckReceipts {
             } else if let Some(pending) =
                 shared_mut(&mut snapshot.sessions.pending_submissions, &id)
             {
-                pending.cursor = Some(receipt.cursor);
+                pending.cursor = Some(receipt.sequence);
                 pending.accepted = true;
                 pending.delivery_unknown = false;
             }
@@ -168,37 +182,12 @@ pub(crate) fn read_scope(
         .get(id)
         .copied()
         .ok_or_else(|| PeerError::InvalidMessage("conversation is not subscribed".into()))?;
-    snapshot
-        .sessions
-        .replicas
-        .get(id)
-        .and_then(|replica| replica.cursor())
-        .ok_or_else(|| PeerError::InvalidMessage("conversation cursor is missing".into()))?;
+    if !snapshot.sessions.projections.contains_key(id) {
+        return Err(PeerError::InvalidMessage(
+            "conversation snapshot is missing".into(),
+        ));
+    }
     Ok(subscription)
-}
-
-pub(crate) fn hydrate_body(
-    snapshot: &mut Snapshot,
-    id: &SessionRef,
-    version: u64,
-    item: crate::models::Item,
-) -> Result<Vec<Effect>, PeerError> {
-    let Some(replica) = snapshot.sessions.replicas.get(id) else {
-        return Ok(Vec::new());
-    };
-    let Some(row) = agent_protocol::conversation::records::hydrate_body(replica, version, item)
-    else {
-        return Ok(Vec::new());
-    };
-    let cursor = replica
-        .cursor()
-        .ok_or_else(|| PeerError::InvalidMessage("body has no conversation cursor".into()))?;
-    apply(
-        snapshot,
-        id,
-        vec![records::Message::Hydrate { cursor, row }],
-    )
-    .map_err(|error| PeerError::InvalidMessage(error.to_string()))
 }
 
 pub(super) fn promote_draft(snapshot: &mut Snapshot, id: &SessionRef, cwd: Option<&str>) {
@@ -227,25 +216,27 @@ pub(crate) fn install(
     snapshot: &mut Snapshot,
     output: Opened,
 ) -> Option<crate::models::ThreadResponse> {
-    let agent_protocol::sync::Scope::Conversation(id) = output.replica.scope() else {
-        return None;
-    };
-    let id = id.clone();
-    let previous = snapshot.sessions.replicas.get(&id)?;
-    if previous.subscription() != output.replica.subscription() {
+    let id = output.session;
+    if snapshot.sessions.subscription_generations.get(&id) != Some(&output.generation) {
         return None;
     }
-    // Keep live rows received while the replacement subscription was opening.
-    // Its queued changes still start at the captured cursor and harmlessly
-    // catch up; older stream messages are fenced by the new subscription ID.
-    let replica = match (previous.cursor(), output.replica.cursor()) {
-        (Some(current), Some(opened)) if opened.precedes(current) => previous.as_ref().clone(),
-        _ => output.replica,
-    };
-    let mut projected = records::project(&replica)?;
+    if output.replaced {
+        Arc::make_mut(&mut snapshot.sessions.expanded_history).remove(&id);
+    }
+    let projected = crate::orchestration::project(
+        &output.projection,
+        &id,
+        output.provider,
+        output.capabilities,
+        output.project_root.as_deref(),
+        &snapshot.sessions.item_details,
+    )
+    .ok()?;
+    Arc::make_mut(&mut snapshot.sessions.projections)
+        .insert(id.clone(), Arc::new(output.projection));
+    let mut projected = projected;
     projected.thread = super::outputs::overlay(projected.thread, &snapshot.sessions.live_outputs);
     promote_draft(snapshot, &id, projected.thread.cwd.as_deref());
-    Arc::make_mut(&mut snapshot.sessions.replicas).insert(id.clone(), Arc::new(replica));
     Arc::make_mut(&mut snapshot.sessions.conversations)
         .insert(id.clone(), Arc::new(projected.thread.clone()));
     Arc::make_mut(&mut snapshot.sessions.subscriptions).insert(id.clone(), output.subscription);
@@ -256,7 +247,7 @@ pub(crate) fn install(
 pub(crate) fn received(
     previous: &Snapshot,
     subscription_id: uuid::Uuid,
-    message: records::Message,
+    message: agent_protocol::orchestration::projection::ThreadStreamItem,
 ) -> (Snapshot, Vec<Effect>) {
     let Some(id) = previous
         .sessions
@@ -267,8 +258,7 @@ pub(crate) fn received(
         return (previous.clone(), Vec::new());
     };
     let mut next = previous.clone();
-    let result = apply(&mut next, &id, vec![message]);
-    match result {
+    match apply(&mut next, &id, vec![message]) {
         Ok(effects) => (next, effects),
         Err(_) => {
             Arc::make_mut(&mut next.sessions.subscriptions).remove(&id);
@@ -277,72 +267,30 @@ pub(crate) fn received(
     }
 }
 
-pub(crate) fn apply(
-    snapshot: &mut Snapshot,
-    id: &crate::session::SessionRef,
-    messages: Vec<records::Message>,
-) -> Result<Vec<Effect>, agent_protocol::sync::ApplyError> {
-    let mut detail_keys = std::collections::BTreeSet::new();
-    for message in &messages {
-        records::validate_message(message)?;
-        let (rows, events) = match message {
-            records::Message::Snapshot { rows, .. } | records::Message::Extend { rows, .. } => {
-                (rows.as_slice(), &[][..])
-            }
-            records::Message::Events { events, .. } => (&[][..], events.as_slice()),
-            records::Message::Hydrate { row, .. } => (std::slice::from_ref(row), &[][..]),
-            records::Message::Missing => (&[][..], &[][..]),
-        };
-        for row in rows
-            .iter()
-            .chain(events.iter().flat_map(|event| &event.rows))
-        {
-            let value = match &row.content {
-                agent_protocol::sync::Content::Full(value)
-                | agent_protocol::sync::Content::Summary(value) => value,
-            };
-            if let records::Record::Item(item) = value.as_ref()
-                && item.content.is_deferred()
-            {
-                detail_keys.insert(row.key.clone());
-            }
-        }
-    }
-    let Some(held) = snapshot.sessions.replicas.get(id) else {
-        return Ok(Vec::new());
-    };
+pub(crate) fn refresh(snapshot: &mut Snapshot, id: &SessionRef) -> Result<Vec<Effect>, PeerError> {
+    let held = snapshot
+        .sessions
+        .projections
+        .get(id)
+        .ok_or_else(|| PeerError::InvalidMessage("conversation snapshot is missing".into()))?;
     let before = snapshot.sessions.conversations.get(id).cloned();
-    let mut replica = held.as_ref().clone();
-    for message in messages {
-        if let records::Message::Snapshot { cursor, .. } = &message
-            && replica
-                .cursor()
-                .is_some_and(|current| cursor.precedes(current))
-        {
-            return Err(agent_protocol::sync::ApplyError::Version);
-        }
-        replica = replica.apply(replica.subscription(), message)?;
-    }
-    let details = detail_keys
-        .iter()
-        .filter_map(|key| replica.rows().get(key))
-        .flat_map(|row| {
-            let (agent_protocol::sync::Content::Full(value)
-            | agent_protocol::sync::Content::Summary(value)) = &row.content;
-            match value.as_ref() {
-                records::Record::Item(item) if item.content.is_deferred() => {
-                    op::item_detail(id, &item.turn, &item.content)
-                }
-                _ => None,
-            }
-        })
-        .collect::<Vec<_>>();
-    let projected = records::project(&replica);
-    Arc::make_mut(&mut snapshot.sessions.replicas).insert(id.clone(), Arc::new(replica));
-    let Some(mut projected) = projected else {
-        Arc::make_mut(&mut snapshot.sessions.conversations).remove(id);
-        return Ok(Vec::new());
-    };
+    let provider = crate::session::ProviderKind::from_instance_id(
+        &held.projection.thread.provider_instance_id,
+    )
+    .map_err(PeerError::InvalidMessage)?;
+    let capabilities = before
+        .as_ref()
+        .and_then(|thread| thread.capabilities)
+        .unwrap_or_default();
+    let mut projected = crate::orchestration::project(
+        held,
+        id,
+        provider,
+        capabilities,
+        before.as_ref().and_then(|thread| thread.cwd.as_deref()),
+        &snapshot.sessions.item_details,
+    )
+    .map_err(PeerError::InvalidMessage)?;
     projected.thread = super::outputs::overlay(projected.thread, &snapshot.sessions.live_outputs);
     if let (Some(previous), Some(turns)) = (before.as_ref(), projected.thread.turns.as_mut()) {
         for turn in turns {
@@ -370,7 +318,7 @@ pub(crate) fn apply(
                 .and_then(|turns| turns.iter().find(|old| old.id == turn.id))
                 .is_some_and(|old| old.status == crate::models::TurnStatus::Running)
     });
-    let mut effects = details;
+    let mut effects = Vec::new();
     if let Some(before) = before {
         let previous_items: HashMap<_, _> = before
             .turns
@@ -389,7 +337,7 @@ pub(crate) fn apply(
         let work_finished = changed_items
             .iter()
             .any(|item| finished_workspace_item(item));
-        let discovered_agents = changed_items.iter().any(|item| matches!(item.body(), crate::models::ItemBody::Subagent { receivers, .. } if receivers.iter().any(|receiver| !snapshot.sessions.conversations.contains_key(receiver))));
+        let discovered_agents = changed_items.iter().any(|item| matches!(item.body(), crate::models::ItemBody::Subagent { receivers, .. } if receivers.iter().any(|receiver| !snapshot.sessions.conversations.keys().any(|id|id.application_id()==receiver.application_id()))));
         effects.extend(context_effects(
             snapshot,
             id,
@@ -414,6 +362,27 @@ pub(crate) fn apply(
         snapshot.prune_subscriptions();
     }
     Ok(effects)
+}
+
+pub(crate) fn apply(
+    snapshot: &mut Snapshot,
+    id: &SessionRef,
+    messages: Vec<agent_protocol::orchestration::projection::ThreadStreamItem>,
+) -> Result<Vec<Effect>, PeerError> {
+    let mut current = snapshot
+        .sessions
+        .projections
+        .get(id)
+        .map(|snapshot| snapshot.as_ref().clone());
+    for message in messages {
+        current = crate::orchestration::receive(&id.application_id(), current.as_ref(), message)
+            .map_err(|error| PeerError::InvalidMessage(error.into()))?;
+    }
+    let Some(current) = current else {
+        return Ok(Vec::new());
+    };
+    Arc::make_mut(&mut snapshot.sessions.projections).insert(id.clone(), Arc::new(current));
+    refresh(snapshot, id)
 }
 
 fn finished_workspace_item(item: &crate::models::Item) -> bool {
@@ -486,12 +455,13 @@ fn fleet_contains(
     let mut ancestor = session;
     // The number of known sessions also bounds malformed parent cycles.
     for _ in 0..=conversations.len() {
-        if ancestor == root {
+        if ancestor.application_id() == root.application_id() {
             return true;
         }
         let Some(parent) = conversations
-            .get(ancestor)
-            .and_then(|thread| thread.parent_id.as_ref())
+            .iter()
+            .find(|(id, _)| id.application_id() == ancestor.application_id())
+            .and_then(|(_, thread)| thread.parent_id.as_ref())
         else {
             return false;
         };

@@ -23,8 +23,12 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use uuid::Uuid;
 
 mod bodies;
+mod commands;
 mod events;
+mod executor;
+mod imports;
 pub(in crate::host_rpc) mod list;
+mod native;
 #[cfg(test)]
 pub(in crate::host_rpc) mod native_fixture;
 pub(in crate::host_rpc) mod output;
@@ -34,6 +38,7 @@ pub(in crate::host_rpc) mod recovery;
 mod replay;
 mod resources;
 mod rpc;
+pub(in crate::host_rpc) mod stream;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -127,6 +132,7 @@ impl Runtime {
         service.restore_setup_expiry();
         Self::start_list_updates(service);
         Self::start_recovery(service);
+        Self::start_effects(service);
         tokio::spawn(async move {
             let mut workers = tokio::task::JoinSet::new();
             while let Some(effect) = effects.recv().await {
@@ -241,133 +247,6 @@ impl Runtime {
             .await?;
         service.inner.conversation.prune_requests(target);
         Ok(result)
-    }
-
-    pub(super) async fn change(
-        service: &HostRpcService,
-        request: &records::Change,
-    ) -> Result<records::Acknowledged, Failure> {
-        if let Some((_, receipt)) = service
-            .inner
-            .conversation
-            .storage
-            .receipts(&request.session, &[request.operation])
-            .map_err(storage_failure)?
-            .into_iter()
-            .next()
-        {
-            Self::await_resolution(service, request, &receipt.outcome)
-                .await
-                .map_err(storage_failure)?;
-            return Ok(receipt);
-        }
-        // Catalog-only rows have no authoritative history or provider
-        // binding yet. An operation cannot start a second native session.
-        if request.session.provider.is_some()
-            && !matches!(
-                request.command,
-                Command::ResolveUnknown { retry: false, .. }
-            )
-            && !service
-                .inner
-                .conversation
-                .storage
-                .loaded(&request.session)
-                .map_err(storage_failure)?
-        {
-            Self::await_import(service, &request.session).await?;
-        }
-        let _workspace = if matches!(
-            request.command,
-            Command::Submit { .. }
-                | Command::ResumeQueue
-                | Command::SteerInput(_)
-                | Command::RetryInput { .. }
-                | Command::ResolveUnknown { retry: true, .. }
-                | Command::Answer { .. }
-                | Command::Rewind(_)
-        ) {
-            let guard = service.inner.worktree_access.read().await;
-            service.require_not_updating()?;
-            Some(guard)
-        } else {
-            None
-        };
-        let admission = (|| {
-            if let Command::Submit { content, .. } = &request.command {
-                let current = service
-                    .inner
-                    .conversation
-                    .storage
-                    .lookup(&request.session)
-                    .map_err(storage_failure)?;
-                let Some(current) = current else {
-                    return Ok(());
-                };
-                let provider = content
-                    .model
-                    .as_ref()
-                    .map_or(current.state.provider, |model| model.provider);
-                service
-                    .creation_agent(provider, content.model.as_ref())?
-                    .availability()?;
-                if current.details.can_accept_direct_input == Some(false) {
-                    return Err(Failure::new(
-                        "read_only_conversation",
-                        "この会話は親の会話から操作してください。",
-                    ));
-                }
-            }
-            Ok::<_, Failure>(())
-        })();
-        let event = match admission {
-            Ok(()) => Event::Command {
-                id: decision::OperationId::Client(request.operation),
-                command: request.command.clone(),
-                receipt: None,
-            },
-            Err(error) => Event::RejectedCommand {
-                id: decision::OperationId::Client(request.operation),
-                reason: error.message,
-                receipt: None,
-            },
-        };
-        let (outcome, cursor) = Self::event(service, &request.session, event)
-            .await
-            .map_err(storage_failure)?;
-        Self::await_resolution(service, request, &outcome)
-            .await
-            .map_err(storage_failure)?;
-        Ok(records::Acknowledged { outcome, cursor })
-    }
-
-    async fn await_resolution(
-        service: &HostRpcService,
-        request: &records::Change,
-        outcome: &Outcome,
-    ) -> Result<(), String> {
-        let Command::ResolveUnknown { id, .. } = &request.command else {
-            return Ok(());
-        };
-        if *outcome != Outcome::Accepted {
-            return Ok(());
-        }
-        let storage = &service.inner.conversation.storage;
-        let mut changed = storage.changes();
-        loop {
-            if !storage.input(&request.session, id)?.is_some_and(|input| {
-                matches!(
-                    input.state,
-                    decision::InputState::Unknown {
-                        status: decision::UnknownState::Resolving { .. },
-                        ..
-                    }
-                )
-            }) {
-                return Ok(());
-            }
-            changed.changed().await.map_err(|error| error.to_string())?;
-        }
     }
 
     async fn execute(service: &HostRpcService, effect: Effect) -> Result<(), String> {

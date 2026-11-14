@@ -1,27 +1,36 @@
 //! Inputs for applying an opened canonical conversation in client tests.
-use super::rows::replica;
 use agent_core::state::{
     Snapshot,
     operations::{Operation, ReadThread},
 };
-use agent_protocol::{conversation::records, models::ThreadResponse};
+use agent_protocol::models::ThreadResponse;
 use std::sync::Arc;
 
 pub type Opened = <ReadThread as Operation>::Output;
 
 pub fn opened(response: ThreadResponse, snapshot: &mut Snapshot) -> Opened {
-    let id = response.thread.id.clone().unwrap();
+    let id = response.thread.id.clone().expect("fixture thread identity");
+    let provider = response
+        .thread
+        .active_provider
+        .or(id.provider)
+        .unwrap_or(agent_protocol::session::ProviderKind::Codex);
+    let capabilities = response.thread.capabilities.unwrap_or_default();
     let generation = snapshot
         .sessions
-        .replicas
+        .subscription_generations
         .get(&id)
-        .map_or(1, |replica| replica.subscription());
-    let replica = replica(response, generation);
-    Arc::make_mut(&mut snapshot.sessions.replicas)
-        .entry(id)
-        .or_insert_with(|| Arc::new(records::Replica::new(replica.scope().clone(), generation)));
+        .copied()
+        .unwrap_or(1);
+    Arc::make_mut(&mut snapshot.sessions.subscription_generations).insert(id.clone(), generation);
     Opened {
-        replica,
+        session: id,
+        projection: super::rows::orchestration::snapshot(response, 1),
+        generation,
+        provider,
+        capabilities,
+        project_root: None,
+        replaced: true,
         subscription: uuid::Uuid::new_v4(),
     }
 }
