@@ -687,6 +687,10 @@ fn item_view(
             result: result.clone().map(serde_json::Value::String),
         },
         Body::DynamicTool {
+            viewed_image_path: Some(path),
+            ..
+        } => items::ItemBody::ImageView { path: path.clone() },
+        Body::DynamicTool {
             tool_name,
             input,
             output,
@@ -771,10 +775,12 @@ fn needs_detail(item: &model::TurnItem) -> bool {
         model::TurnItemBody::DynamicTool {
             input,
             output_omitted,
+            viewed_image_path,
             ..
         } => {
-            *output_omitted == Some(true)
-                || input.get("truncated") == Some(&serde_json::Value::Bool(true))
+            viewed_image_path.is_none()
+                && (*output_omitted == Some(true)
+                    || input.get("truncated") == Some(&serde_json::Value::Bool(true)))
         }
         model::TurnItemBody::FileChange { diff_str, .. } => diff_str.is_none(),
         _ => false,
