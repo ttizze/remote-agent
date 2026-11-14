@@ -1,5 +1,5 @@
 use super::*;
-use agent_protocol::requests::{Answer, RequestBody};
+use agent_protocol::requests::Answer;
 
 pub(super) struct Source {
     pub target: SessionRef,
@@ -19,7 +19,6 @@ pub(super) struct PendingRequest {
     pub target: SessionRef,
     pub attempt: Attempt,
     pub origin: RequestOrigin,
-    pub body: RequestBody,
 }
 
 impl Source {
@@ -812,19 +811,23 @@ impl Runtime {
             action: token,
             answer: answer.clone(),
         };
-        if !runtime.storage.state(target)?.permits(&action) {
-            return Ok(());
-        }
+        let body = {
+            let state = runtime.storage.state(target)?;
+            if !state.permits(&action) {
+                return Ok(());
+            }
+            state.requests[&id].body.clone()
+        };
         let request = runtime
             .requests
             .lock()
             .unwrap()
             .get(&id)
             .filter(|request| request.target == *target && request.attempt == attempt)
-            .map(|request| (request.origin.clone(), request.body.clone()));
+            .map(|request| request.origin.clone());
         let result = if service.require_not_updating().is_err() {
             Err(agent_protocol::error::Delivery::NotSent)
-        } else if let Some((origin, body)) = request {
+        } else if let Some(origin) = request {
             match origin
                 .source
                 .prepare(&origin.native_id, &body, &answer)
@@ -1244,11 +1247,6 @@ mod tests {
                 native_id: serde_json::json!(1),
                 provider: ProviderKind::Codex,
                 source: answer.clone(),
-            },
-            body: RequestBody::ToolExecution {
-                tool: "inspect".into(),
-                namespace: None,
-                arguments: serde_json::Value::Null,
             },
         };
         assert!(

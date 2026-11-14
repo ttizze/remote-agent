@@ -71,7 +71,6 @@ impl Runtime {
                 target: source.target.clone(),
                 attempt: attempt.clone(),
                 origin,
-                body: request.body.clone(),
             },
         )? {
             return Ok(());

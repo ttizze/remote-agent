@@ -3,7 +3,7 @@
 use super::*;
 use agent_protocol::{
     protocol,
-    sync::{Output, OutputStream, OutputUpdate},
+    sync::{Output, OutputUpdate},
 };
 use tokio::{
     sync::watch,
@@ -18,7 +18,7 @@ pub(super) enum Change<'a> {
 pub(super) struct Outputs(Mutex<HashMap<records::OutputKey, Live>>);
 struct Live {
     execution: Uuid,
-    tail: Option<OutputStream>,
+    tail: Option<Output>,
     sequence: u64,
     published: watch::Sender<Publication>,
     recent: Arc<std::collections::VecDeque<Append>>,
@@ -29,7 +29,6 @@ struct Live {
 }
 #[derive(Clone)]
 struct Append {
-    from: u64,
     through: u64,
     text: Arc<str>,
     units: usize,
@@ -64,7 +63,7 @@ impl Subscription {
                 .iter()
                 .filter(|append| append.through > self.sequence)
             {
-                if append.from != through {
+                if append.through.checked_sub(1) != Some(through) {
                     break;
                 }
                 text.push_str(&append.text);
@@ -90,7 +89,7 @@ impl Live {
     fn checkpoint(&self) -> Output {
         self.tail
             .as_ref()
-            .map(OutputStream::checkpoint)
+            .cloned()
             .unwrap_or_else(|| Output::new(self.sequence, ""))
     }
     fn new(execution: Uuid, tail: Output) -> Self {
@@ -103,7 +102,7 @@ impl Live {
         Self {
             execution,
             sequence: tail.sequence,
-            tail: Some(tail.into()),
+            tail: Some(tail),
             published,
             recent: Arc::default(),
             recent_units: 0,
@@ -134,9 +133,7 @@ impl Outputs {
         let replaced = live.tail.is_none();
         match change {
             Change::Append(text) => {
-                let tail = live
-                    .tail
-                    .get_or_insert_with(|| Output::new(from, "").into());
+                let tail = live.tail.get_or_insert_with(|| Output::new(from, ""));
                 tail.append(through, text);
                 let units = text.encode_utf16().count();
                 let recent = Arc::make_mut(&mut live.recent);
@@ -145,7 +142,6 @@ impl Outputs {
                 // to replace its checkpoint, as T3's needsReplace does.
                 if !replaced {
                     recent.push_back(Append {
-                        from,
                         through,
                         text: Arc::from(text),
                         units,
@@ -161,7 +157,7 @@ impl Outputs {
             Change::Replace { text, truncated } => {
                 let mut tail = Output::new(through, text);
                 tail.truncated |= truncated;
-                live.tail = Some(tail.into());
+                live.tail = Some(tail);
                 live.recent = Arc::default();
                 live.recent_units = 0;
                 live.overflowed_through = 0;

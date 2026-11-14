@@ -48,42 +48,6 @@ impl PartialEq for Output {
 }
 impl Eq for Output {}
 
-/// The live owner feeds only new bytes. A display/checkpoint is built when
-/// publishing, subscribing or settling, rather than on each provider chunk.
-#[derive(Debug, Default)]
-pub struct OutputStream {
-    sequence: u64,
-    buffer: terminal::Buffer,
-    truncated: bool,
-}
-impl From<Output> for OutputStream {
-    fn from(output: Output) -> Self {
-        Self {
-            sequence: output.sequence,
-            buffer: std::sync::Arc::unwrap_or_clone(output.buffer),
-            truncated: output.truncated,
-        }
-    }
-}
-impl OutputStream {
-    pub fn sequence(&self) -> u64 {
-        self.sequence
-    }
-    pub fn append(&mut self, through: u64, text: &str) {
-        self.buffer.append(text);
-        self.sequence = through;
-    }
-    pub fn checkpoint(&self) -> Output {
-        let (text, truncated) = self.buffer.display();
-        Output {
-            sequence: self.sequence,
-            text,
-            truncated: self.truncated || truncated,
-            buffer: std::sync::Arc::new(self.buffer.clone()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputUpdate {
     Tail(Output),
@@ -125,6 +89,16 @@ impl Output {
         output.truncated |= truncated;
         output
     }
+    pub fn append(&mut self, through: u64, text: &str) {
+        if through <= self.sequence {
+            return;
+        }
+        std::sync::Arc::make_mut(&mut self.buffer).append(text);
+        let (text, truncated) = self.buffer.display();
+        self.sequence = through;
+        self.text = text;
+        self.truncated |= truncated;
+    }
     pub fn apply(&self, update: OutputUpdate) -> Self {
         match update {
             OutputUpdate::Tail(tail) => {
@@ -134,15 +108,8 @@ impl Output {
                 tail
             }
             OutputUpdate::Append { through, text } => {
-                if through <= self.sequence {
-                    return self.clone();
-                }
                 let mut next = self.clone();
-                std::sync::Arc::make_mut(&mut next.buffer).append(&text);
-                let (text, truncated) = next.buffer.display();
-                next.sequence = through;
-                next.text = text;
-                next.truncated |= truncated;
+                next.append(through, &text);
                 next
             }
         }
@@ -155,7 +122,7 @@ mod tests {
     use proptest::prelude::*;
     #[test]
     fn live_appends_interpret_only_new_terminal_text() {
-        let mut stream = OutputStream::default();
+        let mut stream = Output::default();
         stream.append(
             1,
             &"verbose command line with output and columns................................\n"
@@ -164,7 +131,7 @@ mod tests {
         let before = terminal::PRINTED_UNITS.get();
         stream.append(2, "next line\n");
         assert_eq!(terminal::PRINTED_UNITS.get() - before, "next line".len());
-        assert!(stream.checkpoint().text.ends_with("next line\n"));
+        assert!(stream.text.ends_with("next line\n"));
     }
 
     fn checkpoint(output: Output) -> Output {
@@ -241,7 +208,7 @@ mod tests {
             serde_json::from_str(include_str!("output/terminal-cases.json")).unwrap();
         for case in corpus["cases"].as_array().unwrap() {
             let mut output = Output::default();
-            let mut stream = OutputStream::default();
+            let mut stream = Output::default();
             for step in case["steps"].as_array().unwrap() {
                 let text = step["text"]
                     .as_str()
@@ -252,12 +219,7 @@ mod tests {
                     text: text.clone(),
                 });
                 stream.append(output.sequence, &text);
-                assert_eq!(
-                    stream.checkpoint(),
-                    output,
-                    "{} host checkpoint",
-                    case["name"]
-                );
+                assert_eq!(stream, output, "{} host checkpoint", case["name"]);
                 assert_eq!(output.text, unpack(&step["expected"]), "{}", case["name"]);
                 assert_eq!(
                     output.truncated,

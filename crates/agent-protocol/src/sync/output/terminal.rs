@@ -209,23 +209,9 @@ struct Cell {
 struct Line {
     cells: VecDeque<Cell>,
     runs: usize,
-    style_units: usize,
-}
-fn style_cost(previous: Option<&Style>, next: Option<&Style>) -> usize {
-    let Some(next) = next else { return 0 };
-    let default = Style::default();
-    if previous.unwrap_or(&default) == next {
-        0
-    } else {
-        sgr(&next.pen()).len()
-    }
 }
 impl Line {
     fn push(&mut self, cell: Cell) {
-        self.style_units += style_cost(
-            self.cells.back().map(|last| last.style.as_ref()),
-            Some(&cell.style),
-        );
         if self
             .cells
             .back()
@@ -236,16 +222,6 @@ impl Line {
         self.cells.push_back(cell);
     }
     fn replace(&mut self, index: usize, cell: Cell) {
-        let costs = |style: &Style| {
-            style_cost(
-                index.checked_sub(1).map(|at| self.cells[at].style.as_ref()),
-                Some(style),
-            ) + style_cost(
-                Some(style),
-                self.cells.get(index + 1).map(|next| next.style.as_ref()),
-            )
-        };
-        self.style_units = self.style_units + costs(&cell.style) - costs(&self.cells[index].style);
         let edges = |style: &Arc<Style>| {
             usize::from(index > 0 && self.cells[index - 1].style != *style)
                 + usize::from(index + 1 < self.cells.len() && self.cells[index + 1].style != *style)
@@ -256,9 +232,7 @@ impl Line {
     fn recount(&mut self) {
         let mut previous = None;
         self.runs = 0;
-        self.style_units = 0;
         for cell in &self.cells {
-            self.style_units += style_cost(previous.map(Arc::as_ref), Some(&cell.style));
             if previous.is_none_or(|previous: &Arc<Style>| previous != &cell.style) {
                 self.runs += 1;
             }
@@ -267,10 +241,6 @@ impl Line {
     }
     fn pop_front(&mut self) {
         if let Some(old) = self.cells.pop_front() {
-            let next = self.cells.front().map(|next| next.style.as_ref());
-            self.style_units = self.style_units + style_cost(None, next)
-                - style_cost(None, Some(&old.style))
-                - style_cost(Some(&old.style), next);
             if self
                 .cells
                 .front()
@@ -279,15 +249,6 @@ impl Line {
                 self.runs = self.runs.saturating_sub(1);
             }
         }
-    }
-    fn serialized_units(&self) -> usize {
-        self.cells.len()
-            + self.style_units
-            + usize::from(
-                self.cells
-                    .back()
-                    .is_some_and(|cell| *cell.style != Style::default()),
-            ) * 4
     }
     fn bound_styles(&mut self) {
         if self.runs <= 2048 {
@@ -699,17 +660,6 @@ impl Buffer {
             screen.trim_line(row, keep);
             budget -= keep;
         }
-        // T3 keeps this sticky, including cuts caused only by SGR serialization
-        // or a partial first line rather than by screen scrollback.
-        screen.dropped |= screen.settled_units
-            + screen
-                .lines
-                .iter()
-                .map(Line::serialized_units)
-                .sum::<usize>()
-            + screen.lines.len()
-            - 1
-            > TAIL_CHARS;
     }
     pub fn display(&self) -> (String, bool) {
         let screen = &self.screen;
