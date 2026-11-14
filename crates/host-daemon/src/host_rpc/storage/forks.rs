@@ -20,9 +20,31 @@ impl Storage {
     pub(in crate::host_rpc) fn native_fork_source(
         &self,
         origin: &model::ProviderThreadFork,
-    ) -> Result<(model::ProviderRef, model::ProviderRef), String> {
+        source_point: Option<&model::ContextSourcePoint>,
+    ) -> Result<Option<(model::ProviderRef, model::ProviderRef)>, String> {
         self.with(|connection| {
             let tx = connection.transaction().map_err(failure)?;
+            if let Some(point) = source_point {
+                let state = projections::metadata(&tx, &point.thread_id)?;
+                let run = point
+                    .run_id
+                    .as_ref()
+                    .and_then(|id| state.runs.get(id))
+                    .ok_or("native fork source run is missing")?;
+                if run.provider_thread_id.as_ref() != Some(&origin.provider_thread_id)
+                    || !state
+                        .provider_threads
+                        .contains_key(&origin.provider_thread_id)
+                {
+                    return Err("native fork source provider execution is missing".into());
+                }
+                if state
+                    .active_run()
+                    .is_some_and(|candidate| candidate.ordinal > run.ordinal)
+                {
+                    return Ok(None);
+                }
+            }
             let thread =
                 projections::read::<model::ProviderThread>(&tx, &origin.provider_thread_id)?
                     .ok_or("native fork source is missing")?;
@@ -42,7 +64,7 @@ impl Storage {
                 .native_turn_ref
                 .ok_or("native fork turn reference is missing")?;
             tx.commit().map_err(failure)?;
-            Ok((source, through))
+            Ok(Some((source, through)))
         })
     }
 

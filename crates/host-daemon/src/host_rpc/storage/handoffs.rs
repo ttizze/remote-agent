@@ -8,14 +8,11 @@ impl Storage {
         &self,
         effect: &model::Effect,
         worker: &str,
-        can_fork: bool,
         recovery: &str,
         now: &str,
     ) -> Result<Option<model::State>, String> {
         self.with(|connection| {
-            let tx = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(failure)?;
+            let tx = connection.transaction().map_err(failure)?;
             let state = projections::load(&tx, &effect.thread_id, &[])?;
             if !state.effects.get(&effect.id).is_some_and(|saved|saved.status==model::EffectStatus::Running && saved.lease_owner.as_deref()==Some(worker)) {
                 return Ok(None);
@@ -27,6 +24,9 @@ impl Storage {
                 .runs
                 .get(run_id)
                 .ok_or("context target run is missing")?;
+            if run.status != model::RunStatus::Starting {
+                return Ok(None);
+            }
             let thread = run
                 .provider_thread_id
                 .as_ref()
@@ -49,25 +49,13 @@ impl Storage {
             let pending = state
                 .unconsumed_fork()
                 .filter(|transfer| transfer.target_run_id.as_ref() == Some(&run.id));
-            let origin = if can_fork
-                && !fresh
-                && pending.is_some_and(|transfer| {
-                    transfer.source_provider_instance_id.as_deref()
-                        == Some(run.provider_instance_id.as_str())
-                }) {
-                super::forks::native_origin(&tx, &state)?
-            } else {
-                None
-            };
-            if let Some(origin) = origin {
-                changes.push(model::Change::ProviderThread(model::ProviderThread {
-                    forked_from: Some(origin),
-                    ..thread.clone()
-                }));
-            } else if fresh
+            // A planned native fork is resolved only after native allocation.
+            // Preflight must not publish a replacement that may fail to exist.
+            let native_fork = pending.is_some() && thread.forked_from.is_some();
+            if !native_fork && (fresh
                 || !state.context_handoffs.values().any(|handoff| {
                     handoff.target_run_id == run.id && handoff.to_provider_thread_id == thread.id
-                })
+                }))
             {
                 changes.extend(prepare(
                     &tx, &state, run, thread, pending, fresh, now,
@@ -89,10 +77,68 @@ impl Storage {
                 }
                 }
             }
-            commands::append_decision(&tx, &state, decision.clone(), None, now)?;
             let result = state.apply(&decision);
             tx.commit().map_err(failure)?;
             Ok(Some(result))
+        })
+    }
+
+    /// Publish the actual native resource and its recovery together. Planning
+    /// can read source bodies here; no native I/O runs under the writer lock.
+    pub(in crate::host_rpc) fn bind_native_start(
+        &self,
+        effect: &model::Effect,
+        worker: &str,
+        mut session: model::ProviderSession,
+        native: model::ProviderRef,
+        native_fork: bool,
+        fork_failure: Option<&str>,
+        now: &str,
+    ) -> Result<bool, String> {
+        self.with(|connection| {
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
+            let state = projections::load(&tx, &effect.thread_id, &[])?;
+            if !state.effects.get(&effect.id).is_some_and(|saved| saved.status == model::EffectStatus::Running && saved.lease_owner.as_deref() == Some(worker)) {
+                return Ok(false);
+            }
+            let model::EffectRequest::ProviderTurnStart {run_id} = &effect.request else {return Err("native binding requires a start effect".into())};
+            let run = state.runs.get(run_id).ok_or("native binding run is missing")?;
+            let Some(attempt) = state.active_attempt(run.active_attempt_id.as_deref()).filter(|attempt| run.status == model::RunStatus::Starting && attempt.status == model::RunAttemptStatus::Pending && attempt.provider_turn_id.is_none()) else {return Ok(false)};
+            let thread = state.provider_threads.get(&attempt.provider_thread_id).ok_or("native binding provider thread is missing")?;
+            if session.provider_instance_id != run.provider_instance_id || session.driver != thread.driver || native.driver != thread.driver || native.native_id.is_none() {
+                return Err("native binding uses another provider".into());
+            }
+            let fork = state.unconsumed_fork().filter(|fork| fork.target_run_id.as_ref() == Some(&run.id) && thread.forked_from.is_some());
+            let replaced = thread.native_thread_ref.as_ref().and_then(|old| old.native_id.as_ref()).is_some_and(|old| native.native_id.as_ref() != Some(old));
+            let changes = if !native_fork && fork.is_some() {
+                prepare(&tx, &state, run, thread, fork, false, now)?
+            } else if !native_fork && replaced {
+                prepare(&tx, &state, run, thread, None, true, now)?
+            } else {Vec::new()};
+            let prepared_thread = changes.iter().rev().find_map(|change|match change {model::Change::ProviderThread(value) if value.id == thread.id => Some(value), _=>None}).unwrap_or(thread);
+            session.created_at = state.provider_sessions.get(&session.id).map_or_else(|| now.into(), |existing| existing.created_at.clone());
+            let cwd = session.cwd.clone();
+            let mut decision = model::Decision {changes: {
+                let bound = model::ProviderThread {provider_session_id:Some(session.id.clone()),native_thread_ref:Some(native),status:model::ProviderThreadStatus::Idle,updated_at:now.into(),..prepared_thread.clone()};
+                let mut changes = changes;
+                changes.extend([model::Change::ProviderSessionAttached(session),model::Change::ProviderThread(bound)]);
+                changes
+            },effects:Vec::new()};
+            if let Some(error) = fork_failure {
+                decision.changes.push(model::Change::TurnItem(model::TurnItem {
+                    id:model::derived_id("turn-item", &["run",&run.id,"signal","native-fork-fallback"]),
+                    thread_id:state.thread.id.clone(),run_id:Some(run.id.clone()),node_id:Some(attempt.root_node_id.clone()),provider_thread_id:Some(thread.id.clone()),provider_turn_id:None,native_item_ref:None,parent_item_id:None,ordinal:0,status:model::TurnItemStatus::Completed,title:Some("Native fork failed".into()),started_at:Some(now.into()),completed_at:Some(now.into()),updated_at:now.into(),
+                    body:model::TurnItemBody::SystemNotice {message:format!("Could not fork the source conversation natively ({error}). Started a fresh session with its history.")},
+                }));
+            }
+            let scope = model::prepare_checkpoint_scope(&state.apply(&decision), &run.id, &cwd, now)?;
+            decision.changes.extend(scope.changes);
+            if state.thread.worktree_path.as_deref() != Some(&cwd) {
+                decision.changes.push(model::Change::Thread(model::Thread {worktree_path:Some(cwd),updated_at:now.into(),..state.thread.clone()}));
+            }
+            commands::append_decision(&tx, &state, decision, None, now)?;
+            tx.commit().map_err(failure)?;
+            Ok(true)
         })
     }
 
@@ -375,6 +421,7 @@ fn prepare(
     } else {
         model::HandoffStrategy::DeltaSinceTargetLastSeen
     };
+    let runtime_fork = fork.is_some() && thread.forked_from.is_some();
     let handoff = model::ContextHandoff {
         id: id.clone(),
         transfer_id: transfer_id.clone(),
@@ -397,7 +444,7 @@ fn prepare(
             omitted_item_ids: selected.omitted_item_ids,
         }),
         delivery: None,
-        detail_in_turn_item: true,
+        detail_in_turn_item: !runtime_fork,
         created_by_provider_instance_id: None,
         created_at: now.into(),
         updated_at: now.into(),
@@ -453,7 +500,7 @@ fn prepare(
         handoff_ids.push(id.clone());
     }
     let planned_id = id.clone();
-    let item = model::TurnItem {
+    let item = (!runtime_fork).then(|| model::TurnItem {
         id: model::derived_id(
             "turn-item",
             &["run", &run.id, "signal", &format!("context-handoff:{id}")],
@@ -500,7 +547,7 @@ fn prepare(
                 &selected.context,
             )),
         },
-    };
+    });
     let mut changes = vec![
         model::Change::ProviderThread(model::ProviderThread {
             native_thread_ref: if fresh {
@@ -518,9 +565,9 @@ fn prepare(
             ..thread.clone()
         }),
         model::Change::ContextHandoff(handoff),
-        model::Change::TurnItem(item),
     ];
-    if !fresh && !(fork.is_some() && thread.forked_from.is_some()) {
+    changes.extend(item.map(model::Change::TurnItem));
+    if !fresh && !runtime_fork {
         changes.push(model::Change::Run(model::Run {
             context_handoff_id: Some(planned_id),
             ..run.clone()

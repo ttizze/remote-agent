@@ -48,6 +48,115 @@ fn failure(error: &Failure) -> model::ProviderFailure {
     }
 }
 
+struct LoadedNative {
+    native: SessionRef,
+    needs_reload: bool,
+    forked: bool,
+    fork_failure: Option<String>,
+}
+
+/// Allocate native resources before publishing recovery. A busy native owner
+/// remains an error; a busy fork source can be copied as portable context.
+async fn load_native_start(
+    service: &HostRpcService,
+    agent: &dyn crate::providers::Agent,
+    provider: ProviderKind,
+    target: &SessionRef,
+    cwd: &str,
+    model: &str,
+    native_id: Option<&str>,
+    fork: Option<(
+        &model::ProviderThreadFork,
+        Option<&model::ContextSourcePoint>,
+    )>,
+    will_retry: bool,
+) -> Result<LoadedNative, Failure> {
+    if fork.is_none()
+        && let Some(id) = native_id
+    {
+        if let Ok(current) = agent.state(id).await {
+            let expected = SessionRef::new(provider, id.into())
+                .map_err(|error| Failure::new("invalid_session", error))?;
+            op::validate_thread(&current.response, Some(&expected))
+                .map_err(|error| Failure::new("invalid_thread", error))?;
+            if current.response.thread.status == agent_protocol::execution::SessionStatus::Running
+                || !current.response.thread.requests.is_empty()
+            {
+                return Err(Failure::new(
+                    "native_thread_busy",
+                    "The native conversation is still running",
+                ));
+            }
+            return Ok(LoadedNative {
+                native: expected,
+                needs_reload: current.needs_reload
+                    || current.response.thread.cwd.as_deref() != Some(cwd),
+                forked: false,
+                fork_failure: None,
+            });
+        }
+    }
+    let browser = service.browser_config(&target.to_string())?;
+    let mut fork_failure = None;
+    let forked = if let Some((origin, point)) = fork {
+        if let Some((source, turn)) = service
+            .inner
+            .conversation
+            .storage
+            .native_fork_source(origin, point)
+            .map_err(storage_failure)?
+        {
+            let result = match (source.native_id.as_deref(), turn.native_id.as_deref()) {
+                (Some(source_id), Some(turn_id))
+                    if source.driver == provider.driver()
+                        && source.strength == model::NativeRefStrength::Strong
+                        && turn.driver == provider.driver() =>
+                {
+                    agent.fork(source_id, turn_id, browser.clone()).await
+                }
+                _ => Err(Failure::new(
+                    "fork_context_unavailable",
+                    "native fork references are unavailable",
+                )),
+            };
+            match result {
+                Ok(response) => Some(response),
+                Err(error) if will_retry || point.is_none() => {
+                    return Err(Failure::before_submission(error));
+                }
+                Err(error) => {
+                    fork_failure = Some(error.message);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let native_fork = forked.is_some();
+    let response = match forked {
+        Some(response) => response,
+        None => agent
+            .create(cwd, Some(model), browser)
+            .await
+            .map_err(Failure::before_submission)?,
+    };
+    op::validate_thread(&response, None).map_err(|error| Failure::new("invalid_thread", error))?;
+    let native = response
+        .thread
+        .id
+        .filter(|id| id.provider == Some(provider))
+        .ok_or_else(|| Failure::new("invalid_thread", "created thread uses another provider"))?;
+    Ok(LoadedNative {
+        native,
+        needs_reload: false,
+        forked: native_fork,
+        fork_failure,
+    })
+}
+
 impl Runtime {
     pub(super) fn start_effects(service: &HostRpcService) {
         if let Err(error) = service
@@ -357,7 +466,6 @@ impl Runtime {
             .prepare_context(
                 effect,
                 worker,
-                agent.capabilities().fork,
                 &service.history_command(&target),
                 &commands::at(),
             )
@@ -376,133 +484,78 @@ impl Runtime {
                 "fork context must be prepared before starting a native input",
             ));
         }
-        let native = if let Some(id) = thread
-            .native_thread_ref
-            .as_ref()
-            .and_then(|reference| reference.native_id.as_ref())
-        {
-            let current = agent.state(id).await.map_err(Failure::before_submission)?;
-            let expected = SessionRef::new(provider, id.clone())
-                .map_err(|error| Failure::new("invalid_session", error))?;
-            op::validate_thread(&current.response, Some(&expected))
-                .map_err(|error| Failure::new("invalid_thread", error))?;
-            if current.response.thread.status == agent_protocol::execution::SessionStatus::Running
-                || !current.response.thread.requests.is_empty()
-            {
-                return Err(Failure::new(
-                    "native_thread_busy",
-                    "The native conversation is still running",
-                ));
-            }
-            reload |= current.needs_reload || current.response.thread.cwd.as_deref() != Some(&cwd);
-            SessionRef::new(provider, id.clone()).map_err(|error| storage_failure(error.into()))?
-        } else {
-            let response = if let Some(origin) = thread.forked_from.as_ref().filter(|_| {
-                !state.context_handoffs.values().any(|handoff| {
-                    handoff.to_provider_thread_id == thread.id
-                        && handoff.status == model::HandoffStatus::Ready
-                        && matches!(
-                            handoff.strategy,
-                            model::HandoffStrategy::FullThreadSummary
-                                | model::HandoffStrategy::ManualContext
-                        )
-                })
-            }) {
-                let (source_ref, turn_ref) = runtime
-                    .storage
-                    .native_fork_source(origin)
-                    .map_err(storage_failure)?;
-                let source = (source_ref.driver == provider.driver()
-                    && source_ref.strength == model::NativeRefStrength::Strong)
-                    .then_some(source_ref.native_id.as_deref())
-                    .flatten();
-                let turn = (turn_ref.driver == provider.driver())
-                    .then_some(turn_ref.native_id.as_deref())
-                    .flatten();
-                let (Some(source), Some(turn)) = (source, turn) else {
-                    return Err(Failure::new(
-                        "fork_context_unavailable",
-                        "fork requires portable context from its selected source run",
-                    ));
-                };
-                agent
-                    .fork(source, turn, service.browser_config(&target.to_string())?)
-                    .await
-            } else {
-                agent
-                    .create(
-                        &cwd,
-                        Some(&run.model_selection.model),
-                        service.browser_config(&target.to_string())?,
-                    )
-                    .await
-            }
-            .map_err(Failure::before_submission)?;
-            op::validate_thread(&response, None)
-                .map_err(|error| Failure::new("invalid_thread", error))?;
-            response
-                .thread
-                .id
-                .filter(|id| id.provider == Some(provider))
-                .ok_or_else(|| {
-                    Failure::new("invalid_thread", "created thread uses another provider")
-                })?
-        };
+        let pending_fork = state
+            .unconsumed_fork()
+            .filter(|fork| fork.target_run_id.as_ref() == Some(&run.id));
+        let origin = thread.forked_from.as_ref().filter(|_| {
+            pending_fork.is_some()
+                || thread.native_thread_ref.is_none()
+                    && !state.context_handoffs.values().any(|handoff| {
+                        handoff.to_provider_thread_id == thread.id
+                            && handoff.status == model::HandoffStatus::Ready
+                            && matches!(
+                                handoff.strategy,
+                                model::HandoffStrategy::FullThreadSummary
+                                    | model::HandoffStrategy::ManualContext
+                            )
+                    })
+        });
+        let loaded = load_native_start(
+            service,
+            agent.as_ref(),
+            provider,
+            &target,
+            &cwd,
+            &run.model_selection.model,
+            thread
+                .native_thread_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref()),
+            origin.map(|origin| (origin, pending_fork.map(|fork| &fork.source_point))),
+            effect.attempt_count < MAX_ATTEMPTS,
+        )
+        .await?;
+        reload |= loaded.needs_reload;
+        let native = loaded.native;
         let _retire = scopeguard::guard(native.clone(), |native| runtime.retire_source(&native));
         let source = runtime.register_native(&target, &native);
         let _io = source.io.lock().await;
         let now = commands::at();
         let caps = agent.capabilities();
-        runtime
+        let mut capabilities = model::ProviderCapabilities::default();
+        capabilities.threads.can_create_empty_thread = true;
+        capabilities.threads.can_read_thread_snapshot = true;
+        capabilities.threads.can_fork_thread = caps.fork;
+        capabilities.threads.can_fork_from_turn = caps.fork;
+        capabilities.turns.supports_interrupt = true;
+        capabilities.turns.supports_active_steering = caps.steer;
+        capabilities.turns.supports_queued_messages = true;
+        if !runtime
             .storage
-            .observe_effect(effect, worker, &now, |state| {
-                let mut capabilities = model::ProviderCapabilities::default();
-                capabilities.threads.can_create_empty_thread = true;
-                capabilities.threads.can_read_thread_snapshot = true;
-                capabilities.threads.can_fork_thread = caps.fork;
-                capabilities.threads.can_fork_from_turn = caps.fork;
-                capabilities.turns.supports_interrupt = true;
-                capabilities.turns.supports_active_steering = caps.steer;
-                capabilities.turns.supports_queued_messages = true;
-                let existing = state.provider_sessions.get(&source.session_id);
-                let mut decision = model::Decision {
-                    changes: vec![
-                        model::Change::ProviderSessionAttached(model::ProviderSession {
-                            id: source.session_id.clone(),
-                            driver: provider.driver().into(),
-                            provider_instance_id: provider.key().into(),
-                            status: model::ProviderSessionStatus::Ready,
-                            cwd: cwd.clone(),
-                            model: Some(run.model_selection.model.clone()),
-                            capabilities,
-                            created_at: existing
-                                .map_or_else(|| now.clone(), |session| session.created_at.clone()),
-                            updated_at: now.clone(),
-                            last_error: None,
-                        }),
-                        model::Change::ProviderThread(model::ProviderThread {
-                            provider_session_id: Some(source.session_id.clone()),
-                            native_thread_ref: Some(native_ref(provider, &native.id)),
-                            status: model::ProviderThreadStatus::Idle,
-                            updated_at: now.clone(),
-                            ..state.provider_threads[&attempt.provider_thread_id].clone()
-                        }),
-                    ],
-                    ..Default::default()
-                };
-                let scope =
-                    model::prepare_checkpoint_scope(&state.apply(&decision), &run.id, &cwd, &now)?;
-                decision.changes.extend(scope.changes);
-                if state.thread.worktree_path.as_deref() != Some(&cwd) {
-                    decision.changes.push(model::Change::Thread(model::Thread {
-                        worktree_path: Some(cwd.clone()),
-                        updated_at: now.clone(),
-                        ..state.thread.clone()
-                    }));
-                }
-                Ok(decision)
-            })
-            .map_err(storage_failure)?;
+            .bind_native_start(
+                effect,
+                worker,
+                model::ProviderSession {
+                    id: source.session_id.clone(),
+                    driver: provider.driver().into(),
+                    provider_instance_id: provider.key().into(),
+                    status: model::ProviderSessionStatus::Ready,
+                    cwd: cwd.clone(),
+                    model: Some(run.model_selection.model.clone()),
+                    capabilities,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_error: None,
+                },
+                native_ref(provider, &native.id),
+                loaded.forked,
+                loaded.fork_failure.as_deref(),
+                &now,
+            )
+            .map_err(storage_failure)?
+        {
+            return Ok(None);
+        }
         let Some(current) = runtime
             .storage
             .effect_state(effect, worker)
