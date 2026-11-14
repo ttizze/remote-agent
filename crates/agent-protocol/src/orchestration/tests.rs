@@ -322,6 +322,31 @@ fn completed_foreground_keeps_known_background_work_and_process_loss_fences_its_
             .pending_background_tasks
             .is_empty()
     );
+    // A roster can arrive before its item. Until it records a canonical item
+    // ID, its native reference must match exactly, never a different task.
+    let mut native_only = done.clone();
+    native_only
+        .provider_threads
+        .get_mut("native-thread")
+        .unwrap()
+        .pending_background_tasks[0]
+        .item_id = None;
+    assert!(
+        observe_item(&native_only, &attempt, "session", late.clone())
+            .unwrap()
+            .changes
+            .iter()
+            .any(|change| matches!(change,Change::TurnItem(item) if item.id=="server"))
+    );
+    let mut foreign = late.clone();
+    foreign.id = "foreign-task".into();
+    foreign.native_item_ref = Some(native("foreign-task", None));
+    assert!(
+        observe_item(&native_only, &attempt, "session", foreign)
+            .unwrap()
+            .changes
+            .is_empty()
+    );
     late.id = "unknown".into();
     assert!(
         observe_item(&done, &attempt, "session", late.clone())
