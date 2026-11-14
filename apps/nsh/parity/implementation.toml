@@ -3,9 +3,12 @@
 # Pure UI state does not require a new shared Rust business model.
 # This file is not a record of runtime acceptance results.
 
-revision = "38dfc8fb7a05f591e1e9c5b660c7a1fcc7ab6f3c"
+revision = "cbb154de0c2e01c4282eac747e01a5e34c584664"
 
 [sources]
+fresh_context = "crates/agent-core/src/presentation/fresh_context.rs"
+context_transitions = "crates/host-daemon/src/host_rpc/service/conversations.rs"
+context_bindings = "crates/host-daemon/src/host_rpc/conversations.rs"
 feedback_contract = "crates/agent-protocol/src/feedback.rs"
 feedback_host = "crates/host-daemon/src/host_rpc/service/feedback.rs"
 feedback_actions = "crates/agent-core/src/state/operations/feedback.rs"
@@ -215,7 +218,7 @@ windows = { status = "missing", detail = "調査用の新規会話見出し・�
 components = ["user-message"]
 phase = "shared"
 next = "発言の属性・履歴イベントと添付の種別を共通モデルで表現する。"
-rust = { status = "partial", detail = "本文、画像・添付、送信状態はある。送信者属性、モデル切替・新コンテキストの履歴イベント、音声/動画の型付き部品がない。", evidence = ["items", "models", "rows"] }
+rust = { status = "partial", detail = "本文、画像・添付、送信状態と新コンテキストの開始位置を保持する。送信者属性、モデル切替の履歴イベント、音声/動画の型付き部品がない。", evidence = ["items", "models", "rows", "fresh_context"] }
 mac = { status = "partial", detail = "本文・吹き出し・画像・送信状態はある。送信者属性、切替区切り、音声/動画の専用本文表示がない。", evidence = ["bridge", "mac_rows"] }
 iphone = { status = "partial", detail = "本文・吹き出し・画像・送信状態はある。送信者属性、切替区切り、音声/動画の専用本文表示がない。", evidence = ["iphone_rows"] }
 windows = { status = "partial", detail = "本文・画像・送信状態はある。送信者属性、モデル/新コンテキスト区切り、音声/動画表示がない。", evidence = ["bridge", "win_rows"] }
@@ -673,8 +676,8 @@ windows = { status = "partial", detail = "準備状態・段階・詳細と操�
 [[implementation]]
 components = ["lifecycle"]
 phase = "restore"
-next = "既存中断行を各UIで揃え、モデル/コンテキスト切替の履歴イベントを共通側へ足す。"
-rust = { status = "partial", detail = "Interrupted、プロバイダー引継ぎ、親/分岐リンクはある。新セッション・モデル切替の履歴イベントがない。", evidence = ["timeline", "rows", "models"] }
+next = "共通の中断・新コンテキスト開始位置を各UIへ接続し、モデル切替の履歴イベントを足す。"
+rust = { status = "partial", detail = "Interrupted、プロバイダー引継ぎ、親/分岐リンクと新コンテキスト開始の履歴情報はある。モデル切替の専用履歴イベントがない。", evidence = ["timeline", "rows", "models", "fresh_context"] }
 mac = { status = "partial", detail = "引継ぎ/分岐リンクはある。投影された中断のstopアイコンを汎用行で描画しない。新セッション/モデル区切りもない。", evidence = ["bridge", "mac_rows"] }
 iphone = { status = "partial", detail = "引継ぎと関連会話はある。共通Interrupted行を使わず、新セッション/モデル切替区切りがない。", evidence = ["iphone_history", "iphone_activity"] }
 windows = { status = "partial", detail = "中断アイコン・引継ぎ・関連会話はある。新セッションとモデル切替の履歴区切りがない。", evidence = ["bridge", "win_rows"] }
@@ -781,8 +784,8 @@ windows = { status = "missing", detail = "会話中のLinkRequestと接続確認
 [[implementation]]
 components = ["composer"]
 phase = "shared"
-next = "共通Context・入力履歴・長さ判断を用意し、エディタの装飾はUIで実装する。"
-rust = { status = "partial", detail = "本文・下書き・添付・invocationはある。入力履歴、構造化Context、プロンプト長警告、ライブ文字起こしの共通契約が不足。", evidence = ["state", "completion", "composer"] }
+next = "構造化ContextをUIへ接続し、共通の入力履歴・長さ判断を追加する。"
+rust = { status = "partial", detail = "本文・下書き・添付・invocation・構造化Contextと新コンテキスト指定はある。入力履歴、プロンプト長警告、ライブ文字起こしの共通契約が不足。", evidence = ["state", "completion", "composer", "context", "fresh_context"] }
 mac = { status = "partial", detail = "本文・下書き・添付・候補・入力欄開閉はある。構造化チップ、コードブロック編集、履歴候補、長さ警告、ライブ文字起こしがない。", evidence = ["desktop_composer", "desktop_dictation"] }
 iphone = { status = "partial", detail = "ネイティブ本文入力・下書き・添付・候補はある。構造化チップ、コードブロック編集、入力履歴、長さ警告、ライブ文字起こしがない。", evidence = ["iphone_composer", "iphone_input"] }
 windows = { status = "partial", detail = "本文・下書き・添付・候補・入力欄開閉はある。構造化チップ、コードブロック編集、履歴候補、長さ警告、ライブ文字起こしがない。", evidence = ["desktop_composer", "desktop_dictation"] }
@@ -800,7 +803,7 @@ windows = { status = "missing", detail = "コードブロックの専用編集�
 components = ["send-actions"]
 phase = "shared"
 next = "停止/再開は既存実装を維持する。圧縮送信の選択を共通送信操作に追加する。"
-rust = { status = "partial", detail = "送信・停止・停止後再開・steer・キュー・編集確定と可否がある。次の送信で履歴を圧縮/維持する明示契約がない。", evidence = ["composer", "queue", "operations"] }
+rust = { status = "partial", detail = "送信・停止・停止後再開・steer・キュー・編集確定と可否、新コンテキストで次の独立した応答を始める指定がある。次の送信で履歴を圧縮/維持する明示契約がない。", evidence = ["composer", "queue", "operations", "fresh_context"] }
 mac = { status = "partial", detail = "送信・停止・再開・追加指示・キュー・編集確定はある。圧縮して送信と履歴維持/圧縮切替がない。", evidence = ["desktop_composer", "desktop_queue"] }
 iphone = { status = "partial", detail = "送信・停止・再開・追加指示・キュー・編集確定はある。圧縮送信と履歴維持/圧縮切替がない。", evidence = ["iphone_composer", "iphone_queue"] }
 windows = { status = "partial", detail = "送信・停止・再開・追加指示・キュー・編集確定はある。圧縮して送信と履歴維持/圧縮切替がない。", evidence = ["desktop_composer", "desktop_queue"] }
@@ -809,7 +812,7 @@ windows = { status = "partial", detail = "送信・停止・再開・追加指�
 components = ["composer-attachments"]
 phase = "shared"
 next = "添付メタデータと転送/保存状態を共通下書きへ持たせる。"
-rust = { status = "partial", detail = "添付の追加/削除・送信とファイル取得はある。動画/Snap Shot種別、容量、添付ごとのアップロード/保存失敗・再添付状態が不足。", evidence = ["state", "files", "operations"] }
+rust = { status = "partial", detail = "添付の追加/削除・送信と取得、Snap Shotの画像と取得情報の関連付けはある。動画種別、容量、添付ごとのアップロード/保存失敗・再添付状態が不足。", evidence = ["state", "files", "operations", "snapshot_upload", "upload_operations"] }
 mac = { status = "partial", detail = "添付追加・画像サムネイル・削除・プレビューはある。動画/Snap Shot、容量、添付ごとの再試行/再添付警告が不足。", evidence = ["desktop_composer", "desktop_media"] }
 iphone = { status = "partial", detail = "画像/動画の取り込みと添付削除・プレビューはある。型付き動画サムネイル、Snap Shot、保存/再添付警告などが不足。", evidence = ["iphone_attachments", "iphone_import"] }
 windows = { status = "partial", detail = "添付追加・画像サムネイル・削除・プレビューはある。動画/Snap Shot、容量、添付ごとの再試行/再添付警告が不足。", evidence = ["desktop_composer", "desktop_media"] }
@@ -978,9 +981,9 @@ windows = { status = "missing", detail = "フィードバック状態の会話�
 
 [[implementation]]
 components = ["fresh-session-banner"]
-phase = "shared"
-next = "次回送信のコンテキスト方針を共通下書きへ追加する。"
-rust = { status = "missing", detail = "次の送信で新セッションに切り替える保留設定と取消の契約がない。", evidence = ["state", "operations"] }
+phase = "restore"
+next = "共通の可否と下書きの指定/取消、開始済みの履歴情報をネイティブへ接続する。"
+rust = { status = "present", detail = "会話ごとの下書きに次回の新コンテキスト指定と取消があり、実行中はsteerせずキューで待つ。Hostが空のネイティブセッションへ切り替え、表示履歴を保持し、後のAI切替・AI用履歴取得でも開始前を渡さない。確実な失敗は元の状態へ戻し、不明な送信は再実行しない。分岐・巻き戻しと開始位置の投影もある。", evidence = ["state", "operations", "upload_operations", "fresh_context", "context_transitions", "context_bindings", "models"] }
 mac = { status = "missing", detail = "新セッション開始予告と取消がない。", evidence = ["desktop_notices", "desktop_composer"] }
 iphone = { status = "missing", detail = "新セッション開始予告と取消がない。", evidence = ["iphone_composer"] }
 windows = { status = "missing", detail = "新セッション開始予告と取消がない。", evidence = ["desktop_notices", "desktop_composer"] }
