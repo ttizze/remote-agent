@@ -1,24 +1,216 @@
-//! A Markdown file shown rendered instead of as its source, as T3 Code's file
-//! panel (`FilePreviewPanel`, `FileMarkdownPreview`).
+//! A file shown rendered instead of as its source, as T3 Code's file panel
+//! (`FilePreviewPanel`): Markdown, a Mermaid diagram, or a delimited table.
 use super::super::markdown::{
     MarkdownBlock, MarkdownFileSurface, file_basename, markdown_file_target,
     workspace_markdown_blocks,
 };
+use regex::Regex;
+use std::sync::LazyLock;
 
-/// T3 Code's `isMarkdownPreviewFile`: the files whose panel offers the rendering.
-pub fn is_markdown_preview_file(path: &str) -> bool {
+/// What a file's panel can show in place of its source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileRendering {
+    Mermaid,
+    Markdown,
+    Table,
+}
+
+fn extension_in(path: &str, known: &[&str]) -> bool {
     path.rsplit_once('.').is_some_and(|(_, extension)| {
-        ["md", "mdx", "markdown", "mdown", "mkd"]
+        known
             .iter()
             .any(|known| extension.eq_ignore_ascii_case(known))
     })
 }
 
-/// Whether the panel of `path` shows its rendering: the reader's preference,
-/// except that a link to a line shows the source at that line until the reader
-/// asks for the rendering again.
-pub fn file_renders_markdown(path: &str, preferred: bool, line_pending: bool) -> bool {
-    preferred && !line_pending && is_markdown_preview_file(path)
+/// The rendering the panel of `path` offers, by T3 Code's file names
+/// (`isMarkdownPreviewFile`, its Mermaid pattern and `filePreviewDelimiter`).
+pub fn file_rendering(path: &str) -> Option<FileRendering> {
+    [
+        (FileRendering::Mermaid, &["mmd", "mermaid"][..]),
+        (
+            FileRendering::Markdown,
+            &["md", "mdx", "markdown", "mdown", "mkd"],
+        ),
+        (FileRendering::Table, &["csv", "tsv"]),
+    ]
+    .into_iter()
+    .find_map(|(rendering, known)| extension_in(path, known).then_some(rendering))
+}
+
+/// Which renderings the reader prefers to the source. T3 Code starts with
+/// Markdown as its source, and diagrams and tables rendered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FileRenderingPreferences {
+    markdown: bool,
+    mermaid: bool,
+    table: bool,
+}
+
+impl Default for FileRenderingPreferences {
+    fn default() -> Self {
+        Self {
+            markdown: false,
+            mermaid: true,
+            table: true,
+        }
+    }
+}
+
+impl FileRenderingPreferences {
+    pub fn prefers(self, rendering: FileRendering) -> bool {
+        match rendering {
+            FileRendering::Mermaid => self.mermaid,
+            FileRendering::Markdown => self.markdown,
+            FileRendering::Table => self.table,
+        }
+    }
+
+    /// These preferences once the reader chose `rendered` for `rendering`.
+    pub fn with(mut self, rendering: FileRendering, rendered: bool) -> Self {
+        *match rendering {
+            FileRendering::Mermaid => &mut self.mermaid,
+            FileRendering::Markdown => &mut self.markdown,
+            FileRendering::Table => &mut self.table,
+        } = rendered;
+        self
+    }
+}
+
+/// The rendering the panel of `path` shows now, if not its source: the
+/// reader's preference, except that a link to a line shows the source at that
+/// line until the reader asks for the rendering again.
+pub fn file_rendered(
+    path: &str,
+    preferences: FileRenderingPreferences,
+    line_pending: bool,
+) -> Option<FileRendering> {
+    file_rendering(path).filter(|rendering| !line_pending && preferences.prefers(*rendering))
+}
+
+/// A Mermaid file as the Markdown that draws it as a message's diagram, or
+/// `None` for what T3 Code's `MermaidViewer` refuses to draw: resource URLs,
+/// markup, node metadata and custom configuration.
+pub fn mermaid_file_markdown(text: &str) -> Option<String> {
+    static REFUSED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?im)%%\s*\{|^\s*---|</?[A-Za-z]|<[!?]|@\s*\{|\b(?:img|image)\s*:",
+            r"|url\s*\(|@import|(?:https?|data|blob|file):",
+        ))
+        .unwrap()
+    });
+    if REFUSED.is_match(text) {
+        return None;
+    }
+    // A fence longer than any run of backticks in the diagram's own text.
+    let longest = text
+        .split(|char| char != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    let fence = "`".repeat(longest.max(2) + 1);
+    Some(format!("{fence}mermaid\n{}\n{fence}", text.trim_end()))
+}
+
+/// A delimited file as T3 Code's table: its first row heads the columns.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileTable {
+    pub rows: Vec<Vec<String>>,
+    pub columns: usize,
+}
+
+/// T3 Code's `LARGE_TEXT_MAX_COLUMNS`.
+const TABLE_MAX_COLUMNS: usize = 1024;
+const TABLE_MIN_COLUMN: f32 = 128.0;
+const TABLE_MAX_COLUMN: f32 = 320.0;
+/// The column of row numbers before a table's own.
+pub const TABLE_ROW_HEADER_WIDTH: f32 = 56.0;
+
+impl FileTable {
+    /// The table of the `.csv` or `.tsv` file at `path`, read as T3 Code's
+    /// `parseDelimitedPreview` reads it: a quote opens a quoted cell only at
+    /// the cell's start, and a doubled quote inside one is a quote.
+    pub fn read(text: &str, path: &str) -> Self {
+        let delimiter = if extension_in(path, &["tsv"]) {
+            '\t'
+        } else {
+            ','
+        };
+        let mut rows = Vec::new();
+        let mut row = Vec::new();
+        let mut cell = String::new();
+        let mut quoted = false;
+        let mut pending = false;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        let mut chars = text.chars().peekable();
+        while let Some(char) = chars.next() {
+            pending = true;
+            if char == '"' {
+                if quoted && chars.next_if_eq(&'"').is_some() {
+                    cell.push('"');
+                    continue;
+                }
+                if quoted || cell.is_empty() {
+                    quoted = !quoted;
+                    continue;
+                }
+            }
+            if quoted || !(char == delimiter || char == '\n' || char == '\r') {
+                cell.push(char);
+                continue;
+            }
+            end_cell(&mut row, &mut cell);
+            if char != delimiter {
+                rows.push(std::mem::take(&mut row));
+                if char == '\r' {
+                    chars.next_if_eq(&'\n');
+                }
+                pending = false;
+            }
+        }
+        if pending {
+            end_cell(&mut row, &mut cell);
+            rows.push(row);
+        }
+        let columns = rows.iter().map(Vec::len).max().unwrap_or_default();
+        Self { rows, columns }
+    }
+
+    /// Each column's width in a panel `available` points wide, between T3
+    /// Code's `min-w-32` and `max-w-80`: up to 30 columns fit what their head
+    /// and first rows say, estimated from their characters; more share one width.
+    pub fn column_widths(&self, available: f32) -> Vec<f32> {
+        if self.columns > 30 {
+            let shared = (available - TABLE_ROW_HEADER_WIDTH) / 6.0;
+            return vec![shared.clamp(TABLE_MIN_COLUMN, TABLE_MAX_COLUMN); self.columns];
+        }
+        (0..self.columns)
+            .map(|column| {
+                let widest = self
+                    .rows
+                    .iter()
+                    .take(20)
+                    .filter_map(|row| row.get(column))
+                    .flat_map(|cell| cell.lines())
+                    .map(|line| {
+                        line.chars()
+                            .map(|char| if char.is_ascii() { 1.0 } else { 2.0 })
+                            .sum::<f32>()
+                    })
+                    .fold(0.0, f32::max);
+                // 12-point text and the cell's `px-3`.
+                (widest * 7.0 + 25.0).clamp(TABLE_MIN_COLUMN, TABLE_MAX_COLUMN)
+            })
+            .collect()
+    }
+}
+
+fn end_cell(row: &mut Vec<String>, cell: &mut String) {
+    let cell = std::mem::take(cell);
+    if row.len() < TABLE_MAX_COLUMNS {
+        row.push(cell);
+    }
 }
 
 /// The rendering of the Markdown file at the Host path `path`: its leading YAML
@@ -85,7 +277,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_rendering_is_offered_for_t3s_markdown_extensions_in_any_case() {
+    fn renderings_are_offered_by_t3s_file_names_in_any_case() {
         for path in [
             "a.md",
             "/x/README.MD",
@@ -95,19 +287,132 @@ mod tests {
             "a.mkd",
             ".md",
         ] {
-            assert!(is_markdown_preview_file(path), "{path}");
+            assert_eq!(
+                file_rendering(path),
+                Some(FileRendering::Markdown),
+                "{path}"
+            );
         }
-        for path in ["a.txt", "md", "a.md/", "a.md.bak", "a.mdc", "notes.md/b"] {
-            assert!(!is_markdown_preview_file(path), "{path}");
+        for path in ["a.mmd", "flow.MERMAID"] {
+            assert_eq!(file_rendering(path), Some(FileRendering::Mermaid), "{path}");
+        }
+        for path in ["a.csv", "/x/b.TSV"] {
+            assert_eq!(file_rendering(path), Some(FileRendering::Table), "{path}");
+        }
+        for path in [
+            "a.txt",
+            "md",
+            "a.md/",
+            "a.md.bak",
+            "a.mdc",
+            "notes.md/b",
+            "csv",
+        ] {
+            assert_eq!(file_rendering(path), None, "{path}");
         }
     }
 
     #[test]
+    fn markdown_starts_as_its_source_and_diagrams_and_tables_rendered() {
+        let preferences = FileRenderingPreferences::default();
+        assert_eq!(file_rendered("a.md", preferences, false), None);
+        assert_eq!(
+            file_rendered("a.mmd", preferences, false),
+            Some(FileRendering::Mermaid)
+        );
+        assert_eq!(
+            file_rendered("a.csv", preferences, false),
+            Some(FileRendering::Table)
+        );
+        let chosen = preferences
+            .with(FileRendering::Markdown, true)
+            .with(FileRendering::Table, false);
+        assert_eq!(
+            file_rendered("a.md", chosen, false),
+            Some(FileRendering::Markdown)
+        );
+        assert_eq!(file_rendered("a.csv", chosen, false), None);
+        assert_eq!(
+            file_rendered("a.mmd", chosen, false),
+            Some(FileRendering::Mermaid)
+        );
+        assert_eq!(file_rendered("a.rs", chosen, false), None);
+        // A choice saved before another rendering existed keeps that one's default.
+        let saved: FileRenderingPreferences = serde_json::from_str(r#"{"markdown":true}"#).unwrap();
+        assert_eq!(saved, preferences.with(FileRendering::Markdown, true));
+        let restored: FileRenderingPreferences =
+            serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
+        assert_eq!(restored, chosen);
+    }
+
+    #[test]
     fn a_line_link_shows_the_source_until_the_rendering_is_asked_for() {
-        assert!(file_renders_markdown("a.md", true, false));
-        assert!(!file_renders_markdown("a.md", false, false));
-        assert!(!file_renders_markdown("a.md", true, true));
-        assert!(!file_renders_markdown("a.rs", true, false));
+        let all = FileRenderingPreferences::default().with(FileRendering::Markdown, true);
+        for path in ["a.md", "a.mmd", "a.csv"] {
+            assert!(file_rendered(path, all, false).is_some(), "{path}");
+            assert_eq!(file_rendered(path, all, true), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_mermaid_file_is_drawn_as_a_messages_diagram_unless_t3_refuses_it() {
+        assert_eq!(
+            mermaid_file_markdown("graph TD\n  A --> B\n").as_deref(),
+            Some("```mermaid\ngraph TD\n  A --> B\n```")
+        );
+        assert_eq!(
+            mermaid_file_markdown("graph TD\n  A[\"```x```\"] --> B").as_deref(),
+            Some("````mermaid\ngraph TD\n  A[\"```x```\"] --> B\n````")
+        );
+        for refused in [
+            "%%{init: {}}%%\ngraph TD",
+            "---\ntitle: a\n---\ngraph TD",
+            "graph TD\n  A[<b>x</b>]",
+            "graph TD\n  A@{ shape: rect }",
+            "graph TD\n  click A \"https://example.invalid\"",
+            "graph TD\n  A@{ IMG: \"x\" }",
+            "graph TD\n  style A fill:url(#a)",
+        ] {
+            assert_eq!(mermaid_file_markdown(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn delimited_files_read_as_t3s_table() {
+        let rows = |text: &str, path: &str| FileTable::read(text, path).rows;
+        assert_eq!(
+            rows("\u{feff}a,b\r\n1,\"x, \"\"y\"\"\nz\"\n2,\n", "a.csv"),
+            vec![vec!["a", "b"], vec!["1", "x, \"y\"\nz"], vec!["2", ""]]
+        );
+        // A quote inside an unquoted cell is itself; a last line needs no break.
+        assert_eq!(
+            rows("a\tb \"c\"\rd,e\tf", "a.TSV"),
+            vec![vec!["a", "b \"c\""], vec!["d,e", "f"]]
+        );
+        assert_eq!(rows("", "a.csv"), Vec::<Vec<String>>::new());
+        assert_eq!(rows("\n", "a.csv"), vec![vec![""]]);
+        let wide = FileTable::read(&"x,".repeat(2000), "a.csv");
+        assert_eq!((wide.rows[0].len(), wide.columns), (1024, 1024));
+        assert_eq!(FileTable::read("a\nb,c,d\n", "a.csv").columns, 3);
+    }
+
+    #[test]
+    fn columns_are_as_wide_as_their_first_rows_within_t3s_limits() {
+        let table = FileTable::read(
+            &format!(
+                "id,name,note\n1,日本語の名前を持つ列です,{}\n",
+                "x".repeat(200)
+            ),
+            "a.csv",
+        );
+        let widths = table.column_widths(800.0);
+        assert_eq!(widths[0], 128.0);
+        assert!(widths[1] > 128.0 && widths[1] < 320.0, "{widths:?}");
+        assert_eq!(widths[2], 320.0);
+        let many = FileTable::read(&"x,".repeat(40), "a.csv");
+        assert_eq!(many.column_widths(800.0), vec![128.0; 41]);
+        assert_eq!(many.column_widths(2000.0), vec![320.0; 41]);
+        assert_eq!(many.column_widths(1256.0), vec![200.0; 41]);
     }
 
     #[test]

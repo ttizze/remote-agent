@@ -7,11 +7,14 @@ use crate::{
 };
 use agent_core::{
     presentation::files::{
-        file_edit_prompt, file_line_start_utf16, file_renders_markdown, is_markdown_preview_file,
+        FileRendering, file_edit_prompt, file_line_start_utf16, file_rendered, file_rendering,
+        mermaid_file_markdown,
     },
     state::{Intent, operations as op},
 };
 use nsh_core::{element::input, prelude::*};
+
+mod table;
 
 pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
     let connection = use_context::<Connection>().unwrap();
@@ -43,27 +46,70 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
     let composing = signal(false);
     let laid_out = signal(false);
     let surroundings = crate::rich_text::Surroundings::current();
-    let preferred = computed(move || connection.state.with(|state| state.render_markdown));
+    let offered = file_rendering(&path.get());
+    let preferences = computed(move || connection.state.with(|state| state.file_rendering));
     // The link's line the reader left for the rendering, as T3 Code's handled reveal.
     let line_left = signal(None::<u32>);
-    let rendered = computed(move || {
+    let shown = computed(move || {
         let line = target.with(|target| target.line);
-        file_renders_markdown(
+        file_rendered(
             &path.get(),
-            preferred.get(),
+            preferences.get(),
             line.is_some() && line != line_left.get(),
         )
     });
+    let rendered = computed(move || shown.get().is_some());
     let toggle_rendered = move || {
+        let Some(rendering) = offered else {
+            return;
+        };
         let next = !rendered.get_untracked();
         // The source's field is made again: it shows the link's line again, and
         // a composition does not outlive the field it was in.
         laid_out.set(false);
         composing.set(false);
         line_left.set(target.with_untracked(|target| target.line).filter(|_| next));
+        let preferences = preferences.get_untracked().with(rendering, next);
         connection
             .application
-            .with(|application| application.set_render_markdown(next));
+            .with(|application| application.set_file_rendering(preferences));
+    };
+    // T3 Code's toggle: pressed, with the source's glyph, while the rendering shows.
+    let rendering_toggle = match offered {
+        Some(rendering) => {
+            let (glyph, show, hide) = match rendering {
+                FileRendering::Markdown => (
+                    Icon::EYE,
+                    tr("Markdownをレンダリング表示"),
+                    tr("Markdownのソースを表示"),
+                ),
+                FileRendering::Mermaid => (Icon::EYE, tr("図を表示"), tr("Mermaidのソースを表示")),
+                FileRendering::Table => (Icon::TABLE, tr("表を表示"), tr("ソースを表示")),
+            };
+            view()
+                .child(when(rendered, move || {
+                    ui::toggle(Icon::CODE, hide, || true, toggle_rendered)
+                }))
+                .child(when(
+                    move || !rendered.get(),
+                    move || ui::toggle(glyph, show, || false, toggle_rendered),
+                ))
+                .into_element()
+        }
+        None => view().into_element(),
+    };
+    let contents = move || controls.with(|controls| controls.text.clone());
+    let diagram = computed(move || controls.with(|controls| mermaid_file_markdown(&controls.text)));
+    let page = move |content: View| {
+        scroll()
+            .flex_1()
+            .min_h_0()
+            // As a conversation's, the selection's actions go while it scrolls.
+            .on_scroll(move |_: &ScrollEvent| {
+                #[cfg(desktop)]
+                surroundings.selection.dismiss();
+            })
+            .child(content)
     };
     let position = computed(move || {
         (
@@ -155,29 +201,7 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                 .child(
                     ui::icon_button(Icon::REFRESH, tr("再読込"), reload).enabled(move || !busy()),
                 )
-                .child(when(
-                    move || is_markdown_preview_file(&path.get()),
-                    move || {
-                        view()
-                            .child(when(rendered, move || {
-                                ui::icon_button(
-                                    Icon::CODE,
-                                    tr("Markdownのソースを表示"),
-                                    toggle_rendered,
-                                )
-                            }))
-                            .child(when(
-                                move || !rendered.get(),
-                                move || {
-                                    ui::icon_button(
-                                        Icon::EYE,
-                                        tr("Markdownをレンダリング表示"),
-                                        toggle_rendered,
-                                    )
-                                },
-                            ))
-                    },
-                ))
+                .child(rendering_toggle)
                 .child(ui::icon_button(
                     Icon::SHARE,
                     tr("プレビュー・共有"),
@@ -211,16 +235,11 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
             move || controls.with(|controls| controls.truncated),
             || notice(tr("file.preview.truncated")),
         ))
-        .child(when(rendered, move || {
-            // T3 Code's `mx-auto max-w-4xl px-6 py-5`.
-            scroll()
-                .flex_1()
-                .min_h_0()
-                .on_scroll(move |_: &ScrollEvent| {
-                    #[cfg(desktop)]
-                    surroundings.selection.dismiss();
-                })
-                .child(
+        .child(when(
+            move || shown.get() == Some(FileRendering::Markdown),
+            move || {
+                // T3 Code's `mx-auto max-w-4xl px-6 py-5`.
+                page(
                     view()
                         .w_full()
                         .items_center()
@@ -229,11 +248,44 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                         .child(crate::rich_text::file(
                             surroundings,
                             path.get(),
-                            move || Some(controls.with(|controls| controls.text.clone())),
+                            move || Some(contents()),
                             || 896.0,
                         )),
                 )
-        }))
+            },
+        ))
+        .child(when(
+            move || shown.get() == Some(FileRendering::Mermaid),
+            move || {
+                // T3 Code's `MermaidViewer`: the diagram a message would show, or
+                // why it is not drawn.
+                page(
+                    view()
+                        .w_full()
+                        .p(px(24.0))
+                        .child(when(
+                            move || diagram.with(Option::is_none),
+                            || {
+                                text(tr(
+                                    "この図にはリソースのURL、マークアップ、ノードのメタデータ、または独自の設定が含まれています。安全に確認するにはMermaidのソースを表示してください。",
+                                ))
+                                .text_size(px(12.0))
+                                .text_color(colors::muted())
+                            },
+                        ))
+                        .child(crate::rich_text::message(
+                            surroundings,
+                            move || diagram.get(),
+                            || crate::conversation::Kind::Response,
+                            || 10_000.0,
+                        )),
+                )
+            },
+        ))
+        .child(when(
+            move || shown.get() == Some(FileRendering::Table),
+            move || table::screen(path, contents),
+        ))
         .child(when(
             move || !rendered.get(),
             move || {

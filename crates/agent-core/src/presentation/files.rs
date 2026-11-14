@@ -18,7 +18,10 @@ pub use mobile::{
 };
 pub use preview::{file_preview_mime_type, image_extension, is_image_file};
 mod rendered;
-pub use rendered::{file_markdown_blocks, file_renders_markdown, is_markdown_preview_file};
+pub use rendered::{
+    FileRendering, FileRenderingPreferences, FileTable, TABLE_ROW_HEADER_WIDTH,
+    file_markdown_blocks, file_rendered, file_rendering, mermaid_file_markdown,
+};
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn mobile_file_icon(path: String) -> String {

@@ -83,7 +83,6 @@ pub(crate) mod colors {
     }
 
     /// `--accent`: a pressed or hovered ghost control, white at 4%.
-    #[cfg(desktop)]
     pub(crate) const T3_ACCENT: Rgba = rgba(0xffffff0a);
     /// `--input`: an outlined control's edge, white at 8%.
     pub(crate) const T3_INPUT: Rgba = rgba(0xffffff14);
@@ -143,6 +142,7 @@ impl Icon {
     /// T3 Code's file panel: show a file rendered, or its source again.
     pub(crate) const EYE: Self = icon!(Eye);
     pub(crate) const CODE: Self = icon!(CodeXml);
+    pub(crate) const TABLE: Self = icon!(Table2);
     #[cfg(desktop)]
     pub(crate) const MAXIMIZE: Self = icon!(Maximize2);
     pub(crate) const MINIMIZE: Self = icon!(Minimize2);
@@ -424,7 +424,6 @@ pub(crate) fn bare_button(
 
 /// T3 Code's ghost toggle (`Toggle variant="ghost" size="sm"`): 28 points,
 /// rounded by 10, a 16-point icon at 80%, filled while pressed or hovered.
-#[cfg(desktop)]
 pub(crate) fn toggle(
     glyph: Icon,
     label: impl IntoReactive<SharedString>,

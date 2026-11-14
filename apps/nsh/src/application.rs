@@ -88,8 +88,8 @@ pub(crate) struct State {
     /// The width the user gave the file list beside an open file.
     #[cfg(any(desktop, test))]
     pub explorer_width: f32,
-    /// Whether Markdown files show rendered, as T3 Code's `renderMarkdown`.
-    pub render_markdown: bool,
+    /// Which files show rendered instead of as their source.
+    pub file_rendering: agent_core::presentation::files::FileRenderingPreferences,
     /// This app's own update, on the desktop.
     #[cfg(desktop)]
     pub update: Option<agent_core::updates::UpdateState>,
@@ -128,7 +128,7 @@ impl Default for State {
             contrast: agent_core::presentation::appearance::DEFAULT_CONTRAST,
             #[cfg(any(desktop, test))]
             explorer_width: agent_core::presentation::files::EXPLORER_DEFAULT_WIDTH,
-            render_markdown: false,
+            file_rendering: Default::default(),
             #[cfg(desktop)]
             update: None,
             #[cfg(desktop)]
@@ -259,7 +259,7 @@ pub(crate) struct Application {
     onboarding_path: PathBuf,
     #[cfg(any(desktop, test))]
     explorer_width_path: PathBuf,
-    render_markdown_path: PathBuf,
+    file_rendering_path: PathBuf,
     #[cfg(any(desktop, test))]
     sidebar_projects_path: PathBuf,
     #[cfg(desktop)]
@@ -326,8 +326,8 @@ impl Application {
                 |width| agent_core::presentation::files::explorer_width(width, f32::INFINITY),
             );
         // As the width, an unreadable choice is the default's: the source.
-        let render_markdown_path = root.join("render-markdown.json");
-        let render_markdown = crate::storage::read(&render_markdown_path)
+        let file_rendering_path = root.join("file-rendering.json");
+        let file_rendering = crate::storage::read(&file_rendering_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
@@ -357,7 +357,7 @@ impl Application {
             contrast,
             #[cfg(any(desktop, test))]
             explorer_width,
-            render_markdown,
+            file_rendering,
             #[cfg(any(desktop, test))]
             sidebar_projects,
             #[cfg(desktop)]
@@ -378,7 +378,7 @@ impl Application {
             onboarding_path,
             #[cfg(any(desktop, test))]
             explorer_width_path,
-            render_markdown_path,
+            file_rendering_path,
             #[cfg(any(desktop, test))]
             sidebar_projects_path,
             #[cfg(desktop)]
@@ -550,13 +550,16 @@ impl Application {
         });
     }
 
-    /// Saves whether Markdown files show rendered and publishes it, as the
-    /// file list's width.
-    pub fn set_render_markdown(&self, rendered: bool) {
-        let saved = agent_local_host::save_private_json(&self.render_markdown_path, &rendered);
+    /// Saves which files show rendered and publishes it, as the file list's
+    /// width.
+    pub fn set_file_rendering(
+        &self,
+        preferences: agent_core::presentation::files::FileRenderingPreferences,
+    ) {
+        let saved = agent_local_host::save_private_json(&self.file_rendering_path, &preferences);
         self.state.send_modify(|state| {
             let state = Arc::make_mut(state);
-            state.render_markdown = rendered;
+            state.file_rendering = preferences;
             if let Err(reason) = saved {
                 state.failure = Some(reason.to_string());
             }
@@ -1577,19 +1580,22 @@ mod tests {
     }
 
     #[test]
-    fn rendering_markdown_is_restored_on_the_next_launch_and_starts_as_the_source() {
+    fn file_renderings_are_restored_on_the_next_launch_and_a_broken_choice_is_the_default() {
+        use agent_core::presentation::files::{FileRendering, FileRenderingPreferences};
+        let initial = FileRenderingPreferences::default();
+        let chosen = initial.with(FileRendering::Markdown, true);
         let directory = tempfile::tempdir().unwrap();
         let (runtime, application) = Application::new(directory.path().into(), None).unwrap();
-        assert!(!application.snapshot().render_markdown);
-        application.set_render_markdown(true);
-        assert!(application.snapshot().render_markdown);
+        assert_eq!(application.snapshot().file_rendering, initial);
+        application.set_file_rendering(chosen);
+        assert_eq!(application.snapshot().file_rendering, chosen);
         runtime.block_on(application.shutdown()).unwrap();
         let (runtime, restored) = Application::new(directory.path().into(), None).unwrap();
-        assert!(restored.snapshot().render_markdown);
+        assert_eq!(restored.snapshot().file_rendering, chosen);
         runtime.block_on(restored.shutdown()).unwrap();
-        std::fs::write(directory.path().join("render-markdown.json"), b"broken").unwrap();
+        std::fs::write(directory.path().join("file-rendering.json"), b"broken").unwrap();
         let (runtime, broken) = Application::new(directory.path().into(), None).unwrap();
-        assert!(!broken.snapshot().render_markdown);
+        assert_eq!(broken.snapshot().file_rendering, initial);
         runtime.block_on(broken.shutdown()).unwrap();
     }
 
