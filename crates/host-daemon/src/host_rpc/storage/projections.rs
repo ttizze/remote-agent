@@ -4,6 +4,7 @@ use super::*;
 
 /// Keep unavailable storage separate from invalid or missing source records.
 /// A queued input may fail validation without losing its predecessor's result.
+/// SQL column/type corruption also aborts the transaction as a storage error.
 #[derive(Debug)]
 pub(super) enum ReadError {
     Storage(rusqlite::Error),

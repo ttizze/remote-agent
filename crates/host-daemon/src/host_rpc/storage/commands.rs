@@ -259,11 +259,6 @@ pub(super) fn append_decision(
                     current.turn_items.insert(item.id.clone(), item.clone());
                 }
             }
-            current.effects.extend(
-                effects
-                    .iter()
-                    .map(|effect| (effect.id.clone(), effect.clone())),
-            );
             let mut failed_changes = Vec::new();
             for run_id in &starts {
                 match super::handoffs::prepare_admission(
@@ -284,8 +279,9 @@ pub(super) fn append_decision(
                             .active_attempt_id
                             .as_deref()
                             .ok_or("context target attempt is missing")?;
+                        let failure_id = model::derived_id("context-preparation", &[&seed, run_id]);
                         let context = model::Context {
-                            command_id: &seed,
+                            command_id: &failure_id,
                             now,
                             next_run_ordinal: current
                                 .runs
@@ -309,6 +305,9 @@ pub(super) fn append_decision(
                             },
                             context,
                         )?;
+                        if failed.changes.is_empty() {
+                            return Err("context preparation target is no longer starting".into());
+                        }
                         current = current.apply(&failed);
                         failed_changes.extend(failed.changes);
                         effects.extend(failed.effects);
