@@ -1243,6 +1243,7 @@ async fn queued_fork_input_preserves_context_after_a_failed_start(#[case] provid
     let codex = codex.restarted();
     let claude = claude.restarted();
     let service = HostRpcService::new([codex.backend(), claude.backend()], projects);
+    let _connection = service.open_session();
     let ack = Runtime::change(
         &service,
         &records::Change {
