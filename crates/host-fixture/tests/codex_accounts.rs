@@ -127,6 +127,7 @@ async fn completed_turn(
             command: decision::Command::Submit {
                 id: id.to_string().into(),
                 content: decision::InputContent {
+                    author: None,
                     fresh_context: false,
                     parts: vec![agent_protocol::operations::Input::Text { text: text.into() }],
                     model: None,
@@ -285,6 +286,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let rejected=call(&service,&mut session,"host/conversation/change",json!(records::Change {
             session:thread.clone(),operation,command:decision::Command::Submit {
                 id:operation.to_string().into(),content:decision::InputContent {
+                author: None,
                 fresh_context: false,
                     parts:vec![agent_protocol::operations::Input::Text {text:"must not use a different account".into()}],
                     model:None,effort:None,service_tier:None,follow_up:Default::default(),

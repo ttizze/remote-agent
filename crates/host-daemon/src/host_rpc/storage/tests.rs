@@ -94,6 +94,7 @@ fn forks_settle_copied_background_work_and_allow_the_next_input() {
                     process: storage.process,
                 };
                 let background = Turn {
+                    attempts: Vec::new(),
                     fresh_context: false,
                     id: "answered".into(),
                     ordinal: 1,
@@ -121,6 +122,8 @@ fn forks_settle_copied_background_work_and_allow_the_next_input() {
                 let mut changes = vec![
                     Change::Turn(background.clone()),
                     Change::Item(decision::Item {
+                        attempt: None,
+                        author: None,
                         id: "command".into(),
                         turn: background.id.clone(),
                         position: 1,
@@ -205,6 +208,7 @@ fn forks_settle_copied_background_work_and_allow_the_next_input() {
                     command: Command::Submit {
                         id: operation.to_string().into(),
                         content: InputContent {
+                            author: None,
                             fresh_context: false,
                             parts: vec![Input::Text {
                                 text: "continue the copy".into(),
@@ -486,6 +490,7 @@ fn submit(seed: u128) -> Event {
         command: Command::Submit {
             id: Uuid::from_u128(seed).to_string().into(),
             content: InputContent {
+                author: None,
                 fresh_context: false,
                 parts: vec![Input::Text {
                     text: "hello".into(),
@@ -1824,6 +1829,7 @@ fn restoring_a_missing_outbox_input_fences_a_delayed_original_command() {
                 event(Command::Submit {
                     id: input.to_string().into(),
                     content: InputContent {
+                        author: None,
                         fresh_context: false,
                         parts: vec![Input::Text {
                             text: "delayed original".into(),
@@ -2267,6 +2273,107 @@ fn steering_waits_for_the_first_native_turn_and_dispatches_once_after_it_is_boun
             .step
             .actions
             .is_empty()
+    );
+}
+
+#[test]
+fn superseded_native_completions_cannot_rebind_or_finish_the_replacement_after_a_steer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let storage = Storage::open(&path);
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    storage.create(&target, &header()).unwrap();
+    ready(&storage, &target);
+    let started = storage
+        .decide(&target, submit(100), context(100), None)
+        .unwrap();
+    let decision::Action::Deliver {
+        id,
+        action,
+        attempt,
+        ..
+    } = started.step.actions[0].clone()
+    else {
+        panic!("start")
+    };
+    storage
+        .decide(
+            &target,
+            Event::Delivered {
+                id,
+                action,
+                native_turn: Some("first".into()),
+            },
+            context(101),
+            None,
+        )
+        .unwrap();
+    let mut request = submit(102);
+    let Event::Command {
+        command: Command::Submit { content, .. },
+        ..
+    } = &mut request
+    else {
+        panic!("submission")
+    };
+    content.follow_up = FollowUp::Steer;
+    let steering = storage
+        .decide(&target, request, context(102), None)
+        .unwrap();
+    let decision::Action::Deliver { id, action, .. } = steering.step.actions[0].clone() else {
+        panic!("steer")
+    };
+    storage
+        .decide(
+            &target,
+            Event::Delivered {
+                id,
+                action,
+                native_turn: Some("second".into()),
+            },
+            context(103),
+            None,
+        )
+        .unwrap();
+    let stale = storage
+        .decide(
+            &target,
+            Event::Provider {
+                attempt: attempt.id,
+                native_turn: Some("first".into()),
+                native_items: vec![],
+                observation: Observation::Completed,
+            },
+            context(104),
+            None,
+        )
+        .unwrap();
+    assert_eq!(stale.step.outcome, Outcome::Ignored);
+    assert!(matches!(
+        storage.state(&target).unwrap().turns[&attempt.turn].state,
+        TurnState::Running { .. }
+    ));
+    assert_eq!(
+        storage
+            .turn_execution(&target, &attempt.turn)
+            .unwrap()
+            .unwrap()
+            .native_turn
+            .as_deref(),
+        Some("second")
+    );
+    let history = storage.history(&target, None).unwrap();
+    let attempts = &history.thread.turns.as_ref().unwrap()[0].attempts;
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(
+        attempts[0].state,
+        decision::AttemptState::Superseded { by_steer: true }
+    );
+    drop(storage);
+    let reopened = Storage::open(&path).history(&target, None).unwrap();
+    assert_eq!(
+        &reopened.thread.turns.as_ref().unwrap()[0].attempts,
+        attempts
     );
 }
 

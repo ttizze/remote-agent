@@ -143,6 +143,20 @@ pub enum Input {
     },
 }
 impl Input {
+    pub fn with_context_images(mut input: Vec<Self>) -> Vec<Self> {
+        let paths = Self::contexts(&input)
+            .filter_map(|context| context.content.image_path())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for path in paths {
+            if !input.iter().any(
+                |part| matches!(part, Self::LocalImage { path: existing } if existing == &path),
+            ) {
+                input.push(Self::LocalImage { path });
+            }
+        }
+        input
+    }
     pub fn contexts(input: &[Self]) -> impl Iterator<Item = &crate::context::MessageContext> {
         input.iter().filter_map(|part| match part {
             Self::Context { context } => Some(context.as_ref()),

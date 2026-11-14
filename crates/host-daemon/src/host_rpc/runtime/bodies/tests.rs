@@ -238,6 +238,7 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
                 command: Command::Submit {
                     id: input.to_string().into(),
                     content: InputContent {
+                        author: None,
                         fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "continue on Claude".into(),

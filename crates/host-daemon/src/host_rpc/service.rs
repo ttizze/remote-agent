@@ -2,8 +2,10 @@
 //! owner of its resource; workflows that span owners live in the domain files.
 use super::owners::Write;
 mod activity;
+mod automations;
 mod feedback;
 mod project_import;
+mod pull_requests;
 mod sessions;
 mod titles;
 mod update;
@@ -32,6 +34,8 @@ pub struct HostRpcService {
 }
 
 pub(super) struct ServiceInner {
+    automations: crate::automations::Automations,
+    automation_stop: tokio_util::sync::CancellationToken,
     browser: OnceLock<Arc<crate::browser::Browser>>,
     pub(super) providers: crate::providers::Registry,
     provider_settings: crate::providers::Settings,
@@ -94,6 +98,10 @@ impl HostRpcService {
         );
         Self {
             inner: Arc::new(ServiceInner {
+                automations: crate::automations::Automations::open(
+                    &projects.path().with_file_name("bex-automations.sqlite"),
+                ),
+                automation_stop: Default::default(),
                 history_scope: OnceLock::new(),
                 conversation,
                 updating: std::sync::atomic::AtomicBool::new(false),
@@ -184,6 +192,7 @@ impl HostRpcService {
     }
 
     pub(crate) async fn shutdown_owned_processes(&self) {
+        self.inner.automation_stop.cancel();
         self.inner.project_clones.shutdown().await;
         self.inner.conversation.cancel_preparations();
         if let Some(browser) = self.inner.browser.get() {
@@ -296,6 +305,35 @@ impl HostRpcService {
                 .map_err(|e| Failure::new("browser_failed", e));
         }
         let response = match request {
+            Call::Automations(params) => self.automations(params).await?.into(),
+            Call::PrepareTriage(params) => {
+                params
+                    .validate()
+                    .map_err(|e| Failure::new("invalid_params", e))?;
+                if let Some(source) = &params.source {
+                    self.inner
+                        .conversation
+                        .storage
+                        .header(source)
+                        .map_err(super::runtime::storage_failure)?;
+                }
+                let state = self
+                    .inner
+                    .projects
+                    .path()
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_owned();
+                let params = params.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::triage::prepare(&state.join("triage"), &state, &params, Some(true))
+                })
+                .await
+                .map_err(|e| Failure::new("triage_failed", e.to_string()))?
+                .map_err(|e| Failure::new("triage_failed", e.to_string()))?
+                .into()
+            }
+            Call::PullRequests(params) => self.pull_requests(params).await?.into(),
             Call::UploadFeedback(params) => self.upload_feedback(params).await?.into(),
             Call::SearchList(params) => self.search_list(params).await?.into(),
             Call::ReadFileOpenCapabilities(_) => self
@@ -606,6 +644,7 @@ impl HostRpcService {
 
     fn start_event_pumps(&self) {
         self.inner.event_pumps.call_once(|| {
+            self.start_automations();
             let mut clones = self.inner.project_clones.subscribe();
             let owner = Arc::downgrade(&self.inner);
             tokio::spawn(async move {
@@ -1051,6 +1090,7 @@ mod tests {
             command: Command::Submit {
                 id: input.to_string().into(),
                 content: InputContent {
+                    author: None,
                     fresh_context: false,
                     parts: vec![op::Input::Text {
                         text: "unsent".into(),
@@ -1151,6 +1191,7 @@ mod tests {
             command: agent_protocol::conversation::Command::Submit {
                 id: input.to_string().into(),
                 content: agent_protocol::conversation::InputContent {
+                    author: None,
                     fresh_context: false,
                     parts: vec![agent_protocol::operations::Input::Text {
                         text: "private request title".into(),

@@ -403,6 +403,7 @@ mod tests {
                         command: Command::Submit {
                             id: input.to_string().into(),
                             content: InputContent {
+                                author: None,
                                 fresh_context: false,
                                 parts: vec![op::Input::Text {
                                     text: "work".into(),
@@ -499,6 +500,7 @@ mod tests {
                     command: Command::Submit {
                         id: operation.to_string().into(),
                         content: InputContent {
+                            author: None,
                             fresh_context: false,
                             parts: vec![op::Input::Text {
                                 text: "must not start during update".into(),
@@ -639,6 +641,7 @@ mod tests {
                     command: Command::Submit {
                         id: input.to_string().into(),
                         content: InputContent {
+                            author: None,
                             fresh_context: false,
                             parts: vec![op::Input::Text {
                                 text: "Continue".into(),

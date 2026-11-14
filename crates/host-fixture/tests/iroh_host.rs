@@ -80,6 +80,7 @@ async fn completed_chat(client: &Client, cwd: Option<String>) -> models::Thread 
     request.initial = Some((
         next_submission_id().into(),
         agent_protocol::conversation::InputContent {
+            author: None,
             fresh_context: false,
             parts: vec![rpc::Input::Text {
                 text: "[success] [immediate] prepare workspace".into(),

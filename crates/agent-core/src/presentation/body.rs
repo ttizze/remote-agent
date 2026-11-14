@@ -12,6 +12,19 @@ pub struct ItemBody {
     pub images: Vec<String>,
     pub contexts: Vec<agent_protocol::context::MessageContext>,
 }
+fn context_images(
+    mut images: Vec<String>,
+    contexts: &[agent_protocol::context::MessageContext],
+) -> Vec<String> {
+    for context in contexts {
+        if let Some(path) = agent_protocol::context::screenshot_path(contexts, &context.id)
+            && !images.iter().any(|image| image == path)
+        {
+            images.push(path.into());
+        }
+    }
+    images
+}
 fn attachment(language: UiLanguage, text: &mut String, name: &str, path: &str) {
     if !text.is_empty() {
         text.push('\n');
@@ -105,7 +118,7 @@ pub fn item_body(language: UiLanguage, item: &Item) -> ItemBody {
     };
     ItemBody {
         text,
-        images,
+        images: context_images(images, &contexts),
         contexts,
     }
 }
@@ -127,7 +140,7 @@ pub fn draft_body(language: UiLanguage, draft: &Draft) -> ItemBody {
     }
     ItemBody {
         text: Some(text),
-        images,
+        images: context_images(images, &draft.contexts),
         contexts: draft.contexts.clone(),
     }
 }

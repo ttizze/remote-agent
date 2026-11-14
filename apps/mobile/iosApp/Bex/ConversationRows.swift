@@ -72,10 +72,12 @@ struct ThreadMessageRow: View, Equatable {
                             expandTitle: String(localized: "全文を表示"), collapseTitle: String(localized: "折りたたむ"),
                             identifier: "item.\(item.data.id)") {
             if row.data().queued {
-                Text("キューから送信").font(.caption).foregroundStyle(.secondary)
+                ConversationInputMarker(title: String(localized: "キューから送信"),
+                                        description: String(localized: "実行中の作業の後に送信しました"), steer: false)
             }
             if row.data().steer {
-                Text("追加の指示").font(.caption).foregroundStyle(.secondary)
+                ConversationInputMarker(title: String(localized: "追加の指示"),
+                                        description: String(localized: "実行中の作業に追加で指示しました"), steer: true)
             }
         } images: {
             images

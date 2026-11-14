@@ -50,7 +50,6 @@ import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownRun
 import dev.remoteagent.core.Outcome
-import dev.remoteagent.core.markdownBlocks
 import dev.remoteagent.core.markdownCalloutMarker
 
 private const val RGB_MASK = 0xFFFFFFu
@@ -58,16 +57,6 @@ private const val OPAQUE_ALPHA_MASK = 0xFF000000L
 private const val DARK_SURFACE_LUMINANCE = 0.5f
 private const val COPY_FEEDBACK_MILLIS = 1200L
 private const val LIST_INDENT_DP = 22
-
-@Composable
-internal fun ConversationBody(
-    body: String,
-    cwd: String = "",
-    perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)? = null,
-) {
-    val blocks = remember(body) { markdownBlocks(body) }
-    ConversationBlocks(blocks, cwd, perform)
-}
 
 @Composable
 internal fun ConversationBlocks(
@@ -89,9 +78,7 @@ internal fun ConversationBlocks(
         }
     }
     SelectionContainer {
-        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            MarkdownBlocks(blocks, cwd, perform, openFile)
-        }
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) { MarkdownBlocks(blocks, cwd, perform, openFile) }
     }
     shareError?.let {
         Text(
@@ -129,20 +116,21 @@ private fun MarkdownBlocks(
                 MarkdownBlocks(block.blocks, cwd, perform, openFile)
             }
             is MarkdownBlock.Callout -> {
-                val marker = MarkdownRun(
-                    text = markdownCalloutMarker(block.kind),
-                    template = null,
-                    strong = false,
-                    emphasis = false,
-                    strikethrough = false,
-                    code = false,
-                    math = false,
-                    link = null,
-                    image = null,
-                    file = null,
-                    darkColor = null,
-                    lightColor = null,
-                )
+                val marker =
+                    MarkdownRun(
+                        text = markdownCalloutMarker(block.kind),
+                        template = null,
+                        strong = false,
+                        emphasis = false,
+                        strikethrough = false,
+                        code = false,
+                        math = false,
+                        link = null,
+                        image = null,
+                        file = null,
+                        darkColor = null,
+                        lightColor = null,
+                    )
                 MarkdownParagraph(MarkdownBlock.Paragraph(listOf(marker), block.style), cwd, openFile)
                 MarkdownBlocks(block.blocks, cwd, perform, openFile)
             }

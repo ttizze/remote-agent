@@ -922,6 +922,7 @@ mod tests {
                     command: Command::Submit {
                         id: input.to_string().into(),
                         content: decision::InputContent {
+                            author: None,
                             fresh_context: false,
                             parts: vec![op::Input::Text {
                                 text: "work".into(),

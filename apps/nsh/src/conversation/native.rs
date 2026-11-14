@@ -182,7 +182,7 @@ pub(super) fn project_row(
         shimmer.filter(|_| row.detail.is_none()),
     );
     json!({
-        "id":row.id,"plan":matches!(row.shape,Shape::Plan),"planTitle":matches!(row.shape,Shape::Plan).then_some(row.body.as_ref()),
+        "id":row.id,"attemptFold":row.group_kind == "attempt","plan":matches!(row.shape,Shape::Plan),"planTitle":matches!(row.shape,Shape::Plan).then_some(row.body.as_ref()),
         "error":row.error.as_ref().map(|error|json!({"title":error.title,"message":error.message,"details":error.details,"reconnecting":error.is_reconnecting,"usageLimit":error.is_usage_limit})),"timeAlways":row.kind == Kind::Activity,"preparation":row.preparation.as_ref().map(|setup| preparation_card(setup,open)),"icon":row_icon(row),"separator":matches!(row.shape,Shape::Divider | Shape::Interrupted),"user":row.kind == Kind::User,"gap":row.gap,"buttons":buttons,"parts":parts,"images":row.images,"filePaths":file_paths,"media":{},
         "collapsible":row.kind == Kind::User && agent_core::presentation::conversation::should_collapse_user_message(&row.body),
         "trailing":matches!(row.shape,Shape::Actions),"fold":matches!(row.shape,Shape::Fold{..} | Shape::Working),"time":row.time,"queued":row.queued,"steer":row.steer,
@@ -241,6 +241,9 @@ fn row_icon(row: &Row) -> Option<&'static str> {
         .as_ref()
         .map(|item| item.source.data.kind.as_str())
         .unwrap_or(&row.group_kind);
+    if kind == "attempt" {
+        return None;
+    }
     match row.shape {
         Shape::Interrupted => Some("stop"),
         Shape::Divider => Some("compact"),
@@ -823,7 +826,20 @@ fn handle_row(
                 timeline.set_activity(activity, opening);
             }
         }
-        "group" => timeline.toggle_group(row.id),
+        "group" => {
+            if matches!(row.shape, Shape::Group { open: false })
+                && let Some(attempt) = row
+                    .id
+                    .strip_prefix("attempt:")
+                    .and_then(|id| id.parse().ok())
+                && let Some(thread_id) = connection
+                    .context
+                    .with_untracked(|p| p.navigation().thread_id)
+            {
+                connection.dispatch(Intent::ReadAttempt { thread_id, attempt });
+            }
+            timeline.toggle_group(row.id);
+        }
         "item" => {
             if let Some(item) = row.detail {
                 toggle_item(opened, connection, item);

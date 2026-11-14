@@ -1,4 +1,6 @@
 //! Shared wire contracts and deterministic value operations. No client state or I/O.
+pub mod attribution;
+pub mod automations;
 pub mod browser;
 pub mod browser_import;
 pub mod browser_native;
@@ -26,9 +28,11 @@ pub mod project_clone;
 pub mod project_import;
 pub mod protocol;
 pub mod providers;
+pub mod pull_requests;
 pub mod requests;
 pub mod session;
 pub mod snapshot;
 pub mod sync;
 pub mod tool_output;
+pub mod triage;
 pub mod workspace;

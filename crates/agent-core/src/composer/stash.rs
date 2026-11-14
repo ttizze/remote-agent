@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn restoring_rekeys_context_and_internal_references_without_replacing_newer_context() {
         let mut original = content();
-        original.contexts = vec![file("shot","/old.png"),MessageContext {
+        original.contexts = vec![MessageContext { id: "shot".into(), label: "Image".into(), content: ContextContent::Image { path: "/old.png".into() } },MessageContext {
             id:"annotation".into(),label:"Preview".into(),content:ContextContent::Preview {
                 preview:serde_json::from_value(serde_json::json!({"annotationId":"note","pageUrl":"https://example.com","pageTitle":null,"comment":"explain","targetSummary":"button","styleChanges":[],"elements":[],"elementIds":[],"regionCount":null,"strokeCount":null,"styleChangeDetails":[],"screenshotContextId":"shot"})).unwrap()
             }

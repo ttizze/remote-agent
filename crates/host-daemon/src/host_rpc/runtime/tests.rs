@@ -5,10 +5,12 @@ use agent_protocol::{
     sync::Scope,
 };
 
+mod attribution;
 mod fresh;
 
 fn content() -> decision::InputContent {
     decision::InputContent {
+        author: None,
         fresh_context: false,
         parts: vec![op::Input::Text {
             text: "run once".into(),
@@ -2824,6 +2826,7 @@ async fn a_delivery_admitted_before_update_cannot_write_after_the_update_gate_cl
                 command: Command::Submit {
                     id: input.clone(),
                     content: InputContent {
+                        author: None,
                         fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "keep the admitted input".into(),

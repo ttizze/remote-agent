@@ -28,6 +28,7 @@ struct Implementation {
 #[derive(Clone, Copy, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Phase {
+    Deferred,
     Restore,
     Shared,
     Local,
@@ -37,6 +38,7 @@ enum Phase {
 impl Phase {
     fn label(self) -> &'static str {
         match self {
+            Self::Deferred => "今回の対象外",
             Self::Restore => "既存Rustの接続・描画を修復",
             Self::Shared => "共通データ・操作を追加",
             Self::Local => "UIで補完・既存機能を維持",
@@ -150,7 +152,9 @@ pub(super) fn write(cwd: &Path, directory: &Path, catalog: &Catalog) -> Result<(
     .map(|status| {
         indexed
             .values()
-            .filter(|assessment| assessment.rust.status == status)
+            .filter(|assessment| {
+                assessment.phase != Phase::Deferred && assessment.rust.status == status
+            })
             .count()
     });
     let mut report = String::from(
@@ -163,16 +167,17 @@ pub(super) fn write(cwd: &Path, directory: &Path, catalog: &Catalog) -> Result<(
          共通のデータ・操作がない機能はRust側から、既にある機能は受け渡し・UIから直す。\
          一機能ずつ共通契約→受け渡し→Mac/iPhone/Windowsまで通す。\
          コピー完了・ホバー・アイコンのためだけに共通の業務状態は作らない。\n\n\
+         MCP App・ゲスト共有は今回の対象外で、不足数には含めない。\n\n\
          まず既存TurnRowを各OSへ同じ形で渡し、失われた表示を復旧する。\
          次に引用/Context、試行履歴、圧縮結果、Markdown構造などの不足を共通化する。\
-         MCP App・秘密保管・ゲスト共有・自動実行はHostを含む追加機能として扱う。\n\n",
+         秘密保管・自動実行はHostを含む追加機能として扱う。\n\n",
     );
     writeln!(
         report,
         "共通/UIの調査対象: [{}](https://github.com/ttizze/remote-agent/tree/{})。\
          実装変更時は評価も更新する。\n\n\
          共通Rustの不足: **{}部品群**（未実装{}・一部不足{}）。\
-         実装あり{}・共通Rust不要{}、全{}部品群。\
+         実装あり{}・共通Rust不要{}・今回の対象外{}、全{}部品群。\
          同じ機能に依存する部品群もあるため、独立した機能数ではない。\n\n\
          ## 一覧\n\n\
          | 部品 | 共通Rust | Mac UI | iPhone UI | Windows UI | 次の作業 |\n\
@@ -184,6 +189,10 @@ pub(super) fn write(cwd: &Path, directory: &Path, catalog: &Catalog) -> Result<(
         partial,
         present,
         ui_only,
+        indexed
+            .values()
+            .filter(|assessment| assessment.phase == Phase::Deferred)
+            .count(),
         indexed.len(),
     )?;
     for component in &catalog.component {

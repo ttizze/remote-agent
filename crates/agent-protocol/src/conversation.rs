@@ -2,8 +2,8 @@
 //!
 //! The owner supplies a fresh seed for each new input and commits `Step` before
 //! executing its actions. Replaying an input uses the same seed and timestamp.
-//! Runtime records (attempts, bindings and allocation counters) stay on the Host;
-//! only the five conversation entities are projected into synchronization rows.
+//! Execution ownership, bindings and allocation counters stay on the Host;
+//! attempt summaries travel with turns in the five synchronized entities.
 use crate::{
     execution::{BackgroundTask, ExecutionError, ItemStatus},
     ids::{ClientInputId, ItemId, RequestId, TurnId},
@@ -17,7 +17,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+mod attempts;
 mod commands;
+pub use attempts::{
+    AttemptState, ExecutionAttempt, NativeTurnObservation, current_native_turn,
+    observed_native_turn,
+};
 mod execution;
 mod fresh_context;
 pub use execution::finish;
@@ -64,6 +69,8 @@ pub enum DeliveryMode {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputContent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Box<crate::attribution::Author>>,
     #[serde(default)]
     pub fresh_context: bool,
     pub parts: Vec<InputPart>,
@@ -191,6 +198,8 @@ pub enum UnknownState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
+    #[serde(default)]
+    pub attempts: Vec<ExecutionAttempt>,
     pub id: TurnId,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fresh_context: bool,
@@ -245,6 +254,10 @@ pub enum Wait {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
+    #[serde(default)]
+    pub attempt: Option<Uuid>,
+    #[serde(default)]
+    pub author: Option<Box<crate::attribution::Author>>,
     pub id: ItemId,
     pub turn: TurnId,
     pub position: u64,
@@ -892,6 +905,21 @@ pub fn provider_request_id(attempt: Uuid, native: &str) -> RequestId {
 }
 
 pub fn step(state: &State, event: Event, context: Context) -> Step {
+    let native = observed_native_turn(&state.inputs, &event);
+    if let (Some(native), Event::Provider { observation, .. }) = (&native, &event)
+        && let Some(attempt) = state
+            .attempts
+            .values()
+            .find(|attempt| attempt.id == native.execution)
+        && let Some(turn) = state.turns.get(&attempt.turn)
+        && !current_native_turn(&turn.attempts, native.execution, &native.native)
+        && !matches!(
+            observation,
+            Observation::Item { .. } | Observation::RemoveItem(_)
+        )
+    {
+        return Step::default();
+    }
     let mut result = match event {
         Event::Command {
             id,
@@ -934,13 +962,19 @@ pub fn step(state: &State, event: Event, context: Context) -> Step {
     };
     // A composed decision can touch an entity more than once. Persist only its
     // final value, with parent turns before items and execution records.
-    result.changes = result
-        .changes
-        .into_iter()
-        .map(|change| (change.key(), change))
-        .collect::<BTreeMap<_, _>>()
-        .into_values()
-        .collect();
+    result.changes = attempts::record(
+        &state.turns,
+        &state.attempts,
+        &state.items,
+        result.changes,
+        native.as_ref(),
+        context.now,
+    )
+    .into_iter()
+    .map(|change| (change.key(), change))
+    .collect::<BTreeMap<_, _>>()
+    .into_values()
+    .collect();
     if !result.actions.is_empty() {
         let next = state.apply(&result.changes);
         result.actions.retain(|action| next.permits(action));

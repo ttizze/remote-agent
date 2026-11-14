@@ -27,6 +27,7 @@ pub(super) mod jobs;
 mod journal;
 mod list;
 mod projects;
+pub(super) mod pull_requests;
 mod rows;
 #[cfg(test)]
 mod tests;
@@ -409,14 +410,11 @@ impl Storage {
                 let mut statement = transaction.prepare("SELECT t.id FROM turns t WHERE t.thread=?1 AND t.state='running' AND EXISTS(SELECT 1 FROM executions e WHERE e.thread=t.thread AND e.turn_id=t.id AND e.process=?2) AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.thread=t.thread AND e.turn_id=t.id AND e.process!=?2)").map_err(failure)?;
                 statement.query_map(params![key, Uuid::nil().to_string()], |row| row.get::<_, String>(0).map(TurnId::from)).map_err(failure)?.collect::<Result<Vec<_>, _>>().map_err(failure)?
             } else { Vec::new() };
-            let native_turn = match &event {
-                Event::Provider { attempt, native_turn: Some(turn), .. } => Some((*attempt, turn.clone())),
-                Event::Delivered { id, action, native_turn: Some(turn) } => state.inputs.get(id).and_then(|input| {
-                    let delivery = match &input.state { decision::InputState::Delivering(delivery) | decision::InputState::Unknown { delivery, .. } => delivery, _ => return None };
-                    (delivery.action == *action).then(|| (delivery.attempt.id, turn.clone()))
-                }),
-                _ => None,
-            };
+            let native_turn = decision::observed_native_turn(&state.inputs, &event)
+                .filter(|native| state.attempts.values().find(|attempt| attempt.id == native.execution)
+                    .and_then(|attempt| state.turns.get(&attempt.turn))
+                    .is_none_or(|turn| decision::current_native_turn(&turn.attempts, native.execution, &native.native)))
+                .map(|native| (native.execution, native.native));
             let native_items = match &event { Event::Provider { attempt, native_items, .. } => Some((*attempt, native_items.clone())), _ => None };
             let (mut header,counters)=rows::header(&transaction,key)?;
             let previous_header = header.clone();

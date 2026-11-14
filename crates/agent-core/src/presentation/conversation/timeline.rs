@@ -86,6 +86,11 @@ pub fn turn_rows(
     let mut out = Vec::new();
     let mut work: Vec<&ConversationRow> = Vec::new();
     let mut hidden = false;
+    let attempt_folds = super::attempts::attempt_folds(&turn.source);
+    let folded_items: std::collections::HashMap<_, _> = attempt_folds
+        .iter()
+        .flat_map(|fold| fold.items.iter().map(move |item| (item.as_str(), fold)))
+        .collect();
     let flush = |work: &mut Vec<&ConversationRow>, out: &mut Vec<TurnRow>, last: bool| {
         let rows = std::mem::take(work);
         let live = last
@@ -107,6 +112,30 @@ pub fn turn_rows(
         pieces(language, &rows, status == TurnStatus::Failed, groups, out);
     };
     for row in &turn.rows {
+        if let Some(ItemSource::Native(native)) = activity_item(row).map(|item| &item.source)
+            && let Some(fold) = folded_items.get(native.id.as_str())
+        {
+            let id = format!("attempt:{}", fold.id);
+            let open = groups.contains(&id);
+            if fold.items.first() == Some(&native.id) && !hidden {
+                flush(&mut work, &mut out, false);
+                out.push(TurnRow::Group {
+                    id,
+                    summary: language
+                        .text(if fold.by_steer {
+                            "Cut off by a steer"
+                        } else {
+                            "Superseded attempt"
+                        })
+                        .into(),
+                    kind: "attempt".into(),
+                    open,
+                });
+            }
+            if !open {
+                continue;
+            }
+        }
         match &row.content {
             ConversationRowContent::ActivityHeader { activity } => {
                 flush(&mut work, &mut out, false);

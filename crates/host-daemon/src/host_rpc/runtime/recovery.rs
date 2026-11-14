@@ -353,6 +353,11 @@ impl Runtime {
                             command: Command::ContinueAfterRestart {
                                 source: source.clone(),
                                 content: decision::InputContent {
+                                    author: Some(Box::new(
+                                        agent_protocol::attribution::Author::System {
+                                            label: "Bex".into(),
+                                        },
+                                    )),
                                     fresh_context: false,
                                     parts: vec![op::Input::Text {
                                         text: CONTINUE.into(),

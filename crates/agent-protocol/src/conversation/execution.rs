@@ -518,6 +518,8 @@ fn delivered(state: &State, id: &ClientInputId, action: Uuid, context: Context) 
     let mut changes = vec![
         Change::RemoveInput(id.clone()),
         Change::Item(Item {
+            attempt: None,
+            author: input.content.author.clone(),
             id: ItemId(id.0.clone()),
             turn: turn.clone(),
             position,
@@ -536,6 +538,7 @@ fn delivered(state: &State, id: &ClientInputId, action: Uuid, context: Context) 
     ];
     if !delivery.steer {
         changes.push(Change::Turn(Turn {
+            attempts: Vec::new(),
             fresh_context: input.content.fresh_context,
             id: turn.clone(),
             ordinal: delivery.ordinal,
@@ -853,6 +856,8 @@ fn item(
     Step {
         changes: vec![
             Change::Item(Item {
+                attempt: None,
+                author: state.items.get(&id).and_then(|item| item.author.clone()),
                 id,
                 turn: turn.id.clone(),
                 position,
@@ -1055,6 +1060,7 @@ fn observed_start(
     Step {
         changes: vec![
             Change::Turn(Turn {
+                attempts: Vec::new(),
                 fresh_context: false,
                 id: turn.clone(),
                 ordinal,

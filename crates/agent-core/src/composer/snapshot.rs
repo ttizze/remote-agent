@@ -51,6 +51,65 @@ mod tests {
         reduce,
     };
     use std::sync::Arc;
+    #[test]
+    fn removing_a_capture_keeps_annotation_text_and_clears_its_image_reference() {
+        let key = DraftKey::from("draft");
+        let mut contexts = capture()
+            .append(&[], "/host/capture.png".into(), true)
+            .unwrap();
+        contexts.push(MessageContext {
+            id: "annotation".into(),
+            label: "Annotation".into(),
+            content: ContextContent::Preview {
+                preview: agent_protocol::context::PreviewContext {
+                    annotation_id: "note".into(),
+                    page_url: "https://example.test".into(),
+                    page_title: None,
+                    comment: "Keep this note".into(),
+                    target_summary: String::new(),
+                    style_changes: vec![],
+                    elements: vec![],
+                    element_ids: vec![],
+                    region_count: None,
+                    stroke_count: None,
+                    style_change_details: vec![],
+                    screenshot_context_id: Some("capture".into()),
+                },
+            },
+        });
+        let draft = Draft {
+            contexts,
+            attachments: vec![Attachment {
+                path: "/host/capture.png".into(),
+                name: "capture.png".into(),
+                is_image: true,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::presentation::body::draft_body(crate::localization::UiLanguage::English, &draft)
+                .images,
+            vec!["/host/capture.png"]
+        );
+        let mut state = Snapshot::default();
+        Arc::make_mut(&mut state.input.drafts).insert(key.clone(), Arc::new(draft));
+        let (removed, _) = reduce(
+            &state,
+            "",
+            Event::Intent(Intent::RemoveAttachment {
+                draft_key: key.clone(),
+                index: 0,
+            }),
+        );
+        let draft = &removed.input.drafts[&key];
+        assert_eq!(draft.contexts.len(), 1);
+        agent_protocol::context::validate_contexts(&draft.contexts).unwrap();
+        let ContextContent::Preview { preview } = &draft.contexts[0].content else {
+            panic!("keep annotation")
+        };
+        assert_eq!(preview.comment, "Keep this note");
+        assert_eq!(preview.screenshot_context_id, None);
+    }
     fn capture() -> SnapShotCapture {
         SnapShotCapture {
             id: "capture".into(),

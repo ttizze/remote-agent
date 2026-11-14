@@ -68,6 +68,19 @@ fn operation_notice(key: &OperationKey) -> Option<(ErrorScope, &'static str)> {
     use ErrorScope::*;
     use OperationKey::*;
     Some(match key {
+        Triage => (Application, "調査用の下書きを作成できませんでした"),
+        Automations { session } => (
+            Conversation {
+                draft_key: session.into(),
+            },
+            "自動実行の取得・更新に失敗しました",
+        ),
+        PullRequests { session } => (
+            Conversation {
+                draft_key: session.into(),
+            },
+            "PRの取得・更新に失敗しました",
+        ),
         Feedback { .. } => return None,
         ProjectClone { id: None } => return None,
         ProjectClone { id: Some(_) } => (Settings, "リポジトリの取得操作に失敗しました"),

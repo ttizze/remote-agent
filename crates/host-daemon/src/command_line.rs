@@ -48,6 +48,13 @@ pub(crate) struct StartupConfig {
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Mode {
+    /// Collect private diagnostic metadata without starting a Host or agent.
+    Triage {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long, default_value = "")]
+        description: String,
+    },
     /// Local updater: journal interrupted work and return the saved launch configuration.
     #[command(hide = true)]
     PrepareUpdate,
@@ -95,6 +102,24 @@ pub(crate) enum Mode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn triage_can_collect_a_stopped_hosts_metadata_without_requesting_a_provider() {
+        let config = StartupConfig::try_parse_from([
+            "--state-dir",
+            "/state",
+            "triage",
+            "--output",
+            "/reports",
+            "--description",
+            "selection failed",
+        ])
+        .unwrap();
+        assert_eq!(config.state_dir, Some(PathBuf::from("/state")));
+        assert!(
+            matches!(config.mode, Some(Mode::Triage { output, description }) if output == std::path::Path::new("/reports") && description == "selection failed")
+        );
+    }
 
     #[test]
     fn machine_name_is_the_default_and_explicit_names_are_preserved() {

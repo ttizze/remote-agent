@@ -3,6 +3,18 @@ use crate::host_rpc::routing::{HostReply, SessionId};
 use agent_protocol::protocol::{self, Call, Response};
 
 impl Runtime {
+    fn device_author(
+        service: &HostRpcService,
+        session: SessionId,
+    ) -> Result<Box<agent_protocol::attribution::Author>, Failure> {
+        Ok(Box::new(agent_protocol::attribution::Author::Device {
+            id: service
+                .inner
+                .router
+                .principal(session)
+                .map_err(storage_failure)?,
+        }))
+    }
     pub(in crate::host_rpc) async fn dispatch(
         service: &HostRpcService,
         session: SessionId,
@@ -127,8 +139,12 @@ impl Runtime {
                 return Ok(Some(Self::opened(&request.session, result?)?));
             }
             Call::CreateConversation(request) => {
+                let mut request = request.clone();
+                if let Some((_, content)) = &mut request.initial {
+                    content.author = Some(Self::device_author(service, session)?);
+                }
                 let result = async {
-                    Self::create(service, request).await?;
+                    Self::create(service, &request).await?;
                     service
                         .inner
                         .conversation
@@ -176,10 +192,20 @@ impl Runtime {
                 }
                 .into()
             }
-            Call::ChangeConversation(request) => Response::Success {
-                result: Self::change(service, request).await?.into(),
+            Call::ChangeConversation(request) => {
+                let mut request = request.clone();
+                match &mut request.command {
+                    Command::Submit { content, .. }
+                    | Command::ContinueAfterRestart { content, .. } => {
+                        content.author = Some(Self::device_author(service, session)?);
+                    }
+                    _ => {}
+                }
+                Response::Success {
+                    result: Self::change(service, &request).await?.into(),
+                }
+                .into()
             }
-            .into(),
             Call::CheckConversationCommands(request) => Response::Success {
                 result: (service
                     .inner
@@ -486,6 +512,26 @@ impl Runtime {
             state.issues.sort();
             state.issues.dedup();
         }
+        let parent_author = response
+            .thread
+            .parent_id
+            .as_ref()
+            .filter(|_| response.thread.can_accept_direct_input == Some(false))
+            .map(|parent| {
+                service
+                    .inner
+                    .conversation
+                    .storage
+                    .native_owner(parent)
+                    .map(|owner| {
+                        Box::new(agent_protocol::attribution::Author::Agent {
+                            session: owner.unwrap_or_else(|| parent.clone()),
+                            name: None,
+                        })
+                    })
+            })
+            .transpose()
+            .map_err(storage_failure)?;
         let mut issues = Vec::new();
         for turn in response.thread.turns.iter_mut().flatten() {
             let turn = Arc::make_mut(turn);
@@ -494,7 +540,7 @@ impl Runtime {
                 if !item.is_history_message() {
                     continue;
                 }
-                let item = if item.is_deferred() {
+                let mut item = if item.is_deferred() {
                     match Self::read_native_body(
                         service,
                         &op::ReadItem {
@@ -514,6 +560,14 @@ impl Runtime {
                 } else {
                     item
                 };
+                if item.author.is_none()
+                    && matches!(
+                        item.body(),
+                        agent_protocol::items::ItemBody::UserMessage { .. }
+                    )
+                {
+                    Arc::make_mut(&mut item).author = parent_author.clone();
+                }
                 if item.is_history_message() {
                     kept.push(item);
                 }

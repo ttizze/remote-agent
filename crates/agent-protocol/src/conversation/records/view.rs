@@ -130,6 +130,7 @@ pub fn project(replica: &Replica) -> Option<models::ThreadResponse> {
                 })
                 .collect();
             Arc::new(models::Turn {
+                attempts: turn.attempts.clone(),
                 fresh_context: turn.fresh_context,
                 id: turn.id.clone(),
                 provider: Some(turn.provider),
@@ -162,6 +163,7 @@ pub fn project(replica: &Replica) -> Option<models::ThreadResponse> {
     let floor = replica.window()?;
     Some(models::ThreadResponse {
         thread: models::Thread {
+            pull_requests: header.details.pull_requests.clone(),
             turns: Some(turns),
             requests,
             submissions,
@@ -396,6 +398,7 @@ mod tests {
                     position,
                     state,
                     content: InputContent {
+                        author: None,
                         fresh_context: false,
                         parts: vec![operations::Input::Text { text: name.into() }],
                         model: None,

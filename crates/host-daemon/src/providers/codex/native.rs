@@ -595,6 +595,7 @@ pub(crate) fn approval_review(
 
 pub(crate) fn parse_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
     let mut turn = Turn {
+        attempts: Vec::new(),
         fresh_context: false,
         id: field(&value, "id")?,
         provider: None,

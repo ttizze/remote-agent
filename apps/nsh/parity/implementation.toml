@@ -6,6 +6,21 @@
 revision = "a5833d8a72f4bcd29f351505b0c6ce944a5325de"
 
 [sources]
+attempt_contract = "crates/agent-protocol/src/conversation/attempts.rs"
+attempt_rows = "crates/agent-core/src/presentation/conversation/attempts.rs"
+attribution = "crates/agent-protocol/src/attribution.rs"
+attribution_host = "crates/host-daemon/src/host_rpc/runtime/rpc.rs"
+triage_contract = "crates/agent-protocol/src/triage.rs"
+triage_host = "crates/host-daemon/src/triage.rs"
+triage_actions = "crates/agent-core/src/state/operations/triage.rs"
+automation_contract = "crates/agent-protocol/src/automations.rs"
+automation_host = "crates/host-daemon/src/automations.rs"
+automation_runner = "crates/host-daemon/src/host_rpc/service/automations.rs"
+automation_actions = "crates/agent-core/src/state/operations/automations.rs"
+pull_request_contract = "crates/agent-protocol/src/pull_requests.rs"
+pull_request_host = "crates/host-daemon/src/host_rpc/service/pull_requests.rs"
+pull_request_storage = "crates/host-daemon/src/host_rpc/storage/pull_requests.rs"
+pull_request_actions = "crates/agent-core/src/state/operations/pull_requests.rs"
 fresh_context = "crates/agent-core/src/presentation/fresh_context.rs"
 context_transitions = "crates/agent-protocol/src/conversation/fresh_context.rs"
 context_bindings = "crates/host-daemon/src/host_rpc/runtime/bodies.rs"
@@ -163,12 +178,12 @@ windows = { status = "present", detail = "FoldをWin32の見出し・開閉操�
 
 [[implementation]]
 components = ["attempt-fold"]
-phase = "shared"
-next = "共通側に試行の識別・履歴・取得状態を追加し、その行を各UIへ渡す。"
-rust = { status = "missing", detail = "再試行情報はあるが、steerで中断された試行を独立して保持・遅延取得する折りたたみ契約がない。", evidence = ["execution", "models", "timeline"] }
-mac = { status = "missing", detail = "試行単位の折りたたみ・Cut off by a steer行がない。", evidence = ["bridge", "mac_rows"] }
+phase = "local"
+next = "共通の試行行と遅延取得をiPhoneにも接続し、各OSの取得状態表示を揃える。"
+rust = { status = "present", detail = "物理実行と追加指示による内部ターン切替の試行履歴を保存・同期し、旧試行の遅延取得と折りたたみを投影する。通常の協調steerは同一試行を保ち、旧ターンの完了通知は現在の実行を終了させない。", evidence = ["attempt_contract", "attempt_rows", "timeline", "intents"] }
+mac = { status = "partial", detail = "試行単位の開閉とCut off by a steer行、開いた際の本文取得がある。取得中・失敗をまとめ行で表示する部分は不足。", evidence = ["bridge", "mac_rows"] }
 iphone = { status = "missing", detail = "試行単位の折りたたみ・取得中・失敗表示がない。", evidence = ["iphone_history"] }
-windows = { status = "missing", detail = "試行単位の折りたたみ・Cut off by a steer行がない。", evidence = ["bridge", "win_rows"] }
+windows = { status = "partial", detail = "試行単位の開閉とCut off by a steer行、開いた際の本文取得がある。取得中・失敗をまとめ行で表示する部分は不足。", evidence = ["bridge", "win_rows"] }
 
 [[implementation]]
 components = ["minimap"]
@@ -208,9 +223,9 @@ windows = { status = "partial", detail = "ネイティブ要素のアクセシ�
 
 [[implementation]]
 components = ["triage-draft"]
-phase = "extension"
-next = "調査用会話を製品機能として持たせるなら共通の開始データから追加する。"
-rust = { status = "missing", detail = "T3の不具合調査用会話の種別・CLI収集情報の契約がない。", evidence = ["state", "models", "operations"] }
+phase = "local"
+next = "診断用下書きの開始と機械情報・CLIコピーを各UIへ接続する。"
+rust = { status = "present", detail = "認証済みRPCとオフラインCLIが機械情報・調査手順を生成する。coreは元の入力を保ち診断用下書きへ切り替える。会話を自動送信せず、認証情報・本文・ログ本体は収集しない。", evidence = ["triage_contract", "triage_host", "triage_actions"] }
 mac = { status = "missing", detail = "調査用の新規会話見出し・マシン情報・CLIコピーがない。", evidence = ["desktop_root"] }
 iphone = { status = "missing", detail = "調査用新規会話のUIがない。", evidence = ["iphone_screen"] }
 windows = { status = "missing", detail = "調査用の新規会話見出し・マシン情報・CLIコピーがない。", evidence = ["desktop_root"] }
@@ -245,17 +260,17 @@ windows = { status = "present", detail = "長文の開閉、末尾マスク、�
 [[implementation]]
 components = ["user-intent"]
 phase = "restore"
-next = "既存マーカーを使ってネイティブの追加指示アイコンを置く。"
+next = "Windowsにも既存マーカーの追加指示アイコンと説明を接続する。"
 rust = { status = "present", detail = "queued/steerと入力の変更・昇格操作がある。", evidence = ["rows", "queue", "operations"] }
-mac = { status = "partial", detail = "追加指示・キューの文字はある。追加指示の専用アイコンと説明がない。", evidence = ["bridge", "mac_rows"] }
-iphone = { status = "partial", detail = "追加指示・キューの文字はある。追加指示の専用アイコンと説明がない。", evidence = ["iphone_rows"] }
+mac = { status = "present", detail = "追加指示のネイティブアイコン・説明とキュー表示がある。", evidence = ["bridge", "mac_rows", "shared_swift"] }
+iphone = { status = "present", detail = "追加指示のネイティブアイコン・説明とキュー表示がある。", evidence = ["iphone_rows", "shared_swift"] }
 windows = { status = "partial", detail = "queued/steerをCaptionで表示する。追加指示の専用アイコンと説明がない。", evidence = ["win_rows"] }
 
 [[implementation]]
 components = ["attributed-message"]
-phase = "shared"
-next = "発言に送信元の型と参照先を追加してからUIを作る。"
-rust = { status = "missing", detail = "ゲスト・自動実行・代理エージェントなどの送信元を発言に保持する構造がない。通常の親子会話とは別。", evidence = ["items", "models"] }
+phase = "local"
+next = "型付き送信元を各UIの見出しと元エージェント・設定への操作へ接続する。ゲストは今回の対象外。"
+rust = { status = "present", detail = "端末・自動実行・代理エージェント・システムの送信元を発言と履歴に保持する。端末の申告は認証済み送信元で上書きし、読み取り専用子会話には親エージェントを付与する。ゲストは今回の対象外。", evidence = ["attribution", "attribution_host", "items", "rows"] }
 mac = { status = "missing", detail = "送信元別見出し・開閉・設定/元エージェントへの操作がない。", evidence = ["bridge", "mac_rows"] }
 iphone = { status = "missing", detail = "送信元別の発言行がない。", evidence = ["iphone_rows"] }
 windows = { status = "missing", detail = "送信元別の発言行がない。", evidence = ["win_rows"] }
@@ -316,9 +331,9 @@ windows = { status = "partial", detail = "RichEditのファイルチップと画
 
 [[implementation]]
 components = ["context-details"]
-phase = "shared"
-next = "注釈の画像参照の解決・検証を共通側へ追加し、型付き詳細を各UIへ接続する。"
-rust = { status = "partial", detail = "要素HTML/CSS・ソース、レビュー本文/差分、注釈の説明/画像参照を下書き・送信・履歴へ保持する。Context間の画像参照の解決・検証が不足。", evidence = ["context", "context_actions", "state", "body", "rows"] }
+phase = "local"
+next = "参照解決済みの型付き詳細を各UIのチップと詳細表示へ接続する。"
+rust = { status = "present", detail = "要素HTML/CSS・ソース、レビュー本文/差分、注釈の説明/画像参照を下書き・送信・履歴へ保持する。同じ発言内の画像参照を解決/検証し、画像削除時は参照だけを外して注釈本文を保持する。", evidence = ["context", "context_actions", "state", "body", "rows"] }
 mac = { status = "missing", detail = "選択コンテキストのチップ・詳細ポップオーバーがない。", evidence = ["desktop_composer", "mac_rows"] }
 iphone = { status = "missing", detail = "選択コンテキストのチップ・詳細UIがない。", evidence = ["iphone_input", "iphone_rows"] }
 windows = { status = "missing", detail = "選択コンテキストのチップ・詳細UIがない。", evidence = ["desktop_composer", "win_rows"] }
@@ -514,8 +529,8 @@ windows = { status = "missing", detail = "HTML成果物への一般リンクだ�
 
 [[implementation]]
 components = ["mcp-app"]
-phase = "extension"
-next = "Host側のMCP App資源/RPC/権限と共通ライフサイクルから追加する。"
+phase = "deferred"
+next = "利用者の指定により今回の対象外。既存の通常MCPツールは保持する。"
 rust = { status = "missing", detail = "MCPツールのresource_uri等はあるが、App資源取得、権限、表示ライフサイクル、AppとのRPC契約がない。", evidence = ["items", "operations", "requests"] }
 mac = { status = "missing", detail = "MCP Appの埋め込み、全画面、閉じる/再表示、遷移停止がない。", evidence = ["mac_body"] }
 iphone = { status = "missing", detail = "MCP Appの表示UIがない。HTML成果物ビューとは別。", evidence = ["iphone_html", "iphone_content"] }
@@ -551,9 +566,9 @@ windows = { status = "partial", detail = "作業中の行・時間・シマー�
 [[implementation]]
 components = ["thinking"]
 phase = "restore"
-next = "既存Thinkingの投影を共有Swift部品へ接続する。"
+next = "iPhoneでも共通Thinking行を使い、アイコンとグループを揃える。"
 rust = { status = "present", detail = "Thinking行、ラベル、シマー、グループの開閉情報がある。", evidence = ["timeline"] }
-mac = { status = "partial", detail = "思考本文と開閉はある。投影されたthinkingアイコンを汎用行で表示しない。", evidence = ["bridge", "mac_rows"] }
+mac = { status = "present", detail = "思考本文・開閉と投影されたthinkingアイコンを表示する。", evidence = ["bridge", "mac_rows"] }
 iphone = { status = "partial", detail = "思考の詳細表示はある。共通Thinking行と同じアイコン・シマー付きグループを使っていない。", evidence = ["iphone_history", "iphone_activity"] }
 windows = { status = "present", detail = "行のアイコン・ラベル・シマーと開閉を表示する。", evidence = ["bridge", "win_rows"] }
 
@@ -578,9 +593,9 @@ windows = { status = "partial", detail = "グループ・件数・開閉と内�
 [[implementation]]
 components = ["work-entry"]
 phase = "restore"
-next = "既存行アイコンを表示し、各OSが同じ作業投影を使うようにする。"
+next = "iPhoneも共通TurnRowのグループ・通知行を使うようにする。"
 rust = { status = "present", detail = "種類、見出し、時刻、失敗、詳細、関連会話の操作がある。", evidence = ["rows", "body", "timeline"] }
-mac = { status = "partial", detail = "作業の見出し・詳細・時刻と関連会話操作はある。通知等の汎用行で投影されたアイコンを表示しない。", evidence = ["bridge", "mac_rows"] }
+mac = { status = "present", detail = "作業の見出し・詳細・時刻・関連会話操作と、通知等の汎用行の投影されたアイコンを表示する。", evidence = ["bridge", "mac_rows"] }
 iphone = { status = "partial", detail = "個別活動の種類・詳細はある。共通TurnRowのグループ・通知行と同じ投影ではない。", evidence = ["iphone_activity", "iphone_rows"] }
 windows = { status = "present", detail = "行の種類アイコン、見出し、時刻、開閉、失敗、関連操作を表示する。", evidence = ["bridge", "win_rows"] }
 
@@ -1090,9 +1105,9 @@ windows = { status = "present", detail = "会話に対応した端末を開け�
 
 [[implementation]]
 components = ["right-panel"]
-phase = "shared"
-next = "PRの共通データ/操作を追加する。既存ツールを開く構成はUIで扱う。"
-rust = { status = "partial", detail = "差分・ファイル・ブラウザ・デバイス・サイドチャットの状態/操作はある。Pull Requestの専用モデル/操作がない。", evidence = ["panels", "workspace", "operations"] }
+phase = "local"
+next = "PRの共通データ/操作を各UIへ接続する。既存ツールを開く構成はUIで扱う。"
+rust = { status = "present", detail = "差分・ファイル・ブラウザ・デバイス・サイドチャットに加え、Pull Requestの専用モデルと取得・保存/同期・解除操作がある。", evidence = ["panels", "workspace", "pull_request_contract", "pull_request_actions"] }
 mac = { status = "partial", detail = "差分/ファイル/ブラウザ/デバイス/サイドチャットはある。Pull Requestパネルがない。", evidence = ["desktop_workbench", "desktop_details", "desktop_root"] }
 iphone = { status = "partial", detail = "各ツール画面・サイドチャットはある。PRを扱うパネルがない。画面内の配置差は判定しない。", evidence = ["iphone_screen", "iphone_sidechat"] }
 windows = { status = "partial", detail = "差分/ファイル/ブラウザ/デバイス/サイドチャットはある。Pull Requestパネルがない。", evidence = ["desktop_workbench", "desktop_details", "desktop_root"] }
@@ -1144,18 +1159,18 @@ windows = { status = "missing", detail = "会話サーバー一覧、ポート�
 
 [[implementation]]
 components = ["detail-automations"]
-phase = "extension"
-next = "スケジュールと実行管理をHost/共通側から作る。"
-rust = { status = "missing", detail = "自動実行の定義、予定/次回時刻、実行/一時停止/再開の共通契約がない。", evidence = ["operations", "models", "intents"] }
+phase = "local"
+next = "定義・次回時刻・実行結果と保存/実行/一時停止/再開/削除を各UIへ接続する。"
+rust = { status = "present", detail = "Hostが単発・間隔・曜日/固定UTCオフセットの予定を永続化し、通常の会話キューへ送信する。手動実行・停止/再開・編集/削除と、再起動後の結果照合・不明送信の同一ID再試行がある。", evidence = ["automation_contract", "automation_host", "automation_runner", "automation_actions"] }
 mac = { status = "missing", detail = "会話の自動実行一覧・編集/実行/停止がない。", evidence = ["desktop_details"] }
 iphone = { status = "missing", detail = "自動実行一覧と操作がない。", evidence = ["iphone_screen"] }
 windows = { status = "missing", detail = "会話の自動実行一覧・編集/実行/停止がない。", evidence = ["desktop_details"] }
 
 [[implementation]]
 components = ["detail-prs"]
-phase = "extension"
-next = "PR連携の取得操作と共通モデルを追加する。"
-rust = { status = "missing", detail = "会話に関連するPRの番号/状態/一覧・取得操作の型がない。通常のURL表示とは別。", evidence = ["operations", "models"] }
+phase = "local"
+next = "現在ブランチのPRと保存済みリンクの一覧・更新・追加・解除を各UIへ接続する。"
+rust = { status = "present", detail = "HostのGitHub CLIから現在ブランチとリンク先PRの番号・状態・ドラフト・ブランチ等を取得する。リンクは会話と同期/保存し、更新失敗時は既存情報を保持する。coreに一覧/更新・追加/解除操作がある。", evidence = ["pull_request_contract", "pull_request_host", "pull_request_storage", "pull_request_actions"] }
 mac = { status = "missing", detail = "会話詳細の現在PR・追加PR一覧がない。", evidence = ["desktop_details"] }
 iphone = { status = "missing", detail = "会話詳細のPR一覧がない。", evidence = ["iphone_screen"] }
 windows = { status = "missing", detail = "会話詳細の現在PR・追加PR一覧がない。", evidence = ["desktop_details"] }
@@ -1180,8 +1195,8 @@ windows = { status = "partial", detail = "巻戻し確認・デバイス設定�
 
 [[implementation]]
 components = ["guest-sharing"]
-phase = "extension"
-next = "Host側の共有権限/期限と共通のゲスト会話契約を先に追加する。"
+phase = "deferred"
+next = "利用者の指定により今回の対象外。"
 rust = { status = "missing", detail = "ゲスト共有リンク、期限/停止、送信待ちメッセージと承認/破棄の契約がない。Host端末の認証/ペアリングとは別。", evidence = ["operations", "requests", "models"] }
 mac = { status = "missing", detail = "ゲスト共有ダイアログと保留メッセージ操作がない。", evidence = ["desktop_root", "desktop_requests"] }
 iphone = { status = "missing", detail = "ゲスト共有と保留メッセージのUIがない。", evidence = ["iphone_screen", "iphone_requests"] }

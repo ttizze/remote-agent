@@ -50,6 +50,7 @@ fn submit() -> Event {
         Command::Submit {
             id: Uuid::from_u128(1).to_string().into(),
             content: InputContent {
+                author: None,
                 fresh_context: false,
                 parts: vec![Part::Text {
                     text: "hello".into(),

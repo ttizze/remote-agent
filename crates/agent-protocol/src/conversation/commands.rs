@@ -115,6 +115,7 @@ fn edit_input(state: &State, id: &ClientInputId, parts: Vec<InputPart>) -> Step 
     if let Err(reason) = InputPart::validate_contexts(&parts) {
         return reject(reason);
     }
+    let parts = InputPart::with_context_images(parts);
     let Some(input) = queued(state, id) else {
         return reject("input is no longer queued");
     };
@@ -470,6 +471,10 @@ fn submit(
     if let Err(reason) = InputPart::validate_contexts(&content.parts) {
         return reject(reason);
     }
+    let content = InputContent {
+        parts: InputPart::with_context_images(content.parts),
+        ..content
+    };
     if !content.fresh_context
         && content
             .model

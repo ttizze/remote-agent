@@ -201,6 +201,7 @@ impl Operation for StartSubmission {
                 initial: Some((
                     self.client_user_message_id.clone(),
                     agent_protocol::conversation::InputContent {
+                        author: None,
                         fresh_context: self.draft.fresh_context,
                         parts: submission_input(
                             &self.draft.text,
@@ -274,6 +275,7 @@ impl Operation for SendSubmission {
                 command: agent_protocol::conversation::Command::Submit {
                     id: self.client_user_message_id.clone(),
                     content: agent_protocol::conversation::InputContent {
+                        author: None,
                         fresh_context: self.draft.fresh_context,
                         parts: submission_input(
                             &self.draft.text,

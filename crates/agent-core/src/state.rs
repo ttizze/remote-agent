@@ -15,6 +15,9 @@ use std::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", uniffi(default = None))]
+    pub triage: Option<Box<agent_protocol::triage::Context>>,
     #[serde(default)]
     #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub fresh_context: bool,
@@ -39,6 +42,7 @@ pub struct Draft {
 fn merge_recovered_draft(recovered: &Draft, current: &Draft) -> Draft {
     let mut draft = current.clone();
     draft.fresh_context |= recovered.fresh_context;
+    draft.triage = draft.triage.or_else(|| recovered.triage.clone());
     let mut text = recovered.text.clone();
     append_transcript(&mut text, &current.text);
     draft.text = text;
@@ -906,6 +910,9 @@ fn reduce_intent(
         StartTerminal, StartAccountTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ResolveFile, ResolveFileReference, ReadFile,
         ReadFileOpenCapabilities, OpenInEditor,
+        PullRequests,
+        PrepareTriage,
+        Automations,
         SaveFile, WriteWorkspaceFile, ReviewWorkspace, ChangeWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree,
         ListAgents, AddProject, ScanProjects, ImportProjects, CloneProject, ReadProjectClones, ChangeProjectClone, RetryPreparation,
@@ -915,6 +922,12 @@ fn reduce_intent(
         LoadHostName, LoadHostManagement, LoadModels, ReadModelSettings,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
+        Intent::ReadAttempt { thread_id, attempt } => {
+            let effects = previous.sessions.conversations.get(&thread_id).into_iter()
+                .flat_map(|thread| crate::presentation::conversation::attempts::deferred_attempt_reads(thread, attempt))
+                .map(Effect::execute).collect();
+            return (next, effects);
+        }
         Intent::UploadFeedback(params) => {
             if params.storage_scope != previous.connection.storage_scope { return (next,Vec::new()); }
             let key = op::OperationKey::Feedback {session:params.thread_id.clone()};
@@ -1107,8 +1120,9 @@ fn reduce_intent(
             {
                 let removed = draft.attachments.remove(index);
                 if !draft.attachments.iter().any(|attachment| attachment.path == removed.path) {
-                    draft.contexts.retain(|context| !matches!(&context.content,
-                        agent_protocol::context::ContextContent::SnapShot { image_path, .. } if image_path == &removed.path));
+                    let ids = draft.contexts.iter().filter(|context| context.content.image_path() == Some(removed.path.as_str()))
+                        .map(|context| context.id.clone()).collect::<Vec<_>>();
+                    draft.contexts = agent_protocol::context::remove_contexts(&draft.contexts, &ids);
                 }
             }
         }

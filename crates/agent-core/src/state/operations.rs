@@ -44,6 +44,13 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    ReadAttempt {
+        thread_id: crate::session::SessionRef,
+        attempt: uuid::Uuid,
+    },
+    Automations(Automations),
+    PrepareTriage(PrepareTriage),
+    PullRequests(PullRequests),
     Stash {
         storage_scope: String,
         thread_id: DraftKey,
@@ -349,6 +356,13 @@ impl Intent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {
+    Automations {
+        session: crate::session::SessionRef,
+    },
+    Triage,
+    PullRequests {
+        session: crate::session::SessionRef,
+    },
     Feedback {
         session: crate::session::SessionRef,
     },
@@ -650,6 +664,12 @@ mod project_clone;
 pub use project_clone::*;
 mod feedback;
 pub use feedback::*;
+mod pull_requests;
+pub use pull_requests::*;
+mod triage;
+pub use triage::*;
+mod automations;
+pub use automations::*;
 mod submission;
 pub use submission::*;
 

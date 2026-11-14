@@ -31,6 +31,7 @@ fn request(cwd: &Path) -> Call {
         initial: Some((
             Uuid::from_u128(42).to_string().into(),
             InputContent {
+                author: None,
                 fresh_context: false,
                 parts: vec![op::Input::Text {
                     text: "Build the requested feature".into(),
@@ -369,6 +370,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
             command: Command::Submit {
                 id: operation.to_string().into(),
                 content: InputContent {
+                    author: None,
                     fresh_context: false,
                     parts: vec![op::Input::Text {
                         text: "continue after rewind".into(),
@@ -475,6 +477,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
                 command: Command::Submit {
                     id: input.to_string().into(),
                     content: InputContent {
+                        author: None,
                         fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "prepare another turn".into(),
@@ -1032,6 +1035,7 @@ async fn stopped_checkout(retry_existing: bool) {
             command: Command::Submit {
                 id: input.to_string().into(),
                 content: InputContent {
+                    author: None,
                     fresh_context: false,
                     parts: vec![op::Input::Text {
                         text: "new input after Stop".into(),
@@ -1262,6 +1266,7 @@ async fn cancellation_between_stages_stops_an_async_script_before_discarding_its
                     command: Command::Submit {
                         id: input.clone(),
                         content: InputContent {
+                author: None,
                 fresh_context: false,
                             parts: vec![op::Input::Text {
                                 text: "do work".into(),

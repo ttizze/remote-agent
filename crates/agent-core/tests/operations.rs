@@ -163,6 +163,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                 command: decision::Command::Submit {
                     id,
                     content: decision::InputContent {
+                        author: None,
                         fresh_context: false,
                         parts: items,
                         model: serde_json::from_value(command["model"].clone()).unwrap(),

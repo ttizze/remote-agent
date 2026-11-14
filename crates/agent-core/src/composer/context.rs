@@ -24,8 +24,7 @@ pub(crate) fn change(
             }
         }
         ContextAction::Remove { id } => {
-            next.retain(|item| item.id != id);
-            return Ok(next);
+            return Ok(agent_protocol::context::remove_contexts(current, &[id]));
         }
         ContextAction::Comment { id, text } => {
             let item = next

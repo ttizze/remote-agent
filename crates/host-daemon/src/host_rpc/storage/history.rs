@@ -207,6 +207,7 @@ pub(super) fn write_history(
     for native in response.thread.turns.iter().flatten() {
         state.counters.turn += 1;
         let turn = Turn {
+            attempts: Vec::new(),
             fresh_context: false,
             id: unique(native.id.as_str(), &mut seen_turns, namespace).into(),
             ordinal: state.counters.turn,
@@ -274,6 +275,8 @@ pub(super) fn write_history(
                 status: native.status,
                 deferred: native.is_deferred(),
                 input: native.client_input_id.clone(),
+                author: native.author.clone(),
+                attempt: native.attempt,
                 body: native.body().clone(),
             };
             rows::write(

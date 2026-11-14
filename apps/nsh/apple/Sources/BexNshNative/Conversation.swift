@@ -16,6 +16,7 @@ struct ConversationButton: Decodable, Equatable {
 }
 
 struct NativeConversationRow: Decodable, Equatable {
+    var attemptFold: Bool? = nil
     let id: String
     let user: Bool
     let gap: Double
@@ -668,7 +669,7 @@ private struct MacConversationRow: View {
             } else if let work = headers.first, work.action == "item" || work.action == "group" {
                 ConversationWork(
                     title: work.title,
-                    symbol: MessageAttributes.symbol(row.icon) ?? "chevron.left.forwardslash.chevron.right",
+                    symbol: row.attemptFold == true ? nil : MessageAttributes.symbol(row.icon) ?? "chevron.left.forwardslash.chevron.right",
                     expanded: Binding(get: { work.icon == "chevronDown" }, set: { _ in emit(work.action) }),
                     active: work.shimmer != nil,
                     accessibilityLabel: work.accessibilityLabel
@@ -678,10 +679,14 @@ private struct MacConversationRow: View {
             } else if row.user || !footer.isEmpty || headers.isEmpty && row.icon == nil {
                 message
             } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(headers, id: \.action) { action($0) }
-                    if !row.parts.isEmpty {
-                        text
+                HStack(alignment: .top, spacing: 8) {
+                    if let symbol = MessageAttributes.symbol(row.icon) {
+                        Image(systemName: symbol).font(.system(size: 14)).foregroundStyle(.secondary)
+                            .frame(width: 16, height: 20).accessibilityHidden(true)
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(headers, id: \.action) { action($0) }
+                        if !row.parts.isEmpty { text }
                     }
                 }
             }
@@ -701,10 +706,10 @@ private struct MacConversationRow: View {
                             expandTitle: label("expand"), collapseTitle: label("collapse"), identifier: row.id,
                             expand: { emit("browse") }) {
             if row.queued {
-                Text(verbatim: label("queued")).font(.caption).foregroundStyle(.secondary)
+                ConversationInputMarker(title: label("queued"), description: label("queuedDescription"), steer: false)
             }
             if row.steer {
-                Text(verbatim: label("steer")).font(.caption).foregroundStyle(.secondary)
+                ConversationInputMarker(title: label("steer"), description: label("steerDescription"), steer: true)
             }
         } images: {
             if row.user, !row.images.isEmpty {

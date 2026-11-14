@@ -3,6 +3,11 @@ use agent_protocol::context::*;
 use agent_protocol::ids::{ItemId, TurnId};
 
 use crate::{models::*, session::*};
+use agent_protocol::automations::{
+    Action as AutomationAction, Automation, Definition as AutomationDefinition,
+    Reply as AutomationDetails, Request as Automations, Run as AutomationRun,
+    RunState as AutomationRunState, Schedule as AutomationSchedule,
+};
 use agent_protocol::editors::*;
 use agent_protocol::execution::{BackgroundOutcome, BackgroundReport, BackgroundTaskKind};
 use agent_protocol::feedback::*;
@@ -17,6 +22,150 @@ use agent_protocol::snapshot::*;
 use agent_protocol::workspace::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
+#[uniffi::remote(Record)]
+struct Automations {
+    pub session: SessionRef,
+    pub action: AutomationAction,
+}
+#[uniffi::remote(Enum)]
+enum AutomationAction {
+    Retry {
+        id: uuid::Uuid,
+    },
+    List,
+    Save {
+        definition: Box<AutomationDefinition>,
+    },
+    RunNow {
+        id: uuid::Uuid,
+    },
+    Pause {
+        id: uuid::Uuid,
+    },
+    Resume {
+        id: uuid::Uuid,
+    },
+    Remove {
+        id: uuid::Uuid,
+    },
+}
+#[uniffi::remote(Record)]
+struct AutomationDefinition {
+    pub id: uuid::Uuid,
+    pub session: SessionRef,
+    pub title: String,
+    pub prompt: String,
+    pub model: Option<ModelRef>,
+    pub effort: Option<String>,
+    pub service_tier: Option<String>,
+    pub schedule: AutomationSchedule,
+    pub enabled: bool,
+}
+#[uniffi::remote(Enum)]
+enum AutomationSchedule {
+    Once {
+        at_ms: i64,
+    },
+    Interval {
+        every_ms: u64,
+    },
+    FixedTime {
+        minute_of_day: u16,
+        weekdays: Vec<u8>,
+        utc_offset_minutes: i16,
+    },
+}
+#[uniffi::remote(Enum)]
+enum AutomationRunState {
+    Sending,
+    Accepted,
+    Unknown,
+    Failed { message: String },
+}
+#[uniffi::remote(Record)]
+struct AutomationRun {
+    pub id: uuid::Uuid,
+    pub at_ms: i64,
+    pub state: AutomationRunState,
+}
+#[uniffi::remote(Record)]
+struct Automation {
+    pub definition: AutomationDefinition,
+    pub next_at_ms: Option<i64>,
+    pub last_run: Option<AutomationRun>,
+}
+#[uniffi::remote(Record)]
+struct AutomationDetails {
+    pub automations: Vec<Automation>,
+}
+use agent_protocol::triage::{Context as TriageContext, Prepare as PrepareTriage};
+#[uniffi::remote(Record)]
+struct PrepareTriage {
+    pub source: Option<SessionRef>,
+    pub description: String,
+}
+#[uniffi::remote(Record)]
+struct TriageContext {
+    pub machine_name: String,
+    pub cli_command: String,
+    pub id: String,
+    pub directory: String,
+    pub facts_path: String,
+    pub playbook_path: String,
+    pub source: Option<SessionRef>,
+    pub version: String,
+    pub revision: Option<String>,
+}
+use agent_protocol::attribution::Author as MessageAuthor;
+#[uniffi::remote(Enum)]
+enum MessageAuthor {
+    Device {
+        id: String,
+    },
+    Automation {
+        id: uuid::Uuid,
+        name: String,
+    },
+    Agent {
+        session: SessionRef,
+        name: Option<String>,
+    },
+    System {
+        label: String,
+    },
+}
+use agent_protocol::pull_requests::{
+    Action as PullRequestAction, PullRequest, Reply as PullRequestDetails, Request as PullRequests,
+};
+#[uniffi::remote(Record)]
+struct PullRequests {
+    pub session: SessionRef,
+    pub action: PullRequestAction,
+}
+#[uniffi::remote(Enum)]
+enum PullRequestAction {
+    Read { refresh: bool },
+    Link { url: String },
+    Unlink { url: String },
+}
+#[uniffi::remote(Record)]
+struct PullRequest {
+    pub url: String,
+    pub number: u64,
+    pub title: String,
+    pub state: PullRequestState,
+    pub draft: bool,
+    pub head: String,
+    pub base: String,
+    pub updated_at: String,
+    pub error: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct PullRequestDetails {
+    pub linked: Vec<PullRequest>,
+    pub current: Vec<PullRequest>,
+    pub current_error: Option<String>,
+}
 #[uniffi::remote(Record)]
 struct UploadFeedback {
     pub id: String,
@@ -1187,6 +1336,9 @@ struct ReviewContext {
 }
 #[uniffi::remote(Enum)]
 enum ContextContent {
+    Image {
+        path: String,
+    },
     SnapShot {
         image_path: String,
         source: SnapShotSource,

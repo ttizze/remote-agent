@@ -1,5 +1,6 @@
 mod account_usage;
 mod apns;
+mod automations;
 pub mod browser;
 mod dictation;
 mod editors;
@@ -12,6 +13,7 @@ mod project_clone;
 mod projects;
 pub mod providers;
 mod terminals;
+pub mod triage;
 mod workspace_files;
 mod workspace_review;
 mod worktrees;

@@ -202,6 +202,7 @@ pub fn replica_at(response: ThreadResponse, generation: u64, sequence: u64) -> r
     for (index, turn) in thread.turns.into_iter().flatten().enumerate() {
         let ordinal = index as u64 + 1;
         let record = records::Turn {
+            attempts: Vec::new(),
             fresh_context: turn.fresh_context,
             id: turn.id.clone(),
             ordinal,
@@ -312,6 +313,7 @@ fn input_row(
             position,
             state,
             content: decision::InputContent {
+                author: None,
                 fresh_context: input.fresh_context,
                 parts: input.input,
                 model: input.model,

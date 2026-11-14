@@ -595,6 +595,7 @@ fn import_turn(
     } else {
         state.counters.turn += 1;
         Turn {
+            attempts: Vec::new(),
             fresh_context: false,
             id: if *source == write.id && !state.turns.contains_key(&native.id) {
                 native.id.clone()
@@ -701,6 +702,8 @@ fn import_turn(
                 status: native.status,
                 deferred: native.is_deferred(),
                 input: native.client_input_id.clone(),
+                author: native.author.clone(),
+                attempt: native.attempt,
                 body: native.body().clone(),
             };
             rows::write(

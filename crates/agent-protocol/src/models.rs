@@ -91,6 +91,8 @@ fn project_membership<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_requests: Vec<crate::pull_requests::PullRequest>,
     pub history_read_state: Option<crate::session::HistoryReadState>,
     pub capabilities: Option<crate::session::Capabilities>,
     /// Effective Host admission, distinct from the provider's static capability.
@@ -138,6 +140,8 @@ pub struct Thread {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<crate::conversation::ExecutionAttempt>,
     pub id: crate::ids::TurnId,
     /// This turn starts the provider context visible to subsequent turns.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

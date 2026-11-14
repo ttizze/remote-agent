@@ -709,6 +709,8 @@ mod tests {
         states: Vec<crate::models::SubagentState>,
     ) -> Arc<Item> {
         Arc::new(Item {
+            attempt: None,
+            author: None,
             id: id.into(),
             status,
             client_input_id: None,

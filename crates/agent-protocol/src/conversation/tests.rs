@@ -37,6 +37,7 @@ fn state() -> State {
 
 fn content(follow_up: FollowUp) -> InputContent {
     InputContent {
+        author: None,
         fresh_context: false,
         parts: vec![InputPart::Text {
             text: "hello".into(),
@@ -133,6 +134,159 @@ fn running() -> (State, Attempt) {
         context(2),
     );
     (state.apply(&delivered.changes), attempt)
+}
+
+#[test]
+fn a_native_turn_restarted_by_steering_retains_the_old_work_and_fences_its_late_completion() {
+    let (mut state, attempt) = running();
+    let event = |native: &str, observation| Event::Provider {
+        attempt: attempt.id,
+        native_turn: Some(native.into()),
+        native_items: vec![],
+        observation,
+    };
+    state = state.apply(
+        &step(
+            &state,
+            event(
+                "first",
+                Observation::Item {
+                    id: "old-work".into(),
+                    status: ItemStatus::Completed,
+                    deferred: false,
+                    body: ItemBody::Reasoning {
+                        content: vec!["old".into()],
+                        summary: vec![],
+                    },
+                },
+            ),
+            context(3),
+        )
+        .changes,
+    );
+    let steer = submit(&state, 4, FollowUp::Steer);
+    let [Action::Deliver { id, action, .. }] = &steer.actions[..] else {
+        panic!("steer")
+    };
+    state = state.apply(&steer.changes);
+    let ack = step(
+        &state,
+        Event::Delivered {
+            id: id.clone(),
+            action: *action,
+            native_turn: Some("second".into()),
+        },
+        context(5),
+    );
+    state = state.apply(&ack.changes);
+    let history = &state.turns[&attempt.turn].attempts;
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history[0].state,
+        AttemptState::Superseded { by_steer: true }
+    );
+    assert_eq!(history[1].state, AttemptState::Running);
+    assert_eq!(history[0].execution, history[1].execution);
+    assert_ne!(history[0].id, history[1].id);
+    assert_eq!(
+        state.items[&ItemId::from("old-work")].attempt,
+        Some(history[0].id)
+    );
+    assert_eq!(
+        state.items[&ItemId::from(id.to_string())].attempt,
+        Some(history[1].id)
+    );
+    assert_eq!(
+        step(&state, event("first", Observation::Completed), context(6)),
+        Step::default()
+    );
+    let second = history[1].id;
+    state = state.apply(
+        &step(
+            &state,
+            event(
+                "second",
+                Observation::Item {
+                    id: "new-work".into(),
+                    status: ItemStatus::Completed,
+                    deferred: false,
+                    body: ItemBody::Reasoning {
+                        content: vec!["new".into()],
+                        summary: vec![],
+                    },
+                },
+            ),
+            context(7),
+        )
+        .changes,
+    );
+    assert_eq!(state.items[&ItemId::from("new-work")].attempt, Some(second));
+    state = state.apply(&step(&state, event("second", Observation::Completed), context(8)).changes);
+    assert_eq!(
+        state.turns[&attempt.turn].attempts[1].state,
+        AttemptState::Completed
+    );
+}
+
+#[test]
+fn context_images_are_admitted_as_real_provider_inputs_once_and_rejected_before_effects_when_invalid()
+ {
+    let input = crate::context::MessageContext {
+        id: "image".into(),
+        label: "Screenshot".into(),
+        content: crate::context::ContextContent::Image {
+            path: "/capture.png".into(),
+        },
+    };
+    let content = InputContent {
+        parts: vec![InputPart::Context {
+            context: Box::new(input),
+        }],
+        ..content(FollowUp::Queue)
+    };
+    let result = command(
+        &state(),
+        10,
+        Command::Submit {
+            id: Uuid::from_u128(10).to_string().into(),
+            content,
+        },
+    );
+    assert_eq!(result.outcome, Outcome::Accepted);
+    let [Action::Deliver { id, .. }] = &result.actions[..] else {
+        panic!("deliver admitted image")
+    };
+    let admitted = state().apply(&result.changes);
+    let input = &admitted.inputs[id].content;
+    assert_eq!(
+        input
+            .parts
+            .iter()
+            .filter(|part| matches!(part, InputPart::LocalImage { path } if path == "/capture.png"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        InputPart::with_context_images(input.parts.clone()),
+        input.parts
+    );
+    let mut invalid = input.clone();
+    let InputPart::Context { context } = &mut invalid.parts[0] else {
+        panic!("context")
+    };
+    context.content = crate::context::ContextContent::Image {
+        path: "//server/share/capture.png".into(),
+    };
+    let rejected = command(
+        &state(),
+        11,
+        Command::Submit {
+            id: Uuid::from_u128(11).to_string().into(),
+            content: invalid,
+        },
+    );
+    assert!(matches!(rejected.outcome, Outcome::Rejected(_)));
+    assert!(rejected.actions.is_empty());
 }
 
 #[test]
@@ -680,6 +834,11 @@ fn steering_joins_the_current_attempt_without_overtaking_queued_turns() {
     assert_eq!(state.turns.len(), 1);
     assert_eq!(state.items.len(), 2);
     assert_eq!(state.inputs.len(), 1);
+    assert_eq!(state.turns[&attempt.turn].attempts.len(), 1);
+    assert_eq!(
+        state.turns[&attempt.turn].attempts[0].state,
+        AttemptState::Running
+    );
 }
 
 #[test]
@@ -3773,6 +3932,15 @@ fn capacity_retries_have_five_exact_delays_and_keep_one_canonical_turn() {
         state.apply(&final_failure.changes).turns[&attempt.turn].state,
         TurnState::Failed(_)
     ));
+    let finished = state.apply(&final_failure.changes);
+    let history = &finished.turns[&attempt.turn].attempts;
+    assert_eq!(history.len(), 6);
+    assert!(
+        history[..5]
+            .iter()
+            .all(|attempt| attempt.state == AttemptState::Superseded { by_steer: false })
+    );
+    assert_eq!(history[5].state, AttemptState::Failed);
 }
 #[test]
 fn other_errors_and_provider_owned_retries_never_start_a_host_capacity_retry() {
@@ -4472,6 +4640,10 @@ fn another_compact_promotion_updates_the_selection_without_a_second_native_inter
     assert!(again.actions.is_empty());
     state = state.apply(&again.changes);
     let ended = observe(&state, &compact, Observation::Interrupted, 206);
+    assert_eq!(
+        state.apply(&ended.changes).turns[&compact.turn].attempts[0].state,
+        AttemptState::Superseded { by_steer: true }
+    );
     assert!(matches!(&ended.actions[..],[Action::Deliver {id,..}] if *id==selected(203)));
     assert!(matches!(
         state.apply(&ended.changes).inputs[&selected(202)].state,

@@ -841,6 +841,7 @@ pub(super) mod tests {
                 initial: Some((
                     input.to_string().into(),
                     InputContent {
+                        author: None,
                         fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "keep this input".into(),

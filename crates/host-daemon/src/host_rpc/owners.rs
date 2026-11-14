@@ -65,6 +65,7 @@ enum Input {
 }
 
 pub(super) enum Write {
+    PullRequests(super::storage::pull_requests::Update),
     Setup {
         generation: Uuid,
         update: super::storage::workspace::SetupChange,
@@ -336,6 +337,7 @@ async fn run(
                 let records = storage.clone();
                 let scope = target.clone();
                 let result = tokio::task::spawn_blocking(move || match *write {
+                    Write::PullRequests(update) => records.pull_requests(&scope, update),
                     Write::Setup {
                         generation,
                         update,

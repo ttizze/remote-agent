@@ -1,5 +1,27 @@
 import SwiftUI
 
+public struct ConversationInputMarker: View {
+    let title: String
+    let description: String
+    let steer: Bool
+
+    public init(title: String, description: String, steer: Bool) {
+        self.title = title; self.description = description; self.steer = steer
+    }
+
+    public var body: some View {
+        HStack(spacing: 4) {
+            if steer { Image(systemName: "arrow.turn.down.right") }
+            Text(verbatim: title)
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        .accessibilityHint(Text(verbatim: description))
+        #if os(macOS)
+            .help(Text(verbatim: description))
+        #endif
+    }
+}
+
 /// Native conversation components shared by the Apple clients.
 public struct ConversationMessage<Images: View, Content: View, Actions: View, Notices: View, Markers: View>: View {
     let user: Bool
@@ -385,14 +407,14 @@ public struct ConversationPreparation<Header: View, Steps: View, Actions: View, 
 
 public struct ConversationWork<Content: View>: View {
     let title: String
-    let symbol: String
+    let symbol: String?
     let active: Bool
     let accessibilityLabel: String?
     @Binding var expanded: Bool
     let content: Content
     public init(
         title: String,
-        symbol: String,
+        symbol: String?,
         expanded: Binding<Bool>,
         active: Bool = false,
         accessibilityLabel: String? = nil,
@@ -406,7 +428,7 @@ public struct ConversationWork<Content: View>: View {
         VStack(alignment: .leading, spacing: 8) {
             Button { expanded.toggle() } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: symbol).font(.system(size: 16)).frame(width: 24, height: 24)
+                    if let symbol { Image(systemName: symbol).font(.system(size: 16)).frame(width: 24, height: 24) }
                     NativeShimmer(label: Text(verbatim: title).lineLimit(1), active: active)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")

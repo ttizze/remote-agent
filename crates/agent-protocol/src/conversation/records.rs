@@ -54,6 +54,8 @@ pub struct WorkspacePreparation {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Details {
+    #[serde(default)]
+    pub pull_requests: Vec<crate::pull_requests::PullRequest>,
     pub steerable: bool,
     pub skips_compaction: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,6 +178,8 @@ impl From<decision::PendingInput> for Input {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
+    #[serde(default)]
+    pub attempts: Vec<decision::ExecutionAttempt>,
     pub id: TurnId,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fresh_context: bool,
@@ -213,6 +217,7 @@ impl From<decision::Turn> for Turn {
         };
         Self {
             id: turn.id,
+            attempts: turn.attempts,
             fresh_context: turn.fresh_context,
             ordinal: turn.ordinal,
             provider: turn.provider,
@@ -245,6 +250,8 @@ impl From<decision::Item> for Item {
     fn from(item: decision::Item) -> Self {
         let mut content = crate::models::Item::new(item.id.clone(), item.status, item.body);
         content.client_input_id = item.input;
+        content.author = item.author;
+        content.attempt = item.attempt;
         if item.deferred {
             content.defer();
         }

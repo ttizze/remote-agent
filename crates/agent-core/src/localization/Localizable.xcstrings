@@ -1,6 +1,18 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "Cut off by a steer": {
+      "localizations": {
+        "ja": { "stringUnit": { "state": "translated", "value": "追加の指示で中断" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Cut off by a steer" } }
+      }
+    },
+    "Superseded attempt": {
+      "localizations": {
+        "ja": { "stringUnit": { "state": "translated", "value": "以前の試行" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Superseded attempt" } }
+      }
+    },
     "会話の下書きを開いてから送信してください。": {
       "localizations": {
         "ja": {

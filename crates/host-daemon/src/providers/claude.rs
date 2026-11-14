@@ -636,6 +636,8 @@ impl Claude {
                     }
                 },
                 user: Some(Item {
+                    attempt: None,
+                    author: None,
                     id: id.clone().into(),
                     status: ItemStatus::Unknown,
                     client_input_id: Some(client_id.into()),
@@ -745,6 +747,8 @@ impl Claude {
         };
         let turn_id: agent_protocol::ids::TurnId = params.client_user_message_id.as_str().into();
         let user = Item {
+            attempt: None,
+            author: None,
             id: params.client_user_message_id.as_str().into(),
             status: ItemStatus::Unknown,
             client_input_id: Some(params.client_user_message_id.clone()),

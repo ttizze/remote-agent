@@ -256,6 +256,7 @@ mod tests {
                     id: "preparing".into(),
                     position: 1,
                     content: InputContent {
+                        author: None,
                         fresh_context: false,
                         parts: vec![],
                         model: None,
@@ -274,6 +275,7 @@ mod tests {
                 state.turns.insert(
                     "running".into(),
                     Turn {
+                        attempts: Vec::new(),
                         fresh_context: false,
                         id: "running".into(),
                         ordinal: 1,
@@ -404,6 +406,7 @@ mod tests {
                 id: "failed".into(),
                 position: 1,
                 content: InputContent {
+                    author: None,
                     fresh_context: false,
                     parts: vec![InputPart::Text {
                         text: "work".into(),

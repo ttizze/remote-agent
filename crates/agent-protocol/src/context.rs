@@ -61,6 +61,11 @@ pub(crate) fn bounded(text: &str, limit: usize) -> bool {
 fn identifier(value: &str) -> bool {
     !value.trim().is_empty() && bounded(value, 512)
 }
+fn snapshot_path(value: &str) -> bool {
+    crate::paths::is_absolute_host_path(value)
+        && !crate::paths::is_network_host_path(value)
+        && bounded(value, 2_048)
+}
 
 impl AssistantCitation {
     pub fn from_selection(
@@ -262,6 +267,9 @@ pub struct ReviewContext {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ContextContent {
+    Image {
+        path: String,
+    },
     SnapShot {
         image_path: String,
         source: crate::snapshot::SnapShotSource,
@@ -317,8 +325,19 @@ pub enum ContextContent {
 }
 
 impl ContextContent {
+    pub fn image_path(&self) -> Option<&str> {
+        match self {
+            Self::SnapShot { image_path, .. } | Self::Image { path: image_path }
+                if snapshot_path(image_path) =>
+            {
+                Some(image_path)
+            }
+            _ => None,
+        }
+    }
     pub fn kind(&self) -> &str {
         match self {
+            Self::Image { .. } => "image",
             Self::SnapShot { .. } => "snapshot",
             Self::Summary { kind } => kind,
             Self::Citation { .. } => "citation",
@@ -350,8 +369,11 @@ impl MessageContext {
             return Err("invalid context identity or label");
         }
         match &self.content {
+            ContextContent::Image { path } if !snapshot_path(path) => {
+                Err("invalid context image path")
+            }
             ContextContent::SnapShot { image_path, source } => {
-                if !crate::paths::is_absolute_host_path(image_path) || !bounded(image_path, 2_048) {
+                if !snapshot_path(image_path) {
                     return Err("invalid snapshot image path");
                 }
                 source.validate()
@@ -517,13 +539,26 @@ pub fn user_message(
     ItemBody::UserMessage { text, content }
 }
 
+/// Resolve a screenshot from the same message; a reference cannot name an
+/// arbitrary file context or another reference.
+pub fn screenshot_path<'a>(contexts: &'a [MessageContext], id: &str) -> Option<&'a str> {
+    let context = contexts.iter().find(|context| context.id == id)?;
+    let source = match &context.content {
+        ContextContent::Preview { preview } => contexts
+            .iter()
+            .find(|context| Some(&context.id) == preview.screenshot_context_id.as_ref())?,
+        _ => context,
+    };
+    source.content.image_path()
+}
+
 pub fn validate_contexts<'a>(
     contexts: impl IntoIterator<Item = &'a MessageContext>,
 ) -> Result<(), &'static str> {
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = std::collections::BTreeMap::new();
     let mut bytes = 0;
     for context in contexts {
-        if !ids.insert(context.id.as_str()) {
+        if ids.insert(context.id.as_str(), context).is_some() {
             return Err("duplicate context identity");
         }
         bytes += context.validate()?;
@@ -531,12 +566,108 @@ pub fn validate_contexts<'a>(
             return Err("context capacity exceeded");
         }
     }
+    for context in ids.values() {
+        if let ContextContent::Preview { preview } = &context.content
+            && let Some(id) = &preview.screenshot_context_id
+            && !ids.get(id.as_str()).is_some_and(|source| {
+                matches!(
+                    source.content,
+                    ContextContent::SnapShot { .. } | ContextContent::Image { .. }
+                )
+            })
+        {
+            return Err("annotation screenshot must reference a screenshot in the same message");
+        }
+    }
     Ok(())
+}
+
+pub fn remove_contexts(contexts: &[MessageContext], ids: &[String]) -> Vec<MessageContext> {
+    contexts
+        .iter()
+        .filter(|context| !ids.contains(&context.id))
+        .cloned()
+        .map(|mut context| {
+            if let ContextContent::Preview { preview } = &mut context.content
+                && preview
+                    .screenshot_context_id
+                    .as_ref()
+                    .is_some_and(|id| ids.contains(id))
+            {
+                preview.screenshot_context_id = None;
+            }
+            context
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn annotation() -> MessageContext {
+        MessageContext {
+            id: "note".into(),
+            label: "Annotation".into(),
+            content: ContextContent::Preview {
+                preview: PreviewContext {
+                    annotation_id: "annotation".into(),
+                    page_url: "https://example.test".into(),
+                    page_title: None,
+                    comment: "This button".into(),
+                    target_summary: String::new(),
+                    style_changes: vec![],
+                    elements: vec![],
+                    element_ids: vec![],
+                    region_count: None,
+                    stroke_count: None,
+                    style_change_details: vec![],
+                    screenshot_context_id: Some("image".into()),
+                },
+            },
+        }
+    }
+    fn screenshot() -> MessageContext {
+        MessageContext {
+            id: "image".into(),
+            label: "Screenshot".into(),
+            content: ContextContent::SnapShot {
+                image_path: "/capture.png".into(),
+                source: crate::snapshot::SnapShotSource {
+                    captured_at_ms: 1,
+                    app_name: "Browser".into(),
+                    window_title: String::new(),
+                    app_identifier: None,
+                    app_icon_data_url: None,
+                    accessibility: None,
+                },
+            },
+        }
+    }
+    #[test]
+    fn annotation_images_resolve_within_the_message_regardless_of_context_order() {
+        let contexts = vec![annotation(), screenshot()];
+        validate_contexts(&contexts).unwrap();
+        assert_eq!(screenshot_path(&contexts, "note"), Some("/capture.png"));
+        assert!(validate_contexts([&contexts[0]]).is_err());
+        let mut wrong_kind = screenshot();
+        wrong_kind.content = ContextContent::File {
+            path: "/capture.png".into(),
+        };
+        assert!(validate_contexts([&contexts[0], &wrong_kind]).is_err());
+        let bytes = rmp_serde::to_vec_named(&contexts).unwrap();
+        let restored: Vec<MessageContext> = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(screenshot_path(&restored, "note"), Some("/capture.png"));
+        assert_eq!(screenshot_path(&contexts, "unknown"), None);
+        let removed = remove_contexts(&contexts, &["image".into()]);
+        assert_eq!(removed.len(), 1);
+        validate_contexts(&removed).unwrap();
+        assert_eq!(screenshot_path(&removed, "note"), None);
+        let ContextContent::Preview { preview } = &removed[0].content else {
+            panic!("keep annotation")
+        };
+        assert_eq!(preview.comment, "This button");
+    }
 
     fn source() -> CitationSource {
         CitationSource {

@@ -229,6 +229,8 @@ pub(super) fn tool_result_item(
 ) -> Item {
     let body = Box::new(tool_result_body(body, content, metadata));
     Item {
+        attempt: None,
+        author: None,
         id,
         client_input_id: None,
         status: if failed {
@@ -275,6 +277,8 @@ impl TaskOutcome<'_> {
         }
         let body = Box::new(tool_result_body(body, &json!(self.summary), &Value::Null));
         Some(Item {
+            attempt: None,
+            author: None,
             id,
             status: self.status,
             client_input_id: None,

@@ -14,6 +14,7 @@ use std::{
 mod follow;
 pub use follow::{ScrollPosition, away_from_end, follows_end};
 mod activity;
+pub mod attempts;
 mod images;
 pub mod rows;
 mod timeline;
@@ -620,6 +621,7 @@ impl RenderedItem {
                     .unwrap_or(item.id.as_str())
                     .to_owned(),
                 native_id,
+                author: item.author.clone(),
                 timestamp_ms,
                 kind: presentation.kind.into(),
                 title: presentation.title,
@@ -655,6 +657,7 @@ impl RenderedItem {
             data: ItemPresentation {
                 id: id.into(),
                 native_id: None,
+                author: None,
                 timestamp_ms: pending.submitted_at_ms,
                 kind: "user".into(),
                 title: pending
@@ -1991,6 +1994,7 @@ pub type PendingItems = Vec<(agent_protocol::ids::ClientInputId, Arc<PendingSubm
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ItemPresentation {
+    pub author: Option<Box<agent_protocol::attribution::Author>>,
     pub id: String,
     pub native_id: Option<agent_protocol::ids::ItemId>,
     pub timestamp_ms: Option<u64>,
