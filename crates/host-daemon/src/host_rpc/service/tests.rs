@@ -234,8 +234,7 @@ async fn failed_model_providers_remain_identifiable_when_no_catalog_is_available
             .await
             .unwrap();
         let Response::Success { result: page } =
-            agent_protocol::protocol::decode::<Response<op::ModelPage>>(&response.initial)
-                .unwrap()
+            agent_protocol::protocol::decode::<Response<op::ModelPage>>(&response.initial).unwrap()
         else {
             panic!("catalog failures must retain each provider's error");
         };
@@ -297,9 +296,10 @@ async fn successful_configuration_clears_the_provider_startup_error() {
         .inner
         .conversation
         .storage
-        .header(&response.session)
+        .thread_header(&response.session)
+        .unwrap()
         .unwrap();
-    assert_eq!(header.state.provider, ProviderKind::Claude);
+    assert_eq!(header.provider_instance_id, ProviderKind::Claude.key());
 }
 
 #[test]
@@ -435,8 +435,7 @@ async fn enabling_host_owned_harness_keeps_the_existing_draft_namespace() {
     )
     .await
     .unwrap();
-    let service =
-        super::HostRpcService::new([claude.into()], root.path().join("projects.json"));
+    let service = super::HostRpcService::new([claude.into()], root.path().join("projects.json"));
     let before = service.storage_scope().unwrap();
     assert_eq!(before, service.inner.providers.storage_scope().unwrap());
     let claude = crate::providers::claude::Claude::load(
@@ -484,11 +483,8 @@ async fn conversation_rpc_failures_are_logged_once_without_request_payloads() {
     let client = service.open_session();
     let input = uuid::Uuid::new_v4();
     let request = Call::ChangeConversation(agent_protocol::conversation::records::Change {
-        session: agent_protocol::session::SessionRef::new(
-            None,
-            uuid::Uuid::new_v4().to_string(),
-        )
-        .unwrap(),
+        session: agent_protocol::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string())
+            .unwrap(),
         operation: input,
         command: agent_protocol::conversation::Command::Submit {
             id: input.to_string().into(),
@@ -508,10 +504,10 @@ async fn conversation_rpc_failures_are_logged_once_without_request_payloads() {
         .with_subscriber(subscriber)
         .await
         .unwrap();
-    let Response::Failure { error } = agent_protocol::protocol::decode::<
-        Response<agent_protocol::models::Empty>,
-    >(&reply.initial)
-    .unwrap() else {
+    let Response::Failure { error } =
+        agent_protocol::protocol::decode::<Response<agent_protocol::models::Empty>>(&reply.initial)
+            .unwrap()
+    else {
         panic!("updating must reject the write");
     };
     assert_eq!(error.code, "host_updating");

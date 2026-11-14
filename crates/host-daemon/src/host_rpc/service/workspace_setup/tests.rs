@@ -278,12 +278,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
     )
     .await;
     assert_eq!(reopened, opened);
-    let reopened = fixture
-        .host
-        .inner
-        .conversation
-        .storage
-        .history(&opened, 0)
+    let reopened = crate::host_rpc::runtime::native_fixture::history(&fixture.host, &opened)
         .unwrap()
         .thread;
     assert_eq!(reopened.workspace_setup, Some(running));
@@ -291,12 +286,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
     let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
     assert!(done.ended_at_ms.is_some());
     assert!(!done.can_cancel);
-    let row = fixture
-        .host
-        .inner
-        .conversation
-        .storage
-        .history(&opened, 0)
+    let row = crate::host_rpc::runtime::native_fixture::history(&fixture.host, &opened)
         .unwrap()
         .thread;
     assert!(row.preparations.is_empty());
@@ -558,12 +548,7 @@ async fn local_base_skips_fetch_and_root_selection_overrides_automatic_worktrees
                 .any(|preparation| preparation.stage == PreparationStage::Provider)
         })
         .await;
-        let row = fixture
-            .host
-            .inner
-            .conversation
-            .storage
-            .history(&opened, 0)
+        let row = crate::host_rpc::runtime::native_fixture::history(&fixture.host, &opened)
             .unwrap()
             .thread;
         if root {
@@ -853,12 +838,7 @@ async fn work_locally_cancels_setup_and_continues_the_same_input_at_the_project_
                 .unwrap();
         retried.accepted().unwrap();
         until(&mut updates, |change| change.preparations.is_empty()).await;
-        let row = fixture
-            .host
-            .inner
-            .conversation
-            .storage
-            .history(&opened, 0)
+        let row = crate::host_rpc::runtime::native_fixture::history(&fixture.host, &opened)
             .unwrap()
             .thread;
         assert_eq!(
@@ -911,12 +891,7 @@ async fn automatic_workspace_preference_selects_the_initial_checkout() {
         until(&mut updates, |thread| thread.preparations.is_empty()).await;
         assert_eq!(fixture.agent.inputs.lock().unwrap().len(), 1);
         assert_eq!(
-            fixture
-                .host
-                .inner
-                .conversation
-                .storage
-                .history(&id, 0)
+            crate::host_rpc::runtime::native_fixture::history(&fixture.host, &id)
                 .unwrap()
                 .thread
                 .id

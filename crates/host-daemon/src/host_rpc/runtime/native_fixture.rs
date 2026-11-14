@@ -31,6 +31,90 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+pub(in crate::host_rpc) fn bound_execution(
+    service: &HostRpcService,
+    target: &SessionRef,
+) -> (SessionRef, Uuid) {
+    let state = service
+        .inner
+        .conversation
+        .storage
+        .thread_state(&target.id, &[])
+        .unwrap();
+    let attempt = state
+        .run_attempts
+        .values()
+        .max_by_key(|attempt| (state.runs[&attempt.run_id].ordinal, attempt.attempt_ordinal))
+        .unwrap();
+    let thread = &state.provider_threads[&attempt.provider_thread_id];
+    let native = thread
+        .native_thread_ref
+        .as_ref()
+        .and_then(|reference| reference.native_id.clone())
+        .unwrap();
+    (
+        SessionRef::new(
+            ProviderKind::from_instance_id(&attempt.provider_instance_id).unwrap(),
+            native,
+        )
+        .unwrap(),
+        Uuid::parse_str(&attempt.id).unwrap(),
+    )
+}
+
+/// Inspect the same canonical snapshots, history pages and full-item queries as
+/// clients. This intentionally has no fallback to the replaced row storage.
+pub(in crate::host_rpc) fn history(
+    service: &HostRpcService,
+    target: &SessionRef,
+) -> Result<ThreadResponse, String> {
+    use agent_protocol::orchestration::projection::ThreadStreamItem;
+    let storage = &service.inner.conversation.storage;
+    let mut snapshot = storage
+        .thread_stream(target, None)?
+        .into_iter()
+        .find_map(|item| match item {
+            ThreadStreamItem::Snapshot(snapshot) => Some(snapshot),
+            _ => None,
+        })
+        .ok_or("thread snapshot is missing")?;
+    let mut cursors = std::collections::BTreeSet::new();
+    while let Some(cursor) = snapshot.history_cursor.clone() {
+        if !cursors.insert(cursor.clone()) {
+            return Err("history cursor repeated".into());
+        }
+        let page = storage.thread_history(target, &cursor)?;
+        snapshot = agent_core::orchestration::receive_history(&snapshot, &cursor, page)
+            .ok_or("history cursor changed")?;
+    }
+    let provider =
+        ProviderKind::from_instance_id(&snapshot.projection.thread.provider_instance_id)?;
+    let caps = service
+        .inner
+        .providers
+        .get(provider)
+        .map(|agent| agent.capabilities())
+        .unwrap_or_default();
+    let mut details = std::collections::BTreeMap::new();
+    for row in &snapshot.projection.visible_turn_items {
+        let source = SessionRef::new(None, row.source_thread_id.clone()).map_err(str::to_owned)?;
+        if let Some(item) = storage.thread_item(&source, &row.source_item_id)? {
+            details.insert(
+                (row.source_thread_id.clone(), row.source_item_id.clone()),
+                Arc::new(item),
+            );
+        }
+    }
+    agent_core::orchestration::project(
+        &snapshot,
+        target,
+        provider,
+        records::capabilities(caps),
+        storage.thread_project_root(target)?.as_deref(),
+        &details,
+    )
+}
+
 #[derive(Clone)]
 pub(in crate::host_rpc) struct Transcript {
     pub snapshot: agent_protocol::orchestration::projection::ThreadSnapshot,
@@ -105,6 +189,8 @@ pub(in crate::host_rpc) struct NativeAgent {
     pub(in crate::host_rpc) unload_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) next: Arc<AtomicUsize>,
     pub(in crate::host_rpc) fail_submit: AtomicUsize,
+    pub(in crate::host_rpc) submit_gate: Option<tokio::sync::Semaphore>,
+    pub(in crate::host_rpc) submit_started: tokio::sync::Notify,
     pub(in crate::host_rpc) create_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) create_started: tokio::sync::Notify,
     pub(in crate::host_rpc) created_in: Mutex<Vec<bool>>,
@@ -147,6 +233,8 @@ impl NativeAgent {
             unload_gate: tokio::sync::Semaphore::new(1),
             next: Default::default(),
             fail_submit: AtomicUsize::new(0),
+            submit_gate: None,
+            submit_started: tokio::sync::Notify::new(),
             create_gate: tokio::sync::Semaphore::new(1),
             create_started: tokio::sync::Notify::new(),
             created_in: Mutex::default(),
@@ -184,6 +272,8 @@ impl NativeAgent {
             unload_gate: tokio::sync::Semaphore::new(1),
             next: self.next.clone(),
             fail_submit: AtomicUsize::new(0),
+            submit_gate: None,
+            submit_started: tokio::sync::Notify::new(),
             create_gate: tokio::sync::Semaphore::new(1),
             create_started: tokio::sync::Notify::new(),
             created_in: Mutex::default(),
@@ -496,6 +586,11 @@ impl Agent for NativeAgent {
         _: Option<serde_json::Value>,
         execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
+        self.submit_started.notify_one();
+        let _permit = match &self.submit_gate {
+            Some(gate) => Some(gate.acquire().await.unwrap()),
+            None => None,
+        };
         let failure = self.fail_submit.swap(0, Ordering::SeqCst);
         match failure {
             1 => return Err(Failure::new("refused", "prompt refused before consumption")),

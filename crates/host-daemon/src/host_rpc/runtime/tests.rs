@@ -100,12 +100,7 @@ async fn child_discovery_uses_the_public_parent_and_preserves_already_received_w
         )
         .await
         .unwrap();
-        let before = service
-            .inner
-            .conversation
-            .storage
-            .history(&child, 0)
-            .unwrap();
+        let before = crate::host_rpc::runtime::native_fixture::history(&service, &child).unwrap();
         assert_eq!(before.thread.parent_id, Some(parent));
         assert_eq!(before.thread.can_accept_direct_input, Some(false));
         assert_eq!(before.thread.turns.as_ref().unwrap().len(), 1);
@@ -120,12 +115,7 @@ async fn child_discovery_uses_the_public_parent_and_preserves_already_received_w
         Runtime::observe(&service, discovered(), None)
             .await
             .unwrap();
-        let after = service
-            .inner
-            .conversation
-            .storage
-            .history(&child, 0)
-            .unwrap();
+        let after = crate::host_rpc::runtime::native_fixture::history(&service, &child).unwrap();
         assert_eq!(after.thread.turns, before.thread.turns);
         assert_eq!(after.thread.parent_id, before.thread.parent_id);
     })
@@ -1218,12 +1208,7 @@ async fn completed(
 ) -> agent_protocol::models::ThreadResponse {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let history = service
-                .inner
-                .conversation
-                .storage
-                .history(target, 0)
-                .unwrap();
+            let history = super::native_fixture::history(service, target).unwrap();
             if history.thread.turns.as_ref().is_some_and(|turns| {
                 turns.len() == count
                     && turns.last().unwrap().status
@@ -1398,7 +1383,8 @@ async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resour
 #[tokio::test(start_paused = true)]
 async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    Arc::get_mut(&mut agent).unwrap().submit_gate = Some(tokio::sync::Semaphore::new(0));
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
@@ -1418,32 +1404,41 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     )
     .await
     .unwrap();
-    let initial = completed(&service, &target, 1).await;
-    let native = service
-        .inner
-        .conversation
-        .storage
-        .active_source(&target)
-        .unwrap()
-        .unwrap();
-    let attempt = service
-        .inner
-        .conversation
-        .storage
-        .state(&target)
-        .unwrap()
-        .attempts
-        .into_values()
-        .next()
-        .unwrap();
-    let native_turn = agent.records.lock().unwrap()[&native.id]
-        .thread
-        .turns
-        .as_ref()
-        .unwrap()[0]
-        .clone();
-    let native_turn_id = native_turn.id.clone();
-    let native_answer_id = native_turn.items.as_ref().unwrap()[1].id.clone();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.submit_started.notified(),
+    )
+    .await
+    .unwrap();
+    let (native, execution) = super::native_fixture::bound_execution(&service, &target);
+    let native_turn_id: agent_protocol::ids::TurnId = "stream-turn".into();
+    let native_answer_id: agent_protocol::ids::ItemId = "stream-answer".into();
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native.clone(),
+            change: SessionChange::Turn {
+                turn: agent_protocol::models::Turn {
+                    id: native_turn_id.clone(),
+                    status: agent_protocol::execution::TurnStatus::Running,
+                    items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                        native_answer_id.clone(),
+                        agent_protocol::execution::ItemStatus::Running,
+                        agent_protocol::items::ItemBody::AssistantText {
+                            text: "initial".into(),
+                            phase: agent_protocol::items::AssistantPhase::Final,
+                        },
+                    ))]),
+                    ..Default::default()
+                },
+                completed: false,
+            },
+        },
+        Some(execution),
+    )
+    .await
+    .unwrap();
+    let initial = super::native_fixture::history(&service, &target).unwrap();
     let text = |delta: &str| AgentChange::Session {
         session: native.clone(),
         change: SessionChange::Text {
@@ -1454,66 +1449,49 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
         },
     };
     for delta in [" 一", "文"] {
-        Runtime::observe(&service, text(delta), Some(attempt.id))
+        Runtime::observe(&service, text(delta), Some(execution))
             .await
             .unwrap();
     }
-    let unchanged = service
-        .inner
-        .conversation
-        .storage
-        .history(&target, 0)
-        .unwrap();
+    let unchanged = crate::host_rpc::runtime::native_fixture::history(&service, &target).unwrap();
     assert_eq!(
         unchanged.thread.turns, initial.thread.turns,
         "partial chunks do not each rewrite the database"
     );
-    Runtime::observe(&service, text("。\n\n"), Some(attempt.id))
+    Runtime::observe(&service, text("。\n\n"), Some(execution))
         .await
         .unwrap();
     tokio::task::yield_now().await;
     tokio::time::advance(std::time::Duration::from_millis(400)).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
+            let saved = crate::host_rpc::runtime::native_fixture::history(&service, &target).unwrap();
             if matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with(" 一文。\n\n")) { break; }
             tokio::task::yield_now().await;
         }
     }).await.unwrap();
-    let paragraph = service
-        .inner
-        .conversation
-        .storage
-        .history(&target, 0)
+    let paragraph = crate::host_rpc::runtime::native_fixture::history(&service, &target)
         .unwrap()
         .thread
         .turns;
-    Runtime::observe(&service, text("unfinished suffix"), Some(attempt.id))
+    Runtime::observe(&service, text("unfinished suffix"), Some(execution))
         .await
         .unwrap();
     tokio::task::yield_now().await;
     tokio::time::advance(std::time::Duration::from_millis(799)).await;
     assert_eq!(
-        service
-            .inner
-            .conversation
-            .storage
-            .history(&target, 0)
+        crate::host_rpc::runtime::native_fixture::history(&service, &target)
             .unwrap()
             .thread
             .turns,
         paragraph
     );
-    Runtime::observe(&service, text(" more"), Some(attempt.id))
+    Runtime::observe(&service, text(" more"), Some(execution))
         .await
         .unwrap();
     tokio::time::advance(std::time::Duration::from_millis(1)).await;
     assert_eq!(
-        service
-            .inner
-            .conversation
-            .storage
-            .history(&target, 0)
+        crate::host_rpc::runtime::native_fixture::history(&service, &target)
             .unwrap()
             .thread
             .turns,
@@ -1523,31 +1501,23 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     tokio::time::advance(std::time::Duration::from_millis(799)).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
+            let saved = crate::host_rpc::runtime::native_fixture::history(&service, &target).unwrap();
             if matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with("unfinished suffix more")) { break; }
             tokio::task::yield_now().await;
         }
     }).await.unwrap();
-    let partial = service
-        .inner
-        .conversation
-        .storage
-        .history(&target, 0)
+    let partial = crate::host_rpc::runtime::native_fixture::history(&service, &target)
         .unwrap()
         .thread
         .turns;
     for delta in [" paragraph\n", "\n"] {
-        Runtime::observe(&service, text(delta), Some(attempt.id))
+        Runtime::observe(&service, text(delta), Some(execution))
             .await
             .unwrap();
     }
     tokio::time::advance(std::time::Duration::from_millis(399)).await;
     assert_eq!(
-        service
-            .inner
-            .conversation
-            .storage
-            .history(&target, 0)
+        crate::host_rpc::runtime::native_fixture::history(&service, &target)
             .unwrap()
             .thread
             .turns,
@@ -1578,7 +1548,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
                 )),
             },
         },
-        Some(attempt.id),
+        Some(execution),
     )
     .await
     .unwrap();
@@ -1593,7 +1563,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
                 index: 0,
             },
         },
-        Some(attempt.id),
+        Some(execution),
     )
     .await
     .unwrap();
@@ -1609,7 +1579,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
                     delta: delta.into(),
                 },
             },
-            Some(attempt.id),
+            Some(execution),
         )
         .await
         .unwrap();
@@ -1619,13 +1589,13 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     tokio::time::advance(std::time::Duration::from_millis(800)).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            let saved = service.inner.conversation.storage.history(&target, 0).unwrap();
-            if saved.thread.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten())
-                .any(|item| matches!(item.body(), ItemBody::Reasoning { summary, .. } if summary == &["A\n\nB"])) { break; }
+            let id=super::native::text_item_id(ProviderKind::Codex,native_turn_id.as_str(),"reason-0",TextField::ReasoningSummary {index:0});
+            let saved=service.inner.conversation.storage.thread_item(&target, &id).unwrap();
+            if saved.is_some_and(|item|matches!(item.body, agent_protocol::orchestration::TurnItemBody::Reasoning {text,..} if text=="A\n\nB")) { break; }
             changes.changed().await.unwrap();
         }
     }).await.expect("reasoning must stream after an empty part, before completion");
-    Runtime::observe(&service, text(" final pending"), Some(attempt.id))
+    Runtime::observe(&service, text(" final pending"), Some(execution))
         .await
         .unwrap();
     Runtime::observe(
@@ -1641,16 +1611,11 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
                 completed: true,
             },
         },
-        Some(attempt.id),
+        Some(execution),
     )
     .await
     .unwrap();
-    let saved = service
-        .inner
-        .conversation
-        .storage
-        .history(&target, 0)
-        .unwrap();
+    let saved = crate::host_rpc::runtime::native_fixture::history(&service, &target).unwrap();
     assert!(
         matches!(saved.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[1].body(), agent_protocol::items::ItemBody::AssistantText { text, .. } if text.ends_with(" paragraph\n\n final pending")),
         "completion flushes the last partial body"
@@ -2254,12 +2219,7 @@ async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_anot
     })
     .await
     .expect("completed native I/O resources retire");
-    let before = service
-        .inner
-        .conversation
-        .storage
-        .history(&target, 0)
-        .unwrap();
+    let before = crate::host_rpc::runtime::native_fixture::history(&service, &target).unwrap();
     let native_turn = service
         .inner
         .conversation
@@ -2351,12 +2311,7 @@ async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_anot
         "a fenced callback cannot open a command output resource"
     );
     assert_eq!(
-        service
-            .inner
-            .conversation
-            .storage
-            .history(&target, 0)
-            .unwrap(),
+        crate::host_rpc::runtime::native_fixture::history(&service, &target).unwrap(),
         before
     );
     assert!(

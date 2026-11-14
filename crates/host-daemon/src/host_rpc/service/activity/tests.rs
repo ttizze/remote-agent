@@ -30,8 +30,7 @@ async fn open_list(service: &HostRpcService, connection: u64) -> ListReader {
         .await
         .unwrap();
     let Response::Success { result } =
-        agent_protocol::protocol::decode::<Response<records::OpenedList>>(&reply.initial)
-            .unwrap()
+        agent_protocol::protocol::decode::<Response<records::OpenedList>>(&reply.initial).unwrap()
     else {
         panic!("list subscription failed")
     };
@@ -196,8 +195,7 @@ async fn reading_on_either_device_broadcasts_to_both_and_reconnect_reads_the_sha
     use agent_protocol::conversation::{Command, InputContent, records};
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
-    let service =
-        HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let phone = service.open_session();
     let desktop = service.open_session();
     let mut phone_list = open_list(&service, phone.id()).await;
@@ -246,9 +244,7 @@ async fn reading_on_either_device_broadcasts_to_both_and_reconnect_reads_the_sha
         for connection in [&mut phone_list, &mut desktop_list] {
             loop {
                 let update = next_activity(connection).await;
-                if let Some((_, turn)) =
-                    update.unread.iter().find(|(session, _)| session == &id)
-                {
+                if let Some((_, turn)) = update.unread.iter().find(|(session, _)| session == &id) {
                     completed = Some(turn.clone());
                     break;
                 }
@@ -337,10 +333,8 @@ async fn live_activity_registration_accepts_both_environments_and_rejects_malfor
         .await
         .unwrap();
     assert!(matches!(
-        agent_protocol::protocol::decode::<Response<LiveActivityRegistration>>(
-            &response.initial
-        )
-        .unwrap(),
+        agent_protocol::protocol::decode::<Response<LiveActivityRegistration>>(&response.initial)
+            .unwrap(),
         Response::Failure { .. }
     ));
 }

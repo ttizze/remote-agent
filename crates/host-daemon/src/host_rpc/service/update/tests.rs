@@ -240,10 +240,9 @@ async fn update_handover_continues_running_work_once_and_settles_stopped_or_retr
         .await
         .unwrap()
         .unwrap();
-        let report: Recovery = serde_json::from_slice(
-            &std::fs::read(directory.path().join(RECOVERY_FILE)).unwrap(),
-        )
-        .unwrap();
+        let report: Recovery =
+            serde_json::from_slice(&std::fs::read(directory.path().join(RECOVERY_FILE)).unwrap())
+                .unwrap();
         assert_eq!(report.tasks.len(), 1);
         if mode == "running" {
             assert!(matches!(
@@ -400,8 +399,7 @@ async fn an_interrupted_original_turn_does_not_confirm_a_pending_update_continua
     );
 }
 #[tokio::test(start_paused = true)]
-async fn a_new_update_serializes_its_report_and_only_a_committed_update_stops_the_prior_reader()
-{
+async fn a_new_update_serializes_its_report_and_only_a_committed_update_stops_the_prior_reader() {
     for failed in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let service = HostRpcService::new([], directory.path().join("projects.json"));
@@ -472,8 +470,7 @@ async fn a_new_update_serializes_its_report_and_only_a_committed_update_stops_th
             service.update_recovery_committed(&target).await.unwrap();
             tokio::time::advance(std::time::Duration::from_millis(50)).await;
             resumed.await.unwrap();
-            let report: Recovery =
-                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let report: Recovery = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(report.tasks.len(), 1);
             assert!(matches!(
                 report.tasks[0].delivery,
@@ -483,8 +480,7 @@ async fn a_new_update_serializes_its_report_and_only_a_committed_update_stops_th
             prepared.unwrap();
             tokio::time::advance(std::time::Duration::from_millis(50)).await;
             resumed.await.unwrap();
-            let report: Recovery =
-                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let report: Recovery = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert!(report.tasks.is_empty());
         }
     }

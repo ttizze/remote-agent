@@ -1,6 +1,4 @@
-pub(in crate::host_rpc::service) fn repository(
-    directory: &std::path::Path,
-) -> std::path::PathBuf {
+pub(in crate::host_rpc::service) fn repository(directory: &std::path::Path) -> std::path::PathBuf {
     let repository = directory.join("repository");
     std::fs::create_dir(&repository).unwrap();
     crate::git::text(&repository, &["init", "--quiet", "--initial-branch=main"]).unwrap();
@@ -33,8 +31,7 @@ async fn worktree_resolves_public_tasks_and_preserves_native_idle_warnings() {
         let repository = repository(directory.path());
         let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
         Arc::get_mut(&mut agent).unwrap().idle_warning = warning;
-        let host =
-            HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
+        let host = HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
         host.inner
             .worktrees
             .settings(Some(agent_protocol::models::WorktreeSettings {
@@ -145,8 +142,7 @@ async fn worktree_occupancy_uses_the_imported_status_when_source_history_is_inco
                 .lock()
                 .unwrap()
                 .insert(native.id.clone(), response.clone());
-            let public =
-                SessionRef::new(ProviderKind::Claude, "bex-task:managed".into()).unwrap();
+            let public = SessionRef::new(ProviderKind::Claude, "bex-task:managed".into()).unwrap();
             own(&host, &public, &response);
             let entries = host.worktree_list().await.unwrap();
             assert_eq!(entries.len(), 1);
@@ -270,10 +266,7 @@ async fn worktree_block_reasons_keep_every_provider_failure_in_provider_order() 
                     if listing_fails && provider == ProviderKind::Codex {
                         a.backend()
                     } else {
-                        Backend::unavailable(
-                            provider,
-                            format!("{} startup failed", provider.key()),
-                        )
+                        Backend::unavailable(provider, format!("{} startup failed", provider.key()))
                     }
                 }),
                 directory.path().join("worktrees.json"),
@@ -473,8 +466,7 @@ async fn failed_provider_preparation_keeps_the_owned_checkout_for_retry() {
         .unwrap();
     let client = host.open_session();
     let target =
-        agent_protocol::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string())
-            .unwrap();
+        agent_protocol::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
     let input = uuid::Uuid::new_v4();
     let _: records::Opened = call(
         &host,
