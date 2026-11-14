@@ -3,7 +3,7 @@
 # Pure UI state does not require a new shared Rust business model.
 # This file is not a record of runtime acceptance results.
 
-revision = "32814543279df08cf387dbf14d68f7d43af00ce1"
+revision = "f3f4c802bac275c13771f6caab3ce998430eec18"
 
 [sources]
 agents = "crates/agent-core/src/presentation/agents.rs"
@@ -12,6 +12,8 @@ body = "crates/agent-core/src/presentation/body.rs"
 bridge = "apps/nsh/src/conversation/native.rs"
 completion = "crates/agent-core/src/composer.rs"
 composer = "crates/agent-core/src/presentation/composer.rs"
+context = "crates/agent-protocol/src/context.rs"
+context_actions = "crates/agent-core/src/composer/context.rs"
 desktop_background = "apps/nsh/src/background_work.rs"
 desktop_card = "apps/nsh/src/desktop_workspace/card.rs"
 desktop_composer = "apps/nsh/src/composer.rs"
@@ -71,6 +73,7 @@ list = "crates/agent-core/src/presentation/list.rs"
 mac_body = "apps/nsh/apple/Sources/BexNshNative/TranscriptBody.swift"
 mac_rows = "apps/nsh/apple/Sources/BexNshNative/Conversation.swift"
 markdown = "crates/agent-core/src/presentation/markdown.rs"
+markdown_structure = "crates/agent-core/src/presentation/markdown/structure.rs"
 media = "crates/agent-core/src/presentation/media.rs"
 models = "crates/agent-protocol/src/models.rs"
 operations = "crates/agent-protocol/src/operations.rs"
@@ -284,17 +287,26 @@ windows = { status = "missing", detail = "Snap Shot添付のUIがない。", evi
 [[implementation]]
 components = ["context-chips"]
 phase = "shared"
-next = "Contextの種類・参照・本文を共通側に追加し、既存ファイルチップと統合する。"
-rust = { status = "partial", detail = "ファイル/フォルダのリンク・画像・Skill/Plugin invocationはある。会話/環境/ターミナル/ブラウザ要素/レビュー/PR/注釈を保持する共通Context部品がない。", evidence = ["items", "invocations", "links", "state"] }
+next = "共通Contextの投影を既存ファイルチップへ統合し、各UIの追加操作へ接続する。"
+rust = { status = "partial", detail = "引用/ファイル/Skill/会話/環境/モデル/ターミナル/要素/レビュー/PR/注釈を型付きで下書き・キュー・発言へ保持する。追加/削除、検証、送信・履歴再読込・失敗復元がある。添付のアップロード状態とContext間の画像参照の解決・検証が不足。", evidence = ["context", "context_actions", "state", "rows", "queue"] }
 mac = { status = "partial", detail = "ファイル・フォルダのチップと画像はある。その他の構造化コンテキストとスキル詳細チップが不足。", evidence = ["mac_body", "bridge"] }
 iphone = { status = "partial", detail = "本文のファイルチップ・画像と入力のスキル候補はある。その他の構造化チップがない。", evidence = ["iphone_markdown", "iphone_content", "iphone_input"] }
 windows = { status = "partial", detail = "RichEditのファイルチップと画像はある。その他の構造化コンテキストチップがない。", evidence = ["win_rows", "win_native"] }
 
 [[implementation]]
-components = ["context-details", "terminal-context", "pending-terminal"]
+components = ["context-details"]
 phase = "shared"
-next = "構造化Contextに選択範囲と内容を保持してから詳細UIを追加する。"
-rust = { status = "missing", detail = "通常のターミナル操作はあるが、選択行/要素HTML・CSS/レビュー差分/注釈を発言や下書きに保持する契約がない。", evidence = ["items", "state", "invocations"] }
+next = "注釈の画像参照の解決・検証を共通側へ追加し、型付き詳細を各UIへ接続する。"
+rust = { status = "partial", detail = "要素HTML/CSS・ソース、レビュー本文/差分、注釈の説明/画像参照を下書き・送信・履歴へ保持する。Context間の画像参照の解決・検証が不足。", evidence = ["context", "context_actions", "state", "body", "rows"] }
+mac = { status = "missing", detail = "選択コンテキストのチップ・詳細ポップオーバーがない。", evidence = ["desktop_composer", "mac_rows"] }
+iphone = { status = "missing", detail = "選択コンテキストのチップ・詳細UIがない。", evidence = ["iphone_input", "iphone_rows"] }
+windows = { status = "missing", detail = "選択コンテキストのチップ・詳細UIがない。", evidence = ["desktop_composer", "win_rows"] }
+
+[[implementation]]
+components = ["terminal-context", "pending-terminal"]
+phase = "restore"
+next = "端末の選択範囲を共通Contextへ追加し、型付き投影を各UIのチップ・詳細へ接続する。"
+rust = { status = "present", detail = "端末ID/名前・選択行・出力を保持する。下書きへの追加/削除、送信、履歴取得・巻き戻しで内容を維持し、全文と表示用の投影を渡す。", evidence = ["context", "context_actions", "state", "body", "rows"] }
 mac = { status = "missing", detail = "選択コンテキストのチップ・詳細ポップオーバーがない。", evidence = ["desktop_composer", "mac_rows"] }
 iphone = { status = "missing", detail = "選択コンテキストのチップ・詳細UIがない。", evidence = ["iphone_input", "iphone_rows"] }
 windows = { status = "missing", detail = "選択コンテキストのチップ・詳細UIがない。", evidence = ["desktop_composer", "win_rows"] }
@@ -310,9 +322,9 @@ windows = { status = "partial", detail = "入力候補はある。送信済み�
 
 [[implementation]]
 components = ["model-context"]
-phase = "shared"
-next = "モデル参照をContextへ追加する。"
-rust = { status = "missing", detail = "下書きのモデル選択はあるが、本文内モデルメンションを保持するContext契約がない。", evidence = ["state", "invocations"] }
+phase = "restore"
+next = "モデルContextの追加操作と本文チップを各UIへ接続する。"
+rust = { status = "present", detail = "モデル名とプロバイダーを持つContextがあり、下書きの追加/削除と送信・履歴・本文投影で維持する。", evidence = ["context", "context_actions", "state", "rows"] }
 mac = { status = "missing", detail = "本文内のモデルメンションチップがない。", evidence = ["desktop_composer", "mac_rows"] }
 iphone = { status = "missing", detail = "本文内のモデルメンションチップがない。", evidence = ["iphone_input", "iphone_rows"] }
 windows = { status = "missing", detail = "本文内のモデルメンションチップがない。", evidence = ["desktop_composer", "win_rows"] }
@@ -356,26 +368,26 @@ windows = { status = "partial", detail = "変更ファイルカード・行数�
 [[implementation]]
 components = ["selection"]
 phase = "restore"
-next = "選択の受け渡しを修復し、構造化引用を追加する時に共通の長さ判断を置く。"
-rust = { status = "partial", detail = "選択本文を下書きへ引用する純粋関数と入力操作はある。構造化引用と選択長の制限情報はない。", evidence = ["completion", "state"] }
+next = "既存ネイティブ選択メニューを構造化引用の追加と長さエラーへ接続する。"
+rust = { status = "present", detail = "選択本文の引用に加え、UTF-16の選択範囲から構造化引用を作る共通関数がある。サロゲート境界、空選択、本文/コメント8000単位の上限を検証し、失敗理由を返す。", evidence = ["context", "context_actions", "completion", "state"] }
 mac = { status = "partial", detail = "TextKit選択メニューから引用・説明・サイドチャットができる。長すぎる選択の専用表示がない。", evidence = ["bridge", "mac_rows"] }
 iphone = { status = "partial", detail = "UITextViewのチャットに追加・サイドチャット操作はある。長すぎる選択の専用表示がない。", evidence = ["iphone_selection"] }
 windows = { status = "partial", detail = "RichEdit選択からチャット追加の操作はある。長すぎる選択の専用表示がない。", evidence = ["win_native"] }
 
 [[implementation]]
 components = ["citation", "citation-comment", "citation-source"]
-phase = "shared"
-next = "引用の参照先・範囲・コメントを共通モデルと下書きに追加する。"
-rust = { status = "missing", detail = "通常の引用テキストはある。引用元の会話/発言/範囲、コメント、参照位置を保存する構造化引用がない。", evidence = ["items", "state", "completion"] }
+phase = "restore"
+next = "共通引用をネイティブチップ・コメント編集・元会話への移動/強調へ接続する。"
+rust = { status = "present", detail = "Host/保存領域/会話/ターン/発言ID、UTF-16範囲、引用本文・前後文脈・コメントを保存する。取得済み回答からの参照作成、コメント更新、下書き/キュー/送信/履歴の保持と、曖昧な再配置を拒否する参照位置の検索がある。", evidence = ["context", "context_actions", "state", "rows", "operations"] }
 mac = { status = "missing", detail = "引用チップ・元位置への移動/強調・コメント編集・引用メニューがない。", evidence = ["mac_rows", "mac_body"] }
 iphone = { status = "missing", detail = "引用チップ・元位置への移動/強調・コメント編集がない。", evidence = ["iphone_selection", "iphone_rows"] }
 windows = { status = "missing", detail = "引用チップ・元位置への移動/強調・コメント編集がない。", evidence = ["win_rows", "win_native"] }
 
 [[implementation]]
 components = ["markdown-text"]
-phase = "shared"
-next = "共通Markdown IRにdetailsと注記の構造を残してから各UIで描画する。"
-rust = { status = "partial", detail = "段落・見出し・強調・リスト・タスク・引用・罫線はある。details/summaryはタグを除去し、開閉構造を失う。GitHub注記種別もない。", evidence = ["markdown"] }
+phase = "restore"
+next = "共通IRのDisclosure/Calloutを各UIの開閉・注記描画へ接続する。"
+rust = { status = "present", detail = "既存の基本Markdownに加え、details/summaryの入れ子・見出し・初期open状態とNote/Tip/Important/Warning/Cautionを共通IRに保持する。内部の表/画像/数式/ファイル参照とストリーミング中の未閉じ本文を維持する。", evidence = ["markdown", "markdown_structure"] }
 mac = { status = "partial", detail = "基本Markdownとタスクはある。details/summaryの開閉とNote/Tip等の専用注記がない。", evidence = ["mac_body", "shared_swift"] }
 iphone = { status = "partial", detail = "基本Markdownとタスクはある。details/summaryの開閉と専用注記がない。", evidence = ["iphone_content", "iphone_markdown"] }
 windows = { status = "partial", detail = "基本Markdownはある。detailsの開閉とNote/Tip等の専用注記がない。", evidence = ["win_rows", "win_native"] }
@@ -418,9 +430,9 @@ windows = { status = "partial", detail = "図/ソース切替・図の拡大・�
 
 [[implementation]]
 components = ["math"]
-phase = "shared"
-next = "共通パーサーで数式を保持し、各OSの数式描画へ渡す。"
-rust = { status = "missing", detail = "MarkdownBlock/Runにインライン数式・独立数式の解析結果がない。", evidence = ["markdown"] }
+phase = "restore"
+next = "共通IRのTeXソースと数式フラグを各OSの数式描画へ接続する。"
+rust = { status = "present", detail = "インライン$…$、独立$$…$$、mathコードフェンスを解析し、TeXソースとインライン/独立ブロックの区別を保持する。通常コード、金額や$スキル名を数式へ変えない。", evidence = ["markdown", "markdown_structure"] }
 mac = { status = "missing", detail = "数式のネイティブ描画がない。", evidence = ["mac_body"] }
 iphone = { status = "missing", detail = "数式のネイティブ描画がない。", evidence = ["iphone_content"] }
 windows = { status = "missing", detail = "数式の描画がない。", evidence = ["win_rows"] }

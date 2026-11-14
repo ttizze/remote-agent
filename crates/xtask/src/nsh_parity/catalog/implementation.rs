@@ -141,6 +141,18 @@ pub(super) fn write(cwd: &Path, directory: &Path, catalog: &Catalog) -> Result<(
             return Err(format!("implementation evidence file does not exist: {path}").into());
         }
     }
+    let [present, partial, missing, ui_only] = [
+        Status::Present,
+        Status::Partial,
+        Status::Missing,
+        Status::UiOnly,
+    ]
+    .map(|status| {
+        indexed
+            .values()
+            .filter(|assessment| assessment.rust.status == status)
+            .count()
+    });
     let mut report = String::from(
         "# T3 Codeと共通Rust・各OS UIの実装有無\n\n\
          [T3の全部品・出典](components.md)と同じ確認対象を使う。位置・サイズ・色・余白は対象外。\n\n\
@@ -159,10 +171,20 @@ pub(super) fn write(cwd: &Path, directory: &Path, catalog: &Catalog) -> Result<(
         report,
         "共通/UIの調査対象: [{}](https://github.com/ttizze/remote-agent/tree/{})。\
          実装変更時は評価も更新する。\n\n\
+         共通Rustの不足: **{}部品群**（未実装{}・一部不足{}）。\
+         実装あり{}・共通Rust不要{}、全{}部品群。\
+         同じ機能に依存する部品群もあるため、独立した機能数ではない。\n\n\
          ## 一覧\n\n\
          | 部品 | 共通Rust | Mac UI | iPhone UI | Windows UI | 次の作業 |\n\
          | --- | --- | --- | --- | --- | --- |",
-        assessments.revision, assessments.revision,
+        assessments.revision,
+        assessments.revision,
+        missing + partial,
+        missing,
+        partial,
+        present,
+        ui_only,
+        indexed.len(),
     )?;
     for component in &catalog.component {
         let assessment = indexed[component.id.as_str()];
@@ -212,6 +234,10 @@ pub(super) fn write(cwd: &Path, directory: &Path, catalog: &Catalog) -> Result<(
     let path = directory.join("implementation.md");
     fs::write(&path, report)?;
     println!("Native implementation assessment: {}", path.display());
+    println!(
+        "Shared Rust gaps: {} components ({missing} missing, {partial} partial)",
+        missing + partial
+    );
     Ok(())
 }
 
