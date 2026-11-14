@@ -3,6 +3,7 @@ use ::markdown::{
     ParseOptions,
     mdast::{AlignKind, Node},
 };
+use agent_protocol::markdown::{definitions, image, parse};
 use std::{borrow::Cow, collections::HashMap};
 mod code;
 #[cfg(feature = "diagrams")]
@@ -83,11 +84,6 @@ pub struct MarkdownRun {
     pub light_color: Option<u32>,
 }
 
-fn parse(source: &str) -> Node {
-    // GFM has no syntax errors; only the disabled MDX extensions can fail.
-    ::markdown::to_mdast(source, &ParseOptions::gfm()).expect("GFM is infallible")
-}
-
 fn is_disclosure_tag(source: &str) -> bool {
     let Some(name) = source.strip_prefix('<') else {
         return false;
@@ -156,51 +152,9 @@ fn without_disclosure_tags(source: &str) -> Cow<'_, str> {
     Cow::Owned(text)
 }
 
-fn definitions(node: &Node) -> HashMap<&str, &str> {
-    fn collect<'a>(node: &'a Node, result: &mut HashMap<&'a str, &'a str>) {
-        if let Node::Definition(def) = node {
-            result.entry(&def.identifier).or_insert(&def.url);
-        }
-        for child in node.children().into_iter().flatten() {
-            collect(child, result);
-        }
-    }
-    let mut result = HashMap::new();
-    collect(node, &mut result);
-    result
-}
-
-fn image<'a>(
-    node: &'a Node,
-    definition: impl Fn(&str) -> Option<&'a str>,
-) -> Option<(&'a str, &'a str)> {
-    match node {
-        Node::Image(image) => Some((&image.url, &image.alt)),
-        Node::ImageReference(image) => {
-            definition(&image.identifier).map(|url| (url, image.alt.as_str()))
-        }
-        _ => None,
-    }
-}
-
-/// Every image in reading order, including references.
+/// Every image in reading order, including references and disclosure bodies.
 pub fn markdown_images(source: &str) -> Vec<String> {
-    fn visit(node: &Node, definitions: &HashMap<&str, &str>, images: &mut Vec<String>) {
-        if let Some((url, _)) = image(node, |id| definitions.get(id).copied()) {
-            images.push(url.to_owned());
-        }
-        for child in node.children().into_iter().flatten() {
-            visit(child, definitions, images);
-        }
-    }
-    let source = without_disclosure_tags(source);
-    let mut images = Vec::new();
-    // Inline and reference images both start with `![`; most text needs no parse.
-    if source.contains("![") {
-        let root = parse(&source);
-        visit(&root, &definitions(&root), &mut images);
-    }
-    images
+    agent_protocol::markdown::images(&without_disclosure_tags(source))
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
