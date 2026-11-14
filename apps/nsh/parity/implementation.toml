@@ -3,9 +3,13 @@
 # Pure UI state does not require a new shared Rust business model.
 # This file is not a record of runtime acceptance results.
 
-revision = "a626ca95d15402d3cc85e7c5c1b5d017e98c410b"
+revision = "912ba95983f37fa7ed2f660b2f6e987ba8f5c19c"
 
 [sources]
+clone_contract = "crates/agent-protocol/src/project_clone.rs"
+clone_host = "crates/host-daemon/src/project_clone.rs"
+clone_actions = "crates/agent-core/src/state/operations/project_clone.rs"
+clone_view = "crates/agent-core/src/presentation/project_clone.rs"
 agents = "crates/agent-core/src/presentation/agents.rs"
 background = "crates/agent-core/src/presentation/background_work.rs"
 body = "crates/agent-core/src/presentation/body.rs"
@@ -927,12 +931,12 @@ windows = { status = "partial", detail = "Host接続失敗・再接続操作は�
 
 [[implementation]]
 components = ["project-clone"]
-phase = "extension"
-next = "Hostのリポジトリ取得操作と進捗を共通契約へ追加する。"
-rust = { status = "missing", detail = "既存フォルダの取り込みとは別に、リポジトリを取得/クローンする操作と進捗/失敗の契約がない。", evidence = ["intents", "operations"] }
-mac = { status = "missing", detail = "会話内のプロジェクトクローン進捗・失敗/回復通知がない。", evidence = ["desktop_notices"] }
-iphone = { status = "missing", detail = "会話内のプロジェクトクローン通知がない。", evidence = ["iphone_notices"] }
-windows = { status = "missing", detail = "会話内のプロジェクトクローン進捗・失敗/回復通知がない。", evidence = ["desktop_notices"] }
+phase = "restore"
+next = "共通の取得状態・操作を通常のダウンロードと同じ表示経路へ接続する。"
+rust = { status = "present", detail = "Host所有の取得ジョブと進捗・取消・再試行・履歴の破棄を持つ。接続を閉じても継続し、再接続時に同期する。Host再起動で中断したジョブを失敗として保持して同じIDで再試行し、取得済みcheckoutの登録失敗も回復する。既存フォルダは置換しない。", evidence = ["clone_contract", "clone_host", "clone_actions", "clone_view"] }
+mac = { status = "missing", detail = "共通の取得状態と取消・再試行操作を通常のダウンロード表示へまだ接続していない。", evidence = ["desktop_notices"] }
+iphone = { status = "missing", detail = "共通の取得状態と取消・再試行操作を通常のダウンロード表示へまだ接続していない。", evidence = ["iphone_notices"] }
+windows = { status = "missing", detail = "共通の取得状態と取消・再試行操作を通常のダウンロード表示へまだ接続していない。", evidence = ["desktop_notices"] }
 
 [[implementation]]
 components = ["usage-limit"]
