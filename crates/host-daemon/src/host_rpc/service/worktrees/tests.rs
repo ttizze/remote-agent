@@ -403,7 +403,7 @@ async fn worktree_listing_blocks_only_checkouts_with_unverified_claude_activity(
         .unwrap();
     let id = "12345678-1234-4234-8234-123456789abc";
     let transcript = project.join(format!("{id}.jsonl"));
-    let history = include_str!("../../../tests/fixtures/claude-2.1.266.jsonl")
+    let history = include_str!("../../../../tests/fixtures/claude-2.1.266.jsonl")
         .lines()
         .map(|line| {
             let mut entry: serde_json::Value = serde_json::from_str(line).unwrap();
