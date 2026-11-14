@@ -224,8 +224,10 @@ pub fn admit(
                         && thread.owner_node_id.is_none()
                 })
                 .max_by(|a, b| {
-                    a.updated_at
-                        .cmp(&b.updated_at)
+                    a.last_run_ordinal
+                        .unwrap_or(0)
+                        .cmp(&b.last_run_ordinal.unwrap_or(0))
+                        .then_with(|| a.updated_at.cmp(&b.updated_at))
                         .then_with(|| a.id.cmp(&b.id))
                 })
         })

@@ -528,17 +528,9 @@ impl Runtime {
         }
         let execution =
             Uuid::parse_str(&attempt.id).map_err(|error| Failure::new("invalid_run", error))?;
-        let inline = Self::deliver_context(
-            service,
-            effect,
-            worker,
-            agent.as_ref(),
-            &native,
-            &target,
-            &current,
-            message,
-        )
-        .await?;
+        let inline =
+            Self::deliver_context(service, effect, worker, agent.as_ref(), &native, &target)
+                .await?;
         if let Some((_, history)) = &inline
             && let Some(op::Input::Text { text }) = input.input.first_mut()
         {
@@ -546,6 +538,25 @@ impl Runtime {
                 "{}\n\nUser message:\n{text}",
                 model::handoffs::render_history(&history.messages, &history.context)
             );
+        }
+        let before_write = commands::at();
+        runtime
+            .storage
+            .observe_effect(effect, worker, &before_write, |state| {
+                model::cancel_start(
+                    state,
+                    &attempt.id,
+                    context(state, &effect.id, &before_write),
+                )
+            })
+            .map_err(storage_failure)?;
+        if runtime
+            .storage
+            .effect_state(effect, worker)
+            .map_err(storage_failure)?
+            .is_none()
+        {
+            return Ok(None);
         }
         let submitted = agent
             .submit(
@@ -586,57 +597,11 @@ impl Runtime {
         agent: &dyn crate::providers::Agent,
         native: &SessionRef,
         target: &SessionRef,
-        state: &model::State,
-        message: &model::TurnItem,
     ) -> Result<Option<(Vec<model::ContextHandoff>, model::handoffs::SelectedHistory)>, Failure>
     {
-        let model::TurnItemBody::UserMessage {
-            text, attachments, ..
-        } = &message.body
-        else {
-            return Err(Failure::new(
-                "invalid_input",
-                "handoff target is not a user message",
-            ));
-        };
-        let usage = state
-            .provider_turns
-            .values()
-            .filter(|turn| {
-                turn.run_attempt_id
-                    .as_ref()
-                    .and_then(|id| state.run_attempts.get(id))
-                    .is_some_and(|attempt| {
-                        attempt.native_thread_id.as_deref() == Some(native.id.as_str())
-                            && attempt.provider_thread_id == turn.provider_thread_id
-                            && attempt.root_node_id == turn.node_id
-                    })
-            })
-            .filter_map(|turn| turn.token_usage.as_ref())
-            .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
-        let window = usage.and_then(|usage| {
-            usage
-                .max_tokens
-                .into_iter()
-                .chain(usage.auto_compact_threshold)
-                .filter(|max| *max > 0)
-                .min()
-        });
-        let budget = model::handoffs::handoff_budget(
-            text,
-            attachments,
-            usage.map_or(0, |usage| usage.used_tokens),
-            window,
-        );
         let storage = &service.inner.conversation.storage;
         let Some((handoffs, selected)) = storage
-            .pending_context(
-                effect,
-                worker,
-                native,
-                budget,
-                &service.history_command(target),
-            )
+            .pending_context(effect, worker, native, &service.history_command(target))
             .map_err(storage_failure)?
         else {
             return Ok(None);

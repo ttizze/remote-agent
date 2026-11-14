@@ -185,6 +185,10 @@ pub fn started(
         Change::RunAttempt(RunAttempt {
             status: RunAttemptStatus::Running,
             provider_turn_id: Some(turn.id.clone()),
+            native_thread_id: provider_thread
+                .native_thread_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.clone()),
             started_at: attempt
                 .started_at
                 .clone()

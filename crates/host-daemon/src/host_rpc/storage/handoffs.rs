@@ -17,7 +17,7 @@ impl Storage {
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
             let state = projections::load(&tx, &effect.thread_id, &[])?;
-            if !owns(&state, effect, worker) {
+            if !state.effects.get(&effect.id).is_some_and(|saved|saved.status==model::EffectStatus::Running && saved.lease_owner.as_deref()==Some(worker)) {
                 return Ok(None);
             }
             let model::EffectRequest::ProviderTurnStart { run_id } = &effect.request else {
@@ -73,10 +73,22 @@ impl Storage {
                     &tx, &state, run, thread, pending, fresh, recovery, now,
                 )?);
             }
-            let decision = model::Decision {
-                changes,
-                effects: Vec::new(),
-            };
+            let mut decision = model::Decision {changes,effects:Vec::new()};
+            if !fresh && let Some(native)=thread.native_thread_ref.as_ref().and_then(|reference|reference.native_id.as_deref()) {
+                let candidate=state.apply(&decision);
+                if pending_handoffs(&candidate.context_handoffs,&thread.id,native).next().is_some() {
+                let budget=context_budget(&tx,&candidate,run,thread,Some(native))?;
+                if matches!(select_context(&tx,&candidate.context_handoffs,&thread.id,native,budget,recovery)?,ContextPlan::InsufficientBudget) {
+                    let replacement=prepare(&tx,&candidate,run,thread,None,true,recovery,now)?;
+                    let restored=candidate.apply(&model::Decision {changes:replacement.clone(),effects:Vec::new()});
+                    let budget=context_budget(&tx,&restored,run,thread,None)?;
+                    if matches!(select_context(&tx,&restored.context_handoffs,&thread.id,"",budget,recovery)?,ContextPlan::Deliver(..)) {
+                        if !thread.pending_background_tasks.is_empty() || state.nodes.values().any(|node|node.provider_thread_id.as_ref()==Some(&thread.id) && node.run_id.as_ref()!=Some(&run.id) && matches!(node.status,model::NodeStatus::Pending|model::NodeStatus::Running|model::NodeStatus::Waiting)) {return Err("native context has pending background work; cannot replace its thread".into());}
+                        decision.changes.extend(replacement);
+                    }
+                }
+                }
+            }
             commands::append_decision(&tx, &state, decision.clone(), None, now)?;
             let result = state.apply(&decision);
             tx.commit().map_err(failure)?;
@@ -89,46 +101,49 @@ impl Storage {
         effect: &model::Effect,
         worker: &str,
         native: &SessionRef,
-        budget: usize,
         recovery: &str,
     ) -> Result<Option<(Vec<model::ContextHandoff>, history::SelectedHistory)>, String> {
         self.with(|connection| {
-            let tx=connection.transaction().map_err(failure)?;
-            let state=projections::metadata(&tx,&effect.thread_id)?;
-            // Re-read the lease under this snapshot too; cancellation must not
-            // allocate or inject history after another worker owns the write.
-            let effects=event_store::effects(&tx,&effect.thread_id)?;
-            if !effects.get(&effect.id).is_some_and(|saved|saved.status==model::EffectStatus::Running && saved.lease_owner.as_deref()==Some(worker)) {return Ok(None);}
-            let model::EffectRequest::ProviderTurnStart {run_id}=&effect.request else {return Err("context requires a start effect".into());};
-            let run=&state.runs[run_id];
-            let thread=run.provider_thread_id.as_ref().and_then(|id|state.provider_threads.get(id)).ok_or("context provider thread is missing")?;
-            let mut pending:Vec<_>=state.context_handoffs.values().filter(|handoff|handoff.to_provider_thread_id==thread.id && handoff.status==model::HandoffStatus::Ready && handoff.delivery.as_ref().is_none_or(|delivery|delivery.native_thread_id!=native.id || delivery.status==model::HandoffDeliveryStatus::Pending)).cloned().collect();
-            pending.sort_by(|a,b|a.created_at.cmp(&b.created_at).then_with(||a.id.cmp(&b.id)));
-            if pending.is_empty() {return Ok(None);}
-            if pending.iter().any(|handoff|handoff.delivery.as_ref().is_some_and(|delivery|delivery.native_thread_id==native.id && delivery.status==model::HandoffDeliveryStatus::Pending)) {return Err("historical context delivery is uncertain; replace the native thread before retrying".into());}
-            let mut seen:std::collections::BTreeSet<_>=state.context_handoffs.values().filter_map(|handoff|handoff.delivery.as_ref()).filter(|delivery|delivery.native_thread_id==native.id && delivery.status!=model::HandoffDeliveryStatus::Pending).flat_map(|delivery|delivery.item_ids.iter().cloned()).collect();
-            let mut messages=Vec::new();
-            let mut omitted_ids=Vec::new();
-            let mut omitted=0;
-            let mut coverage=Vec::new();
-            for handoff in &pending {
-                let stored=handoff.history.as_ref().ok_or("handoff history is missing")?;
-                coverage.push(format!("Context handoff ({}):\n{}",serde_json::to_value(handoff.strategy).map_err(failure)?.as_str().ok_or("invalid strategy")?,stored.coverage));
-                omitted+=stored.omitted_items as usize;
-                omitted_ids.extend(stored.omitted_item_ids.iter().cloned());
-                for reference in &stored.messages {
-                    if !seen.insert(reference.item_id.clone()) {continue;}
-                    let item=projections::read::<model::TurnItem>(&tx,&reference.item_id)?.filter(|item|item.thread_id==reference.thread_id).ok_or("handoff source body is missing")?;
-                    let mut message=history::historical_message(&item,None).ok_or("handoff source kind changed")?;
-                    message.message=reference.clone();
-                    messages.push(message);
-                }
+            let tx = connection.transaction().map_err(failure)?;
+            let state = projections::load(&tx, &effect.thread_id, &[])?;
+            if !state.effects.get(&effect.id).is_some_and(|saved| {
+                saved.status == model::EffectStatus::Running
+                    && saved.lease_owner.as_deref() == Some(worker)
+            }) {
+                return Ok(None);
             }
-            let mut coverage=coverage.join("\n");
-            if history::history_cost(&[],&coverage)>4_000.min(budget/2) {coverage=format!("Context handoff. {} records; detailed coverage references omitted. Recover an omitted item only when the request needs it.\n{recovery}",pending.len());}
-            let selected=history::select_history(&messages,&coverage,omitted,&omitted_ids,budget)?;
+            let model::EffectRequest::ProviderTurnStart { run_id } = &effect.request else {
+                return Err("context requires a start effect".into());
+            };
+            let run = state.runs.get(run_id).ok_or("context run is missing")?;
+            let thread = run
+                .provider_thread_id
+                .as_ref()
+                .and_then(|id| state.provider_threads.get(id))
+                .ok_or("context provider thread is missing")?;
+            if pending_handoffs(&state.context_handoffs, &thread.id, &native.id)
+                .next()
+                .is_none()
+            {
+                return Ok(None);
+            }
+            let budget = context_budget(&tx, &state, run, thread, Some(&native.id))?;
+            let context = match select_context(
+                &tx,
+                &state.context_handoffs,
+                &thread.id,
+                &native.id,
+                budget,
+                recovery,
+            )? {
+                ContextPlan::Empty => None,
+                ContextPlan::Deliver(handoffs, selected) => Some((handoffs, selected)),
+                ContextPlan::InsufficientBudget => {
+                    return Err("historical context exceeds the available native budget".into());
+                }
+            };
             tx.commit().map_err(failure)?;
-            Ok(Some((pending,selected)))
+            Ok(context)
         })
     }
 
@@ -202,12 +217,6 @@ impl Storage {
     }
 }
 
-fn owns(state: &model::State, effect: &model::Effect, worker: &str) -> bool {
-    state.effects.get(&effect.id).is_some_and(|saved| {
-        saved.status == model::EffectStatus::Running && saved.lease_owner.as_deref() == Some(worker)
-    })
-}
-
 fn prepare(
     connection: &Connection,
     state: &model::State,
@@ -218,11 +227,10 @@ fn prepare(
     recovery: &str,
     now: &str,
 ) -> Result<Vec<model::Change>, String> {
-    let source = if let Some(fork) = fork {
-        projections::metadata(connection, &fork.source_thread_id)?
-    } else {
-        state.clone()
-    };
+    let fork_source = fork
+        .map(|fork| projections::metadata(connection, &fork.source_thread_id))
+        .transpose()?;
+    let source = fork_source.as_ref().unwrap_or(state);
     let latest = if let Some(fork) = fork {
         fork.source_point
             .run_id
@@ -234,10 +242,10 @@ fn prepare(
             .values()
             .filter(|source| {
                 source.ordinal < run.ordinal
+                    && (source.status != model::RunStatus::Cancelled || source.started_at.is_some())
                     && matches!(
                         source.status,
                         model::RunStatus::Completed
-                            | model::RunStatus::Waiting
                             | model::RunStatus::Failed
                             | model::RunStatus::Interrupted
                             | model::RunStatus::Cancelled
@@ -289,12 +297,21 @@ fn prepare(
     );
     let selected =
         history::select_history(&messages, &coverage, 0, &[], history::DEFAULT_TOKEN_CAP)?;
-    let id = model::derived_id(
-        "context-handoff",
-        &[&run.id, if fresh { "recovery" } else { "provider" }],
-    );
+    let scope = if fresh {
+        format!(
+            "recovery:{}",
+            thread
+                .native_thread_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref())
+                .ok_or("recovery source native identity is missing")?
+        )
+    } else {
+        "provider".into()
+    };
+    let id = model::derived_id("context-handoff", &[&run.id, &scope]);
     let transfer_id = fork.map_or_else(
-        || model::derived_id("context-transfer", &[&run.id, "provider"]),
+        || model::derived_id("context-transfer", &[&run.id, &scope]),
         |fork| fork.id.clone(),
     );
     let from: Vec<_> = items
@@ -446,4 +463,220 @@ fn prepare(
         },
         model::Change::TurnItem(item),
     ])
+}
+
+// Absence of telemetry is not an empty native conversation. T3 estimates the
+// text and native attachments already accepted by this exact native identity.
+fn context_budget(
+    connection: &Connection,
+    state: &model::State,
+    run: &model::Run,
+    thread: &model::ProviderThread,
+    native: Option<&str>,
+) -> Result<usize, String> {
+    let item=state.turn_items.values().find(|item|matches!(&item.body,model::TurnItemBody::UserMessage {message_id,..} if message_id==&run.user_message_id)).ok_or("context target input is missing")?;
+    let model::TurnItemBody::UserMessage {
+        text, attachments, ..
+    } = &item.body
+    else {
+        unreachable!()
+    };
+    let usage = state
+        .provider_turns
+        .values()
+        .filter(|turn| {
+            turn.provider_thread_id == thread.id
+                && turn
+                    .run_attempt_id
+                    .as_ref()
+                    .and_then(|id| state.run_attempts.get(id))
+                    .is_some_and(|attempt| {
+                        native.is_some()
+                            && attempt.native_thread_id.as_deref() == native
+                            && attempt.provider_thread_id == turn.provider_thread_id
+                            && attempt.root_node_id == turn.node_id
+                    })
+        })
+        .filter_map(|turn| turn.token_usage.as_ref())
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+    let window = usage.map(|usage| {
+        usage
+            .max_tokens
+            .filter(|max| *max > 0)
+            .unwrap_or(128_000)
+            .min(
+                usage
+                    .auto_compact_threshold
+                    .filter(|max| *max > 0)
+                    .unwrap_or(u64::MAX),
+            )
+    });
+    let used = if let Some(usage) = usage {
+        usage.used_tokens
+    } else if let Some(native) = native {
+        let accepted: std::collections::BTreeSet<_> = state
+            .provider_turns
+            .values()
+            .filter_map(|turn| {
+                turn.run_attempt_id
+                    .as_ref()
+                    .and_then(|id| state.run_attempts.get(id))
+            })
+            .filter(|attempt| {
+                attempt.provider_thread_id == thread.id
+                    && attempt.native_thread_id.as_deref() == Some(native)
+            })
+            .map(|attempt| attempt.run_id.as_str())
+            .collect();
+        let delivered: std::collections::BTreeSet<_> = state
+            .context_handoffs
+            .values()
+            .filter(|handoff| handoff.to_provider_thread_id == thread.id)
+            .filter_map(|handoff| handoff.delivery.as_ref())
+            .filter(|delivery| {
+                delivery.native_thread_id == native
+                    && delivery.status != model::HandoffDeliveryStatus::Pending
+            })
+            .flat_map(|delivery| delivery.item_ids.iter().map(String::as_str))
+            .collect();
+        timeline::handoff_items(
+            connection,
+            &state.thread.id,
+            0,
+            run.ordinal.saturating_sub(1),
+            true,
+        )?
+        .iter()
+        .map(|(item, status)| {
+            let native_input = item.provider_thread_id.as_ref() == Some(&thread.id)
+                && item
+                    .run_id
+                    .as_deref()
+                    .is_some_and(|id| accepted.contains(id));
+            if !native_input && !delivered.contains(item.id.as_str()) {
+                return 0;
+            }
+            let text = history::historical_message(item, *status)
+                .map_or(0, |message| message.text.len().div_ceil(4) as u64);
+            text + if native_input
+                && let model::TurnItemBody::UserMessage { attachments, .. } = &item.body
+            {
+                history::attachment_token_allowance(attachments)
+            } else {
+                0
+            }
+        })
+        .sum()
+    } else {
+        0
+    };
+    Ok(history::handoff_budget(text, attachments, used, window))
+}
+
+enum ContextPlan {
+    Empty,
+    Deliver(Vec<model::ContextHandoff>, history::SelectedHistory),
+    InsufficientBudget,
+}
+
+fn pending_handoffs<'a>(
+    handoffs: &'a std::collections::BTreeMap<String, model::ContextHandoff>,
+    thread_id: &'a str,
+    native_id: &'a str,
+) -> impl Iterator<Item = &'a model::ContextHandoff> {
+    handoffs.values().filter(move |handoff| {
+        handoff.to_provider_thread_id == thread_id
+            && handoff.status == model::HandoffStatus::Ready
+            && handoff.delivery.as_ref().is_none_or(|delivery| {
+                delivery.native_thread_id != native_id
+                    || delivery.status == model::HandoffDeliveryStatus::Pending
+            })
+    })
+}
+
+fn select_context(
+    connection: &Connection,
+    handoffs: &std::collections::BTreeMap<String, model::ContextHandoff>,
+    thread_id: &str,
+    native_id: &str,
+    budget: usize,
+    recovery: &str,
+) -> Result<ContextPlan, String> {
+    let mut pending: Vec<_> = pending_handoffs(handoffs, thread_id, native_id)
+        .cloned()
+        .collect();
+    pending.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    if pending.is_empty() {
+        return Ok(ContextPlan::Empty);
+    }
+    if pending.iter().any(|handoff| {
+        handoff.delivery.as_ref().is_some_and(|delivery| {
+            delivery.native_thread_id == native_id
+                && delivery.status == model::HandoffDeliveryStatus::Pending
+        })
+    }) {
+        return Err(
+            "historical context delivery is uncertain; replace the native thread before retrying"
+                .into(),
+        );
+    }
+    let mut seen: std::collections::BTreeSet<_> = handoffs
+        .values()
+        .filter_map(|handoff| handoff.delivery.as_ref())
+        .filter(|delivery| {
+            delivery.native_thread_id == native_id
+                && delivery.status != model::HandoffDeliveryStatus::Pending
+        })
+        .flat_map(|delivery| delivery.item_ids.iter().cloned())
+        .collect();
+    let mut messages = Vec::new();
+    let mut omitted_ids = Vec::new();
+    let mut omitted = 0;
+    let mut coverage = Vec::new();
+    for handoff in &pending {
+        let stored = handoff
+            .history
+            .as_ref()
+            .ok_or("handoff history is missing")?;
+        coverage.push(format!(
+            "Context handoff ({}):\n{}",
+            serde_json::to_value(handoff.strategy)
+                .map_err(failure)?
+                .as_str()
+                .ok_or("invalid strategy")?,
+            stored.coverage
+        ));
+        omitted += stored.omitted_items as usize;
+        omitted_ids.extend(stored.omitted_item_ids.iter().cloned());
+        for reference in &stored.messages {
+            if !seen.insert(reference.item_id.clone()) {
+                continue;
+            }
+            let item = projections::read::<model::TurnItem>(connection, &reference.item_id)?
+                .filter(|item| item.thread_id == reference.thread_id)
+                .ok_or("handoff source body is missing")?;
+            let mut message =
+                history::historical_message(&item, None).ok_or("handoff source kind changed")?;
+            message.message = reference.clone();
+            messages.push(message);
+        }
+    }
+    let mut coverage = coverage.join("\n");
+    if history::history_cost(&[], &coverage) > 4_000.min(budget / 2) {
+        coverage = format!(
+            "Context handoff. {} records; detailed coverage references omitted. Recover an omitted item only when the request needs it.\n{recovery}",
+            pending.len()
+        );
+    }
+
+    Ok(
+        match history::select_history(&messages, &coverage, omitted, &omitted_ids, budget) {
+            Ok(selected) => ContextPlan::Deliver(pending, selected),
+            Err(_) => ContextPlan::InsufficientBudget,
+        },
+    )
 }

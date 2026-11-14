@@ -234,20 +234,23 @@ pub fn handoff_budget(
     context_window: Option<u64>,
 ) -> usize {
     let window = context_window.unwrap_or(128_000);
-    let current = json_len(&user_text) as u64
-        + attachments
-            .iter()
-            .map(|attachment| {
-                if attachment.get("type").and_then(Value::as_str) == Some("image") {
-                    8_192
-                } else {
-                    4_096
-                }
-            })
-            .sum::<u64>();
+    let current = json_len(&user_text) as u64 + attachment_token_allowance(attachments);
     window
         .saturating_sub(used_tokens)
         .saturating_sub(current)
         .saturating_sub(16_000.max(window.div_ceil(4)))
         .min(DEFAULT_TOKEN_CAP as u64) as usize
+}
+
+pub fn attachment_token_allowance(attachments: &[Value]) -> u64 {
+    attachments
+        .iter()
+        .map(|attachment| {
+            if attachment.get("type").and_then(Value::as_str) == Some("image") {
+                8_192
+            } else {
+                4_096
+            }
+        })
+        .sum()
 }
