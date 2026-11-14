@@ -21,9 +21,11 @@ fn restart_blocked(state: &State, run: &Run) -> bool {
 }
 
 fn restart_source(state: &State) -> Option<&Run> {
-    let run = state
-        .active_run()
-        .filter(|run| run.status == RunStatus::Running)?;
+    let run = state.active_run().filter(|run| {
+        run.status == RunStatus::Running
+            || run.status == RunStatus::Starting && run.restart_continuation_of_run_id.is_some()
+    })?;
+    let prepared = run.status == RunStatus::Starting;
     if restart_blocked(state, run) {
         return None;
     }
@@ -36,7 +38,11 @@ fn restart_source(state: &State) -> Option<&Run> {
     (thread.owner_node_id.is_none()
         && thread.app_thread_id.as_ref() == Some(&state.thread.id)
         && thread.provider_instance_id == run.provider_instance_id
-        && thread.status == ProviderThreadStatus::Active
+        && (prepared || thread.status == ProviderThreadStatus::Active)
+        && !matches!(
+            thread.status,
+            ProviderThreadStatus::Closed | ProviderThreadStatus::Archived
+        )
         && thread.native_thread_ref.as_ref().is_some_and(|native| {
             native.native_id.is_some()
                 && native.strength == NativeRefStrength::Strong
@@ -44,15 +50,17 @@ fn restart_source(state: &State) -> Option<&Run> {
         })
         && session.provider_instance_id == run.provider_instance_id
         && session.driver == thread.driver
-        && !matches!(
-            session.status,
-            ProviderSessionStatus::Stopped | ProviderSessionStatus::Error
-        )
-        && state.provider_turns.values().any(|turn| {
-            turn.run_attempt_id == run.active_attempt_id
-                && turn.provider_thread_id == thread.id
-                && turn.status == ProviderTurnStatus::Running
-        }))
+        && (prepared
+            || !matches!(
+                session.status,
+                ProviderSessionStatus::Stopped | ProviderSessionStatus::Error
+            ))
+        && (prepared
+            || state.provider_turns.values().any(|turn| {
+                turn.run_attempt_id == run.active_attempt_id
+                    && turn.provider_thread_id == thread.id
+                    && turn.status == ProviderTurnStatus::Running
+            })))
     .then_some(run)
 }
 
@@ -63,7 +71,7 @@ pub fn runtime_restarted(
     continue_after_restart: bool,
     context: Context<'_>,
 ) -> Result<Decision, String> {
-    let continuation = continue_after_restart
+    let continuation = (continue_after_restart && !state.has_uncertain_input())
         .then(|| restart_source(state))
         .flatten();
     let mut decision = if let Some(run) = state.active_run()
@@ -206,10 +214,14 @@ pub fn continue_restarted(
         context,
     )?;
     for change in &mut decision.changes {
-        if let Change::Run(run) = change
+        if let Change::RunCreated(run) = change
             && run.user_message_id == message_id
         {
             run.restart_continuation_of_run_id = Some(source.id.clone());
+            run.work_started_at = source
+                .work_started_at
+                .clone()
+                .or_else(|| source.started_at.clone());
         }
     }
     Ok(decision)
