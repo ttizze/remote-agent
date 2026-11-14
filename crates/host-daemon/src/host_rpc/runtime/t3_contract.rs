@@ -1412,28 +1412,31 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
             .count(),
         usize::from(recovering)
     );
-    let handoff = current
+    let latest_run = current
+        .projection
+        .runs
+        .iter()
+        .max_by_key(|run| run.ordinal)
+        .unwrap();
+    let target_handoffs: Vec<_> = current
         .projection
         .context_handoffs
         .iter()
-        .find(|handoff| {
-            handoff.target_run_id
-                == current
-                    .projection
-                    .runs
-                    .iter()
-                    .max_by_key(|run| run.ordinal)
-                    .unwrap()
-                    .id
-        })
-        .unwrap();
+        .filter(|handoff| handoff.target_run_id == latest_run.id)
+        .collect();
+    assert_eq!(target_handoffs.len(), if recovering { 2 } else { 1 });
+    assert!(
+        target_handoffs
+            .iter()
+            .any(|handoff| handoff.strategy == model::HandoffStrategy::DeltaSinceTargetLastSeen),
+        "the original switch delta remains in the audit records"
+    );
     assert_eq!(
-        handoff.strategy,
-        if recovering {
-            model::HandoffStrategy::FullThreadSummary
-        } else {
-            model::HandoffStrategy::DeltaSinceTargetLastSeen
-        }
+        target_handoffs
+            .iter()
+            .any(|handoff| handoff.strategy == model::HandoffStrategy::FullThreadSummary),
+        recovering,
+        "recovery adds a full-context record alongside the original delta"
     );
 }
 
