@@ -2,7 +2,6 @@ use agent_protocol::{
     conversation::{self as decision, records},
     protocol::{Call, Response},
     session::{ProviderKind, SessionRef},
-    sync::Scope,
 };
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::{HostRpcService, HostSession};
@@ -10,6 +9,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 mod codex_fixture;
+#[allow(dead_code)]
+#[path = "support/conversations.rs"]
+mod conversations;
 
 async fn rpc(server: &CodexAppServer, method: &str, params: Value) -> Value {
     let response = server
@@ -57,15 +59,14 @@ async fn opened(
     service: &HostRpcService,
     session: &HostSession,
     thread: &SessionRef,
-) -> (records::Replica, host_daemon::HostSubscription) {
+) -> (conversations::Projection, host_daemon::HostSubscription) {
     let reply = service
         .dispatch(
             session.id(),
             &Call::SubscribeConversation(records::Subscribe {
                 session: thread.clone(),
                 subscription: uuid::Uuid::new_v4(),
-                cached: None,
-                window: None,
+                after_sequence: None,
             }),
         )
         .await
@@ -75,9 +76,7 @@ async fn opened(
     else {
         panic!("open failed")
     };
-    let replica = records::Replica::new(Scope::Conversation(thread.clone()), 1)
-        .apply(1, result.initial)
-        .unwrap();
+    let replica = conversations::Projection::new(result);
     (replica, reply.updates.unwrap())
 }
 
@@ -86,7 +85,7 @@ async fn open(
     session: &HostSession,
     thread: &SessionRef,
 ) -> agent_protocol::models::ThreadResponse {
-    records::project(&opened(service, session, thread).await.0).unwrap()
+    opened(service, session, thread).await.0.view()
 }
 
 async fn create(
@@ -141,7 +140,7 @@ async fn completed_turn(
     let receipt: records::Acknowledged = serde_json::from_value(result["result"].clone()).unwrap();
     receipt.accepted().unwrap();
     loop {
-        let view = records::project(&replica).unwrap();
+        let view = replica.view();
         assert!(
             !view.thread.preparations.iter().any(|preparation| matches!(
                 preparation.status,
@@ -164,7 +163,7 @@ async fn completed_turn(
             .await
             .unwrap_or_else(|_| panic!("no turn update for {text}: {:?}", view.thread));
         let message = agent_protocol::protocol::decode(&bytes.unwrap()).unwrap();
-        replica = replica.apply(1, message).unwrap();
+        replica.receive(message);
     }
 }
 
@@ -290,7 +289,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
             },
         })).await;
         let rejected:records::Acknowledged=serde_json::from_value(rejected["result"].clone()).unwrap();
-        assert!(matches!(&rejected.outcome,decision::Outcome::Rejected(reason) if reason == "Codexにログインしてください。"),"{:?}",rejected.outcome);
+        assert_eq!(rejected.error.as_deref(), Some("Codexにログインしてください。"));
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         let recovered=create(&service,&mut session,&home).await;
         completed_turn(&service,&mut session,&recovered,"recovered account").await;

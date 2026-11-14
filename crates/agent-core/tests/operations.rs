@@ -22,6 +22,22 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
 fn optional<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value[key].as_str()
 }
+fn opened_snapshot(
+    session: &SessionRef,
+    initial: Vec<agent_protocol::orchestration::projection::ThreadStreamItem>,
+) -> Result<agent_protocol::orchestration::projection::ThreadSnapshot, PeerError> {
+    let mut snapshot = None;
+    for message in initial {
+        snapshot = agent_core::orchestration::receive(
+            &session.application_id(),
+            snapshot.as_ref(),
+            message,
+        )
+        .map_err(|error| PeerError::InvalidMessage(error.into()))?;
+    }
+    snapshot.ok_or_else(|| PeerError::InvalidMessage("conversation snapshot is missing".into()))
+}
+
 async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
     macro_rules! call {
         ($operation:expr) => {
@@ -69,17 +85,20 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                 .call(&records::Subscribe {
                     session: id.clone(),
                     subscription: uuid::Uuid::from_u128(2),
-                    cached: None,
-                    window: None,
+                    after_sequence: None,
                 })
                 .await?;
-            let replica = records::Replica::new(agent_protocol::sync::Scope::Conversation(id), 1)
-                .apply(1, opened.initial)
-                .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            let snapshot = opened_snapshot(&id, opened.initial)?;
             json!(
-                records::project(&replica).ok_or_else(|| PeerError::InvalidMessage(
-                    "conversation header is missing".into()
-                ))?
+                agent_core::orchestration::project(
+                    &snapshot,
+                    &id,
+                    opened.provider,
+                    records::capabilities(opened.capabilities),
+                    opened.project_root.as_deref(),
+                    &Default::default()
+                )
+                .map_err(PeerError::InvalidMessage)?
             )
         }
         "readItem" => {
@@ -89,21 +108,14 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     &agent_protocol::protocol::Call::SubscribeConversation(records::Subscribe {
                         session: session.clone(),
                         subscription: uuid::Uuid::from_u128(2),
-                        cached: None,
-                        window: None,
+                        after_sequence: None,
                     }),
                 )
                 .await?;
-            let mut replica = records::Replica::new(
-                agent_protocol::sync::Scope::Conversation(session.clone()),
-                1,
-            )
-            .apply(1, opened.initial)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            let mut snapshot = opened_snapshot(&session, opened.initial)?;
             let reply = client
                 .call(&records::Hydrate {
-                    session,
-                    subscription: uuid::Uuid::from_u128(2),
+                    session: session.clone(),
                     item: text(command, "itemId").into(),
                 })
                 .await?;
@@ -111,8 +123,24 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                 reply.transfer.is_none(),
                 "this corpus covers inline item bodies"
             );
+            let detail = reply
+                .item
+                .ok_or_else(|| PeerError::InvalidMessage("item detail is missing".into()))?;
+            let details = [(
+                (detail.thread_id.clone(), detail.id.clone()),
+                Arc::new(detail),
+            )]
+            .into();
             let item = loop {
-                let response = records::project(&replica).unwrap();
+                let response = agent_core::orchestration::project(
+                    &snapshot,
+                    &session,
+                    opened.provider,
+                    records::capabilities(opened.capabilities),
+                    opened.project_root.as_deref(),
+                    &details,
+                )
+                .map_err(PeerError::InvalidMessage)?;
                 if let Some(item) = response
                     .thread
                     .turns
@@ -123,16 +151,20 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                 {
                     break item.as_ref().clone();
                 }
-                let message: records::Message = stream
+                let message: agent_protocol::orchestration::projection::ThreadStreamItem = stream
                     .read()
                     .await
                     .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?
                     .ok_or_else(|| {
                         PeerError::ConnectionClosed("item subscription closed".into())
                     })?;
-                replica = replica
-                    .apply(1, message)
-                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                snapshot = agent_core::orchestration::receive(
+                    &session.application_id(),
+                    Some(&snapshot),
+                    message,
+                )
+                .map_err(|error| PeerError::InvalidMessage(error.into()))?
+                .ok_or_else(|| PeerError::InvalidMessage("snapshot disappeared".into()))?;
             };
             json!(item)
         }

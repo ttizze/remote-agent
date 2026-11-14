@@ -308,8 +308,7 @@ fn route(
                     .call(&records::Subscribe {
                         session: target.clone(),
                         subscription: uuid::Uuid::new_v4(),
-                        cached: None,
-                        window: None,
+                        after_sequence: None,
                     })
                     .await?;
                 let operation = uuid::Uuid::new_v4();

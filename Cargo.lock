@@ -71,6 +71,7 @@ dependencies = [
  "agent-transport",
  "anyhow",
  "clap",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

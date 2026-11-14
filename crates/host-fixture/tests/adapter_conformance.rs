@@ -511,10 +511,7 @@ async fn scenarios(provider: ProviderKind) {
     let receipt = submit(&local.peer, &submission(&session, "resumed input"))
         .await
         .unwrap();
-    assert_eq!(
-        receipt.outcome,
-        agent_protocol::conversation::Outcome::Accepted
-    );
+    receipt.accepted().unwrap();
     let resumed = finished(&mut events).await;
     assert_ne!(resumed.id, turn.id);
     assert_eq!(resumed.status, TurnStatus::Completed);
@@ -660,16 +657,8 @@ async fn scenarios(provider: ProviderKind) {
         };
         let receipt = submit(&local.peer, &follow_up).await.unwrap();
         let id = &follow_up.client_user_message_id;
-        if case == "steer" {
-            assert_eq!(
-                receipt.outcome,
-                agent_protocol::conversation::Outcome::Accepted
-            );
-        } else {
-            assert_eq!(
-                receipt.outcome,
-                agent_protocol::conversation::Outcome::Accepted
-            );
+        receipt.accepted().unwrap();
+        if case != "steer" {
             let (opened, _) = open(&local.peer, &session).await;
             assert_eq!(opened.thread.queue.inputs, std::slice::from_ref(&follow_up));
         }
@@ -1335,10 +1324,11 @@ async fn codex_queues_input_for_a_running_turn_it_has_not_observed() {
         follow_up: op::FollowUp::Steer,
         ..submission(&session, "queued for unobserved turn")
     };
-    assert_eq!(
-        submit(&local.peer, &input).await.unwrap().outcome,
-        agent_protocol::conversation::Outcome::Accepted
-    );
+    submit(&local.peer, &input)
+        .await
+        .unwrap()
+        .accepted()
+        .unwrap();
     let (opened, _) = open(&local.peer, &session).await;
     assert_eq!(opened.thread.queue.inputs, [input]);
     let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();

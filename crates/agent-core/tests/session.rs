@@ -89,12 +89,11 @@ fn canonical_snapshot_and_later_rows_preserve_the_hosts_confirmed_history_and_re
                 phase: Default::default(),
             },
         ))]);
-    let replica = rows::replica_at(
+    let projection = rows::orchestration::snapshot(
         agent_protocol::models::ThreadResponse {
             thread: changed,
             ..Default::default()
         },
-        1,
         8,
     );
     let (snapshot, _) = reduce(
@@ -102,7 +101,9 @@ fn canonical_snapshot_and_later_rows_preserve_the_hosts_confirmed_history_and_re
         "",
         Event::ConversationRows {
             subscription_id: subscription,
-            message: Box::new(replica.snapshot().unwrap()),
+            message: Box::new(
+                agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(projection),
+            ),
         },
     );
     let thread = &snapshot.sessions.conversations[&agent_protocol::session::SessionRef {
@@ -603,12 +604,13 @@ proptest::proptest! {
         };
         let mut original = original;
         let expected_text = format!("{claude_text}{delta}");
-        Arc::make_mut(&mut original.sessions.replicas).insert(claude.clone(), Arc::new(rows::replica(
+        Arc::make_mut(&mut original.sessions.projections).insert(claude.clone(), Arc::new(rows::orchestration::snapshot(
             agent_protocol::models::ThreadResponse { thread: make_thread(&claude, &claude_text).as_ref().clone(), ..Default::default() }, 1,
         )));
-        let update = rows::replica_at(agent_protocol::models::ThreadResponse {
+        Arc::make_mut(&mut original.sessions.subscription_generations).insert(claude.clone(), 1);
+        let update = agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(rows::orchestration::snapshot(agent_protocol::models::ThreadResponse {
             thread: make_thread(&claude, &expected_text).as_ref().clone(), ..Default::default()
-        }, 1, 8).snapshot().unwrap();
+        }, 8));
         let (changed, _) = agent_core::state::reduce(&original, "", agent_core::state::Event::ConversationRows {
             subscription_id: claude_subscription, message: Box::new(update),
         });

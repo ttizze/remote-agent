@@ -1765,7 +1765,7 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         let local = fixture.local().await.unwrap();
         let _catalog=conversations::Catalog::open(&local.peer).await;
         let opened=conversations::Conversation::open(&local.peer,&SessionRef::new(ProviderKind::Codex,"command-history".into()).unwrap()).await.unwrap();
-        let bytes=agent_protocol::protocol::encode(opened.replica.snapshot().unwrap()).unwrap().len();
+        let bytes=agent_protocol::protocol::encode(&opened.projection.snapshot).unwrap().len();
         assert!(bytes < 100 * 1024, "collapsed command bodies delayed history: {bytes} bytes");
         let view=opened.view();
         let turn=&view.thread.turns.as_ref().unwrap()[0];
@@ -1806,7 +1806,7 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         let preview = conversations::Conversation::open(&mobile.peer, &id)
             .await
             .unwrap();
-        let preview_bytes = agent_protocol::protocol::encode(preview.replica.snapshot().unwrap())
+        let preview_bytes = agent_protocol::protocol::encode(&preview.projection.snapshot)
             .unwrap()
             .len();
         assert!(
@@ -3789,7 +3789,7 @@ async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without
                 conversation = conversations::Conversation::open(&mobile.peer, &thread_id).await.unwrap();
             }
             let opened = serde_json::to_value(conversation.view()).unwrap();
-            assert!(agent_protocol::protocol::encode(conversation.replica.snapshot().unwrap()).unwrap().len() < 16 * 1024);
+            assert!(agent_protocol::protocol::encode(&conversation.projection.snapshot).unwrap().len() < 16 * 1024);
             let turn = &opened["thread"]["turns"][0];
             // An import copies messages and images; past tool activity stays native.
             let deferred = ["oversized-text", "oversized-image"];
@@ -4043,16 +4043,16 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
         let started = started.unwrap();
         let duplicate = duplicate.unwrap();
         assert_eq!(
-            (&duplicate.outcome, duplicate.cursor),
-            (&started.outcome, started.cursor),
+            (&duplicate.error, duplicate.sequence, &duplicate.accepted_at),
+            (&started.error, started.sequence, &started.accepted_at),
             "one durable receipt per input"
         );
         first.peer.close().await;
         let second = fixture.local().await.unwrap();
         let replay = conversations::submit(&second.peer, &input).await.unwrap();
         assert_eq!(
-            (&replay.outcome, replay.cursor),
-            (&started.outcome, started.cursor)
+            (&replay.error, replay.sequence, &replay.accepted_at),
+            (&started.error, started.sequence, &started.accepted_at)
         );
         let mut events = conversations::Conversation::open(&second.peer, &thread)
             .await

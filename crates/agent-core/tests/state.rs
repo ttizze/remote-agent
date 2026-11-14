@@ -30,37 +30,33 @@ fn fixture_change(previous: &Snapshot, params: Value) -> (Snapshot, Vec<Effect>)
         let thread = change.apply(&previous.sessions.conversations[&id]).unwrap();
         let sequence = previous
             .sessions
-            .replicas
+            .projections
             .get(&id)
-            .and_then(|replica| replica.cursor())
-            .map_or(8, |cursor| cursor.sequence + 1);
+            .map_or(8, |snapshot| snapshot.snapshot_sequence + 1);
         let generation = previous
             .sessions
-            .replicas
+            .subscription_generations
             .get(&id)
-            .map_or(1, |replica| replica.subscription());
-        let replica = rows::replica_at(
+            .copied()
+            .unwrap_or(1);
+        let projection = rows::orchestration::snapshot(
             ThreadResponse {
                 thread,
                 ..Default::default()
             },
-            generation,
             sequence,
         );
-        Arc::make_mut(&mut next.sessions.replicas)
-            .entry(id.clone())
-            .or_insert_with(|| {
-                Arc::new(agent_protocol::conversation::records::Replica::new(
-                    agent_protocol::sync::Scope::Conversation(id.clone()),
-                    generation,
-                ))
-            });
+        Arc::make_mut(&mut next.sessions.subscription_generations).insert(id.clone(), generation);
         (next, effects) = reduce(
             &next,
             "",
             Event::ConversationRows {
                 subscription_id: subscription,
-                message: Box::new(replica.snapshot().unwrap()),
+                message: Box::new(
+                    agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(
+                        projection,
+                    ),
+                ),
             },
         );
         next.sessions.subscriptions = previous.sessions.subscriptions.clone();
@@ -88,33 +84,21 @@ fn fixture_change(previous: &Snapshot, params: Value) -> (Snapshot, Vec<Effect>)
         summaries.insert(id.clone(), change.apply(&previous).unwrap());
     }
     list.data = summaries.into_values().collect();
-    let conversation = updated
+    let conversation_sequence = updated
         .sessions
-        .replicas
+        .projections
         .get(&id)
-        .and_then(|replica| replica.cursor())
-        .or_else(|| {
-            updated
-                .lists
-                .replica
-                .as_ref()
-                .and_then(|replica| replica.cursor())
-        })
-        .unwrap_or(agent_protocol::sync::Cursor {
-            store: uuid::Uuid::nil(),
-            sequence: 8,
-        });
-    let sequence = updated
+        .map_or(8, |snapshot| snapshot.snapshot_sequence);
+    let previous_cursor = updated
         .lists
         .replica
         .as_ref()
-        .and_then(|replica| replica.cursor())
-        .map_or(conversation.sequence, |cursor| {
-            conversation.sequence.max(cursor.sequence + 1)
-        });
+        .and_then(|replica| replica.cursor());
     let cursor = agent_protocol::sync::Cursor {
-        sequence,
-        ..conversation
+        store: previous_cursor.map_or(uuid::Uuid::from_u128(1), |cursor| cursor.store),
+        sequence: previous_cursor.map_or(conversation_sequence, |cursor| {
+            conversation_sequence.max(cursor.sequence + 1)
+        }),
     };
     if updated.lists.replica.is_none() {
         updated.lists.replica = Some(Arc::new(
@@ -165,25 +149,28 @@ fn fixture_change(previous: &Snapshot, params: Value) -> (Snapshot, Vec<Effect>)
 }
 
 fn initial(thread: Thread) -> Snapshot {
-    let id = thread.id.clone().unwrap();
-    let replica = rows::replica(
+    let mut snapshot = Snapshot::default();
+    let output = opening::opened(
         ThreadResponse {
             thread,
             ..Default::default()
         },
-        1,
+        &mut snapshot,
     );
-    let thread = agent_protocol::conversation::records::project(&replica)
-        .unwrap()
-        .thread;
-    Snapshot {
-        sessions: agent_core::state::Sessions {
-            replicas: Arc::new(BTreeMap::from([(id.clone(), Arc::new(replica))])),
-            conversations: Arc::new(BTreeMap::from([(id, Arc::new(thread))])),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
+    let view = agent_core::orchestration::project(
+        &output.projection,
+        &output.session,
+        output.provider,
+        output.capabilities,
+        output.project_root.as_deref(),
+        &Default::default(),
+    )
+    .unwrap();
+    Arc::make_mut(&mut snapshot.sessions.projections)
+        .insert(output.session.clone(), Arc::new(output.projection));
+    Arc::make_mut(&mut snapshot.sessions.conversations)
+        .insert(output.session, Arc::new(view.thread));
+    snapshot
 }
 
 fn applied<O: Operation>(
@@ -193,29 +180,23 @@ fn applied<O: Operation>(
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     if let Some(agent_protocol::sync::Scope::Conversation(id)) = operation.subscription_scope() {
-        Arc::make_mut(&mut next.sessions.replicas)
+        Arc::make_mut(&mut next.sessions.subscription_generations)
             .entry(id.clone())
-            .or_insert_with(|| {
-                Arc::new(agent_protocol::conversation::records::Replica::new(
-                    agent_protocol::sync::Scope::Conversation(id.clone()),
-                    1,
-                ))
-            });
+            .or_insert(1);
     }
     let effects = operation.apply(&mut next, "", output);
     (next, effects)
 }
 fn reply(thread: Thread) -> opening::Opened {
-    opening::Opened {
-        replica: rows::replica(
-            ThreadResponse {
-                thread,
-                ..Default::default()
-            },
-            1,
-        ),
-        subscription: uuid::Uuid::nil(),
-    }
+    let mut output = opening::opened(
+        ThreadResponse {
+            thread,
+            ..Default::default()
+        },
+        &mut Snapshot::default(),
+    );
+    output.subscription = uuid::Uuid::nil();
+    output
 }
 
 #[test]
@@ -278,7 +259,8 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     let restored: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
     let mut expected = snapshot.clone();
-    expected.sessions.replicas = Default::default();
+    expected.sessions.projections = Default::default();
+    expected.sessions.subscription_generations = Default::default();
     expected.lists.replica = None;
     expected.lists.subscription = None;
     expected.lists.task_activity = None;
@@ -375,14 +357,7 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
                     draft: Arc::default(),
                     follow_up: Default::default(),
                 }
-                .apply(
-                    &mut finished,
-                    "",
-                    agent_protocol::sync::Cursor {
-                        store: uuid::Uuid::from_u128(1),
-                        sequence: 8,
-                    },
-                );
+                .apply(&mut finished, "", 8);
             }
             if index == 0 {
                 assert_eq!(
@@ -437,14 +412,7 @@ fn submission_acknowledgement_waits_for_canonical_rows_without_guessing_a_turn()
         draft: Arc::default(),
         follow_up: Default::default(),
     }
-    .apply(
-        &mut pending,
-        "",
-        agent_protocol::sync::Cursor {
-            store: uuid::Uuid::from_u128(1),
-            sequence: 8,
-        },
-    );
+    .apply(&mut pending, "", 8);
     let input = &pending.sessions.pending_submissions["5b1986e4-742d-5d96-81d1-93be060b53a6"];
     assert!(input.accepted);
     assert_eq!(input.turn_id.as_deref(), Some("old"));
@@ -635,9 +603,10 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
         Some("before after")
     );
     let restored: Snapshot = serde_json::from_slice(&serde_json::to_vec(&next).unwrap()).unwrap();
-    assert!(restored.sessions.replicas.is_empty());
+    assert!(restored.sessions.projections.is_empty());
     let mut expected = next.clone();
-    expected.sessions.replicas = Default::default();
+    expected.sessions.projections = Default::default();
+    expected.sessions.subscription_generations = Default::default();
     expected.lists.replica = None;
     expected.lists.subscription = None;
     expected.lists.task_activity = None;
@@ -806,14 +775,9 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
         for open_thread in [false, true] {
             let next = if open_thread {
                 let mut next = previous.clone();
-                Arc::make_mut(&mut next.sessions.replicas).insert(
+                Arc::make_mut(&mut next.sessions.subscription_generations).insert(
                     SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap(),
-                    Arc::new(agent_protocol::conversation::records::Replica::new(
-                        agent_protocol::sync::Scope::Conversation(
-                            SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap(),
-                        ),
-                        1,
-                    )),
+                    1,
                 );
                 op::ReadThread::open(SessionRef {
                     provider: Some(ProviderKind::Codex),

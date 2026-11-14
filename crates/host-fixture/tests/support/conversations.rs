@@ -1,4 +1,8 @@
-//! Transport assertions consume the same row contract as native clients.
+//! Transport assertions consume the same canonical stream as native clients.
+use agent_protocol::orchestration::{
+    self as model,
+    projection::{ThreadSnapshot, ThreadStreamItem},
+};
 use agent_protocol::{
     conversation::{Command, InputContent, records},
     error::PeerError,
@@ -10,34 +14,84 @@ use agent_protocol::{
     sync::Scope,
 };
 use agent_transport::{client::Client, framing::Reader};
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use uuid::Uuid;
+
+pub struct Projection {
+    pub snapshot: ThreadSnapshot,
+    session: SessionRef,
+    provider: ProviderKind,
+    capabilities: agent_protocol::session::Capabilities,
+    project_root: Option<String>,
+    details: BTreeMap<(String, String), Arc<model::TurnItem>>,
+}
+
+impl Projection {
+    pub fn new(opened: records::Opened) -> Self {
+        let mut snapshot = None;
+        for message in opened.initial {
+            snapshot = agent_core::orchestration::receive(
+                &opened.session.application_id(),
+                snapshot.as_ref(),
+                message,
+            )
+            .unwrap();
+        }
+        Self {
+            snapshot: snapshot.expect("opening includes a canonical snapshot"),
+            session: opened.session,
+            provider: opened.provider,
+            capabilities: records::capabilities(opened.capabilities),
+            project_root: opened.project_root,
+            details: BTreeMap::new(),
+        }
+    }
+
+    pub fn receive(&mut self, message: ThreadStreamItem) {
+        self.snapshot = agent_core::orchestration::receive(
+            &self.session.application_id(),
+            Some(&self.snapshot),
+            message,
+        )
+        .unwrap()
+        .expect("snapshot remains available");
+    }
+
+    pub fn view(&self) -> ThreadResponse {
+        agent_core::orchestration::project(
+            &self.snapshot,
+            &self.session,
+            self.provider,
+            self.capabilities,
+            self.project_root.as_deref(),
+            &self.details,
+        )
+        .unwrap()
+    }
+}
 
 pub struct Conversation {
     reader: Reader,
-    subscription: Uuid,
-    pub replica: records::Replica,
+    pub projection: Projection,
     completed: HashSet<TurnId>,
 }
 
 impl Conversation {
     pub async fn open(client: &Client, session: &SessionRef) -> Result<Self, PeerError> {
-        let subscription = Uuid::new_v4();
         let (opened, reader) = client
             .request_stream::<records::Opened>(&Call::SubscribeConversation(records::Subscribe {
                 session: session.clone(),
-                subscription,
-                cached: None,
-                window: None,
+                subscription: Uuid::new_v4(),
+                after_sequence: None,
             }))
             .await?;
-        let replica = records::Replica::new(Scope::Conversation(session.clone()), 1)
-            .apply(1, opened.initial)
-            .expect("valid initial rows");
         let mut conversation = Self {
             reader,
-            subscription,
-            replica,
+            projection: Projection::new(opened),
             completed: HashSet::new(),
         };
         while conversation
@@ -63,40 +117,37 @@ impl Conversation {
     }
 
     pub fn view(&self) -> ThreadResponse {
-        records::project(&self.replica).unwrap()
+        self.projection.view()
     }
 
     pub async fn next(&mut self) -> ThreadResponse {
-        let message: records::Message =
+        let message: ThreadStreamItem =
             tokio::time::timeout(Duration::from_secs(15), self.reader.read())
                 .await
                 .unwrap_or_else(|_| panic!("conversation event deadline: {:?}", self.view()))
                 .unwrap()
                 .expect("conversation stream closed");
-        records::validate_message(&message).unwrap();
-        self.replica = self
-            .replica
-            .clone()
-            .apply(1, message)
-            .expect("ordered conversation rows");
+        self.projection.receive(message);
         self.view()
     }
 
     pub async fn extend(&mut self, client: &Client) -> ThreadResponse {
-        let Scope::Conversation(session) = self.replica.scope() else {
-            unreachable!()
-        };
-        let before = self.replica.window();
-        client
+        let cursor = self
+            .projection
+            .snapshot
+            .history_cursor
+            .clone()
+            .expect("older history cursor");
+        let page = client
             .call(&records::Extend {
-                session: session.clone(),
-                subscription: self.subscription,
+                session: self.projection.session.clone(),
+                cursor: cursor.clone(),
             })
             .await
             .unwrap();
-        while self.replica.window() == before {
-            self.next().await;
-        }
+        self.projection.snapshot =
+            agent_core::orchestration::receive_history(&self.projection.snapshot, &cursor, page)
+                .expect("requested history page is current");
         self.view()
     }
 
@@ -119,71 +170,41 @@ impl Conversation {
         transport: &agent_transport::transport::Session,
         item: &agent_protocol::ids::ItemId,
     ) -> (agent_protocol::models::Item, usize, Option<u64>) {
-        let Scope::Conversation(session) = self.replica.scope() else {
-            unreachable!()
-        };
-        let mut reply = client
+        let reply = client
             .call(&records::Hydrate {
-                session: session.clone(),
-                subscription: self.subscription,
+                session: self.projection.session.clone(),
                 item: item.clone(),
             })
             .await
             .unwrap();
         let wire_bytes = agent_protocol::protocol::encode(&reply).unwrap().len();
         let transfer_size = reply.transfer.as_ref().map(|grant| grant.size);
-        let resolved = if let Some(grant) = reply.transfer.take() {
-            Some(
-                agent_transport::transfers::resolve_item(grant, item, Some(transport))
-                    .await
-                    .unwrap(),
-            )
+        let detail = if let Some(grant) = reply.transfer {
+            agent_transport::transfers::resolve_item(grant, item, Some(transport))
+                .await
+                .unwrap()
         } else {
-            None
+            reply.item.expect("requested body exists")
         };
+        assert_eq!(detail.id, item.as_str());
+        self.projection.details.insert(
+            (detail.thread_id.clone(), detail.id.clone()),
+            Arc::new(detail),
+        );
         loop {
-            let caught_up = self.replica.cursor().is_some_and(|cursor| {
-                cursor.store == reply.cursor.store && cursor.sequence >= reply.cursor.sequence
-            });
-            let ready = self
+            if let Some(saved) = self
                 .view()
                 .thread
                 .turns
                 .iter()
                 .flatten()
                 .flat_map(|turn| turn.items.iter().flatten())
-                .find(|row| &row.id == item)
-                .is_some_and(|item| resolved.is_some() || !item.is_deferred());
-            if caught_up && ready {
-                break;
+                .find(|saved| &saved.id == item && !saved.is_deferred())
+            {
+                return (saved.as_ref().clone(), wire_bytes, transfer_size);
             }
             self.next().await;
         }
-        if let Some(item) = resolved {
-            let row = records::hydrate_body(&self.replica, reply.version.unwrap(), item).unwrap();
-            self.replica = self
-                .replica
-                .apply(
-                    1,
-                    records::Message::Hydrate {
-                        cursor: self.replica.cursor().unwrap(),
-                        row,
-                    },
-                )
-                .unwrap();
-        }
-        let view = self.view();
-        let saved = view
-            .thread
-            .turns
-            .iter()
-            .flatten()
-            .flat_map(|turn| turn.items.iter().flatten())
-            .find(|saved| &saved.id == item)
-            .unwrap()
-            .as_ref()
-            .clone();
-        (saved, wire_bytes, transfer_size)
     }
 
     pub async fn input_turn(&mut self, input: &ClientInputId, completed: bool) -> Turn {
@@ -273,10 +294,7 @@ pub async fn created(
     request: records::Create,
 ) -> Result<ThreadResponse, PeerError> {
     let opened = client.call(&request).await?;
-    let replica = records::Replica::new(Scope::Conversation(opened.session), 1)
-        .apply(1, opened.initial)
-        .expect("created rows");
-    Ok(records::project(&replica).unwrap())
+    Ok(Projection::new(opened).view())
 }
 
 pub struct Catalog {

@@ -1,6 +1,7 @@
 use agent_core::state::DraftKey;
 #[path = "store/panes.rs"]
 mod panes;
+use agent_protocol::orchestration::projection::{ThreadHistoryPage, ThreadStreamItem};
 use agent_protocol::session::{ProviderKind, SessionRef};
 #[path = "support/host.rs"]
 mod host_fixture;
@@ -2620,7 +2621,6 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
 
 #[tokio::test]
 async fn gallery_restarts_paging_after_a_history_reset() {
-    use agent_protocol::sync::{Message, Position, Window};
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let id = SessionRef::new(ProviderKind::Codex, "reset-gallery".into()).unwrap();
     let server_id = id.clone();
@@ -2631,63 +2631,26 @@ async fn gallery_restarts_paging_after_a_history_reset() {
         writer.reply(&request, json!({"result":{"thread":{"id":server_id,"historyHasMore":true,"turns":[{"id":"image-turn","status":"completed","items":[{"id":"image","status":"completed","body":{"inline":{"body":{"imageGeneration":{"savedPath":"/image.png","data":null,"revisedPrompt":null}}}}}]}]}}})).await.unwrap();
         let extend = read(&mut reader).await;
         assert_eq!(extend["method"], "host/conversation/extend");
-        let mut reset = writer.replica(&server_id).snapshot().unwrap();
-        let Message::Snapshot {
-            cursor,
-            window,
-            rows,
-        } = &mut reset
-        else {
-            unreachable!()
-        };
-        cursor.sequence += 1;
-        *window = Some(Window {
-            turn: 2000,
-            item: 0,
-        });
-        for row in rows {
-            match &mut row.position {
-                Position::Turn { ordinal } | Position::Item { ordinal, .. } => *ordinal = 2000,
-                _ => {}
-            }
-            if let agent_protocol::sync::Content::Full(record) = &mut row.content
-                && let agent_protocol::conversation::records::Record::Turn(turn) =
-                    Arc::make_mut(record)
-            {
-                turn.ordinal = 2000;
-            }
+        let mut reset = writer.projection(&server_id);
+        let before_reset = reset.snapshot_sequence;
+        reset.snapshot_sequence += 1;
+        reset.history_cursor = Some("reset-older".into());
+        for (index, item) in reset.projection.visible_turn_items.iter_mut().enumerate() {
+            item.position = 2000 + index as u64;
         }
-        let cursor = *cursor;
-        writer.send_rows(subscription, reset).await.unwrap();
         writer
-            .send_rows(
-                subscription,
-                Message::Extend {
-                    cursor,
-                    window: Window {
-                        turn: 1000,
-                        item: 0,
-                    },
-                    rows: vec![],
-                },
-            )
+            .send_stream(subscription, ThreadStreamItem::Snapshot(reset))
             .await
             .unwrap();
-        extend.acknowledge().await.unwrap();
+        writer.reply(&extend, json!({"result":ThreadHistoryPage {
+            snapshot_sequence: before_reset, items: vec![], next_cursor: Some("stale-older".into()), has_more_history: true
+        }})).await.unwrap();
         let extend = read(&mut reader).await;
         assert_eq!(extend["method"], "host/conversation/extend");
-        writer
-            .send_rows(
-                subscription,
-                Message::Extend {
-                    cursor,
-                    window: Window { turn: 0, item: 0 },
-                    rows: vec![],
-                },
-            )
-            .await
-            .unwrap();
-        extend.acknowledge().await.unwrap();
+        assert_eq!(extend["params"]["cursor"], "reset-older");
+        writer.reply(&extend, json!({"result":ThreadHistoryPage {
+            snapshot_sequence: before_reset + 1, items: vec![], next_cursor: None, has_more_history: false
+        }})).await.unwrap();
         (reader, writer)
     });
     let result = tokio::time::timeout(
@@ -2732,23 +2695,12 @@ async fn gallery_drains_live_frames_while_image_hydration_waits_for_the_host() {
                 (b'!' + (seed % 90) as u8) as char
             })
             .collect();
-        let mut message = writer.replica(&server_id).snapshot().unwrap();
-        let agent_protocol::sync::Message::Snapshot { cursor, rows, .. } = &mut message else {
-            unreachable!()
-        };
-        cursor.sequence += 1;
-        for row in rows {
-            if let agent_protocol::sync::Content::Full(record) = &mut row.content
-                && let agent_protocol::conversation::records::Record::Thread(header) =
-                    Arc::make_mut(record)
-            {
-                header.state.name = text.clone();
-                row.version = cursor.sequence;
-            }
-        }
+        let mut snapshot = writer.projection(&server_id);
+        snapshot.snapshot_sequence += 1;
+        snapshot.projection.thread.title = text;
         for _ in 0..64 {
             writer
-                .send_rows(subscription, message.clone())
+                .send_stream(subscription, ThreadStreamItem::Snapshot(snapshot.clone()))
                 .await
                 .unwrap();
         }
@@ -3385,15 +3337,10 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             json!({"thread": {"id":source,"cwd":"/fixture","turns":[kept.clone()]}}),
         )
         .unwrap();
-        let sequence = current.sessions.replicas[&source]
-            .cursor()
-            .unwrap()
-            .sequence
-            + 1;
-        let replacement = host_fixture::rows::replica_at(response, 1, sequence)
-            .snapshot()
-            .unwrap();
-        writer.send_rows(subscription, replacement).await.unwrap();
+        let sequence = current.sessions.projections[&source].snapshot_sequence + 1;
+        let replacement =
+            ThreadStreamItem::Snapshot(host_fixture::orchestration::snapshot(response, sequence));
+        writer.send_stream(subscription, replacement).await.unwrap();
     }
     writer.reply(&request, json!({"result":{}})).await.unwrap();
     rewind.await.unwrap();
@@ -3421,17 +3368,19 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         let response: agent_protocol::models::ThreadResponse =
             serde_json::from_value(json!({"thread":{"id":source,"cwd":"/fixture","turns":[kept]}}))
                 .unwrap();
-        let sequence = current.sessions.replicas[&source]
-            .cursor()
-            .unwrap()
-            .sequence
-            + 1;
+        let sequence = current.sessions.projections[&source].snapshot_sequence + 1;
         let opened = agent_protocol::conversation::records::Opened {
             session: source.clone(),
             subscription_id: uuid::Uuid::nil(),
-            initial: host_fixture::rows::replica_at(response, 1, sequence)
-                .snapshot()
-                .unwrap(),
+            provider: ProviderKind::Codex,
+            capabilities: response.thread.capabilities.unwrap_or_default(),
+            project_root: None,
+            initial: vec![
+                ThreadStreamItem::Snapshot(host_fixture::orchestration::snapshot(
+                    response, sequence,
+                )),
+                ThreadStreamItem::Synchronized,
+            ],
         };
         writer
             .reply(&refresh, json!({"result":opened}))
@@ -4907,9 +4856,9 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             completion.await.unwrap();
         }
         let subscription = store.snapshot().sessions.subscriptions[&read_item.thread_id];
-        let cursor = store.snapshot().sessions.replicas[&read_item.thread_id].cursor().unwrap();
+        let sequence = store.snapshot().sessions.projections[&read_item.thread_id].snapshot_sequence;
         output.lock().await.notify(json!({"method":"fixture/session/change","session":read_item.thread_id,"change":SessionChange::Text {turn_id:"turn".into(),item_id:"item".into(),field:TextField::CommandOutput,delta:"live suffix".into()}})).await.unwrap();
-        wait_for(&store, |s| s.sessions.replicas[&read_item.thread_id].cursor().is_some_and(|current| current.sequence > cursor.sequence)).await;
+        wait_for(&store, |s| s.sessions.projections[&read_item.thread_id].snapshot_sequence > sequence).await;
         assert_eq!(store.snapshot().sessions.subscriptions[&read_item.thread_id],subscription);
         assert!(store.snapshot().panes.primary().error.is_none());
         // New deferred metadata invalidates the in-flight source; a complete read must retry.
@@ -4987,7 +4936,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
 #[case::restored(true)]
 #[case::read_failed(false)]
 #[tokio::test]
-async fn session_storage_change_preserves_history_and_only_reports_failed_recovery(
+async fn foreign_conversation_stream_preserves_history_and_only_reports_failed_recovery(
     #[case] restored: bool,
 ) {
     use agent_protocol::session::{SessionChange, TextField};
@@ -5007,31 +4956,17 @@ async fn session_storage_change_preserves_history_and_only_reports_failed_recove
     let (store, mut reader, writer) = setup(initial).await;
     let cached_turns = store.snapshot().sessions.conversations[&id].turns.clone();
     let old_subscription = store.snapshot().sessions.subscriptions[&id];
-    let cursor = store.snapshot().sessions.replicas[&id].cursor().unwrap();
+    let sequence = store.snapshot().sessions.projections[&id].snapshot_sequence;
+    let mut foreign = writer.projection(&id);
+    foreign.snapshot_sequence = sequence + 2;
+    foreign.projection.thread.id = uuid::Uuid::new_v4().to_string();
     writer
-        .send_rows(
-            old_subscription,
-            agent_protocol::sync::Message::Events {
-                through: agent_protocol::sync::Cursor {
-                    store: uuid::Uuid::new_v4(),
-                    sequence: cursor.sequence + 2,
-                },
-                events: vec![agent_protocol::sync::Event {
-                    sequence: (agent_protocol::sync::Cursor {
-                        sequence: cursor.sequence + 2,
-                        ..cursor
-                    })
-                    .sequence,
-                    rows: vec![],
-                    removed: vec![],
-                }],
-            },
-        )
+        .send_stream(old_subscription, ThreadStreamItem::Snapshot(foreign))
         .await
         .unwrap();
     let recovery = read(&mut reader).await;
     assert_eq!(recovery["method"], "host/conversation/subscribe");
-    assert_eq!(recovery["params"]["cached"], json!(cursor));
+    assert_eq!(recovery["params"]["afterSequence"], json!(sequence));
     assert!(!store.snapshot().sessions.subscriptions.contains_key(&id));
     assert!(store.snapshot().panes.primary().error.is_none());
     assert_eq!(
@@ -6077,7 +6012,7 @@ async fn local_unknown_input_restore_and_discard_follow_the_user_intent_after_ho
         request["params"]["command"]["ResolveUnknown"],
         json!({"id":input,"retry":false})
     );
-    writer.reply(&request, json!({"result":{"outcome":{"Rejected":"original was never admitted"},"cursor":{"store":uuid::Uuid::from_u128(1),"sequence":8}}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"sequence":8,"acceptedAt":"2026-11-14T00:00:00.000Z","error":"original was never admitted"}})).await.unwrap();
     receipt.await.unwrap();
     let state = store.snapshot();
     assert!(!state.sessions.pending_submissions.contains_key(&input));
@@ -6090,10 +6025,7 @@ async fn local_unknown_input_restore_and_discard_follow_the_user_intent_after_ho
 
 #[tokio::test]
 async fn gallery_finishes_with_an_error_when_the_hydrated_image_was_removed() {
-    use agent_protocol::{
-        conversation::records,
-        sync::{Key, Message},
-    };
+    use agent_protocol::conversation::records;
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let id = SessionRef::new(ProviderKind::Codex, "removed-gallery".into()).unwrap();
     let target = id.clone();
@@ -6104,29 +6036,21 @@ async fn gallery_finishes_with_an_error_when_the_hydrated_image_was_removed() {
         writer.reply(&subscribe, json!({"result":{"thread":{"id":target,"turns":[{"id":"turn","status":"completed","items":[{"id":"image","status":"completed","body":{"deferred":{"summary":{"imageGeneration":{"savedPath":"/image.png","data":null,"revisedPrompt":null}}}}}]}]}}})).await.unwrap();
         let hydrate = read(&mut reader).await;
         assert_eq!(hydrate["method"], "host/conversation/hydrate");
-        let from = writer.replica(&target).cursor().unwrap();
-        let through = agent_protocol::sync::Cursor {
-            sequence: from.sequence + 1,
-            ..from
-        };
+        let mut removed = writer.projection(&target);
+        removed.snapshot_sequence += 1;
+        removed.projection.turn_items.clear();
+        removed.projection.visible_turn_items.clear();
         writer
-            .send_rows(
-                subscription,
-                Message::Events {
-                    through,
-                    events: vec![agent_protocol::sync::Event {
-                        sequence: through.sequence,
-                        rows: vec![],
-                        removed: vec![Key::Item {
-                            thread: target,
-                            id: "image".into(),
-                        }],
-                    }],
-                },
+            .send_stream(subscription, ThreadStreamItem::Snapshot(removed))
+            .await
+            .unwrap();
+        writer
+            .reply(
+                &hydrate,
+                json!({"result":records::Hydrated { item: None, transfer: None }}),
             )
             .await
             .unwrap();
-        writer.reply(&hydrate, json!({"result":records::Hydrated { cursor: through, version: None, transfer: None }})).await.unwrap();
         (reader, writer)
     });
     let result = tokio::time::timeout(
