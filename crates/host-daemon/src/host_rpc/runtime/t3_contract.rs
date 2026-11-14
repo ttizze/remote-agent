@@ -1072,6 +1072,20 @@ async fn a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_rest
     })
     .await
     .expect("native creation failure settles the first run");
+    let failed = snapshot(&service, &target);
+    assert!(
+        failed.projection.context_handoffs.is_empty(),
+        "failed fallback allocation cannot publish a context handoff"
+    );
+    assert!(
+        failed
+            .projection
+            .context_transfers
+            .iter()
+            .all(|transfer| transfer.status == model::TransferStatus::Pending
+                && transfer.resolution.is_none())
+    );
+    assert!(failed.projection.provider_threads[0].forked_from.is_some());
     assert_eq!(agent.inputs.lock().unwrap().len(), 1);
     let owner = Arc::downgrade(&service.inner);
     drop(connection);
@@ -2208,4 +2222,308 @@ async fn context_history_finds_an_omitted_item_by_its_canonical_id() {
         "an item outside this visible timeline cannot be read"
     );
     assert_eq!(agent.inputs.lock().unwrap().len(), 2);
+}
+
+async fn finished_run(
+    service: &HostRpcService,
+    session: &SessionRef,
+    ordinal: u64,
+) -> model::projection::ThreadSnapshot {
+    let mut changed = service.inner.conversation.storage.changes();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let saved = snapshot(service, session);
+            if saved.projection.runs.iter().any(|run| {
+                run.ordinal == ordinal
+                    && matches!(
+                        run.status,
+                        model::RunStatus::Completed
+                            | model::RunStatus::Failed
+                            | model::RunStatus::Interrupted
+                            | model::RunStatus::Cancelled
+                    )
+            }) {
+                return saved;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("execution reaches its terminal state")
+}
+
+#[tokio::test]
+async fn a_spent_native_fork_uses_fresh_portable_context_without_an_extra_handoff_card() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let source = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("retained-native-prefix"),
+    )
+    .await;
+    let first = settled(&service, &source, 1).await;
+    send(
+        &service,
+        &source,
+        ProviderKind::Codex,
+        "outside-native-prefix",
+    )
+    .await;
+    settled(&service, &source, 2).await;
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let connection = service.open_session();
+    let _: SessionRef = call(
+        &service,
+        connection.id(),
+        Call::ForkConversation(records::Fork {
+            source: source.clone(),
+            target: target.clone(),
+            through: first.projection.runs[0].id.clone().into(),
+        }),
+    )
+    .await
+    .unwrap();
+    let original = agent.inputs.lock().unwrap()[0].thread_id.id.clone();
+    agent.records.lock().unwrap().remove(&original);
+    send(&service, &target, ProviderKind::Codex, "fresh-fork-input").await;
+    let completed = finished_run(&service, &target, 1).await;
+    assert_eq!(
+        completed.projection.runs[0].status,
+        model::RunStatus::Completed
+    );
+    assert_eq!(
+        completed.projection.runs[0].context_handoff_id, None,
+        "runtime fallback is not a dispatch-planned handoff"
+    );
+    assert_eq!(completed.projection.context_handoffs.len(), 1);
+    assert!(
+        completed
+            .projection
+            .context_transfers
+            .iter()
+            .any(|t| t.status == model::TransferStatus::ResolvedPortable)
+    );
+    assert!(
+        !completed
+            .projection
+            .turn_items
+            .iter()
+            .any(|item| matches!(item.body, model::TurnItemBody::Handoff { .. })),
+        "T3 runtime fork fallback does not emit a handoff turn item"
+    );
+    assert!(completed.projection.turn_items.iter().any(|item|item.title.as_deref()==Some("Native fork failed") && matches!(&item.body,model::TurnItemBody::SystemNotice {message} if message.contains("Started a fresh session with its history."))));
+    let injected = serde_json::to_string(&*agent.injected.lock().unwrap()).unwrap();
+    assert!(injected.contains("retained-native-prefix"));
+    assert!(!injected.contains("outside-native-prefix"));
+    let inputs = agent.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 3);
+    let records = agent.records.lock().unwrap();
+    assert_eq!(
+        records[&inputs[2].thread_id.id]
+            .thread
+            .turns
+            .as_ref()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+fn admit_before_worker(
+    storage: &super::super::storage::Storage,
+    session: &SessionRef,
+    text: &str,
+    fork_origin: Option<model::ProviderThreadFork>,
+) {
+    let operation = Uuid::new_v4().to_string();
+    let now = commands::at();
+    let ack = storage
+        .thread_command(
+            super::super::storage::commands::Command {
+                id: &operation,
+                thread_id: &session.application_id(),
+                kind: "message.dispatch",
+                now: &now,
+                item_ids: &[],
+            },
+            None,
+            |state| {
+                model::admit(
+                    state,
+                    model::Input {
+                        message_id: operation.clone(),
+                        created_by: model::Actor::User,
+                        creation_source: model::CreationSource::Mobile,
+                        text: text.into(),
+                        attachments: vec![],
+                        context: None,
+                        model_selection: state.thread.model_selection.clone(),
+                        driver: "codex".into(),
+                        workspace_preparation: None,
+                        fork_origin,
+                    },
+                    model::Admission::Queue,
+                    super::executor::context(state, &operation, &now),
+                )
+            },
+        )
+        .unwrap();
+    assert!(ack.error.is_none());
+}
+
+#[tokio::test]
+async fn a_source_busy_after_admission_keeps_its_native_plan_until_fresh_allocation_succeeds() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let source = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("busy-source-prefix"),
+    )
+    .await;
+    let first = settled(&service, &source, 1).await;
+    agent.create_started.notified().await; // Consume the source's creation notification.
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let connection = service.open_session();
+    let _: SessionRef = call(
+        &service,
+        connection.id(),
+        Call::ForkConversation(records::Fork {
+            source: source.clone(),
+            target: target.clone(),
+            through: first.projection.runs[0].id.clone().into(),
+        }),
+    )
+    .await
+    .unwrap();
+    let workspace = service.inner.worktree_access.write().await;
+    let creation = agent.create_gate.acquire().await.unwrap();
+    let storage = &service.inner.conversation.storage;
+    let origin = storage
+        .fork_origin(&target)
+        .unwrap()
+        .expect("eligible source at admission");
+    admit_before_worker(storage, &target, "busy-fork-input", Some(origin));
+    agent
+        .fail_submit
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    admit_before_worker(storage, &source, "later-busy-source", None);
+    drop(workspace);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.create_started.notified(),
+    )
+    .await
+    .expect("portable fallback waits for fresh allocation");
+    let allocating = snapshot(&service, &target);
+    assert!(
+        allocating.projection.context_handoffs.is_empty(),
+        "fallback metadata is published only after successful native allocation"
+    );
+    assert_eq!(
+        allocating.projection.context_transfers[0].status,
+        model::TransferStatus::Pending
+    );
+    assert!(
+        allocating.projection.provider_threads[0]
+            .forked_from
+            .is_some()
+    );
+    drop(creation);
+    let completed = finished_run(&service, &target, 1).await;
+    assert_eq!(
+        completed.projection.runs[0].status,
+        model::RunStatus::Completed
+    );
+    assert_eq!(completed.projection.runs[0].context_handoff_id, None);
+    assert!(
+        completed
+            .projection
+            .context_transfers
+            .iter()
+            .any(|t| t.status == model::TransferStatus::ResolvedPortable)
+    );
+    assert!(
+        !completed.projection.turn_items.iter().any(|item| matches!(
+            item.body,
+            model::TurnItemBody::Handoff { .. }
+        ) || item.title.as_deref()
+            == Some("Native fork failed")),
+        "a busy source is not a failed fork"
+    );
+    let injected = serde_json::to_string(&*agent.injected.lock().unwrap()).unwrap();
+    assert!(injected.contains("busy-source-prefix"));
+    assert!(!injected.contains("later-busy-source"));
+}
+
+#[tokio::test]
+async fn failed_recovery_allocation_keeps_the_existing_native_reference_and_uncommitted_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("native-before-recovery"),
+    )
+    .await;
+    settled(&service, &session, 1).await;
+    let original = codex.inputs.lock().unwrap()[0].thread_id.id.clone();
+    send(&service, &session, ProviderKind::Claude, "foreign-context").await;
+    settled(&service, &session, 2).await;
+    codex.create_gate.close();
+    codex
+        .fail_inject
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    send(
+        &service,
+        &session,
+        ProviderKind::Codex,
+        "unsent-recovery-input",
+    )
+    .await;
+    let failed = finished_run(&service, &session, 3).await;
+    let run = failed
+        .projection
+        .runs
+        .iter()
+        .max_by_key(|r| r.ordinal)
+        .unwrap();
+    assert_eq!(run.status, model::RunStatus::Failed);
+    let provider = failed
+        .projection
+        .provider_threads
+        .iter()
+        .find(|thread| Some(&thread.id) == run.provider_thread_id.as_ref())
+        .unwrap();
+    assert_eq!(
+        provider
+            .native_thread_ref
+            .as_ref()
+            .and_then(|r| r.native_id.as_deref()),
+        Some(original.as_str()),
+        "failed fresh allocation cannot erase the previous native identity"
+    );
+    assert_eq!(
+        failed
+            .projection
+            .context_handoffs
+            .iter()
+            .filter(|h| h.target_run_id == run.id)
+            .count(),
+        1,
+        "only the dispatch-planned switch exists before a fresh recovery is allocated"
+    );
+    assert_eq!(
+        codex.inputs.lock().unwrap().len(),
+        1,
+        "the failed input never reached a native thread"
+    );
 }
