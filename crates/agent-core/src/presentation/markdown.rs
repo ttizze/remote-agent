@@ -279,6 +279,58 @@ fn structured_blocks(
     blocks
 }
 
+/// `source` with its `index`th task item set to `checked`: counted from 0 in
+/// reading order, as the rendered blocks carry their boxes. As T3 Code's
+/// `taskListMarkerOffset` and `setMarkdownTaskChecked`, only the box on the
+/// item's first line changes. `None` when there is no such task, it already
+/// is, or the source's tasks are not those the rendering shows.
+pub fn markdown_task_checked(source: &str, index: u32, checked: bool) -> Option<String> {
+    /// Where each task item starts and its state; an item with nothing in
+    /// it shows no row, so no box.
+    fn tasks(source: &str) -> Vec<(usize, bool)> {
+        fn visit(node: &Node, tasks: &mut Vec<(usize, bool)>) {
+            if let Node::ListItem(item) = node
+                && let Some(checked) = item.checked
+                && !item.children.is_empty()
+                && let Some(position) = &item.position
+            {
+                tasks.push((position.start.offset, checked));
+            }
+            for child in node.children().into_iter().flatten() {
+                visit(child, tasks);
+            }
+        }
+        let mut tasks = Vec::new();
+        visit(&parse(source), &mut tasks);
+        tasks
+    }
+    let written = tasks(source);
+    // The rendering reads the source without its disclosure tags, which can
+    // turn text between them into a list: then a box's place names no item here.
+    let shown = tasks(&without_disclosure_tags(source));
+    if !written
+        .iter()
+        .map(|task| task.1)
+        .eq(shown.iter().map(|task| task.1))
+    {
+        return None;
+    }
+    let (start, state) = *written.get(usize::try_from(index).ok()?)?;
+    if state == checked {
+        return None;
+    }
+    let line = source.get(start..)?.lines().next()?;
+    let open = line.find('[')?;
+    let state = line.as_bytes().get(open + 1..open + 3)?;
+    if !matches!(state, [b' ' | b'x' | b'X', b']']) {
+        return None;
+    }
+    let mark = start + open + 1;
+    let mut edited = source.to_owned();
+    edited.replace_range(mark..mark + 1, if checked { "x" } else { " " });
+    Some(edited)
+}
+
 /// CSV always quotes cells, including embedded delimiters, quotes and newlines.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn markdown_table_csv(rows: Vec<Vec<String>>) -> String {
