@@ -4920,7 +4920,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         let decline = store.snapshot().request("approval").unwrap().body.choices().iter()
             .find(|choice| choice.effect == agent_protocol::requests::ChoiceEffect::Deny).unwrap().id.clone();
         for intent in [
-            Intent::Respond(op::Respond {request_id:"approval".into(),answer:Answer::Approval {choice_id: "choice-2".into()}}),
+            Intent::Respond(op::Respond {request_id:"approval".into(),answer:Answer::Approval {choice_id: decline}}),
             Intent::Interrupt(op::Interrupt {thread_id:SessionRef { provider: Some(ProviderKind::Codex), id: "A".into() },turn_id:"turn".into()}),
         ] {
             let completion = store.dispatch(intent);
