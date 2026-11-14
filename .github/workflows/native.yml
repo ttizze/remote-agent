@@ -611,6 +611,8 @@ jobs:
     timeout-minutes: 60
     env:
       AGENT_RELEASE_TAG: ${{ inputs.release-tag }}
+      # SQLite and Git fixtures share the runner's CPU and filesystem capacity.
+      NEXTEST_TEST_THREADS: num-cpus
     steps:
       - *windows-checkout
       - name: Require a verified Nightly revision for release packaging
