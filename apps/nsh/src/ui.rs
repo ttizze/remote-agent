@@ -424,8 +424,19 @@ pub(crate) fn bare_button(
 
 /// T3 Code's ghost toggle (`Toggle variant="ghost" size="sm"`): 28 points,
 /// rounded by 10, a 16-point icon at 80%, filled while pressed or hovered.
+#[cfg(desktop)]
 pub(crate) fn toggle(
     glyph: Icon,
+    label: impl IntoReactive<SharedString>,
+    pressed: impl Fn() -> bool + Copy + 'static,
+    press: impl Fn() + 'static,
+) -> nsh_base::ButtonElement {
+    toggle_with(icon(glyph, 16.0), label, pressed, press)
+}
+
+/// T3 Code's ghost toggle around `glyph`, for one whose icon follows its state.
+pub(crate) fn toggle_with(
+    glyph: impl IntoElement,
     label: impl IntoReactive<SharedString>,
     pressed: impl Fn() -> bool + Copy + 'static,
     press: impl Fn() + 'static,
@@ -439,7 +450,7 @@ pub(crate) fn toggle(
         .hover(|s| s.bg(colors::T3_ACCENT))
         .selected(pressed)
         .selected_style(|s| s.bg(colors::T3_ACCENT))
-        .child(view().tooltip(tooltip(label)).child(icon(glyph, 16.0)))
+        .child(view().tooltip(tooltip(label)).child(glyph))
 }
 
 /// nsh-base's button (focus, keys, accessibility) in the desktop client's

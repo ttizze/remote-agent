@@ -79,7 +79,10 @@ pub(crate) struct State {
     /// Each Host's observed navigation survives sidebar and language remounts.
     #[cfg(any(desktop, test))]
     sidebar_routes: BTreeMap<String, agent_core::presentation::sidebar::ProjectReveal>,
-    pub file_line: Option<(u64, Option<u32>)>,
+    /// The file panel last opened, the line its link names, and which opening
+    /// it was: opening the same line again is a new request to show it.
+    pub file_line: Option<(u64, Option<u32>, u64)>,
+    file_openings: u64,
     pub side_chats: BTreeMap<u64, SideChat>,
     pub browser_renderer: String,
     pub worktrees: Option<WorktreeEditor>,
@@ -121,6 +124,7 @@ impl Default for State {
             #[cfg(any(desktop, test))]
             sidebar_routes: BTreeMap::new(),
             file_line: None,
+            file_openings: 0,
             side_chats: BTreeMap::new(),
             browser_renderer: String::new(),
             worktrees: None,
@@ -325,7 +329,7 @@ impl Application {
                 agent_core::presentation::files::EXPLORER_DEFAULT_WIDTH,
                 |width| agent_core::presentation::files::explorer_width(width, f32::INFINITY),
             );
-        // As the width, an unreadable choice is the default's: the source.
+        // As the width, an unreadable choice is the default's.
         let file_rendering_path = root.join("file-rendering.json");
         let file_rendering = crate::storage::read(&file_rendering_path)
             .ok()
@@ -792,7 +796,8 @@ impl Application {
             let state = Arc::make_mut(state);
             state.panels = next.panels;
             if kind == PanelKind::File {
-                state.file_line = Some((next.id, line));
+                state.file_openings += 1;
+                state.file_line = Some((next.id, line, state.file_openings));
             }
         });
     }
@@ -847,7 +852,7 @@ impl Application {
             let state = Arc::make_mut(state);
             state.panels = panels;
             state.side_chats.remove(&id);
-            if state.file_line.is_some_and(|(file, _)| file == id) {
+            if state.file_line.is_some_and(|(file, ..)| file == id) {
                 state.file_line = None;
             }
             true
@@ -1208,7 +1213,7 @@ mod tests {
         let first = sidebar.borrow_and_update().clone();
         let second = tools.borrow_and_update().clone();
         assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(first.file_line, Some((id, Some(7))));
+        assert_eq!(first.file_line, Some((id, Some(7), 1)));
         assert!(first.panels.get(scope.clone()).maximized);
         assert!(first.settings);
         assert_eq!(first.provider, Some(ProviderKind::Codex));
@@ -1221,7 +1226,7 @@ mod tests {
         assert!(closed.provider.is_none());
         assert_eq!(
             first.file_line,
-            Some((id, Some(7))),
+            Some((id, Some(7), 1)),
             "mounted views retain immutable snapshots"
         );
         runtime.block_on(application.shutdown()).unwrap();

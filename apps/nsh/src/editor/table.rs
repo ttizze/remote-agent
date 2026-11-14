@@ -62,16 +62,7 @@ pub(super) fn screen(path: Stored<String>, source: impl Fn() -> String + 'static
                 |column: &usize| *column,
                 move |column, _| {
                     let column = column.get_untracked();
-                    let title = move || {
-                        table.with(|table| {
-                            table
-                                .rows
-                                .first()
-                                .and_then(|head| head.get(column))
-                                .cloned()
-                                .unwrap_or_default()
-                        })
-                    };
+                    let title = move || table.with(|table| table.column_title(column));
                     cell(
                         text(title)
                             .number_of_lines(1)

@@ -48,58 +48,54 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
     let surroundings = crate::rich_text::Surroundings::current();
     let offered = file_rendering(&path.get());
     let preferences = computed(move || connection.state.with(|state| state.file_rendering));
-    // The link's line the reader left for the rendering, as T3 Code's handled reveal.
-    let line_left = signal(None::<u32>);
+    // The opening whose line the reader left for the rendering, as T3 Code's
+    // handled reveal.
+    let line_left = signal(None::<u64>);
     let shown = computed(move || {
-        let line = target.with(|target| target.line);
         file_rendered(
             &path.get(),
             preferences.get(),
-            line.is_some() && line != line_left.get(),
+            target.with(|target| target.line_request),
+            line_left.get(),
         )
     });
     let rendered = computed(move || shown.get().is_some());
-    let toggle_rendered = move || {
-        let Some(rendering) = offered else {
-            return;
-        };
-        let next = !rendered.get_untracked();
-        // The source's field is made again: it shows the link's line again, and
-        // a composition does not outlive the field it was in.
-        laid_out.set(false);
-        composing.set(false);
-        line_left.set(target.with_untracked(|target| target.line).filter(|_| next));
-        let preferences = preferences.get_untracked().with(rendering, next);
-        connection
-            .application
-            .with(|application| application.set_file_rendering(preferences));
-    };
     // T3 Code's toggle: pressed, with the source's glyph, while the rendering shows.
-    let rendering_toggle = match offered {
-        Some(rendering) => {
-            let (glyph, show, hide) = match rendering {
-                FileRendering::Markdown => (
-                    Icon::EYE,
-                    tr("Markdownをレンダリング表示"),
-                    tr("Markdownのソースを表示"),
-                ),
-                FileRendering::Mermaid => (Icon::EYE, tr("図を表示"), tr("Mermaidのソースを表示")),
-                FileRendering::Table => (Icon::TABLE, tr("表を表示"), tr("ソースを表示")),
-            };
+    let rendering_toggle = offered.map(|rendering| {
+        let (glyph, show, hide) = match rendering {
+            FileRendering::Markdown => (
+                Icon::EYE,
+                tr("Markdownをレンダリング表示"),
+                tr("Markdownのソースを表示"),
+            ),
+            FileRendering::Mermaid => (Icon::EYE, tr("図を表示"), tr("Mermaidのソースを表示")),
+            FileRendering::Table => (Icon::TABLE, tr("表を表示"), tr("ソースを表示")),
+        };
+        ui::toggle_with(
             view()
-                .child(when(rendered, move || {
-                    ui::toggle(Icon::CODE, hide, || true, toggle_rendered)
-                }))
-                .child(when(
-                    move || !rendered.get(),
-                    move || ui::toggle(glyph, show, || false, toggle_rendered),
-                ))
-                .into_element()
-        }
-        None => view().into_element(),
-    };
-    let contents = move || controls.with(|controls| controls.text.clone());
-    let diagram = computed(move || controls.with(|controls| mermaid_file_markdown(&controls.text)));
+                .child(when(rendered, || ui::icon(Icon::CODE, 16.0)))
+                .child(when(move || !rendered.get(), move || ui::icon(glyph, 16.0))),
+            move || SharedString::from(if rendered.get() { hide } else { show }),
+            move || rendered.get(),
+            move || {
+                let next = !rendered.get_untracked();
+                // The source's field is made again: it shows the link's line again,
+                // and a composition does not outlive the field it was in.
+                laid_out.set(false);
+                composing.set(false);
+                line_left.set(
+                    target
+                        .with_untracked(|target| target.line_request)
+                        .filter(|_| next),
+                );
+                let preferences = preferences.get_untracked().with(rendering, next);
+                connection
+                    .application
+                    .with(|application| application.set_file_rendering(preferences));
+            },
+        )
+    });
+    let contents = computed(move || controls.with(|controls| controls.text.clone()));
     let page = move |content: View| {
         scroll()
             .flex_1()
@@ -113,13 +109,13 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
     };
     let position = computed(move || {
         (
-            target.with(|target| target.line),
+            target.with(|target| (target.line, target.line_request)),
             controls.with(|controls| controls.loaded_revision.clone()),
             laid_out.get(),
         )
     });
     effect(move || {
-        if let (Some(line), Some(_), true) = position.get() {
+        if let ((Some(line), _), Some(_), true) = position.get() {
             let offset = file_line_start_utf16(
                 controls.with_untracked(|controls| controls.text.clone()),
                 line,
@@ -248,7 +244,7 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                         .child(crate::rich_text::file(
                             surroundings,
                             path.get(),
-                            move || Some(contents()),
+                            move || Some(contents.get()),
                             || 896.0,
                         )),
                 )
@@ -259,6 +255,7 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
             move || {
                 // T3 Code's `MermaidViewer`: the diagram a message would show, or
                 // why it is not drawn.
+                let diagram = computed(move || contents.with(|text| mermaid_file_markdown(text)));
                 page(
                     view()
                         .w_full()
@@ -284,7 +281,7 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
         ))
         .child(when(
             move || shown.get() == Some(FileRendering::Table),
-            move || table::screen(path, contents),
+            move || table::screen(path, move || contents.get()),
         ))
         .child(when(
             move || !rendered.get(),

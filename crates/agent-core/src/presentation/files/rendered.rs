@@ -41,7 +41,6 @@ pub fn file_rendering(path: &str) -> Option<FileRendering> {
 /// Which renderings the reader prefers to the source. T3 Code starts with
 /// Markdown as its source, and diagrams and tables rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
 pub struct FileRenderingPreferences {
     markdown: bool,
     mermaid: bool,
@@ -79,13 +78,16 @@ impl FileRenderingPreferences {
 }
 
 /// The rendering the panel of `path` shows now, if not its source: the
-/// reader's preference, except that a link to a line shows the source at that
-/// line until the reader asks for the rendering again.
+/// reader's preference, except that a link to a line (`line_request`, each
+/// opening its own) shows the source at that line until the reader asks for
+/// the rendering of that opening (`line_left`).
 pub fn file_rendered(
     path: &str,
     preferences: FileRenderingPreferences,
-    line_pending: bool,
+    line_request: Option<u64>,
+    line_left: Option<u64>,
 ) -> Option<FileRendering> {
+    let line_pending = line_request.is_some() && line_request != line_left;
     file_rendering(path).filter(|rendering| !line_pending && preferences.prefers(*rendering))
 }
 
@@ -95,7 +97,9 @@ pub fn file_rendered(
 pub fn mermaid_file_markdown(text: &str) -> Option<String> {
     static REFUSED: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
-            r"(?im)%%\s*\{|^\s*---|</?[A-Za-z]|<[!?]|@\s*\{|\b(?:img|image)\s*:",
+            // JavaScript's `^` also follows a lone CR, and its `\b` is ASCII's.
+            r"(?imR)%%\s*\{|^\s*---|</?[A-Za-z]|<[!?]|@\s*\{",
+            r"|(?:^|[^0-9A-Za-z_])(?:img|image)\s*:",
             r"|url\s*\(|@import|(?:https?|data|blob|file):",
         ))
         .unwrap()
@@ -175,6 +179,21 @@ impl FileTable {
         }
         let columns = rows.iter().map(Vec::len).max().unwrap_or_default();
         Self { rows, columns }
+    }
+
+    /// What heads `column`: the first row's cell, or where that row is
+    /// shorter, the column's letters as T3 Code's `columnLabel` (A, B, … AA).
+    pub fn column_title(&self, column: usize) -> String {
+        if let Some(title) = self.rows.first().and_then(|head| head.get(column)) {
+            return title.clone();
+        }
+        let mut letters = Vec::new();
+        let mut value = column + 1;
+        while value > 0 {
+            letters.push(char::from(b'A' + ((value - 1) % 26) as u8));
+            value = (value - 1) / 26;
+        }
+        letters.into_iter().rev().collect()
     }
 
     /// Each column's width in a panel `available` points wide, between T3
@@ -315,31 +334,28 @@ mod tests {
     #[test]
     fn markdown_starts_as_its_source_and_diagrams_and_tables_rendered() {
         let preferences = FileRenderingPreferences::default();
-        assert_eq!(file_rendered("a.md", preferences, false), None);
+        assert_eq!(file_rendered("a.md", preferences, None, None), None);
         assert_eq!(
-            file_rendered("a.mmd", preferences, false),
+            file_rendered("a.mmd", preferences, None, None),
             Some(FileRendering::Mermaid)
         );
         assert_eq!(
-            file_rendered("a.csv", preferences, false),
+            file_rendered("a.csv", preferences, None, None),
             Some(FileRendering::Table)
         );
         let chosen = preferences
             .with(FileRendering::Markdown, true)
             .with(FileRendering::Table, false);
         assert_eq!(
-            file_rendered("a.md", chosen, false),
+            file_rendered("a.md", chosen, None, None),
             Some(FileRendering::Markdown)
         );
-        assert_eq!(file_rendered("a.csv", chosen, false), None);
+        assert_eq!(file_rendered("a.csv", chosen, None, None), None);
         assert_eq!(
-            file_rendered("a.mmd", chosen, false),
+            file_rendered("a.mmd", chosen, None, None),
             Some(FileRendering::Mermaid)
         );
-        assert_eq!(file_rendered("a.rs", chosen, false), None);
-        // A choice saved before another rendering existed keeps that one's default.
-        let saved: FileRenderingPreferences = serde_json::from_str(r#"{"markdown":true}"#).unwrap();
-        assert_eq!(saved, preferences.with(FileRendering::Markdown, true));
+        assert_eq!(file_rendered("a.rs", chosen, None, None), None);
         let restored: FileRenderingPreferences =
             serde_json::from_str(&serde_json::to_string(&chosen).unwrap()).unwrap();
         assert_eq!(restored, chosen);
@@ -349,8 +365,17 @@ mod tests {
     fn a_line_link_shows_the_source_until_the_rendering_is_asked_for() {
         let all = FileRenderingPreferences::default().with(FileRendering::Markdown, true);
         for path in ["a.md", "a.mmd", "a.csv"] {
-            assert!(file_rendered(path, all, false).is_some(), "{path}");
-            assert_eq!(file_rendered(path, all, true), None, "{path}");
+            assert!(file_rendered(path, all, None, None).is_some(), "{path}");
+            assert_eq!(file_rendered(path, all, Some(1), None), None, "{path}");
+            // The reader asked for the rendering of that opening.
+            assert!(
+                file_rendered(path, all, Some(1), Some(1)).is_some(),
+                "{path}"
+            );
+            // The link opened again shows its line again.
+            assert_eq!(file_rendered(path, all, Some(2), Some(1)), None, "{path}");
+            // Opened without a line, the choice holds.
+            assert!(file_rendered(path, all, None, Some(1)).is_some(), "{path}");
         }
     }
 
@@ -372,6 +397,8 @@ mod tests {
             "graph TD\n  click A \"https://example.invalid\"",
             "graph TD\n  A@{ IMG: \"x\" }",
             "graph TD\n  style A fill:url(#a)",
+            "graph TD\r---",
+            "graph TD\n  A[背景image: x]",
         ] {
             assert_eq!(mermaid_file_markdown(refused), None, "{refused:?}");
         }
@@ -393,7 +420,17 @@ mod tests {
         assert_eq!(rows("\n", "a.csv"), vec![vec![""]]);
         let wide = FileTable::read(&"x,".repeat(2000), "a.csv");
         assert_eq!((wide.rows[0].len(), wide.columns), (1024, 1024));
-        assert_eq!(FileTable::read("a\nb,c,d\n", "a.csv").columns, 3);
+        let ragged = FileTable::read("a\nb,c,d\n", "a.csv");
+        assert_eq!(ragged.columns, 3);
+        assert_eq!(
+            [0, 1, 2].map(|column| ragged.column_title(column)),
+            ["a", "B", "C"]
+        );
+        let headless = FileTable::default();
+        assert_eq!(
+            [25, 26, 27, 701, 702].map(|column| headless.column_title(column)),
+            ["Z", "AA", "AB", "ZZ", "AAA"]
+        );
     }
 
     #[test]
