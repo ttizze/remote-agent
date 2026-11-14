@@ -254,3 +254,21 @@ pub fn attachment_token_allowance(attachments: &[Value]) -> u64 {
         })
         .sum()
 }
+
+/// T3's handoff labels keep the first occurrence order, but use the latest
+/// options for each provider/model pair, independently of history storage.
+pub fn distinct_model_selections<'a>(
+    selections: impl IntoIterator<Item = &'a ModelSelection>,
+) -> Vec<ModelSelection> {
+    let mut models: Vec<ModelSelection> = Vec::new();
+    for selection in selections {
+        if let Some(existing) = models.iter_mut().find(|model| {
+            model.instance_id == selection.instance_id && model.model == selection.model
+        }) {
+            *existing = selection.clone();
+        } else {
+            models.push(selection.clone());
+        }
+    }
+    models
+}

@@ -193,6 +193,46 @@ impl State {
             .min_by_key(|run| (run.queue_position.unwrap_or(run.ordinal), run.ordinal))
     }
 
+    pub fn last_delivered_run(&self, provider_thread_id: &str) -> Option<&Run> {
+        self.runs
+            .values()
+            .filter(|run| {
+                run.provider_thread_id.as_deref() == Some(provider_thread_id)
+                    && run.is_handoff_source()
+                    && (run.status == RunStatus::Completed
+                        || self.provider_turns.values().any(|turn| {
+                            run.active_attempt_id
+                                .as_ref()
+                                .is_some_and(|id| turn.run_attempt_id.as_ref() == Some(id))
+                        }))
+            })
+            .max_by_key(|run| run.ordinal)
+    }
+
+    pub fn context_source_point(&self, run: &Run) -> ContextSourcePoint {
+        ContextSourcePoint {
+            thread_id: run.thread_id.clone(),
+            run_id: Some(run.id.clone()),
+            checkpoint_id: run.checkpoint_id.clone(),
+            turn_item_id: None,
+            provider_thread_ref: run
+                .provider_thread_id
+                .as_ref()
+                .and_then(|id| self.provider_threads.get(id))
+                .and_then(|thread| thread.native_thread_ref.clone()),
+            provider_turn_ref: self
+                .provider_turns
+                .values()
+                .filter(|turn| {
+                    run.active_attempt_id
+                        .as_ref()
+                        .is_some_and(|id| turn.run_attempt_id.as_ref() == Some(id))
+                })
+                .max_by_key(|turn| turn.ordinal)
+                .and_then(|turn| turn.native_turn_ref.clone()),
+        }
+    }
+
     /// A failed/cancelled start has not delivered its fork context. The next
     /// input claims that same transfer instead of starting without its history.
     pub fn pending_fork(&self) -> Option<&ContextTransfer> {
@@ -293,5 +333,14 @@ impl State {
                         })
             })
             .map(|_| attempt)
+    }
+}
+
+impl Run {
+    pub fn is_handoff_source(&self) -> bool {
+        matches!(
+            self.status,
+            RunStatus::Completed | RunStatus::Failed | RunStatus::Interrupted
+        ) || (self.status == RunStatus::Cancelled && self.started_at.is_some())
     }
 }

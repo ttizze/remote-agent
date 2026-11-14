@@ -66,15 +66,8 @@ impl Storage {
             }
             let state=projections::metadata(&transaction,&source_id)?;
             let run=state.runs.get(through.as_str()).ok_or("fork run does not exist")?;
-            let provider_thread=run.provider_thread_id.as_ref().and_then(|id|state.provider_threads.get(id));
-            let provider_turn=state.provider_turns.values().filter(|turn|run.active_attempt_id.as_ref().is_some_and(|attempt|turn.run_attempt_id.as_ref()==Some(attempt))).max_by_key(|turn|turn.ordinal);
             let transfer_id=model::derived_id("context-transfer",&[&target_id,"fork"]);
-            let (thread,transfer)=model::fork_thread(&state.thread,run,model::ContextSourcePoint {
-                thread_id:source_id,run_id:Some(run.id.clone()),
-                checkpoint_id:run.checkpoint_id.clone(),
-                turn_item_id:None,provider_thread_ref:provider_thread.and_then(|thread|thread.native_thread_ref.clone()),
-                provider_turn_ref:provider_turn.and_then(|turn|turn.native_turn_ref.clone()),
-            },&target_id,&transfer_id,now)?;
+            let (thread,transfer)=model::fork_thread(&state.thread,run,state.context_source_point(run),&target_id,&transfer_id,now)?;
             let target_state=model::State::new(thread.clone());
             commands::append_decision(&transaction,&target_state,model::Decision {
                 changes:vec![model::Change::ThreadCreated(thread),model::Change::ContextTransfer(transfer)],effects:vec![],

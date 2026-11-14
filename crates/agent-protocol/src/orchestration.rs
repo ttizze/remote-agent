@@ -142,7 +142,6 @@ status!(HandoffDeliveryStatus {
 status!(TransferType {
     Fork,
     ProviderHandoff,
-    ProviderResumeFallback,
     MergeBack,
     SubagentSpawn,
     SubagentResult
@@ -758,6 +757,10 @@ pub enum TurnItemBody {
         to_provider_thread_id: String,
         from_provider_instance_ids: Vec<String>,
         to_provider_instance_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_model_selections: Option<Vec<ModelSelection>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to_model: Option<String>,
         strategy: HandoffStrategy,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
