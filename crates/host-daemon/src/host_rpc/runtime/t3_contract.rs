@@ -59,6 +59,35 @@ fn snapshot(service: &HostRpcService, session: &SessionRef) -> model::projection
     snapshot
 }
 
+fn assert_fork_preserves_source(
+    mut current: model::projection::ThreadSnapshot,
+    before: &model::projection::ThreadSnapshot,
+    target: &SessionRef,
+) {
+    // ProjectionStore.ts4253-4270 exposes outgoing transfers on the source too.
+    // The fork adds this link; all owned execution/transcript state stays intact.
+    let transfer = current
+        .projection
+        .context_transfers
+        .iter()
+        .find(|transfer| {
+            transfer.kind == model::TransferType::Fork
+                && transfer.source_thread_id == before.projection.thread.id
+                && transfer.target_thread_id == target.application_id()
+        })
+        .expect("outgoing fork context transfer");
+    assert_eq!(
+        transfer.source_point.run_id.as_ref(),
+        Some(&before.projection.runs[0].id)
+    );
+    let id = transfer.id.clone();
+    current
+        .projection
+        .context_transfers
+        .retain(|transfer| transfer.id != id);
+    assert_eq!(&current, before);
+}
+
 async fn settled(
     service: &HostRpcService,
     session: &SessionRef,
@@ -222,7 +251,7 @@ async fn a_fork_keeps_the_selected_prefix_and_independent_native_resources() {
     assert!(fork.projection.visible_turn_items.iter().any(|item|item.visibility==model::projection::Visibility::Inherited && matches!(&item.item.body,model::TurnItemBody::UserMessage {text,..} if text=="prefix-marker")));
     assert!(fork.projection.runs.is_empty());
     assert_eq!(agent.inputs.lock().unwrap().len(), 1);
-    assert_eq!(snapshot(&service, &source), first);
+    assert_fork_preserves_source(snapshot(&service, &source), &first, &target);
     let ack: records::Acknowledged = call(
         &service,
         connection.id(),
@@ -240,10 +269,23 @@ async fn a_fork_keeps_the_selected_prefix_and_independent_native_resources() {
     assert!(ack.error.is_none());
     let continued = settled(&service, &target, 1).await;
     assert_eq!(continued.projection.runs[0].ordinal, 1);
+    assert!(
+        continued
+            .projection
+            .context_transfers
+            .iter()
+            .any(
+                |transfer| transfer.status == model::TransferStatus::Consumed
+                    && matches!(
+                        transfer.resolution,
+                        Some(model::ContextTransferResolution::NativeFork { .. })
+                    )
+            )
+    );
     let inputs = agent.inputs.lock().unwrap();
     assert_eq!(inputs.len(), 2);
     assert_ne!(inputs[0].thread_id, inputs[1].thread_id);
-    assert_eq!(snapshot(&service, &source), first);
+    assert_fork_preserves_source(snapshot(&service, &source), &first, &target);
 }
 
 #[tokio::test]
