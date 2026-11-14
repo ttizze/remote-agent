@@ -778,6 +778,10 @@ impl ReadItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Submission {
+    /// Start a new native context, preserving the Host's visible transcript.
+    /// Such input waits for its own turn even when `follow_up` asks to steer.
+    #[serde(default)]
+    pub fresh_context: bool,
     pub thread_id: crate::session::SessionRef,
     pub client_user_message_id: crate::ids::ClientInputId,
     pub input: Vec<Input>,

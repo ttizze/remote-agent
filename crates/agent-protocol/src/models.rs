@@ -137,6 +137,9 @@ pub struct Thread {
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
     pub id: crate::ids::TurnId,
+    /// This turn starts the provider context visible to subsequent turns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_context: bool,
     pub provider: Option<crate::session::ProviderKind>,
     pub supports_fork: Option<bool>,
     #[serde(default)]
@@ -782,6 +785,7 @@ mod tests {
         let mut thread = Thread {
             preparation: Some(SessionPreparation {
                 submission: crate::operations::Submission {
+                    fresh_context: false,
                     thread_id: id,
                     client_user_message_id: "input".into(),
                     input: Vec::new(),

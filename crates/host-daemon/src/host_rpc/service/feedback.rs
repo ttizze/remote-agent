@@ -128,6 +128,7 @@ mod tests {
         assert_eq!(codex.feedback_reports.lock().unwrap().len(), 2);
         row.active = SessionRef::new(ProviderKind::Claude, "native-claude".into()).unwrap();
         row.bindings.push(Binding {
+            context_start: 0,
             session: row.active.clone(),
             covered: Some(0),
         });

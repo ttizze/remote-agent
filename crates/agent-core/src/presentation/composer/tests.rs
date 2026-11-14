@@ -73,6 +73,7 @@ fn resume_releases_held_input_in_order_instead_of_submitting_an_extra_message() 
         .queue
         .inputs
         .push(agent_protocol::operations::Submission {
+            fresh_context: false,
             thread_id: session(),
             client_user_message_id: "waiting".into(),
             input: vec![],
@@ -127,6 +128,7 @@ fn resume_only_releases_held_messages_and_never_starts_an_empty_completed_conver
                 .queue
                 .inputs
                 .push(agent_protocol::operations::Submission {
+                    fresh_context: false,
                     thread_id: session(),
                     client_user_message_id: "waiting".into(),
                     input: vec![],
@@ -436,6 +438,7 @@ fn the_review_summary_needs_a_conversation_with_changes() {
 #[test]
 fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
     let queued = |id: &str| agent_protocol::operations::Submission {
+        fresh_context: false,
         thread_id: session(),
         client_user_message_id: id.into(),
         input: vec![agent_protocol::operations::Input::Text {

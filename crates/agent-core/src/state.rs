@@ -15,6 +15,9 @@ use std::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
+    #[serde(default)]
+    #[cfg_attr(feature = "bindings", uniffi(default = false))]
+    pub fresh_context: bool,
     #[cfg_attr(feature = "bindings", uniffi(default = None))]
     pub workspace: Option<agent_protocol::workspace::WorkspaceStrategy>,
     pub text: String,
@@ -758,6 +761,13 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
                 return (next, Vec::new());
             }
             return prepare(next, pane_id, params);
+        }
+        Intent::SetFreshContext {storage_scope, session, enabled} => {
+            let key: DraftKey = session.clone().into();
+            if !storage_scope.is_empty() && storage_scope == previous.connection.storage_scope
+                && (if enabled { previous.fresh_context_available(session) } else { previous.input.drafts.contains_key(&key) }) {
+                Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(key).or_default()).fresh_context = enabled;
+            }
         }
         Intent::DismissFeedback {storage_scope,session,id} => {
             let key = op::OperationKey::Feedback {session:session.clone()};
@@ -1956,6 +1966,7 @@ fn submission(
         );
         return (next, Vec::new());
     }
+    let requested = follow_up::for_context(requested, draft.fresh_context);
     let mut next = previous.clone();
     if let Err(reason) = agent_protocol::context::validate_contexts(&draft.contexts) {
         next.fail_operation(
@@ -1984,6 +1995,7 @@ fn submission(
     }
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
     if let Some(current) = shared_mut(&mut next.input.drafts, &draft_key) {
+        current.fresh_context &= !cleared.fresh_context;
         if current.text == cleared.text {
             current.text.clear();
             current.invocations.clear();
@@ -2249,6 +2261,7 @@ mod submission_tests {
 
 fn restore_sent_draft(current: &Draft, sent: &Draft) -> Draft {
     let mut restored = current.clone();
+    restored.fresh_context |= sent.fresh_context;
     restored.text = sent.text.clone();
     append_transcript(&mut restored.text, &current.text);
     for invocation in &sent.invocations {

@@ -813,6 +813,52 @@ async fn project_clone_notifications_survive_stale_reads_and_actions_use_the_sam
 }
 
 #[tokio::test]
+async fn fresh_context_policy_reaches_the_host_and_a_rejected_send_restores_it() {
+    let mut initial = snapshot();
+    initial.connection.storage_scope = "fixture-storage".into();
+    let session = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
+    let key = DraftKey::from(&session);
+    let (store, mut reader, mut writer) = setup(initial).await;
+    store
+        .dispatch(Intent::SetFreshContext {
+            storage_scope: "fixture-storage".into(),
+            session: session.clone(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: key.clone(),
+            text: "fresh prompt".into(),
+        })
+        .await
+        .unwrap();
+    assert!(store.snapshot().input.drafts[&key].fresh_context);
+    let sending = store.dispatch(Intent::Submit {
+        thread_id: Some(session),
+        client_user_message_id: "fresh-input".into(),
+        alternate: false,
+    });
+    let request = read_after_reviews(&mut reader, &mut writer).await;
+    assert_eq!(request["method"], "host/session/submit");
+    assert_eq!(request["params"]["freshContext"], true);
+    assert_eq!(request["params"]["followUp"], "queue");
+    assert!(!store.snapshot().input.drafts[&key].fresh_context);
+    writer
+        .reply(
+            &request,
+            json!({"error":{"code":"refused","message":"Not sent","delivery":"notSent"}}),
+        )
+        .await
+        .unwrap();
+    assert!(sending.await.is_err());
+    assert!(store.snapshot().input.drafts[&key].fresh_context);
+    assert_eq!(store.snapshot().input.drafts[&key].text, "fresh prompt");
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn feedback_upload_survives_navigation_without_duplicate_sends_and_reports_failures() {
     use agent_core::presentation::feedback::FeedbackPhase;
     use agent_protocol::feedback::UploadFeedback;
@@ -3324,6 +3370,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
 #[tokio::test]
 async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer(
     #[values(false, true)] navigate: bool,
+    #[values(false, true)] fresh_context: bool,
     #[values("loaded", "deferred", "failed", "incomplete")] loading: &str,
     #[values(
         "/fixture/shot.png",
@@ -3353,7 +3400,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
     let mut thread: Thread = serde_json::from_value(json!({
         "id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"idle",
         "turns":[kept.clone(),
-            {"id":"edit","status":"completed","items":[user("b",json!([
+            {"id":"edit","status":"completed","freshContext":fresh_context,"items":[user("b",json!([
                 {"text":{"text":"send this again"}},
                 {"image":{"source":image}},
                 {"image":{"source":"data:image/png;base64,AAAA"}},
@@ -3479,6 +3526,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         assert_eq!(snapshot.panes.primary().navigation.thread_id, None);
     }
     let draft = &snapshot.input.drafts[&DraftKey::from(source)];
+    assert_eq!(draft.fresh_context, fresh_context);
     assert_eq!(draft.text, "send this again");
     assert_eq!(draft.contexts, [context]);
     assert_eq!(

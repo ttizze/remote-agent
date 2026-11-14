@@ -718,6 +718,7 @@ mod tests {
                         name: None,
                         preview: None,
                         bindings: vec![Binding {
+                            context_start: 0,
                             session: active.clone(),
                             covered: None,
                         }],

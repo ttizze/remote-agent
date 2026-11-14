@@ -787,6 +787,7 @@ mod tests {
                             cwd: Some("/project".into()),
                             preparation: Some(SessionPreparation {
                                 submission: agent_protocol::operations::Submission {
+                                    fresh_context: false,
                                     thread_id: id.clone(),
                                     client_user_message_id: "input".into(),
                                     input: Vec::new(),

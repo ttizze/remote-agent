@@ -1,7 +1,10 @@
 use super::*;
-use crate::host_rpc::conversations::{Binding, Conversation, Delivery, Handoff, inline_context};
+use crate::host_rpc::conversations::{
+    Binding, ContextTransition, Conversation, Delivery, inline_context,
+};
 use agent_protocol::{
     handoff,
+    models::{SessionStatus, Turn},
     protocol::Notification,
     session::{HistoryPage, SessionRef},
 };
@@ -41,13 +44,35 @@ fn readable_history(state: Option<&agent_protocol::session::HistoryReadState>) -
     })
 }
 
+fn context_packet(
+    turns: &[Arc<Turn>],
+    start: usize,
+    coverage: &str,
+) -> Result<handoff::Context, Failure> {
+    let messages = turns
+        .get(start..)
+        .ok_or_else(|| {
+            Failure::new(
+                "history_changed",
+                "Host transcript coverage is outside the saved conversation.",
+            )
+        })?
+        .iter()
+        .flat_map(|turn| handoff::Message::from_turn(turn))
+        .collect::<Vec<_>>();
+    handoff::select(&messages, coverage, handoff::DEFAULT_BUDGET)
+        .map_err(|error| Failure::new("handoff_context_limit", error))
+}
+
 impl HostRpcService {
     pub(super) async fn read_handoff_history(
         &self,
         params: &agent_protocol::handoff::ReadHistory,
     ) -> Result<agent_protocol::handoff::Page, Failure> {
-        let history = if let Some(row) = self.inner.conversations.get(&params.session)? {
-            self.conversation_history(&row, HistoryUse::Excerpt).await?
+        let row = self.inner.conversations.get(&params.session)?;
+        let context_start = row.as_ref().map_or(0, Conversation::context_start);
+        let history = if let Some(row) = &row {
+            self.conversation_history(row, HistoryUse::Excerpt).await?
         } else if let Some(response) = self
             .inner
             .store
@@ -64,6 +89,7 @@ impl HostRpcService {
             .turns
             .iter()
             .flatten()
+            .skip(context_start)
             .flat_map(|turn| agent_protocol::handoff::Message::from_turn(turn));
         let mut page = agent_protocol::handoff::page(
             messages,
@@ -322,6 +348,14 @@ impl HostRpcService {
             end: None,
         });
         fork.cover(boundary);
+        fork.bindings[0].context_start = inherited
+            .thread
+            .turns
+            .as_ref()
+            .unwrap()
+            .iter()
+            .rposition(|turn| turn.fresh_context)
+            .unwrap_or(0);
         Ok((fork, inherited))
     }
     pub fn set_history_scope(&self, directory: std::path::PathBuf, isolated: bool) {
@@ -698,7 +732,7 @@ impl HostRpcService {
         Ok(response)
     }
 
-    pub(super) async fn switch_provider(
+    pub(super) async fn change_context(
         &self,
         root: &SessionRef,
         input: &op::Submission,
@@ -708,20 +742,32 @@ impl HostRpcService {
             .as_ref()
             .map_or_else(|| root.clone(), |row| row.active.clone());
         let source_agent = self.inner.providers.get(active.provider)?;
-        let source = source_agent.state(&active.id).await?.response;
+        let mut source = source_agent.state(&active.id).await?.response;
         if source.thread.id.as_ref() != Some(&active) {
             return Err(Failure::new(
                 "invalid_session",
                 "native session identity changed",
             ));
         }
-        let selected = input
-            .model
-            .as_ref()
-            .or(source.model.as_ref())
-            .ok_or_else(|| {
-                Failure::new("model_required", "Select a model for the target provider.")
-            })?;
+        let options = self.inner.model_selections.resolve(
+            &active,
+            source.model.as_ref(),
+            source.effort.as_deref(),
+            source.service_tier.as_deref(),
+        )?;
+        (source.model, source.effort, source.service_tier) =
+            (options.model, options.effort, options.service_tier);
+        let selected = input.model.as_ref().or(source.model.as_ref());
+        let provider = selected.map_or(active.provider, |model| model.provider);
+        if source.thread.can_accept_direct_input == Some(false)
+            || (source.thread.parent_id.is_some()
+                && source.thread.can_accept_direct_input != Some(true))
+        {
+            return Err(Failure::new(
+                "provider_switch_unavailable",
+                "サブエージェントのコンテキストは変更できません。親の会話から指示してください。",
+            ));
+        }
         // Receipts and live events use public IDs, including after a handoff.
         // Compare the native history in that same namespace.
         let mut observed = source.thread.clone();
@@ -731,6 +777,17 @@ impl HostRpcService {
             }
         }
         let mut observed = self.inner.router.overlay_execution(root, observed);
+        let queue = self.inner.router.queue(root);
+        if input.fresh_context
+            && (source.thread.status == SessionStatus::Running
+                || observed.status == SessionStatus::Running
+                || (!queue.held
+                    && queue.inputs.first().is_some_and(|queued| {
+                        queued.client_user_message_id != input.client_user_message_id
+                    })))
+        {
+            return self.enqueue(root, input, queue);
+        }
         let unfinished = observed
             .submissions
             .iter()
@@ -777,49 +834,10 @@ impl HostRpcService {
                 "現在の応答・確認・送信が確定してからAIを切り替えてください。",
             ));
         }
-        if source.thread.can_accept_direct_input == Some(false)
-            || (source.thread.parent_id.is_some()
-                && source.thread.can_accept_direct_input != Some(true))
-        {
-            return Err(Failure::new(
-                "provider_switch_unavailable",
-                "サブエージェントのAIは切り替えられません。親の会話から指示してください。",
-            ));
-        }
-        let deadline = tokio::time::Instant::now() + SESSION_LIST_TIMEOUT;
-        let children = session_pages(
-            source_agent.as_ref(),
-            "",
-            SessionListScope::Descendants(&active.id),
-            100,
-            100,
-            Some(deadline),
-            None,
-        )
-        .try_collect::<Vec<_>>()
-        .await?;
-        for child in children.into_iter().flatten() {
-            let thread = if let Some(id) = &child.thread.id {
-                self.inner
-                    .router
-                    .overlay_execution(id, child.thread.clone())
-            } else {
-                child.thread
-            };
-            if worktree_active(
-                thread.status,
-                thread.turns.as_deref().unwrap_or_default(),
-                !thread.requests.is_empty(),
-                thread.submissions.values(),
-            ) {
-                return Err(Failure::new(
-                    "provider_switch_busy",
-                    "サブエージェントの応答・確認が終わってからAIを切り替えてください。",
-                ));
-            }
-        }
-        self.require_provider_enabled(selected.provider)?;
-        let agent = self.inner.providers.get(selected.provider)?;
+        self.ensure_descendants_idle(source_agent.as_ref(), &active.id)
+            .await?;
+        self.require_provider_enabled(provider)?;
+        let agent = self.inner.providers.get(provider)?;
         agent.validate_create()?;
         let mut row = match previous {
             Some(row) => row,
@@ -833,12 +851,20 @@ impl HostRpcService {
         let turns = history.thread.turns.as_deref().unwrap_or_default();
         let count = turns.len();
         row.cover(count);
-        let mut target = row
-            .binding(selected.provider)
-            // Reuse requires known coverage in this transcript. A fresh
-            // runtime can receive all history without duplicating native context.
-            .filter(|binding| binding.covered.is_some())
-            .map(|binding| binding.session.clone());
+        let context_start = if input.fresh_context {
+            count
+        } else {
+            row.context_start()
+        };
+        let mut target = (!input.fresh_context)
+            .then(|| {
+                row.binding(provider)
+                    // Reuse requires known coverage in this transcript. A fresh
+                    // runtime can receive all history without duplicating native context.
+                    .filter(|binding| binding.covered.is_some())
+                    .map(|binding| binding.session.clone())
+            })
+            .flatten();
         // An ambiguous history injection must never be replayed into the same
         // native session. Recover the logical history into a fresh binding.
         if target.as_ref().is_some_and(|target| {
@@ -849,7 +875,13 @@ impl HostRpcService {
             target = None;
         }
         let target_history = self
-            .handoff_target(&row.cwd, root, selected, target.as_ref())
+            .handoff_target(
+                &row.cwd,
+                root,
+                provider,
+                selected.map(|model| model.id.as_str()),
+                target.as_ref(),
+            )
             .await?;
         let target = target_history
             .thread
@@ -858,8 +890,9 @@ impl HostRpcService {
             .ok_or_else(|| Failure::new("invalid_session", "target session ID is missing"))?;
         if !row.bindings.iter().any(|binding| binding.session == target) {
             row.bindings.push(Binding {
+                context_start,
                 session: target.clone(),
-                covered: Some(0),
+                covered: Some(context_start),
             });
         }
         // Persist the native binding before attempting delivery; events and
@@ -872,29 +905,25 @@ impl HostRpcService {
             .expect("binding saved")
             .covered
             .unwrap_or(0);
-        let messages = turns
-            .get(last_seen..)
-            .ok_or_else(|| {
-                Failure::new(
-                    "history_changed",
-                    "Host transcript coverage is outside the saved conversation.",
-                )
-            })?
-            .iter()
-            .flat_map(|turn| handoff::Message::from_turn(turn))
-            .collect::<Vec<_>>();
-        let coverage = format!(
-            "Provider context handoff. Conversation: {root}. Covered history turns: {last_seen}..{count}.\nRead omitted history on this Host with the BEX history command shown below.\n{}",
-            self.history_command(root)
-        );
-        let context = handoff::select(&messages, &coverage, handoff::DEFAULT_BUDGET)
-            .map_err(|error| Failure::new("handoff_context_limit", error))?;
+        let context = if input.fresh_context {
+            None
+        } else {
+            let coverage = format!(
+                "Provider context handoff. Conversation: {root}. Covered history turns: {last_seen}..{count}.\nRead omitted history on this Host with the BEX history command shown below.\n{}",
+                self.history_command(root)
+            );
+            Some(context_packet(
+                turns,
+                last_seen.max(context_start),
+                &coverage,
+            )?)
+        };
         source_agent
             .unload(&active.id)
             .await
             .map_err(Failure::before_submission)?;
         let index = row.handoffs.len();
-        row.handoffs.push(Handoff {
+        row.handoffs.push(ContextTransition {
             session: target.clone(),
             input_id: input.client_user_message_id.clone(),
             context,
@@ -903,10 +932,13 @@ impl HostRpcService {
             submission: agent_protocol::session::SubmissionDelivery::Rejected,
         });
         self.inner.conversations.save(row.clone())?;
-        let injected = agent
-            .inject_history(&target.id, &row.handoffs[index].context)
-            .await
-            .map_err(Failure::before_submission)?;
+        let injected = match &row.handoffs[index].context {
+            Some(context) => agent
+                .inject_history(&target.id, context)
+                .await
+                .map_err(Failure::before_submission)?,
+            None => true,
+        };
         if injected {
             row.handoffs[index].delivery = Delivery::Injected;
             self.inner.conversations.save(row.clone())?;
@@ -914,12 +946,23 @@ impl HostRpcService {
         row.activate(target.clone(), count);
         self.inner.conversations.save(row.clone())?;
         let mut native_input = input.clone();
+        native_input.fresh_context = false;
         native_input.thread_id = target.clone();
+        if input.fresh_context && selected == source.model.as_ref() {
+            native_input.model = source.model.clone();
+            native_input.effort = input.effort.clone().or(source.effort);
+            native_input.service_tier = input.service_tier.clone().or(source.service_tier);
+        }
         if !injected {
             native_input.input.insert(
                 0,
                 op::Input::Text {
-                    text: inline_context(&row.handoffs[index].context),
+                    text: inline_context(
+                        row.handoffs[index]
+                            .context
+                            .as_ref()
+                            .expect("inline handoff"),
+                    ),
                 },
             );
         }
@@ -938,6 +981,18 @@ impl HostRpcService {
                         turn_id: receipt.turn_id.clone(),
                     };
                 self.inner.conversations.save(row)?;
+                if input.fresh_context
+                    && let Some(turn_id) = &receipt.turn_id
+                {
+                    self.inner.router.mark_turn(
+                        root,
+                        turn_id.clone(),
+                        crate::host_rpc::session_actor::TurnMarks {
+                            fresh_context: true,
+                            ..Default::default()
+                        },
+                    );
+                }
                 Ok(receipt)
             }
             Err(error) => {
@@ -966,14 +1021,55 @@ impl HostRpcService {
         }
     }
 
+    async fn ensure_descendants_idle(
+        &self,
+        agent: &dyn Agent,
+        native_id: &str,
+    ) -> Result<(), Failure> {
+        let deadline = tokio::time::Instant::now() + SESSION_LIST_TIMEOUT;
+        let children = session_pages(
+            agent,
+            "",
+            SessionListScope::Descendants(native_id),
+            100,
+            100,
+            Some(deadline),
+            None,
+        )
+        .try_collect::<Vec<_>>()
+        .await?;
+        for child in children.into_iter().flatten() {
+            let thread = if let Some(id) = &child.thread.id {
+                self.inner
+                    .router
+                    .overlay_execution(id, child.thread.clone())
+            } else {
+                child.thread
+            };
+            if worktree_active(
+                thread.status,
+                thread.turns.as_deref().unwrap_or_default(),
+                !thread.requests.is_empty(),
+                thread.submissions.values(),
+            ) {
+                return Err(Failure::new(
+                    "provider_switch_busy",
+                    "サブエージェントの応答・確認が終わってからコンテキストを切り替えてください。",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn handoff_target(
         &self,
         cwd: &str,
         root: &SessionRef,
-        model: &agent_protocol::models::ModelRef,
+        provider: ProviderKind,
+        model: Option<&str>,
         previous: Option<&SessionRef>,
     ) -> Result<ThreadResponse, Failure> {
-        let agent = self.inner.providers.get(model.provider)?;
+        let agent = self.inner.providers.get(provider)?;
         if let Some(previous) = previous
             && let Ok(state) = agent.state(&previous.id).await
         {
@@ -999,11 +1095,7 @@ impl HostRpcService {
         // An unreadable continuation receives all Host history in a fresh
         // runtime. Keep the exact workspace and the same public conversation.
         agent
-            .create(
-                cwd,
-                Some(&model.id),
-                self.browser_config(&root.to_string())?,
-            )
+            .create(cwd, model, self.browser_config(&root.to_string())?)
             .await
     }
 

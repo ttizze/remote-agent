@@ -82,6 +82,11 @@ pub enum Intent {
     },
     ReadTaskActivity(ReadTaskActivity),
     UploadFeedback(UploadFeedback),
+    SetFreshContext {
+        storage_scope: String,
+        session: crate::session::SessionRef,
+        enabled: bool,
+    },
     DismissFeedback {
         storage_scope: String,
         session: crate::session::SessionRef,

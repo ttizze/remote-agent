@@ -92,6 +92,7 @@ impl Running {
             &self.host,
             self.client.id(),
             Call::Submit(op::Submission {
+                fresh_context: false,
                 thread_id: self.root.clone(),
                 client_user_message_id: id.into(),
                 input: vec![op::Input::Text { text: id.into() }],
@@ -181,6 +182,75 @@ impl Running {
 }
 
 #[tokio::test]
+async fn fresh_context_input_waits_even_when_it_requests_steering_and_queue_edits_keep_its_policy()
+{
+    let running = running().await;
+    let input = op::Submission {
+        fresh_context: true,
+        thread_id: running.root.clone(),
+        client_user_message_id: "fresh-context".into(),
+        input: vec![op::Input::Text {
+            text: "original".into(),
+        }],
+        model: Some(agent_protocol::models::ModelRef {
+            provider: ProviderKind::Codex,
+            id: "model".into(),
+        }),
+        effort: None,
+        service_tier: None,
+        follow_up: FollowUp::Steer,
+    };
+    let receipt: op::SubmissionReceipt =
+        call(&running.host, running.client.id(), Call::Submit(input))
+            .await
+            .unwrap();
+    assert!(receipt.turn_id.is_none());
+    assert!(running.sent().is_empty());
+    assert_eq!(
+        running
+            .change(QueueChange::Steer {
+                client_user_message_id: "fresh-context".into()
+            })
+            .await
+            .unwrap_err()
+            .code,
+        "steer_unavailable"
+    );
+    running
+        .change(QueueChange::Edit {
+            client_user_message_id: "fresh-context".into(),
+            input: vec![op::Input::Text {
+                text: "edited".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    assert!(running.thread().await.queue.inputs[0].fresh_context);
+    running.finish(TurnStatus::Completed);
+    running.until_sent(&["fresh-context=edited"]).await;
+    assert!(running.queued().await.is_empty());
+    let row = running
+        .host
+        .inner
+        .conversations
+        .get(&running.root)
+        .unwrap()
+        .unwrap();
+    assert_ne!(row.active, running.root);
+    assert!(
+        running
+            .agent
+            .inputs
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .thread_id
+            == row.active
+    );
+}
+
+#[tokio::test]
 async fn incomplete_context_is_rejected_before_creating_submitting_or_editing_a_task() {
     use agent_protocol::context::{ContextContent, MessageContext};
     let running = running().await;
@@ -197,6 +267,7 @@ async fn incomplete_context_is_rejected_before_creating_submitting_or_editing_a_
     }];
     let requests = [
         Call::Submit(op::Submission {
+            fresh_context: false,
             thread_id: running.root.clone(),
             client_user_message_id: "invalid".into(),
             input: input.clone(),

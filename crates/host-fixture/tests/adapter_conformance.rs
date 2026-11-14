@@ -74,6 +74,7 @@ async fn finished_with_input(events: &mut Reader, input: &ClientInputId) -> Turn
 
 fn submission(session: &SessionRef, text: &str) -> op::Submission {
     op::Submission {
+        fresh_context: false,
         thread_id: session.clone(),
         client_user_message_id: ClientInputId::from(format!("{}:{text}", session.id)),
         input: vec![op::Input::Text { text: text.into() }],

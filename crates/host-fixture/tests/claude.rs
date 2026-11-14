@@ -466,6 +466,7 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
             local
                 .peer
                 .call(&rpc::Submission {
+                    fresh_context: false,
                     thread_id: id.clone(),
                     client_user_message_id: format!("delegate-{model}").into(),
                     input: vec![rpc::Input::Text {

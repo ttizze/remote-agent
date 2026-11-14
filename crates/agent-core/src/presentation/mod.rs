@@ -18,6 +18,7 @@ pub mod editors;
 pub mod error;
 pub mod feedback;
 pub mod files;
+pub mod fresh_context;
 pub mod host_management;
 pub mod media;
 pub mod model_settings;

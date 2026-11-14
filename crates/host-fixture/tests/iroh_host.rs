@@ -2996,6 +2996,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         assert!(!Path::new(&path).exists(), "reading history must not recreate the worktree");
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "advance main"]);
         let receipt = local.peer.call(&rpc::Submission {
+                fresh_context: false,
             thread_id: id.clone(),
             client_user_message_id: "after-removal".into(),
             input: vec![rpc::Input::Text { text: "[success] continue after removal".into() }],
@@ -3112,6 +3113,7 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
         let receipt = local
             .peer
             .call(&rpc::Submission {
+                fresh_context: false,
                 thread_id: active.clone(),
                 client_user_message_id: "cleanup-running".into(),
                 input: vec![rpc::Input::Text {
@@ -4033,6 +4035,7 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
             .id
             .unwrap();
         let input = rpc::Submission {
+            fresh_context: false,
             thread_id: thread.clone(),
             client_user_message_id: "first-input".into(),
             input: vec![rpc::Input::Text {

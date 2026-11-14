@@ -580,6 +580,7 @@ fn merge_turn(previous: Option<&Turn>, incoming: &Turn, completed: bool) -> Opti
     }
     let mut merged = previous.unwrap_or(incoming).clone();
     merged.queued |= incoming.queued;
+    merged.fresh_context |= incoming.fresh_context;
     macro_rules! field { ($($field:ident),* $(,)?) => { $(if incoming.$field.is_some() { merged.$field = incoming.$field.clone(); })* }; }
     field!(
         provider,

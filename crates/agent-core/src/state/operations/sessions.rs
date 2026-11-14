@@ -788,7 +788,7 @@ impl Operation for RewindSession {
             session: self.thread_id.clone(),
         })
     }
-    type Input = (String, Option<Arc<Item>>);
+    type Input = (String, Option<Arc<Item>>, bool);
     type Output = (Self::Input, crate::models::ThreadResponse);
     fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
         let turns = snapshot
@@ -797,23 +797,22 @@ impl Operation for RewindSession {
             .get(&self.thread_id)
             .and_then(|thread| thread.turns.as_deref())
             .unwrap_or_default();
+        let turn = turns.iter().rfind(|turn| turn.id == self.turn_id);
         Ok((
             snapshot.connection.storage_scope.clone(),
-            turns
-                .iter()
-                .find(|turn| turn.id == self.turn_id)
-                .and_then(|turn| turn.items.as_ref())
+            turn.and_then(|turn| turn.items.as_ref())
                 .and_then(|items| {
                     items.iter().find(|item| {
                         matches!(item.body(), crate::models::ItemBody::UserMessage { .. })
                     })
                 })
                 .cloned(),
+            turn.is_some_and(|turn| turn.fresh_context),
         ))
     }
     async fn run(
         &self,
-        (scope, mut original): Self::Input,
+        (scope, mut original, fresh_context): Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
         if let Some(item) = original.as_ref().filter(|item| item.is_deferred()) {
@@ -835,7 +834,7 @@ impl Operation for RewindSession {
             }
             original = Some(Arc::new(loaded));
         }
-        Ok(((scope, original), context.call(self).await?))
+        Ok(((scope, original, fresh_context), context.call(self).await?))
     }
     fn invalidates(&self) -> bool {
         true
@@ -844,7 +843,7 @@ impl Operation for RewindSession {
         self,
         snapshot: &mut Snapshot,
         pane_id: &str,
-        ((scope, original), output): Self::Output,
+        ((scope, original, fresh_context), output): Self::Output,
         current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
         if scope != snapshot.connection.storage_scope {
@@ -855,6 +854,7 @@ impl Operation for RewindSession {
             let drafts = Arc::make_mut(&mut snapshot.input.drafts);
             let draft = Arc::make_mut(drafts.entry(id.clone().into()).or_default());
             draft.text = text;
+            draft.fresh_context = fresh_context;
             for context in contexts {
                 if !draft
                     .contexts

@@ -66,6 +66,7 @@ impl HostRpcService {
                 })?,
         };
         let submission = op::Submission {
+            fresh_context: false,
             thread_id: id.clone(),
             client_user_message_id: initial.client_user_message_id.clone(),
             input: initial.input.clone(),

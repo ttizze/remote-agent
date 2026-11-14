@@ -565,6 +565,7 @@ pub(super) mod tests {
                 let mut row = Conversation::new(&previous).unwrap();
                 row.id = SessionRef::new(ProviderKind::Claude, "bex-task:managed".into()).unwrap();
                 row.bindings.push(Binding {
+                    context_start: 0,
                     session: native.clone(),
                     covered: None,
                 });

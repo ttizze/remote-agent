@@ -68,6 +68,7 @@ impl HostRpcService {
                 cwd: response.thread.cwd,
                 last_turn: response.thread.turns.as_ref().and_then(|turns| turns.last()).map(|turn| turn.id.clone()),
                 submission: op::Submission {
+                fresh_context: false,
                     thread_id: session,
                     client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
                     input: vec![op::Input::Text { text: "Bexの更新に伴う再起動で作業が中断されました。この同じ会話の履歴から進捗と未完了の作業を確認し、中断したところから続けてください。元の依頼を最初からやり直したり、代わりの会話を作成したりしないでください。".into() }],

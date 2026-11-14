@@ -310,10 +310,11 @@ impl HostRpcService {
                 "The previous provider input may already have run. It will not be sent again.",
             ));
         }
-        if input
-            .model
-            .as_ref()
-            .is_some_and(|model| model.provider != active.provider)
+        if input.fresh_context
+            || input
+                .model
+                .as_ref()
+                .is_some_and(|model| model.provider != active.provider)
             || row.as_ref().is_some_and(|row| {
                 row.handoffs.iter().any(|handoff| {
                     handoff.session == row.active
@@ -321,7 +322,7 @@ impl HostRpcService {
                 })
             })
         {
-            return self.switch_provider(target, input).await;
+            return self.change_context(target, input).await;
         }
         let mut native = input.clone();
         native.thread_id = active.clone();

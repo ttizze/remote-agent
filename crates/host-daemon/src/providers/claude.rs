@@ -2860,6 +2860,7 @@ mod execution_tests {
                 receiver.close();
             }
             let submission = op::Submission {
+                fresh_context: false,
                 thread_id: session.clone(),
                 client_user_message_id: "input".into(),
                 input: vec![op::Input::Text {
@@ -2917,6 +2918,7 @@ mod execution_tests {
             .unwrap();
         let record = claude.record(&session.id).await.unwrap();
         let submission = |model: &str, effort: Option<&str>| op::Submission {
+            fresh_context: false,
             thread_id: session.clone(),
             client_user_message_id: "input".into(),
             input: vec![op::Input::Text {

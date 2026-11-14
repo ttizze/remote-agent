@@ -3,6 +3,49 @@ use agent_protocol::models::{Item, Thread, Turn};
 use agent_transport::peer::RpcMessage;
 
 #[test]
+fn fresh_context_mark_belongs_to_one_completed_turn_occurrence() {
+    let router = SessionRouter::new();
+    let session = SessionRef::new(ProviderKind::Codex, "fresh".into()).unwrap();
+    let _lease = router.retain_execution(session.clone()).unwrap();
+    router.mark_turn(
+        &session,
+        "reused".into(),
+        crate::host_rpc::session_actor::TurnMarks {
+            fresh_context: true,
+            ..Default::default()
+        },
+    );
+    for item in ["first", "later"] {
+        let turn = Turn {
+            id: "reused".into(),
+            status: agent_protocol::execution::TurnStatus::Completed,
+            items: Some(vec![Arc::new(Item::new(
+                item.into(),
+                agent_protocol::execution::ItemStatus::Completed,
+                agent_protocol::items::ItemBody::UserMessage {
+                    text: Some(item.into()),
+                    content: Vec::new(),
+                },
+            ))]),
+            ..Default::default()
+        };
+        router.session_change(
+            &session,
+            SessionChange::Turn {
+                turn,
+                completed: true,
+            },
+        );
+    }
+    let thread = router.overlay_execution(&session, Thread::default());
+    let turns = thread.turns.unwrap();
+    assert_eq!(turns.len(), 2);
+    assert!(turns[0].fresh_context);
+    assert!(!turns[1].fresh_context);
+    assert!(lock_state(&router.actor(&session)).turn_marks.is_empty());
+}
+
+#[test]
 fn subagent_work_and_requests_do_not_contribute_to_system_activity() {
     use agent_protocol::{models::SessionStatus, session::RequestDelivery};
     let router = SessionRouter::new();

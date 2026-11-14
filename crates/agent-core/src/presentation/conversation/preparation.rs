@@ -175,6 +175,7 @@ mod tests {
             id: Some(id.clone()),
             preparation: Some(SessionPreparation {
                 submission: Submission {
+                    fresh_context: false,
                     thread_id: id,
                     client_user_message_id: "initial".into(),
                     input: Vec::new(),

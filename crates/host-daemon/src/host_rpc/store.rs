@@ -919,6 +919,7 @@ mod tests {
             .unwrap();
         let queue = InputQueue {
             inputs: vec![agent_protocol::operations::Submission {
+                fresh_context: false,
                 thread_id: session.clone(),
                 client_user_message_id: "waiting".into(),
                 input: vec![],

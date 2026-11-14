@@ -18,6 +18,9 @@ mod rewind;
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Binding {
     pub session: SessionRef,
+    /// The first Host transcript turn admitted to this native context.
+    #[serde(default)]
+    pub context_start: usize,
     /// Number of Host transcript turns already available to this runtime.
     pub covered: Option<usize>,
 }
@@ -40,10 +43,11 @@ pub(super) enum Delivery {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(super) struct Handoff {
+pub(super) struct ContextTransition {
     pub session: SessionRef,
     pub input_id: ClientInputId,
-    pub context: Context,
+    /// None deliberately starts empty; Some contains the exact provider handoff.
+    pub context: Option<Context>,
     pub delivery: Delivery,
     pub receipt: Option<SubmissionReceipt>,
     pub submission: SubmissionDelivery,
@@ -58,7 +62,7 @@ pub(super) struct Conversation {
     pub preview: Option<String>,
     pub bindings: Vec<Binding>,
     pub segments: Vec<Segment>,
-    pub handoffs: Vec<Handoff>,
+    pub handoffs: Vec<ContextTransition>,
     pub startup: Option<Startup>,
     pub workspace_setup: Option<agent_protocol::workspace::WorkspaceSetup>,
 }
@@ -161,6 +165,7 @@ fn change_startup(
         }
         StartupChange::Binding { native } => {
             row.bindings.push(Binding {
+                context_start: 0,
                 session: native.clone(),
                 covered: None,
             });
@@ -288,6 +293,7 @@ impl Conversation {
             name: thread.name.clone(),
             preview: thread.preview.clone(),
             bindings: vec![Binding {
+                context_start: 0,
                 session: id.clone(),
                 covered: None,
             }],
@@ -304,10 +310,17 @@ impl Conversation {
     }
 
     pub fn binding(&self, provider: ProviderKind) -> Option<&Binding> {
+        let context_start = self.context_start();
+        self.bindings.iter().rev().find(|binding| {
+            binding.session.provider == provider && binding.context_start == context_start
+        })
+    }
+
+    pub fn context_start(&self) -> usize {
         self.bindings
             .iter()
-            .rev()
-            .find(|binding| binding.session.provider == provider)
+            .find(|binding| binding.session == self.active)
+            .map_or(0, |binding| binding.context_start)
     }
 
     pub fn sources(&self) -> impl Iterator<Item = &SessionRef> {
@@ -381,9 +394,12 @@ impl Conversation {
                 && (item.client_input_id.as_ref() == Some(&handoff.input_id)
                     || item.id.as_str() == handoff.input_id.as_str())
         }) {
+            let Some(context) = &handoff.context else {
+                continue;
+            };
             // A refused submission may have been retried with the same input
             // identity and newer context. Strip only the exact delivered packet.
-            let prefix = inline_context(&handoff.context);
+            let prefix = inline_context(context);
             if let Some(rest) = text
                 .as_deref()
                 .and_then(|value| value.strip_prefix(&prefix))
@@ -404,6 +420,25 @@ impl Conversation {
     pub fn turn(&self, session: &SessionRef, mut turn: Turn) -> Turn {
         turn.provider = Some(session.provider);
         turn.id = self.identity(session, &turn.id).into();
+        let inputs: Vec<_> = turn
+            .items
+            .iter()
+            .flatten()
+            .filter(|item| matches!(item.body(), ItemBody::UserMessage { .. }))
+            .filter_map(|item| item.client_input_id.as_ref())
+            .collect();
+        turn.fresh_context |= self.handoffs.iter().any(|change| {
+            change.context.is_none()
+                && &change.session == session
+                && (if inputs.is_empty() {
+                    change
+                        .receipt
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.turn_id.as_ref() == Some(&turn.id))
+                } else {
+                    inputs.contains(&&change.input_id)
+                })
+        });
         if let Some(items) = &mut turn.items {
             for item in items {
                 self.item(session, Arc::make_mut(item));
@@ -815,7 +850,10 @@ pub(super) fn validate(rows: &[Conversation]) -> Result<(), String> {
         }
         for binding in &row.bindings {
             binding.session.validate().map_err(str::to_owned)?;
-            if !identities.insert(binding.session.clone())
+            if binding
+                .covered
+                .is_some_and(|covered| covered < binding.context_start)
+                || !identities.insert(binding.session.clone())
                 || (binding.session != row.id && public.contains(&binding.session))
             {
                 return Err("Duplicate native owner or invalid history coverage".into());
@@ -893,6 +931,40 @@ fn namespace_request(
 mod tests {
     use super::*;
 
+    #[test]
+    fn fresh_context_attribution_checks_input_when_native_turn_ids_repeat() {
+        let mut row = conversation();
+        row.handoffs.push(ContextTransition {
+            session: row.id.clone(),
+            input_id: "fresh-input".into(),
+            context: None,
+            delivery: Delivery::Injected,
+            receipt: Some(SubmissionReceipt {
+                turn_id: Some("reused".into()),
+            }),
+            submission: SubmissionDelivery::Accepted {
+                turn_id: Some("reused".into()),
+            },
+        });
+        for (input, expected) in [("fresh-input", true), ("later-input", false)] {
+            let mut user = Item::new(
+                input.into(),
+                agent_protocol::execution::ItemStatus::Completed,
+                ItemBody::UserMessage {
+                    text: Some(input.into()),
+                    content: vec![],
+                },
+            );
+            user.client_input_id = Some(input.into());
+            let native = Turn {
+                id: "reused".into(),
+                items: Some(vec![Arc::new(user)]),
+                ..Default::default()
+            };
+            assert_eq!(row.turn(&row.id, native).fresh_context, expected);
+        }
+    }
+
     fn conversation() -> Conversation {
         Conversation::new(&Thread {
             id: Some(SessionRef {
@@ -920,6 +992,7 @@ mod tests {
             for status in [PreparationStatus::Preparing, PreparationStatus::Sending] {
                 let mut row = conversation();
                 let submission = agent_protocol::operations::Submission {
+                    fresh_context: false,
                     thread_id: row.id.clone(),
                     client_user_message_id: "input".into(),
                     input: vec![agent_protocol::operations::Input::Text {
@@ -1011,6 +1084,7 @@ mod tests {
         };
         row.cover(1);
         row.bindings.push(Binding {
+            context_start: 0,
             session: target.clone(),
             covered: None,
         });
@@ -1064,10 +1138,10 @@ mod tests {
             omitted: 0,
         };
         for context in [packet("old history"), packet("new history")] {
-            row.handoffs.push(Handoff {
+            row.handoffs.push(ContextTransition {
                 session: row.id.clone(),
                 input_id: "same-input".into(),
-                context,
+                context: Some(context),
                 delivery: Delivery::Inline,
                 receipt: None,
                 submission: SubmissionDelivery::Rejected,
@@ -1079,7 +1153,7 @@ mod tests {
             ItemBody::UserMessage {
                 text: Some(format!(
                     "{}\n\nkeep spacing",
-                    inline_context(&row.handoffs[0].context)
+                    inline_context(row.handoffs[0].context.as_ref().unwrap())
                 )),
                 content: vec![],
             },
@@ -1089,7 +1163,7 @@ mod tests {
         assert!(
             matches!(item.body(), ItemBody::UserMessage { text: Some(text), .. } if text == "\n\nkeep spacing")
         );
-        let prefix = inline_context(&row.handoffs[0].context);
+        let prefix = inline_context(row.handoffs[0].context.as_ref().unwrap());
         let mut separate = Item::new(
             "same-input".into(),
             agent_protocol::execution::ItemStatus::Completed,

@@ -1,4 +1,5 @@
 use super::*;
+mod fresh_context;
 use crate::providers::{
     AccountCommand, AccountReply, AgentChange, AgentEvent, Identity, SessionPage, SessionSummary,
     SubmissionState, emit,
@@ -671,6 +672,7 @@ async fn app_update_does_not_repeat_uncertain_failed_or_finished_continuations()
         tasks.push(InterruptedTask {
             native_session: session.clone(),
             submission: op::Submission {
+                fresh_context: false,
                 thread_id: session,
                 client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
                 input: vec![op::Input::Text {
@@ -730,6 +732,7 @@ async fn send(
         service,
         session,
         Call::Submit(op::Submission {
+            fresh_context: false,
             thread_id: root.clone(),
             client_user_message_id: id.into(),
             input: vec![op::Input::Text { text: text.into() }],
@@ -886,6 +889,7 @@ async fn unimported_handoff(directory: &Path) -> HandoffFixture {
         end: None,
     });
     row.bindings.push(Binding {
+        context_start: 0,
         session: target.clone(),
         covered: None,
     });
@@ -2117,6 +2121,7 @@ async fn reopening_after_restart_restores_only_accepted_turn_settings() {
     let host = service(directory.path(), &a, &b);
     let client = host.open_session();
     let input = |id: &str, provider, effort: &str, tier: &str| op::Submission {
+        fresh_context: false,
         thread_id: root.clone(),
         client_user_message_id: id.into(),
         input: vec![op::Input::Text {

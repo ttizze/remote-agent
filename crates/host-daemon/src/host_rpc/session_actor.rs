@@ -2,14 +2,20 @@
 use agent_protocol::models::Thread;
 use std::collections::HashSet;
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct TurnMarks {
+    pub queued: bool,
+    pub fresh_context: bool,
+}
+
 #[derive(Default)]
 pub(super) struct SessionActor {
     pub(super) timeline: agent_protocol::session::Timeline,
     pub(super) request_origins:
         std::collections::BTreeMap<agent_protocol::ids::RequestId, crate::providers::RequestOrigin>,
     pub(super) leases: usize,
-    /// Turns queued input started; their later changes keep that mark.
-    pub(super) queued_turns: HashSet<agent_protocol::ids::TurnId>,
+    /// Host annotations survive provider updates that do not know about them.
+    pub(super) turn_marks: std::collections::HashMap<agent_protocol::ids::TurnId, TurnMarks>,
     pub(super) submission_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     pub(super) subscriptions: std::collections::HashMap<
         uuid::Uuid,

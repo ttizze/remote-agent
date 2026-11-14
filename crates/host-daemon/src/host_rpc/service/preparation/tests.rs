@@ -354,6 +354,7 @@ async fn admitted_public_identity_keeps_native_history_through_provider_switchin
         &host,
         client.id(),
         Call::Submit(op::Submission {
+            fresh_context: false,
             thread_id: opened.session.clone(),
             client_user_message_id: "switch".into(),
             input: vec![op::Input::Text {

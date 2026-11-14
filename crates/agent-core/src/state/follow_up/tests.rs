@@ -11,6 +11,7 @@ fn session() -> SessionRef {
 
 fn queued(id: &str, text: &str) -> rpc::Submission {
     rpc::Submission {
+        fresh_context: false,
         thread_id: session(),
         client_user_message_id: id.into(),
         input: vec![

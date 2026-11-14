@@ -180,6 +180,7 @@ rl.on('line', line => {
             .submit_input(
                 &self.session,
                 &op::Submission {
+                    fresh_context: false,
                     thread_id: self.session.clone(),
                     client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
                     input: vec![op::Input::Text { text: text.into() }],
@@ -536,6 +537,7 @@ async fn recovery_uses_the_native_binding_after_a_provider_switch() {
     .unwrap();
     row.active = fixture.session.clone();
     row.bindings.push(Binding {
+        context_start: 0,
         session: fixture.session.clone(),
         covered: None,
     });

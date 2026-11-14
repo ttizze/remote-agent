@@ -91,6 +91,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             }
             let reply = client
                 .call(&Submission {
+                    fresh_context: false,
                     thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
                     client_user_message_id: text(input, "clientUserMessageId").into(),
                     input: items,

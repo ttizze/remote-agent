@@ -175,7 +175,14 @@ impl HostRpcService {
         }) = &result
             && running.as_ref() != Some(turn)
         {
-            self.inner.router.mark_queued_turn(target, turn.clone());
+            self.inner.router.mark_turn(
+                target,
+                turn.clone(),
+                crate::host_rpc::session_actor::TurnMarks {
+                    queued: true,
+                    ..Default::default()
+                },
+            );
         }
         let delivery = match &result {
             Ok(receipt) => SubmissionDelivery::Accepted {
@@ -282,6 +289,12 @@ impl HostRpcService {
             QueueChange::Steer {
                 client_user_message_id,
             } => {
+                if queue.inputs[position(client_user_message_id)?].fresh_context {
+                    return Err(Failure::new(
+                        "steer_unavailable",
+                        "新しいコンテキストで始める発言は、現在の応答に追加できません。",
+                    ));
+                }
                 let input = op::Submission {
                     follow_up: FollowUp::Steer,
                     ..queue.inputs[position(client_user_message_id)?].clone()

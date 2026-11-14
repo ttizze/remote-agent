@@ -40,6 +40,7 @@ fn resumable(thread: &crate::models::Thread) -> bool {
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerControls {
+    pub fresh_context_available: bool,
     pub feedback_available: bool,
     pub feedback: Option<super::feedback::FeedbackNotice>,
     pub workspace: Option<WorkspaceSelection>,
@@ -95,6 +96,7 @@ pub struct FollowUpControls {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct QueuedMessage {
     pub id: ClientInputId,
+    pub fresh_context: bool,
     pub text: String,
     /// Images and files sent with it.
     pub attachments: u32,
@@ -106,10 +108,14 @@ pub struct QueuedMessage {
 fn follow_up_controls(
     snapshot: &Snapshot,
     thread: Option<&crate::models::Thread>,
+    fresh_context: bool,
 ) -> FollowUpControls {
     let preferences = snapshot.input.composer_preferences;
     let action = |alternate| {
-        let requested = follow_up::requested(preferences.follow_up, alternate);
+        let requested = follow_up::for_context(
+            follow_up::requested(preferences.follow_up, alternate),
+            fresh_context,
+        );
         if thread.is_some_and(|thread| follow_up::waits(thread, requested)) {
             FollowUp::Queue
         } else {
@@ -133,6 +139,7 @@ fn follow_up_controls(
     let session = thread.id.as_ref();
     let waiting = thread.queue.inputs.iter().map(|input| QueuedMessage {
         id: input.client_user_message_id.clone(),
+        fresh_context: input.fresh_context,
         text: follow_up::queued_text(input),
         attachments: input
             .input
@@ -176,6 +183,7 @@ fn follow_up_controls(
         queue: waiting
             .chain(sending.into_iter().map(|(id, pending)| QueuedMessage {
                 id: id.clone(),
+                fresh_context: pending.draft.fresh_context,
                 text: pending.draft.text.clone(),
                 attachments: pending.draft.attachments.len() as u32,
                 pending: true,
@@ -238,6 +246,8 @@ impl ComposerPresentation {
         let provider = snapshot.model_provider_for_draft(key.clone());
         let question = session.and_then(|id| snapshot.question_prompt(id.clone()));
         let controls = ComposerControls {
+            fresh_context_available: session
+                .is_some_and(|id| snapshot.fresh_context_available(id.clone())),
             feedback_available: session.is_some_and(|id| snapshot.feedback_available(id.clone())),
             feedback: session.and_then(|id| snapshot.feedback_notice(id.clone())),
             workspace: workspace::project(snapshot, pane, &draft),
@@ -278,7 +288,7 @@ impl ComposerPresentation {
                 })
             }),
             question,
-            follow_up: follow_up_controls(snapshot, thread.map(AsRef::as_ref)),
+            follow_up: follow_up_controls(snapshot, thread.map(AsRef::as_ref), draft.fresh_context),
         };
         let catalog = snapshot
             .catalog

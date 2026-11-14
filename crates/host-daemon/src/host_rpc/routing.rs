@@ -245,7 +245,7 @@ impl SessionRouter {
         let mut owned = lock_state(&actor);
         owned.timeline = Default::default();
         owned.request_origins.clear();
-        owned.queued_turns.clear();
+        owned.turn_marks.clear();
         let mut state = lock_state(&self.activity);
         state.tasks.remove(target);
         state.reads.forget(target);
@@ -299,12 +299,12 @@ impl SessionRouter {
         prune(&self.state, target, &actor);
         turn
     }
-    /// Marks the turn that queued input started, now and when it changes later,
-    /// as T3 Code labels a message that waited in its queue.
-    pub(super) fn mark_queued_turn(
+    /// Stamp the observed turn and subsequent native updates with Host facts.
+    pub(super) fn mark_turn(
         &self,
         target: &SessionRef,
         turn_id: agent_protocol::ids::TurnId,
+        marks: super::session_actor::TurnMarks,
     ) {
         let actor = self.actor(target);
         let mut owned = lock_state(&actor);
@@ -315,9 +315,24 @@ impl SessionRouter {
             .flatten()
             .rfind(|turn| turn.id == turn_id)
             .cloned();
-        owned.queued_turns.insert(turn_id);
+        let mut marks = marks;
+        if current.as_ref().is_some_and(|turn| {
+            turn.status != agent_protocol::execution::TurnStatus::Running && turn.fresh_context
+        }) {
+            marks.fresh_context = false;
+        }
+        if !marks.queued && !marks.fresh_context {
+            drop(owned);
+            prune(&self.state, target, &actor);
+            return;
+        }
+        let saved = owned.turn_marks.entry(turn_id).or_default();
+        saved.queued |= marks.queued;
+        saved.fresh_context |= marks.fresh_context;
         let mut failed = Vec::new();
-        if let Some(turn) = current.filter(|turn| !turn.queued) {
+        if let Some(turn) = current.filter(|turn| {
+            (marks.queued && !turn.queued) || (marks.fresh_context && !turn.fresh_context)
+        }) {
             let completed = turn.status != agent_protocol::execution::TurnStatus::Running;
             let turn = agent_protocol::models::Turn {
                 items: None,
@@ -690,12 +705,12 @@ impl SessionRouter {
     ) {
         let stamped;
         let change = match change {
-            SessionChange::Turn { turn, completed }
-                if !turn.queued && actor.queued_turns.contains(&turn.id) =>
-            {
+            SessionChange::Turn { turn, completed } if actor.turn_marks.contains_key(&turn.id) => {
+                let marks = &actor.turn_marks[&turn.id];
                 stamped = SessionChange::Turn {
                     turn: agent_protocol::models::Turn {
-                        queued: true,
+                        queued: turn.queued || marks.queued,
+                        fresh_context: turn.fresh_context || marks.fresh_context,
                         ..turn.clone()
                     },
                     completed: *completed,
@@ -704,6 +719,19 @@ impl SessionRouter {
             }
             change => change,
         };
+        if let SessionChange::Turn {
+            turn,
+            completed: true,
+        } = change
+            && let Some(marks) = actor.turn_marks.get_mut(&turn.id)
+        {
+            // A completed occurrence keeps its stored annotation. A future
+            // native occurrence reusing the ID must prove its input again.
+            marks.fresh_context = false;
+            if !marks.queued {
+                actor.turn_marks.remove(&turn.id);
+            }
+        }
         let expired: Vec<_> = actor.timeline.requests.values().filter(|request| match change {
             SessionChange::Turn { turn, completed: true } => matches!(&request.target, agent_protocol::requests::RequestTarget::Turn { turn_id, .. } if turn_id == &turn.id),
             SessionChange::Item { turn_id, item } => {

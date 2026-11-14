@@ -323,6 +323,7 @@ impl Operation for SendSubmission {
         let reply = context
             .client
             .call(&Submission {
+                fresh_context: self.draft.fresh_context,
                 thread_id: self.thread_id.clone(),
                 client_user_message_id: self.client_user_message_id.clone(),
                 input: submission_input(
