@@ -310,6 +310,28 @@ impl State {
             })
     }
 
+    /// Completed attempts may still own detached work while their process lives.
+    pub fn accepts_background_observation(&self, attempt_id: &str, session_id: &str) -> bool {
+        self.owned_attempt(attempt_id, session_id)
+            .is_some_and(|attempt| {
+                attempt.status == RunAttemptStatus::Completed
+                    && (self
+                        .provider_threads
+                        .get(&attempt.provider_thread_id)
+                        .is_some_and(|thread| !thread.pending_background_tasks.is_empty())
+                        || self.turn_items.values().any(|item| {
+                            item.run_id.as_ref() == Some(&attempt.run_id)
+                                && matches!(item.body, TurnItemBody::Subagent { .. })
+                                && matches!(
+                                    item.status,
+                                    TurnItemStatus::Pending
+                                        | TurnItemStatus::Running
+                                        | TurnItemStatus::Waiting
+                                )
+                        }))
+            })
+    }
+
     pub fn native_thread_matches(&self, attempt_id: &str, driver: &str, native_id: &str) -> bool {
         self.run_attempts
             .get(attempt_id)

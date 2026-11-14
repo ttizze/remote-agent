@@ -312,8 +312,32 @@ pub fn observe_item(
     {
         return Err("item identity is already owned by another run".into());
     }
+    let mut changes = vec![];
+    if !matches!(
+        item.status,
+        TurnItemStatus::Idle
+            | TurnItemStatus::Pending
+            | TurnItemStatus::Running
+            | TurnItemStatus::Waiting
+    ) && let Some(thread) = state.provider_threads.get(&attempt.provider_thread_id)
+    {
+        let pending: Vec<_> = thread
+            .pending_background_tasks
+            .iter()
+            .filter(|task| !background_task_matches(task, &item))
+            .cloned()
+            .collect();
+        if pending.len() != thread.pending_background_tasks.len() {
+            changes.push(Change::ProviderThread(ProviderThread {
+                pending_background_tasks: pending,
+                updated_at: item.updated_at.clone(),
+                ..thread.clone()
+            }));
+        }
+    }
+    changes.push(Change::TurnItem(item));
     Ok(Decision {
-        changes: vec![Change::TurnItem(item)],
+        changes,
         ..Default::default()
     })
 }
@@ -380,29 +404,39 @@ fn accepts_background_item(
     else {
         return false;
     };
-    let known_subagent = state.turn_items.get(&item.id).is_some_and(|saved| {
-        matches!(saved.body, TurnItemBody::Subagent { .. })
-            && matches!(
-                saved.status,
-                TurnItemStatus::Pending | TurnItemStatus::Running | TurnItemStatus::Waiting
-            )
-    });
-    let known_task = state
-        .provider_threads
-        .get(&attempt.provider_thread_id)
-        .is_some_and(|thread| {
-            thread.pending_background_tasks.iter().any(|task| {
-                task.item_id.as_deref() == Some(&item.id)
-                    || item
-                        .native_item_ref
-                        .as_ref()
-                        .and_then(|reference| reference.native_id.as_ref())
-                        .is_some_and(|native| {
-                            task.native_item_id.as_ref().unwrap_or(&task.task_id) == native
-                        })
+    is_background_item(
+        state,
+        attempt,
+        state.turn_items.get(&item.id).unwrap_or(item),
+    )
+}
+
+fn background_task_matches(task: &PendingBackgroundTask, item: &TurnItem) -> bool {
+    if let Some(id) = &task.item_id {
+        return id == &item.id;
+    }
+    item.native_item_ref
+        .as_ref()
+        .and_then(|reference| reference.native_id.as_ref())
+        .is_some_and(|native| task.native_item_id.as_ref().unwrap_or(&task.task_id) == native)
+}
+
+fn is_background_item(state: &State, attempt: &RunAttempt, item: &TurnItem) -> bool {
+    (state.turn_items.contains_key(&item.id)
+        && matches!(item.body, TurnItemBody::Subagent { .. })
+        && matches!(
+            item.status,
+            TurnItemStatus::Pending | TurnItemStatus::Running | TurnItemStatus::Waiting
+        ))
+        || state
+            .provider_threads
+            .get(&attempt.provider_thread_id)
+            .is_some_and(|thread| {
+                thread
+                    .pending_background_tasks
+                    .iter()
+                    .any(|task| background_task_matches(task, item))
             })
-        });
-    known_subagent || known_task
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -761,7 +795,7 @@ pub(super) fn finish_run(
     }
     for item in state.turn_items.values().filter(|item| {
         item.run_id.as_deref() == Some(&run.id)
-            && !matches!(item.body, TurnItemBody::Subagent { .. })
+            && !(run_status == RunStatus::Completed && is_background_item(state, attempt, item))
             && matches!(
                 item.status,
                 TurnItemStatus::Pending | TurnItemStatus::Running | TurnItemStatus::Waiting
@@ -783,7 +817,11 @@ pub(super) fn finish_run(
     }
     for node in state.nodes.values().filter(|node| {
         node.run_id.as_deref() == Some(&run.id)
-            && node.kind != NodeKind::Subagent
+            && !(run_status == RunStatus::Completed
+                && state.turn_items.values().any(|item| {
+                    item.node_id.as_ref() == Some(&node.id)
+                        && is_background_item(state, attempt, item)
+                }))
             && matches!(
                 node.status,
                 NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
@@ -944,4 +982,50 @@ pub fn interrupt(state: &State, run_id: &str, context: Context<'_>) -> Result<De
     }
     changes.push(Change::TurnItem(request));
     Ok(Decision { changes, effects })
+}
+
+/// A process cannot carry its old background roster into a later attachment.
+pub(super) fn lose_background_work(state: &State, provider: &str, now: &str) -> Vec<Change> {
+    let mut changes = vec![];
+    for thread in state
+        .provider_threads
+        .values()
+        .filter(|thread| thread.provider_instance_id == provider)
+    {
+        for item in state.turn_items.values().filter(|item| {
+            item.provider_thread_id.as_ref() == Some(&thread.id)
+                && matches!(
+                    item.status,
+                    TurnItemStatus::Pending | TurnItemStatus::Running | TurnItemStatus::Waiting
+                )
+                && (thread
+                    .pending_background_tasks
+                    .iter()
+                    .any(|task| background_task_matches(task, item))
+                    || matches!(&item.body,TurnItemBody::Subagent {origin,..} if origin=="native"))
+        }) {
+            changes.push(Change::TurnItem(TurnItem {
+                status: TurnItemStatus::Interrupted,
+                completed_at: Some(now.into()),
+                updated_at: now.into(),
+                ..item.clone()
+            }));
+            if let Some(node) = item.node_id.as_ref().and_then(|id| state.nodes.get(id)) {
+                changes.push(Change::Node(ExecutionNode {
+                    status: NodeStatus::Interrupted,
+                    completed_at: Some(now.into()),
+                    ..node.clone()
+                }));
+            }
+        }
+        if !thread.pending_background_tasks.is_empty() {
+            changes.push(Change::ProviderThread(ProviderThread {
+                pending_background_tasks: vec![],
+                status: ProviderThreadStatus::Error,
+                updated_at: now.into(),
+                ..thread.clone()
+            }));
+        }
+    }
+    changes
 }

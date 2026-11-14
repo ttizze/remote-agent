@@ -41,6 +41,17 @@ impl Source {
             .unwrap_or_default()
     }
 
+    pub(super) fn background_owners(
+        &self,
+    ) -> Vec<(Uuid, Vec<agent_protocol::execution::BackgroundTask>)> {
+        self.background
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(owner, background)| (*owner, background.tasks.clone()))
+            .collect()
+    }
+
     pub(super) fn finish_foreground(
         &self,
         execution: Uuid,

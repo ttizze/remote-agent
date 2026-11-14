@@ -133,8 +133,16 @@ impl Runtime {
             })?;
         }
         let state = storage.thread_state(&source.target.id, &[])?;
-        if !state.accepts_observation(&attempt_id, &source.session_id)
-            || !state.native_thread_matches(&attempt_id, driver, &native.id)
+        let foreground = state.accepts_observation(&attempt_id, &source.session_id);
+        if !state.native_thread_matches(&attempt_id, driver, &native.id)
+            || (!foreground
+                && (!state.accepts_background_observation(&attempt_id, &source.session_id)
+                    || !matches!(
+                        change,
+                        SessionChange::Item { .. }
+                            | SessionChange::Text { .. }
+                            | SessionChange::Background { .. }
+                    )))
         {
             return Ok(());
         }
@@ -156,35 +164,29 @@ impl Runtime {
                     .await?;
                 }
                 if completed {
-                    let tasks =
-                        if matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted) {
-                            source.cancel_background(execution);
-                            Vec::new()
-                        } else {
-                            source.finish_foreground(
-                                execution,
-                                super::super::events::background(&turn),
-                            )
-                        };
-                    Self::execution_background(service, source, execution, &tasks)?;
-                    if tasks.is_empty() {
-                        let completion = match turn.status {
-                            TurnStatus::Failed => {
-                                model::Completion::Failed(failure(turn.error.as_ref()))
-                            }
-                            TurnStatus::Interrupted => model::Completion::Interrupted,
-                            _ => model::Completion::Completed,
-                        };
-                        storage.observe_thread(&source.target.id, &[], &now, |state| {
-                            model::complete(
-                                state,
-                                &attempt_id,
-                                &source.session_id,
-                                completion,
-                                executor::context(state, &command_id, &now),
-                            )
-                        })?;
+                    if matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted) {
+                        source.cancel_background(execution);
+                    } else {
+                        source
+                            .finish_foreground(execution, super::super::events::background(&turn));
                     }
+                    Self::execution_background(service, source, execution)?;
+                    let completion = match turn.status {
+                        TurnStatus::Failed => {
+                            model::Completion::Failed(failure(turn.error.as_ref()))
+                        }
+                        TurnStatus::Interrupted => model::Completion::Interrupted,
+                        _ => model::Completion::Completed,
+                    };
+                    storage.observe_thread(&source.target.id, &[], &now, |state| {
+                        model::complete(
+                            state,
+                            &attempt_id,
+                            &source.session_id,
+                            completion,
+                            executor::context(state, &command_id, &now),
+                        )
+                    })?;
                 }
             }
             SessionChange::Item { turn_id, item } => {
@@ -206,6 +208,23 @@ impl Runtime {
                 ..
             } => {
                 let context = native_context(&state, &attempt_id, &now, false)?;
+                if !foreground {
+                    let id = super::text_item_id(
+                        context.provider,
+                        &context.native_turn_id,
+                        item_id.as_str(),
+                        field,
+                    );
+                    let Some(item) = state.turn_items.get(&id) else {
+                        return Ok(());
+                    };
+                    if model::observe_item(&state, &attempt_id, &source.session_id, item.clone())?
+                        .changes
+                        .is_empty()
+                    {
+                        return Ok(());
+                    }
+                }
                 Self::ensure_text_item(
                     service,
                     source,
@@ -222,21 +241,17 @@ impl Runtime {
                 };
                 Self::text_delta(service, source, &attempt, item_id.as_str(), field, &delta)?;
             }
-            SessionChange::Background { tasks } => {
-                for (owner, tasks, native_ended) in source.roster(execution, tasks) {
-                    Self::execution_background(service, source, owner, &tasks)?;
-                    if native_ended && tasks.is_empty() {
-                        storage.observe_thread(&source.target.id, &[], &now, |state| {
-                            model::complete(
-                                state,
-                                &owner.to_string(),
-                                &source.session_id,
-                                model::Completion::Completed,
-                                executor::context(state, &command_id, &now),
-                            )
-                        })?;
-                    }
+            SessionChange::Background { mut tasks } => {
+                if !foreground {
+                    let known = source.background_owners();
+                    tasks.retain(|task| {
+                        known
+                            .iter()
+                            .any(|(_, tasks)| tasks.iter().any(|saved| saved.id == task.id))
+                    });
                 }
+                source.roster(execution, tasks);
+                Self::execution_background(service, source, execution)?;
             }
             SessionChange::Error { error, .. } => {
                 let context = native_context(&state, &attempt_id, &now, true)?;
@@ -387,9 +402,6 @@ impl Runtime {
             &item_ids,
             now,
             |state| {
-                if !state.accepts_observation(attempt_id, &source.session_id) {
-                    return Ok(model::Decision::default());
-                }
                 let mut decision = model::Decision::default();
                 for mut artifact in artifacts {
                     if let Some(node) = state.nodes.get(&artifact.node.id) {
@@ -400,7 +412,6 @@ impl Runtime {
                         artifact.item.started_at =
                             item.started_at.clone().or(artifact.item.started_at);
                     }
-                    decision.changes.push(model::Change::Node(artifact.node));
                     let observed = if let Some(plan) = artifact.plan {
                         model::observe_plan(
                             &state.apply(&decision),
@@ -417,7 +428,10 @@ impl Runtime {
                             artifact.item,
                         )?
                     };
-                    decision.changes.extend(observed.changes);
+                    if !observed.changes.is_empty() {
+                        decision.changes.push(model::Change::Node(artifact.node));
+                        decision.changes.extend(observed.changes);
+                    }
                 }
                 Ok(decision)
             },
@@ -452,54 +466,31 @@ impl Runtime {
         service: &HostRpcService,
         source: &resources::Source,
         attempt: Uuid,
-        tasks: &[agent_protocol::execution::BackgroundTask],
     ) -> Result<(), String> {
         let now = commands::at();
-        service
-            .inner
-            .conversation
-            .storage
-            .observe_thread(&source.target.id, &[], &now, |state| {
-                let Some(attempt) = state.run_attempts.get(&attempt.to_string()) else {
-                    return Ok(model::Decision::default());
-                };
-                let thread = state
-                    .provider_threads
-                    .get(&attempt.provider_thread_id)
-                    .ok_or("background provider thread is missing")?;
-                let tasks = tasks
-                    .iter()
-                    .map(|task| model::PendingBackgroundTask {
-                        kind: match task.kind {
-                            agent_protocol::execution::BackgroundTaskKind::Command => "command",
-                            agent_protocol::execution::BackgroundTaskKind::Subagent => "subagent",
-                            agent_protocol::execution::BackgroundTaskKind::Monitor => "monitor",
-                            agent_protocol::execution::BackgroundTaskKind::BackgroundTask => {
-                                "background_task"
-                            }
-                        }
-                        .into(),
-                        task_id: task.id.clone(),
-                        command: task.description.clone(),
-                        item_id: None,
-                        source_thread_id: None,
-                        description: task.description.clone(),
-                        parent_task_id: None,
-                        native_item_id: Some(task.id.clone()),
-                        awaited: Some(true),
-                        provider_instance_id: Some(attempt.provider_instance_id.clone()),
-                        child_thread_id: None,
-                    })
-                    .collect();
-                Ok(model::Decision {
-                    changes: vec![model::Change::ProviderThread(model::ProviderThread {
-                        pending_background_tasks: tasks,
-                        updated_at: now.clone(),
-                        ..thread.clone()
-                    })],
-                    ..Default::default()
-                })
-            })
-            .map(|_| ())
+        let owners = source.background_owners();
+        service.inner.conversation.storage.observe_thread(&source.target.id,&[],&now,|state| {
+            let id=attempt.to_string();
+            if !state.accepts_observation(&id,&source.session_id) && !state.accepts_background_observation(&id,&source.session_id) {return Ok(model::Decision::default());}
+            let attempt=&state.run_attempts[&id];
+            let thread=state.provider_threads.get(&attempt.provider_thread_id).ok_or("background provider thread is missing")?;
+            let mut tasks=std::collections::BTreeMap::new();
+            for (owner,pending) in owners {
+                let id=owner.to_string();
+                let Some(owner)=state.run_attempts.get(&id).filter(|owner|owner.provider_thread_id==thread.id) else {continue;};
+                if !state.accepts_observation(&id,&source.session_id) && !state.accepts_background_observation(&id,&source.session_id) {continue;}
+                for task in pending {
+                    let item=state.turn_items.values().find(|item|item.run_id.as_ref()==Some(&owner.run_id) && item.native_item_ref.as_ref().and_then(|reference|reference.native_id.as_deref())==Some(task.id.as_str()));
+                    if item.is_some_and(|item|!matches!(item.status,model::TurnItemStatus::Pending|model::TurnItemStatus::Running|model::TurnItemStatus::Waiting)) {continue;}
+                    tasks.insert(task.id.clone(),model::PendingBackgroundTask {
+                        kind:match task.kind {agent_protocol::execution::BackgroundTaskKind::Command=>"command",agent_protocol::execution::BackgroundTaskKind::Subagent=>"subagent",agent_protocol::execution::BackgroundTaskKind::Monitor=>"monitor",agent_protocol::execution::BackgroundTaskKind::BackgroundTask=>"background_task"}.into(),
+                        task_id:task.id.clone(),command:task.description.clone(),item_id:item.map(|item|item.id.clone()),source_thread_id:None,description:task.description,parent_task_id:None,native_item_id:Some(task.id),awaited:None,provider_instance_id:Some(owner.provider_instance_id.clone()),child_thread_id:None,
+                    });
+                }
+            }
+            let pending_background_tasks=tasks.into_values().collect();
+            if thread.pending_background_tasks==pending_background_tasks {return Ok(model::Decision::default());}
+            Ok(model::Decision {changes:vec![model::Change::ProviderThread(model::ProviderThread {pending_background_tasks,updated_at:now.clone(),..thread.clone()})],..Default::default()})
+        }).map(|_|())
     }
 }

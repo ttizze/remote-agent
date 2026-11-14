@@ -88,6 +88,20 @@ pub fn runtime_restarted(
     } else {
         Decision::default()
     };
+    for provider in state
+        .provider_threads
+        .values()
+        .map(|thread| thread.provider_instance_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        decision
+            .changes
+            .extend(super::execution::lose_background_work(
+                &state.apply(&decision),
+                provider,
+                context.now,
+            ));
+    }
     decision.changes.extend(
         state
             .provider_sessions
@@ -260,6 +274,13 @@ pub fn provider_stopped(
             thread.status = ProviderThreadStatus::Error;
         }
     }
+    decision
+        .changes
+        .extend(super::execution::lose_background_work(
+            &state.apply(&decision),
+            provider_instance_id,
+            context.now,
+        ));
     decision.changes.extend(
         state
             .provider_sessions
