@@ -1582,6 +1582,89 @@ fn callbacks_require_the_exact_attached_session_and_a_live_provider_process() {
 
 mod fork_tests {
     use super::*;
+    fn undelivered_fork() -> (State, String) {
+        let (source, mut run, point) = fork_source_fixture();
+        run.status = RunStatus::Completed;
+        let (target, transfer) =
+            fork_thread(&source, &run, point, "target", "transfer", NOW).unwrap();
+        let state = State::new(target).apply(&Decision {
+            changes: vec![Change::ContextTransfer(transfer)],
+            effects: vec![],
+        });
+        let mut first = input(100);
+        first.fork_origin = Some(ProviderThreadFork {
+            provider_thread_id: "source-provider-thread".into(),
+            provider_turn_id: Some("source-turn".into()),
+            checkpoint_id: None,
+        });
+        let state = state.apply(
+            &admit(
+                &state,
+                first,
+                Admission::Queue,
+                context("fork-first", &state),
+            )
+            .unwrap(),
+        );
+        let id = state.active_run().unwrap().id.clone();
+        (state, id)
+    }
+
+    #[test]
+    fn undelivered_forks_are_reclaimed_only_after_the_assigned_run_finishes() {
+        let (state, id) = undelivered_fork();
+        for (status, claimable) in [
+            (RunStatus::Preparing, false),
+            (RunStatus::Queued, false),
+            (RunStatus::Starting, false),
+            (RunStatus::Running, false),
+            (RunStatus::Waiting, false),
+            (RunStatus::Completed, true),
+            (RunStatus::Failed, true),
+            (RunStatus::Interrupted, true),
+            (RunStatus::Cancelled, true),
+            (RunStatus::RolledBack, true),
+        ] {
+            let mut state = state.clone();
+            state.runs.get_mut(&id).unwrap().status = status;
+            assert_eq!(state.pending_fork().is_some(), claimable, "{status:?}");
+        }
+        let mut state = state;
+        state.runs.get_mut(&id).unwrap().status = RunStatus::Failed;
+        state
+            .context_transfers
+            .get_mut("transfer")
+            .unwrap()
+            .target_thread_id = "foreign".into();
+        assert!(state.pending_fork().is_none());
+        state
+            .context_transfers
+            .get_mut("transfer")
+            .unwrap()
+            .target_thread_id = "target".into();
+        state.context_transfers.get_mut("transfer").unwrap().status = TransferStatus::Consumed;
+        assert!(state.pending_fork().is_none());
+    }
+
+    #[test]
+    fn a_queued_input_claims_undelivered_fork_context_when_activated() {
+        let (state, first) = undelivered_fork();
+        let mut state = accepted(&state, 101, Admission::Queue);
+        let queued = state.next_queued_run().unwrap().id.clone();
+        state.runs.get_mut(&first).unwrap().status = RunStatus::Failed;
+        let activated =
+            state.apply(&activate_queued(&state, &queued, context("resume-fork", &state)).unwrap());
+        assert_eq!(
+            activated.context_transfers["transfer"]
+                .target_run_id
+                .as_ref(),
+            Some(&queued)
+        );
+        assert_eq!(
+            activated.context_transfers["transfer"].status,
+            TransferStatus::Pending
+        );
+    }
     fn fork_source_fixture() -> (Thread, Run, ContextSourcePoint) {
         let state = accepted(&initial(), 1, Admission::Queue);
         let run = state.runs.into_values().next().unwrap();

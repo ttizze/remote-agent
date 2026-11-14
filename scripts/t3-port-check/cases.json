@@ -29,7 +29,12 @@
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_12",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_13",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_14",
-      "host_rpc::runtime::t3_contract::a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_restart"
+      "host_rpc::runtime::t3_contract::a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_restart",
+      "host_rpc::runtime::t3_contract::queued_fork_input_preserves_context_after_a_failed_start::case_1",
+      "host_rpc::runtime::t3_contract::queued_fork_input_preserves_context_after_a_failed_start::case_2"
+    ],
+    "agent-protocol": [
+      "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated"
     ]
   },
   "guards": {
@@ -186,7 +191,8 @@
       "orchestration::tests::fork_tests::only_finished_source_runs_can_be_forked",
       "orchestration::tests::fork_tests::an_invalid_source_cannot_create_a_fork",
       "orchestration::tests::fork_tests::a_strong_native_source_needs_no_portable_context_warning",
-      "orchestration::tests::fork_tests::a_fork_starts_its_own_lifecycle_and_keeps_the_source_provenance"
+      "orchestration::tests::fork_tests::a_fork_starts_its_own_lifecycle_and_keeps_the_source_provenance",
+      "orchestration::tests::fork_tests::undelivered_forks_are_reclaimed_only_after_the_assigned_run_finishes"
     ],
     "host-daemon": [
       "host_rpc::routing::credit::tests::streams_share_connection_credit_and_release_it_only_when_the_frame_is_dropped",

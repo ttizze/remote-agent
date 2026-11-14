@@ -1152,3 +1152,164 @@ async fn a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_rest
     );
     assert_ne!(inputs[0].thread_id, inputs[1].thread_id);
 }
+
+#[rstest::rstest]
+#[case(ProviderKind::Codex)]
+#[case(ProviderKind::Claude)]
+#[tokio::test]
+async fn queued_fork_input_preserves_context_after_a_failed_start(#[case] provider: ProviderKind) {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let projects = directory.path().join("projects.json");
+    let service = HostRpcService::new([codex.backend(), claude.backend()], projects.clone());
+    let source = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("queued-prefix-marker"),
+    )
+    .await;
+    let first = settled(&service, &source, 1).await;
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let connection = service.open_session();
+    let _: SessionRef = call(
+        &service,
+        connection.id(),
+        Call::ForkConversation(records::Fork {
+            source,
+            target: target.clone(),
+            through: first.projection.runs[0].id.clone().into(),
+        }),
+    )
+    .await
+    .unwrap();
+    let held = codex.create_gate.acquire().await.unwrap();
+    for (kind, text) in [
+        (ProviderKind::Codex, "failed-before-write"),
+        (provider, "queued-with-context"),
+    ] {
+        let ack: records::Acknowledged = call(
+            &service,
+            connection.id(),
+            Call::ChangeConversation(records::Change {
+                session: target.clone(),
+                operation: Uuid::new_v4(),
+                command: Command::Submit {
+                    id: Uuid::new_v4().to_string().into(),
+                    content: input(kind, text),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(ack.error.is_none());
+    }
+    let queued = snapshot(&service, &target)
+        .projection
+        .runs
+        .iter()
+        .find(|run| run.status == model::RunStatus::Queued)
+        .unwrap()
+        .id
+        .clone();
+    codex.create_gate.close();
+    drop(held);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if snapshot(&service, &target)
+                .projection
+                .runs
+                .iter()
+                .any(|run| run.status == model::RunStatus::Failed)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let owner = Arc::downgrade(&service.inner);
+    drop(connection);
+    drop(service);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while owner.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let codex = codex.restarted();
+    let claude = claude.restarted();
+    let service = HostRpcService::new([codex.backend(), claude.backend()], projects);
+    let connection = service.open_session();
+    let ack: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: target.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::ResumeQueue,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(ack.error.is_none());
+    assert!(
+        snapshot(&service, &target)
+            .projection
+            .context_transfers
+            .iter()
+            .any(|transfer| transfer.target_run_id.as_ref() == Some(&queued)),
+        "queued activation claims the undelivered fork source"
+    );
+    let current = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let current = snapshot(&service, &target);
+            if current
+                .projection
+                .runs
+                .iter()
+                .any(|run| run.id == queued && run.status == model::RunStatus::Completed)
+            {
+                break current;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued input completes with its fork history");
+    let transfer = current
+        .projection
+        .context_transfers
+        .iter()
+        .find(|transfer| transfer.target_run_id.as_ref() == Some(&queued))
+        .unwrap();
+    if provider == ProviderKind::Codex {
+        assert_eq!(transfer.status, model::TransferStatus::Consumed);
+        let inputs = codex.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 2);
+        let records = codex.records.lock().unwrap();
+        assert_eq!(
+            records[&inputs[1].thread_id.id]
+                .thread
+                .turns
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(claude.inputs.lock().unwrap().is_empty());
+    } else {
+        assert_eq!(transfer.status, model::TransferStatus::ResolvedPortable);
+        assert!(!current.projection.context_handoffs.is_empty());
+        assert_eq!(codex.inputs.lock().unwrap().len(), 1);
+        assert_eq!(claude.inputs.lock().unwrap().len(), 1);
+        let delivered = serde_json::to_string(&(
+            &*claude.injected.lock().unwrap(),
+            &*claude.inputs.lock().unwrap(),
+        ))
+        .unwrap();
+        assert!(delivered.contains("queued-prefix-marker"));
+    }
+}
