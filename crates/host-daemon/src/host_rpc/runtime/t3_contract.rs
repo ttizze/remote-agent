@@ -1398,7 +1398,10 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
             .projection
             .context_transfers
             .iter()
-            .filter(|transfer| transfer.kind == model::TransferType::ProviderHandoff)
+            .filter(
+                |transfer| transfer.kind == model::TransferType::ProviderHandoff
+                    && transfer.status == model::TransferStatus::Consumed
+            )
             .count(),
         2,
         "recovery must preserve both provider-switch records"
@@ -1408,7 +1411,11 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
             .projection
             .context_transfers
             .iter()
-            .filter(|transfer| transfer.kind == model::TransferType::ProviderResumeFallback)
+            .filter(
+                |transfer| transfer.kind == model::TransferType::ProviderHandoff
+                    && transfer.status == model::TransferStatus::ResolvedPortable
+                    && transfer.created_by == model::Actor::System
+            )
             .count(),
         usize::from(recovering)
     );
@@ -1425,6 +1432,58 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
         .filter(|handoff| handoff.target_run_id == latest_run.id)
         .collect();
     assert_eq!(target_handoffs.len(), if recovering { 2 } else { 1 });
+    let delta = current
+        .projection
+        .context_transfers
+        .iter()
+        .find(|transfer| {
+            transfer.target_run_id.as_ref() == Some(&latest_run.id)
+                && transfer.status == model::TransferStatus::Consumed
+        })
+        .unwrap();
+    let base = delta
+        .base_point
+        .as_ref()
+        .expect("T3 provider-switch delta records the prior target boundary");
+    assert_eq!(
+        base.run_id.as_deref(),
+        Some(
+            current
+                .projection
+                .runs
+                .iter()
+                .min_by_key(|run| run.ordinal)
+                .unwrap()
+                .id
+                .as_str()
+        )
+    );
+    assert!(base.provider_thread_ref.is_some() && base.provider_turn_ref.is_some());
+    let model::ContextTransferResolution::DeltaContext { context_handoff_id } =
+        delta.resolution.as_ref().unwrap()
+    else {
+        panic!("switch delta resolution");
+    };
+    assert_eq!(
+        latest_run.context_handoff_id.as_ref(),
+        Some(context_handoff_id)
+    );
+    for handoff in &target_handoffs {
+        let owner = current
+            .projection
+            .provider_threads
+            .iter()
+            .find(|thread| thread.id == handoff.to_provider_thread_id)
+            .unwrap();
+        assert!(
+            owner.handoff_ids.contains(&handoff.id),
+            "the provider thread retains each prepared handoff link"
+        );
+        if handoff.strategy == model::HandoffStrategy::FullThreadSummary {
+            assert_eq!(handoff.from_provider_thread_ids, [owner.id.clone()]);
+        }
+    }
+
     assert!(
         target_handoffs
             .iter()
@@ -1499,6 +1558,17 @@ async fn portable_forks_include_only_the_selected_source_prefix() {
             .any(|transfer| transfer.kind == model::TransferType::Fork
                 && transfer.status == model::TransferStatus::ResolvedPortable)
     );
+    assert!(
+        current.projection.runs[0]
+            .context_handoff_id
+            .as_ref()
+            .is_some_and(|id| current
+                .projection
+                .context_handoffs
+                .iter()
+                .any(|handoff| &handoff.id == id)),
+        "portable fork records its planned handoff on the run"
+    );
 }
 
 #[tokio::test]
@@ -1572,6 +1642,22 @@ async fn switching_back_replaces_a_full_native_context_before_appending_history(
             .projection
             .context_transfers
             .iter()
-            .any(|transfer| transfer.kind == model::TransferType::ProviderResumeFallback)
+            .any(
+                |transfer| transfer.kind == model::TransferType::ProviderHandoff
+                    && transfer.status == model::TransferStatus::ResolvedPortable
+                    && transfer.created_by == model::Actor::System
+            )
     );
+    for handoff in &current.projection.context_handoffs {
+        let owner = current
+            .projection
+            .provider_threads
+            .iter()
+            .find(|thread| thread.id == handoff.to_provider_thread_id)
+            .unwrap();
+        assert!(
+            owner.handoff_ids.contains(&handoff.id),
+            "budget recovery preserves the immediately preceding switch handoff link"
+        );
+    }
 }

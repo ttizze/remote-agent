@@ -40,7 +40,8 @@
       "host_rpc::runtime::t3_contract::switching_back_replaces_a_full_native_context_before_appending_history"
     ],
     "agent-protocol": [
-      "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated"
+      "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
+      "orchestration::tests::context_transfer_types_follow_t3_contract_instead_of_id_allocator_tags"
     ]
   },
   "guards": {

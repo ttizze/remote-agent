@@ -1880,3 +1880,24 @@ mod handoff_tests {
         }
     }
 }
+
+#[test]
+fn context_transfer_types_follow_t3_contract_instead_of_id_allocator_tags() {
+    // orchestrationV2.ts179-185 defines five types. The allocator's purpose
+    // string provider_resume_fallback is only part of an ID, never a row type.
+    for kind in [
+        "fork",
+        "provider_handoff",
+        "merge_back",
+        "subagent_spawn",
+        "subagent_result",
+    ] {
+        let value = serde_json::Value::String(kind.into());
+        let kind: TransferType = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(kind).unwrap(), value);
+    }
+    assert!(
+        serde_json::from_value::<TransferType>(serde_json::json!("provider_resume_fallback"))
+            .is_err()
+    );
+}
