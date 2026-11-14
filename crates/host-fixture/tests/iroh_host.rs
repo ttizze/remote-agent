@@ -1594,6 +1594,11 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         };
         let store = Store::new((local.peer, local.events), initial, None);
         store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
+        let mut updates = store.subscribe();
+        updates.wait_for(|snapshot| {
+            !snapshot.operation_running(agent_core::state::operations::OperationKey::SessionList)
+                && snapshot.lists.replica.as_deref().is_some_and(agent_protocol::conversation::records::catalog_ready)
+        }).await.unwrap();
         let session = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "history".into()).unwrap();
         // The first open reads native history and imports it once.
         store.dispatch(Intent::ReadThread(op::ReadThread::new(session.clone()))).await.unwrap();

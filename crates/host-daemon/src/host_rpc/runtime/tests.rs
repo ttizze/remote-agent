@@ -391,6 +391,18 @@ async fn missing_providerless_conversations_keep_durable_rejections_without_a_pr
     let service = HostRpcService::new([], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let opened = call::<records::Opened>(
+        &service,
+        connection.id(),
+        Call::SubscribeConversation(records::Subscribe {
+            session: target.clone(),
+            subscription: Uuid::new_v4(),
+            cached: None,
+            window: None,
+        }),
+    )
+    .await;
+    assert_eq!(opened.unwrap_err().code, "invalid_session");
     let operation = Uuid::new_v4();
     let request = records::Change {
         session: target.clone(),

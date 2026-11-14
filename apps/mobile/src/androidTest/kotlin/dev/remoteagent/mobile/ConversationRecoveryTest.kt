@@ -15,7 +15,6 @@ import dev.remoteagent.core.DraftKey
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.OperationKey
 import dev.remoteagent.core.Outcome
-import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.ReadThread
 import dev.remoteagent.core.SessionRef
 import java.io.File
@@ -105,7 +104,7 @@ class ConversationRecoveryTest {
                     }
                     assertEquals("", model.snapshot.draft(DraftKey.Session(id)).text)
                     perform(Intent.SetDraftText(DraftKey.Session(id), "preserved draft")).getOrThrow()
-                    val missing = SessionRef(ProviderKind.CODEX, "missing-thread")
+                    val missing = SessionRef(null, UUID.randomUUID().toString())
                     assertTrue(perform(Intent.ReadThread(ReadThread(missing, open = true))).isFailure)
                     assertNotNull(model.snapshot.operationError(OperationKey.History(missing)))
                     assertTrue(model.snapshot.errorNotices("", dev.remoteagent.core.ErrorScope.Application).isEmpty())
