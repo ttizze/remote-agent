@@ -1866,6 +1866,53 @@ mod handoff_tests {
         assert_eq!(handoff_budget("x", &[image], 86_000, Some(128_000)), 1_805);
         assert_eq!(handoff_budget("x", &[], 128_000, Some(128_000)), 0);
     }
+    #[test]
+    fn history_selection_matches_pinned_t3_reference_outputs() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/t3-port-check/handoff-fixtures.json"
+        )))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let messages: Vec<_> = input["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| HistoricalText {
+                    message: serde_json::from_value(value.clone()).unwrap(),
+                    text: value["text"].as_str().unwrap().into(),
+                })
+                .collect();
+            let prior: Vec<String> = input
+                .get("omittedItemIds")
+                .map(|value| serde_json::from_value(value.clone()).unwrap())
+                .unwrap_or_default();
+            let budget = input["budget"].as_u64().unwrap() as usize;
+            let selected = select_history(
+                &messages,
+                input["coverage"].as_str().unwrap(),
+                input
+                    .get("omittedItems")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as usize,
+                &prior,
+                budget,
+            );
+            if case["cost"].as_u64().unwrap() > budget as u64 {
+                assert!(
+                    selected.is_err(),
+                    "{} must fail before delivery",
+                    case["name"]
+                );
+                continue;
+            }
+            let selected = selected.unwrap_or_else(|error| panic!("{}: {error}", case["name"]));
+            let actual = serde_json::json!({"messages":selected.messages,"context":selected.context,"omittedItemIds":selected.omitted_item_ids,"omittedItems":selected.omitted_items});
+            assert_eq!(actual, case["expected"], "reference case {}", case["name"]);
+        }
+    }
+
     proptest::proptest! {
         #[test]
         fn selected_history_fits_serialized_native_and_inline_payloads(data in proptest::collection::vec((proptest::prelude::any::<bool>(),".{0,300}"),0..20),budget in 1500usize..12_000) {

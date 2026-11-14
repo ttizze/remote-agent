@@ -41,7 +41,8 @@
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
-      "orchestration::tests::context_transfer_types_follow_t3_contract_instead_of_id_allocator_tags"
+      "orchestration::tests::context_transfer_types_follow_t3_contract_instead_of_id_allocator_tags",
+      "orchestration::tests::handoff_tests::history_selection_matches_pinned_t3_reference_outputs"
     ]
   },
   "guards": {
