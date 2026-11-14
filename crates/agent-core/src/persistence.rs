@@ -91,6 +91,8 @@ pub struct PersistedState {
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
     drafts: Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
+    #[serde(default)]
+    stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
     pending_submissions: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     navigation: Arc<Navigation>,
@@ -103,6 +105,7 @@ impl Same for PersistedState {
             && self.storage_scope == other.storage_scope
             && self.archived_scopes.same(&other.archived_scopes)
             && self.drafts.same(&other.drafts)
+            && self.stashes.same(&other.stashes)
             && self.pending_submissions.same(&other.pending_submissions)
             && self.file_drafts.same(&other.file_drafts)
             && self.navigation.same(&other.navigation)
@@ -117,6 +120,7 @@ impl PersistedState {
             storage_scope: snapshot.connection.storage_scope.clone(),
             archived_scopes: snapshot.lists.archived_scopes.clone(),
             drafts: snapshot.input.drafts.clone(),
+            stashes: snapshot.input.stashes.clone(),
             pending_submissions: snapshot.sessions.pending_submissions.clone(),
             file_drafts: snapshot.files.file_drafts.clone(),
             navigation: snapshot.panes.primary().navigation.clone(),
@@ -150,6 +154,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         },
         input: crate::state::Input {
             drafts: saved.drafts,
+            stashes: saved.stashes,
             ..Default::default()
         },
         sessions: crate::state::Sessions {

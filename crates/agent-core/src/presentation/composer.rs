@@ -205,6 +205,7 @@ pub struct ComposerPresentation {
     pub controls: ComposerControls,
     models: Arc<Vec<Model>>,
     catalog: Option<Arc<agent_protocol::composer::ComposerCatalog>>,
+    stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
 }
 
 impl ComposerPresentation {
@@ -214,6 +215,7 @@ impl ComposerPresentation {
             && self.controls == other.controls
             && self.models.same(&other.models)
             && self.catalog.same(&other.catalog)
+            && self.stashes.same(&other.stashes)
     }
     pub(crate) fn project(
         snapshot: &Snapshot,
@@ -284,6 +286,7 @@ impl ComposerPresentation {
             controls,
             models: snapshot.catalog.models.clone(),
             catalog,
+            stashes: snapshot.input.stashes.clone(),
         };
         if let Some(previous) = previous
             && next.equivalent(previous)
@@ -364,6 +367,12 @@ impl Snapshot {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl ComposerPresentation {
+    pub fn stashed_prompts(&self) -> Vec<crate::composer::stash::StashedPrompt> {
+        self.stashes.as_ref().clone()
+    }
+    pub fn stash_count(&self) -> u32 {
+        self.stashes.len() as u32
+    }
     pub fn draft(&self) -> Draft {
         self.draft.as_ref().clone()
     }

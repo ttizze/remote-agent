@@ -428,6 +428,7 @@ fn native_session_ids_round_trip_without_provider_collisions() {
 
 #[test]
 fn local_storage_keeps_user_work_without_host_caches() {
+    use agent_core::composer::stash::StashedPrompt;
     use agent_core::state::{Draft, FileDraft, Navigation, PendingSubmission, Snapshot};
     let draft = Arc::new(Draft {
         text: "unsent message".into(),
@@ -497,6 +498,14 @@ fn local_storage_keeps_user_work_without_host_caches() {
             ..Default::default()
         },
         input: agent_core::state::Input {
+            stashes: Arc::new(vec![StashedPrompt {
+                id: "saved-prompt".into(),
+                created_at_ms: 1234,
+                text: "stashed unsent message".into(),
+                attachments: draft.attachments.clone(),
+                invocations: vec![],
+                contexts: vec![],
+            }]),
             drafts: Arc::new(
                 [(
                     SessionRef {
@@ -561,12 +570,14 @@ fn local_storage_keeps_user_work_without_host_caches() {
             "navigation",
             "pending_submissions",
             "project_preferences",
+            "stashes",
             "storage_scope"
         ]
     );
     let restored = agent_core::persistence::decode(&bytes).unwrap();
     assert!(!restored.connection_enabled());
     assert_eq!(restored.input.drafts, original.input.drafts);
+    assert_eq!(restored.input.stashes, original.input.stashes);
     assert_eq!(
         restored.sessions.pending_submissions,
         original.sessions.pending_submissions

@@ -427,6 +427,8 @@ group! {
     pub struct Input {
         #[serde(with = "crate::persistence::entries")]
         pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+        #[serde(default)]
+        pub stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
         /// Answers composed for awaiting questions; local to this device.
         #[serde(skip)]
         pub question_drafts:
@@ -630,6 +632,8 @@ pub use operations::Intent;
 pub struct ScopedData {
     #[serde(with = "crate::persistence::entries")]
     pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+    #[serde(default)]
+    pub stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
     pub pending_submissions:
         Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
@@ -1105,6 +1109,19 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.input.drafts).insert(thread_id, Arc::new(draft));
         }
+        Intent::Stash {storage_scope,thread_id,action} => {
+            if storage_scope == previous.connection.storage_scope {
+                let empty = Draft::default();
+                let draft = previous.input.drafts.get(&thread_id).map(AsRef::as_ref).unwrap_or(&empty);
+                let busy = previous.operation_running(op::OperationKey::Attachment {draft_key:thread_id.clone()})
+                    || previous.operation_running(op::OperationKey::Dictation {draft_key:thread_id.clone()})
+                    || matches!(&thread_id, DraftKey::Session {session} if previous.input.queued_edits.contains_key(session));
+                match crate::composer::stash::change(&previous.input.stashes,draft,busy,action) {
+                    Ok(change) => next.input.apply_stash_change(thread_id, change),
+                    Err(reason) => Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists")).error = Some(reason.into()),
+                }
+            }
+        }
         Intent::ChangeContext { storage_scope, thread_id, action } => {
             if storage_scope == previous.connection.storage_scope {
                 let current = previous.input.drafts.get(&thread_id).map_or(&[][..], |draft| &draft.contexts);
@@ -1372,6 +1389,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
             if !next.connection.storage_scope.is_empty() {
                 let archived = ScopedData {
                     drafts: std::mem::take(&mut next.input.drafts),
+                    stashes: std::mem::take(&mut next.input.stashes),
                     pending_submissions: std::mem::take(&mut next.sessions.pending_submissions),
                     file_drafts: std::mem::take(&mut next.files.file_drafts),
                     navigation: std::mem::take(
@@ -1382,6 +1400,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                     .insert(next.connection.storage_scope.clone(), Arc::new(archived));
                 if let Some(saved) = Arc::make_mut(&mut next.lists.archived_scopes).remove(&scope) {
                     next.input.drafts = saved.drafts.clone();
+                    next.input.stashes = saved.stashes.clone();
                     next.sessions.pending_submissions = saved.pending_submissions.clone();
                     next.files.file_drafts = saved.file_drafts.clone();
                     Arc::make_mut(next.panes.primary_mut()).navigation = saved.navigation.clone();
