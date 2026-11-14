@@ -140,6 +140,7 @@ pub fn apply_event(
     }
     let mut next = projection.clone();
     next.updated_at = event.occurred_at.clone();
+    next.thread.updated_at = event.occurred_at.clone();
     use model::Change;
     match &event.change {
         Change::ThreadCreated(value) | Change::Thread(value) => next.thread = value.clone(),

@@ -20,6 +20,14 @@ pub(super) fn append(
         normalize_item(transaction, item, run_ordinal)?;
     }
     projections::apply(transaction, &event.thread_id, &event.change)?;
+    if !matches!(
+        event.change,
+        model::Change::ThreadCreated(_) | model::Change::Thread(_)
+    ) {
+        transaction.execute("UPDATE orchestration_v2_projection_threads
+            SET updated_at=?1,payload_json=json_set(payload_json,'$.updatedAt',?1) WHERE thread_id=?2",
+            params![event.occurred_at,event.thread_id]).map_err(failure)?;
+    }
     let mut encoded = serde_json::to_value(&event).map_err(failure)?;
     let fields = encoded.as_object_mut().ok_or("event is not an object")?;
     let payload = fields.remove("payload").ok_or("event payload is missing")?;
