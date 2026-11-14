@@ -40,6 +40,7 @@ pub use commands::{
 };
 mod execution;
 mod forks;
+pub mod handoffs;
 pub use execution::{
     Completion, activate_queued, cancel_start, cancel_uncertain, complete, fail_start,
     finish_provider_turn, interrupt, observe_item, observe_plan, observe_subagent, started,
@@ -141,6 +142,7 @@ status!(HandoffDeliveryStatus {
 status!(TransferType {
     Fork,
     ProviderHandoff,
+    ProviderResumeFallback,
     MergeBack,
     SubagentSpawn,
     SubagentResult

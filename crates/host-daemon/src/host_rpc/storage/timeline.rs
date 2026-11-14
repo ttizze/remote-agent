@@ -150,6 +150,53 @@ fn read(
     Ok(Timeline { state, items })
 }
 
+/// Portable context uses the same visible inherited timeline as the client,
+/// with full source bodies rather than the reduced wire projection.
+pub(super) fn handoff_items(
+    connection: &Connection,
+    thread_id: &str,
+    after: u64,
+    through: u64,
+    inherited: bool,
+) -> Result<Vec<(model::TurnItem, Option<model::RunStatus>)>, String> {
+    let timeline = read(connection, thread_id, &mut BTreeSet::new())?;
+    let mut sources = std::collections::BTreeMap::new();
+    sources.insert(thread_id.to_owned(), timeline.state);
+    let mut items = Vec::new();
+    for index in timeline
+        .items
+        .into_iter()
+        .filter(|index| index.synthetic.is_none())
+    {
+        if index.source_thread_id != thread_id && !inherited {
+            continue;
+        }
+        if !sources.contains_key(&index.source_thread_id) {
+            sources.insert(
+                index.source_thread_id.clone(),
+                projections::metadata(connection, &index.source_thread_id)?,
+            );
+        }
+        let source = &sources[&index.source_thread_id];
+        let item = projections::read::<model::TurnItem>(connection, &index.id)?
+            .ok_or("handoff source item is missing")?;
+        let run = item.run_id.as_ref().and_then(|id| source.runs.get(id));
+        if index.source_thread_id == thread_id
+            && run.is_some_and(|run| run.ordinal <= after || run.ordinal > through)
+        {
+            continue;
+        }
+        if run.is_none()
+            && (after > 0
+                || source.thread.history_origin != Some(model::ThreadHistoryOrigin::V1Import))
+        {
+            continue;
+        }
+        items.push((item, run.map(|run| run.status)));
+    }
+    Ok(items)
+}
+
 fn inherited_run_ids<'a>(
     runs: impl Iterator<Item = &'a model::Run>,
     through: u64,

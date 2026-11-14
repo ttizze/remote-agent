@@ -200,13 +200,6 @@ pub fn admit(
     let active = state.active_run();
     let queued = active.is_some();
     let fork = state.pending_fork();
-    if fork.is_some_and(|fork| {
-        input.fork_origin.is_none()
-            || fork.source_provider_instance_id.as_deref()
-                != Some(input.model_selection.instance_id.as_str())
-    }) {
-        return Err("fork context must be prepared before starting this input".into());
-    }
     let run_id = id(context.command_id, "run");
     let mut item = user_item(
         &state.thread.id,
@@ -221,6 +214,21 @@ pub fn admit(
         .as_ref()
         .and_then(|id| state.provider_threads.get(id))
         .filter(|thread| thread.provider_instance_id == input.model_selection.instance_id)
+        .or_else(|| {
+            state
+                .provider_threads
+                .values()
+                .filter(|thread| {
+                    thread.app_thread_id.as_deref() == Some(state.thread.id.as_str())
+                        && thread.provider_instance_id == input.model_selection.instance_id
+                        && thread.owner_node_id.is_none()
+                })
+                .max_by(|a, b| {
+                    a.updated_at
+                        .cmp(&b.updated_at)
+                        .then_with(|| a.id.cmp(&b.id))
+                })
+        })
         .cloned()
         .unwrap_or_else(|| ProviderThread {
             id: id(context.command_id, "provider-thread"),

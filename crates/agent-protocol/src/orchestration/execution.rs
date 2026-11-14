@@ -206,6 +206,27 @@ pub fn started(
         Change::ProviderTurn(turn),
     ]);
     if let Some(reference) = &provider_thread.native_thread_ref {
+        changes.extend(
+            state
+                .context_handoffs
+                .values()
+                .filter(|handoff| {
+                    handoff.to_provider_thread_id == provider_thread.id
+                        && handoff.delivery.as_ref().is_some_and(|delivery| {
+                            Some(&delivery.native_thread_id) == reference.native_id.as_ref()
+                                && delivery.status == HandoffDeliveryStatus::Pending
+                        })
+                })
+                .map(|handoff| {
+                    Change::ContextHandoff(ContextHandoff {
+                        delivery: handoff.delivery.as_ref().map(|delivery| HandoffDelivery {
+                            status: HandoffDeliveryStatus::Inline,
+                            ..delivery.clone()
+                        }),
+                        ..handoff.clone()
+                    })
+                }),
+        );
         // ProviderTurnStartService consumes a planned native fork only when
         // the provider accepts a turn, including callback-before-ACK delivery.
         changes.extend(

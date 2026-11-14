@@ -352,6 +352,20 @@ impl Runtime {
             .to_str()
             .ok_or_else(|| Failure::new("workspace_unavailable", "workspace path is not UTF-8"))?
             .to_owned();
+        let Some(prepared) = runtime
+            .storage
+            .prepare_context(
+                effect,
+                worker,
+                agent.capabilities().fork,
+                &service.history_command(&target),
+                &commands::at(),
+            )
+            .map_err(storage_failure)?
+        else {
+            return Ok(None);
+        };
+        let state = &prepared;
         let thread = state
             .provider_threads
             .get(&attempt.provider_thread_id)
@@ -491,7 +505,7 @@ impl Runtime {
         }
         let message=current.turn_items.values().find(|item|matches!(&item.body,model::TurnItemBody::UserMessage {message_id,..} if message_id==&run.user_message_id))
             .ok_or_else(||Failure::new("invalid_run","run input is missing"))?;
-        let input =
+        let mut input =
             Self::native_submission(service, &native, &cwd, &run.model_selection, message).await?;
         let before_write = commands::at();
         runtime
@@ -514,7 +528,26 @@ impl Runtime {
         }
         let execution =
             Uuid::parse_str(&attempt.id).map_err(|error| Failure::new("invalid_run", error))?;
-        let receipt = agent
+        let inline = Self::deliver_context(
+            service,
+            effect,
+            worker,
+            agent.as_ref(),
+            &native,
+            &target,
+            &current,
+            message,
+        )
+        .await?;
+        if let Some((_, history)) = &inline
+            && let Some(op::Input::Text { text }) = input.input.first_mut()
+        {
+            *text = format!(
+                "{}\n\nUser message:\n{text}",
+                model::handoffs::render_history(&history.messages, &history.context)
+            );
+        }
+        let submitted = agent
             .submit(
                 &input,
                 SubmissionTarget::Start { cwd: &cwd },
@@ -522,10 +555,135 @@ impl Runtime {
                 service.browser_config(&target.to_string())?,
                 execution,
             )
-            .await?;
-        Ok(receipt
+            .await;
+        if submitted
+            .as_ref()
+            .is_err_and(|error| error.delivery == agent_protocol::error::Delivery::NotSent)
+            && let Some((handoffs, history)) = &inline
+        {
+            runtime
+                .storage
+                .context_delivery(
+                    effect,
+                    worker,
+                    &native,
+                    handoffs,
+                    history,
+                    None,
+                    &commands::at(),
+                )
+                .map_err(storage_failure)?;
+        }
+        Ok(submitted?
             .turn_id
             .map(|turn| (source.session_id.clone(), provider, turn)))
+    }
+
+    async fn deliver_context(
+        service: &HostRpcService,
+        effect: &model::Effect,
+        worker: &str,
+        agent: &dyn crate::providers::Agent,
+        native: &SessionRef,
+        target: &SessionRef,
+        state: &model::State,
+        message: &model::TurnItem,
+    ) -> Result<Option<(Vec<model::ContextHandoff>, model::handoffs::SelectedHistory)>, Failure>
+    {
+        let model::TurnItemBody::UserMessage {
+            text, attachments, ..
+        } = &message.body
+        else {
+            return Err(Failure::new(
+                "invalid_input",
+                "handoff target is not a user message",
+            ));
+        };
+        let usage = state
+            .provider_turns
+            .values()
+            .filter(|turn| {
+                turn.run_attempt_id
+                    .as_ref()
+                    .and_then(|id| state.run_attempts.get(id))
+                    .is_some_and(|attempt| {
+                        attempt.native_thread_id.as_deref() == Some(native.id.as_str())
+                            && attempt.provider_thread_id == turn.provider_thread_id
+                            && attempt.root_node_id == turn.node_id
+                    })
+            })
+            .filter_map(|turn| turn.token_usage.as_ref())
+            .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        let window = usage.and_then(|usage| {
+            usage
+                .max_tokens
+                .into_iter()
+                .chain(usage.auto_compact_threshold)
+                .filter(|max| *max > 0)
+                .min()
+        });
+        let budget = model::handoffs::handoff_budget(
+            text,
+            attachments,
+            usage.map_or(0, |usage| usage.used_tokens),
+            window,
+        );
+        let storage = &service.inner.conversation.storage;
+        let Some((handoffs, selected)) = storage
+            .pending_context(
+                effect,
+                worker,
+                native,
+                budget,
+                &service.history_command(target),
+            )
+            .map_err(storage_failure)?
+        else {
+            return Ok(None);
+        };
+        if !storage
+            .context_delivery(
+                effect,
+                worker,
+                native,
+                &handoffs,
+                &selected,
+                Some(model::HandoffDeliveryStatus::Pending),
+                &commands::at(),
+            )
+            .map_err(storage_failure)?
+        {
+            return Err(Failure::new(
+                "context_cancelled",
+                "context delivery is no longer current",
+            ));
+        }
+        // The user's input has not been submitted. If history delivery is
+        // ambiguous, the durable pending marker forces a fresh native thread
+        // on the next attempt, never another injection into this thread.
+        let injected = agent
+            .inject_history(
+                &native.id,
+                &model::handoffs::native_items(&selected.messages, &selected.context),
+            )
+            .await
+            .map_err(|error| Failure::new("context_delivery_uncertain", error.message))?;
+        if injected {
+            storage
+                .context_delivery(
+                    effect,
+                    worker,
+                    native,
+                    &handoffs,
+                    &selected,
+                    Some(model::HandoffDeliveryStatus::Injected),
+                    &commands::at(),
+                )
+                .map_err(storage_failure)?;
+            Ok(None)
+        } else {
+            Ok(Some((handoffs, selected)))
+        }
     }
 
     async fn native_submission(
