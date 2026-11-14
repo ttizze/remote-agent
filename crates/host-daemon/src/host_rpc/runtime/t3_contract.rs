@@ -2024,6 +2024,62 @@ async fn first_injection_recovery_keeps_its_provider_without_inventing_a_source_
 }
 
 #[tokio::test]
+async fn recovery_context_precedes_the_run_input_and_uses_a_stable_run_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("original-history"),
+    )
+    .await;
+    settled(&service, &session, 1).await;
+    send(&service, &session, ProviderKind::Claude, "foreign-history").await;
+    settled(&service, &session, 2).await;
+    codex
+        .fail_inject
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    send(&service, &session, ProviderKind::Codex, "current-input").await;
+    let current = settled(&service, &session, 3).await;
+    let run = &current.projection.runs[2];
+    let recovery = current
+        .projection
+        .turn_items
+        .iter()
+        .find(|item| {
+            item.run_id.as_ref() == Some(&run.id)
+                && item.title.as_deref() == Some("Recovered context")
+        })
+        .expect("a recovered native context has a visible handoff");
+    assert_eq!(
+        recovery.id,
+        model::derived_id(
+            "turn-item",
+            &["run", &run.id, "signal", "resume-fallback-handoff"]
+        )
+    );
+    assert_eq!(
+        recovery.ordinal,
+        run.ordinal * 1_000_000,
+        "T3 reserves the first run position for recovery"
+    );
+    assert!(
+        current
+            .projection
+            .turn_items
+            .iter()
+            .filter(|item| { item.run_id.as_ref() == Some(&run.id) && item.id != recovery.id })
+            .all(|item| item.ordinal > recovery.ordinal),
+        "recovery precedes the provider-switch handoff and current input"
+    );
+}
+
+#[tokio::test]
 async fn context_history_reads_canonical_full_bodies_with_exact_unicode_continuations() {
     use agent_protocol::handoff;
     let directory = tempfile::tempdir().unwrap();

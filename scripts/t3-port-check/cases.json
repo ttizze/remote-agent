@@ -50,7 +50,8 @@
       "host_rpc::runtime::t3_contract::context_history_finds_an_omitted_item_by_its_canonical_id",
       "host_rpc::runtime::t3_contract::a_spent_native_fork_uses_fresh_portable_context_without_an_extra_handoff_card",
       "host_rpc::runtime::t3_contract::a_source_busy_after_admission_keeps_its_native_plan_until_fresh_allocation_succeeds",
-      "host_rpc::runtime::t3_contract::failed_recovery_allocation_keeps_the_existing_native_reference_and_uncommitted_recovery"
+      "host_rpc::runtime::t3_contract::failed_recovery_allocation_keeps_the_existing_native_reference_and_uncommitted_recovery",
+      "host_rpc::runtime::t3_contract::recovery_context_precedes_the_run_input_and_uses_a_stable_run_identity"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
@@ -247,7 +248,9 @@
       "host_rpc::storage::timeline::tests::rollback_cutoffs_compare_instants_including_different_timestamp_precisions",
       "host_rpc::storage::timeline::tests::a_history_page_carries_the_stop_request_paired_with_its_result",
       "host_rpc::storage::timeline::tests::context_excerpts_read_only_selected_bodies_and_do_not_count_nonhistorical_items",
-      "host_rpc::storage::timeline::tests::context_excerpts_cannot_read_a_deleted_conversation"
+      "host_rpc::storage::timeline::tests::context_excerpts_cannot_read_a_deleted_conversation",
+      "host_rpc::storage::event_store::tests::item_positions_are_stable_and_identical_in_projection_and_replayed_events",
+      "host_rpc::storage::event_store::tests::a_queued_body_gets_its_position_at_activation_after_ordinal_reassignment"
     ]
   },
   "obsolete_files": [
