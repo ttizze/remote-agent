@@ -812,6 +812,90 @@ async fn project_clone_notifications_survive_stale_reads_and_actions_use_the_sam
     store.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn feedback_upload_survives_navigation_without_duplicate_sends_and_reports_failures() {
+    use agent_core::presentation::feedback::FeedbackPhase;
+    use agent_protocol::feedback::UploadFeedback;
+    let mut initial = authenticated_snapshot();
+    initial.connection.storage_scope = "fixture-storage".into();
+    let (store, mut reader, writer) = setup(initial).await;
+    let session = SessionRef::new(ProviderKind::Codex, "session".into()).unwrap();
+    let scope = store.snapshot().connection.storage_scope.clone();
+    let request = UploadFeedback {
+        id: "00000000-0000-0000-0000-000000000001".into(),
+        storage_scope: scope.clone(),
+        thread_id: session.clone(),
+        reason: Some("A bug".into()),
+        include_logs: false,
+    };
+    let uploading = store.dispatch(Intent::UploadFeedback(request.clone()));
+    let call = read(&mut reader).await;
+    assert_eq!(call["method"], "host/feedback/upload");
+    assert_eq!(call["params"]["includeLogs"], false);
+    assert_eq!(call["params"]["storageScope"], scope);
+    let notice = store.snapshot().feedback_notice(session.clone()).unwrap();
+    assert_eq!(notice.phase, FeedbackPhase::Uploading);
+    assert!(!notice.can_dismiss);
+    let mut duplicate = request.clone();
+    duplicate.id = "00000000-0000-0000-0000-000000000002".into();
+    store
+        .dispatch(Intent::UploadFeedback(duplicate.clone()))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), reader.read_request())
+            .await
+            .is_err()
+    );
+    store
+        .dispatch(Intent::NewChat { cwd: String::new() })
+        .await
+        .unwrap();
+    writer
+        .reply(&call, json!({"result":{"feedbackId":"uploaded-report"}}))
+        .await
+        .unwrap();
+    uploading.await.unwrap();
+    let notice = store.snapshot().feedback_notice(session.clone()).unwrap();
+    assert_eq!(notice.phase, FeedbackPhase::Sent);
+    assert_eq!(notice.feedback_id.as_deref(), Some("uploaded-report"));
+    assert!(notice.can_dismiss);
+    store
+        .dispatch(Intent::DismissFeedback {
+            storage_scope: "another-host".into(),
+            session: session.clone(),
+            id: notice.id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(store.snapshot().feedback_notice(session.clone()).is_some());
+    store
+        .dispatch(Intent::DismissFeedback {
+            storage_scope: scope,
+            session: session.clone(),
+            id: notice.id,
+        })
+        .await
+        .unwrap();
+    assert!(store.snapshot().feedback_notice(session.clone()).is_none());
+    let failing = store.dispatch(Intent::UploadFeedback(duplicate));
+    let call = read(&mut reader).await;
+    writer
+        .reply(
+            &call,
+            json!({"error":{"code":"failed","message":"Upload rejected","delivery":"notSent"}}),
+        )
+        .await
+        .unwrap();
+    assert!(failing.await.is_err());
+    let notice = store.snapshot().feedback_notice(session).unwrap();
+    assert_eq!(notice.phase, FeedbackPhase::Failed);
+    assert!(notice.feedback_id.is_none());
+    assert!(notice.can_dismiss);
+    assert!(store.snapshot().panes.primary().error.is_none());
+    store.close().await.unwrap();
+}
+
 fn authenticated_snapshot() -> Snapshot {
     Snapshot {
         catalog: agent_core::state::Catalog {

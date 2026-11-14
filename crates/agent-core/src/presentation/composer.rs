@@ -40,6 +40,8 @@ fn resumable(thread: &crate::models::Thread) -> bool {
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerControls {
+    pub feedback_available: bool,
+    pub feedback: Option<super::feedback::FeedbackNotice>,
     pub workspace: Option<WorkspaceSelection>,
     pub navigation: Navigation,
     pub connected: bool,
@@ -236,6 +238,8 @@ impl ComposerPresentation {
         let provider = snapshot.model_provider_for_draft(key.clone());
         let question = session.and_then(|id| snapshot.question_prompt(id.clone()));
         let controls = ComposerControls {
+            feedback_available: session.is_some_and(|id| snapshot.feedback_available(id.clone())),
+            feedback: session.and_then(|id| snapshot.feedback_notice(id.clone())),
             workspace: workspace::project(snapshot, pane, &draft),
             navigation: pane.navigation.as_ref().clone(),
             connected: snapshot.connection.connected,

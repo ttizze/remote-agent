@@ -3,6 +3,7 @@
 mod activity;
 mod capacity;
 mod conversations;
+mod feedback;
 pub(super) mod model_selections;
 mod preparation;
 mod project_import;
@@ -421,6 +422,7 @@ impl HostRpcService {
                 agent_protocol::models::Empty {}.into()
             }
             Call::ReadTaskActivity(_) => self.read_task_activity(false).await?.into(),
+            Call::UploadFeedback(params) => self.upload_feedback(params).await?.into(),
             Call::RegisterLiveActivity(params) => {
                 self.register_live_activity(session, params)?.into()
             }
@@ -837,6 +839,7 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
         Call::ReadItem(p) => (Some(&p.thread_id), None),
         Call::ReadTurnItems(p) => (Some(&p.session), None),
         Call::RenameSession(p) => (Some(&p.thread_id), None),
+        Call::UploadFeedback(p) => (Some(&p.thread_id), None),
         _ => (None, None),
     }
 }

@@ -5,6 +5,7 @@ use agent_protocol::ids::{ItemId, TurnId};
 use crate::{models::*, session::*};
 use agent_protocol::editors::*;
 use agent_protocol::execution::{BackgroundOutcome, BackgroundReport, BackgroundTaskKind};
+use agent_protocol::feedback::*;
 use agent_protocol::file_metadata::{FileMetadata, FileMetadataKind, FilePathMetadata};
 use agent_protocol::file_tree::EntryKind;
 use agent_protocol::live_activity::*;
@@ -16,6 +17,18 @@ use agent_protocol::snapshot::*;
 use agent_protocol::workspace::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
+#[uniffi::remote(Record)]
+struct UploadFeedback {
+    pub id: String,
+    pub storage_scope: String,
+    pub thread_id: SessionRef,
+    pub reason: Option<String>,
+    pub include_logs: bool,
+}
+#[uniffi::remote(Record)]
+struct FeedbackReceipt {
+    pub feedback_id: String,
+}
 #[uniffi::remote(Record)]
 struct SnapShotSource {
     pub captured_at_ms: u64,

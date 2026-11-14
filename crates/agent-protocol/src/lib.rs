@@ -9,6 +9,7 @@ pub mod dsh;
 pub mod editors;
 pub mod error;
 pub mod execution;
+pub mod feedback;
 pub mod file_metadata;
 pub mod file_tree;
 pub mod handoff;

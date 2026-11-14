@@ -81,6 +81,12 @@ pub enum Intent {
         enabled: bool,
     },
     ReadTaskActivity(ReadTaskActivity),
+    UploadFeedback(UploadFeedback),
+    DismissFeedback {
+        storage_scope: String,
+        session: crate::session::SessionRef,
+        id: String,
+    },
     RegisterLiveActivity(RegisterLiveActivity),
     UnregisterLiveActivity(UnregisterLiveActivity),
     ReadPermissionSettings(ReadPermissionSettings),
@@ -311,6 +317,9 @@ pub enum StalePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {
+    Feedback {
+        session: crate::session::SessionRef,
+    },
     ProjectScan,
     ProjectImport,
     ProjectClone {
@@ -619,6 +628,8 @@ mod project_import;
 pub use project_import::*;
 mod project_clone;
 pub use project_clone::*;
+mod feedback;
+pub use feedback::*;
 mod submission;
 pub use submission::*;
 

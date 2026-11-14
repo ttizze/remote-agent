@@ -1344,6 +1344,7 @@ pub struct SessionUpdate {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Capabilities {
+    pub feedback: bool,
     /// Input can join a running turn (T3 Code's active steering). Every
     /// provider can queue input behind one; the Host owns that queue.
     pub steer: bool,

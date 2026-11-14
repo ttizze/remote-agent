@@ -76,6 +76,7 @@ macro_rules! contracts {
 contracts! {
     ReadHandoffHistory, "host/session/context/read" => (crate::handoff::ReadHistory, crate::handoff::Page) [clone],
     ReadTaskActivity, "host/taskActivity/read" => (crate::live_activity::ReadTaskActivity, crate::live_activity::TaskActivityState) [clone],
+    UploadFeedback, "host/feedback/upload" => (crate::feedback::UploadFeedback, crate::feedback::FeedbackReceipt) [clone, crate::feedback::validate_receipt],
     MarkSessionRead, "host/session/markRead" => (crate::live_activity::MarkSessionRead, m::Empty) [clone],
     RegisterLiveActivity, "host/liveActivity/register" => (crate::live_activity::RegisterLiveActivity, crate::live_activity::LiveActivityRegistration) [clone],
     UnregisterLiveActivity, "host/liveActivity/unregister" => (crate::live_activity::UnregisterLiveActivity, m::Empty) [clone],

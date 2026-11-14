@@ -426,6 +426,7 @@ impl HostRpcService {
                 Ok(agent.capabilities())
             })
             .unwrap_or(agent_protocol::session::Capabilities {
+                feedback: false,
                 steer: false,
                 model_change: false,
                 fork: false,

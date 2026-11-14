@@ -411,6 +411,8 @@ group! {
 group! {
     /// Open conversations and the input they have accepted or are still receiving.
     pub struct Sessions {
+        #[serde(skip)]
+        pub feedback: Arc<BTreeMap<crate::session::SessionRef, op::FeedbackSubmission>>,
         #[serde(default)]
         #[serde(with = "crate::persistence::entries")]
         pub conversations: Arc<BTreeMap<crate::session::SessionRef, Arc<Thread>>>,
@@ -748,6 +750,23 @@ fn reduce_intent(previous: &Snapshot, pane_id: &str, intent: Intent) -> (Snapsho
         LoadHostName, LoadHostManagement, LoadModels, ReadModelSettings,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
+        Intent::UploadFeedback(params) => {
+            if params.storage_scope != previous.connection.storage_scope { return (next,Vec::new()); }
+            let key = op::OperationKey::Feedback {session:params.thread_id.clone()};
+            if previous.operation_running(key)
+                || previous.sessions.feedback.get(&params.thread_id).is_some_and(|submission| submission.id == params.id) {
+                return (next, Vec::new());
+            }
+            return prepare(next, pane_id, params);
+        }
+        Intent::DismissFeedback {storage_scope,session,id} => {
+            let key = op::OperationKey::Feedback {session:session.clone()};
+            if storage_scope == previous.connection.storage_scope && !previous.operation_running(key.clone())
+                && previous.sessions.feedback.get(&session).is_some_and(|submission| submission.id == id) {
+                Arc::make_mut(&mut next.sessions.feedback).remove(&session);
+                Arc::make_mut(&mut next.operations).remove(&key);
+            }
+        }
         Intent::RefreshModels => return (next, op::refresh_models()),
         Intent::SetConnectionEnabled { enabled } => next.connection.connection_disabled = !enabled,
         // Store commits this device-owned value after admitting the action.
@@ -1398,6 +1417,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
             }
             next.project_import = Arc::default();
             next.lists.project_clones = None;
+            next.sessions.feedback = Arc::default();
             next.terminals = Arc::default();
             Arc::make_mut(next.panes.primary_mut()).observed_agents = None;
             next.catalog.provider_settings = None;

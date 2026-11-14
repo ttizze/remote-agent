@@ -16,6 +16,7 @@ pub mod connections;
 pub mod diff;
 pub mod editors;
 pub mod error;
+pub mod feedback;
 pub mod files;
 pub mod host_management;
 pub mod media;

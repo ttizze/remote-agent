@@ -2082,6 +2082,7 @@ impl Agent for Claude {
     }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
+            feedback: false,
             steer: true,
             fork: true,
             rename: false,

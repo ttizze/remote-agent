@@ -887,6 +887,7 @@ impl Agent for DeepSeek {
     }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            feedback: false,
             steer: false,
             fork: false,
             rename: true,

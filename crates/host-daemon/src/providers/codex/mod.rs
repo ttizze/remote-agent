@@ -675,6 +675,24 @@ impl Identity for Codex {
 
 #[async_trait::async_trait]
 impl Agent for Codex {
+    async fn upload_feedback(
+        &self,
+        id: &str,
+        reason: Option<&str>,
+        include_logs: bool,
+    ) -> Result<agent_protocol::feedback::FeedbackReceipt, Failure> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Uploaded {
+            thread_id: String,
+        }
+        let response: Uploaded = self.request("feedback/upload", &serde_json::json!({
+            "classification":"bug", "threadId":id, "reason":reason, "includeLogs":include_logs,
+        })).await?;
+        Ok(agent_protocol::feedback::FeedbackReceipt {
+            feedback_id: response.thread_id,
+        })
+    }
     async fn codex_cli(&self, update: bool) -> Result<op::CodexCliStatus, Failure> {
         Ok(self.cli.request(update).await)
     }
@@ -683,6 +701,7 @@ impl Agent for Codex {
     }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
+            feedback: true,
             steer: true,
             fork: true,
             rename: true,

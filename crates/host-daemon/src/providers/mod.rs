@@ -301,6 +301,17 @@ pub(crate) trait Identity: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Agent: Identity {
+    async fn upload_feedback(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: bool,
+    ) -> Result<agent_protocol::feedback::FeedbackReceipt, Failure> {
+        Err(Failure::new(
+            "unsupported",
+            "このエージェントはフィードバック送信に対応していません。",
+        ))
+    }
     async fn codex_cli(&self, _: bool) -> Result<op::CodexCliStatus, Failure> {
         Err(Failure::new(
             "unsupported",
