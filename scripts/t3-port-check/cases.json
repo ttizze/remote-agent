@@ -66,7 +66,11 @@
       "operation_corpus",
       "delta_copies_only_the_changed_path_and_snapshot_round_trips",
       "pending_submission_reconciles_both_reply_and_echo_orders",
-      "selected_folder_preserves_explicit_scope_without_losing_the_execution_directory"
+      "selected_folder_preserves_explicit_scope_without_losing_the_execution_directory",
+      "gallery_restarts_paging_after_a_history_reset",
+      "gallery_drains_live_frames_while_image_hydration_waits_for_the_host",
+      "gallery_finishes_with_an_error_when_the_hydrated_image_was_removed",
+      "gallery_history_reads_do_not_block_conversation_notifications"
     ]
   },
   "guards": {

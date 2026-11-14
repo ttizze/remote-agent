@@ -297,6 +297,23 @@ fn run(
 }
 
 fn push_item(projection: &mut ThreadProjection, mut item: model::TurnItem, visible: bool) {
+    if let Some(existing) = projection
+        .turn_items
+        .iter_mut()
+        .find(|existing| existing.id == item.id)
+    {
+        item.ordinal = existing.ordinal;
+        let item = Arc::new(item);
+        *existing = item.clone();
+        if let Some(visible) = projection
+            .visible_turn_items
+            .iter_mut()
+            .find(|visible| visible.source_item_id == item.id)
+        {
+            visible.item = item;
+        }
+        return;
+    }
     item.ordinal = projection.turn_items.len() as u64 + 1;
     let item = Arc::new(item);
     projection.turn_items.push(item.clone());
@@ -381,6 +398,7 @@ fn body(item: &agent_protocol::items::Item, queued: bool) -> model::TurnItemBody
         ItemBody::FileChange {changes,..}=>Body::FileChange {file_name:changes.first().map_or_else(String::new,|change|change.path.clone()),changes:changes.iter().map(|change|json!({"operation":match change.kind {agent_protocol::items::FileChangeKind::Add=>"add",agent_protocol::items::FileChangeKind::Delete=>"delete",_=>"update"},"path":change.path})).collect(),diff_str:changes.first().and_then(|change|change.diff.clone())},
         ItemBody::Plan {text}=>Body::ProposedPlan {plan_id:item.id.to_string(),markdown:text.clone(),streaming:item.status==ItemStatus::Running},
         ItemBody::ToolCall {tool,arguments,result,error,..}=>Body::DynamicTool {tool_name:Some(tool.clone()),input:arguments.clone(),output:result.clone().or(error.clone()),output_omitted:item.is_deferred().then_some(true),viewed_image_path:None},
+        ItemBody::ImageGeneration {saved_path,data,revised_prompt}=>Body::DynamicTool {tool_name:Some("image_gen.imagegen".into()),input:revised_prompt.as_ref().map_or(Value::Null,|prompt|json!({"prompt":prompt})),output:Some(json!({"status":"completed","savedPath":saved_path.clone().or_else(||data.as_ref().map(|data|format!("data:image/png;base64,{data}")))})),output_omitted:item.is_deferred().then_some(true),viewed_image_path:None},
         ItemBody::ImageView {path}=>Body::DynamicTool {tool_name:Some("view_image".into()),input:json!({"path":path}),output:None,output_omitted:None,viewed_image_path:Some(path.clone())},
         ItemBody::WebSearch {query,..}=>Body::WebSearch {patterns:vec![query.clone()],results:vec![]},
         ItemBody::Subagent {receivers,prompt,result,..}=>Body::Subagent {subagent_id:item.id.to_string(),origin:"native".into(),driver:receivers.first().and_then(|id|id.provider).unwrap_or(ProviderKind::Codex).driver().into(),provider_instance_id:receivers.first().and_then(|id|id.provider).unwrap_or(ProviderKind::Codex).key().into(),child_thread_id:receivers.first().map(|id|id.application_id()),prompt:prompt.clone().unwrap_or_default(),result:result.as_ref().map(ToString::to_string),progress:None},
