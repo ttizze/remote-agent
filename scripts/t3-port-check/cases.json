@@ -152,8 +152,9 @@
       "state::operations::sessions::tests::reopening_uses_latest_settings_despite_cached_defaults::catalog_at_3___after__::cached_2_true::provider_2_ProviderKind__Claude",
       "state::operations::sessions::tests::reopening_uses_latest_settings_despite_cached_defaults::catalog_at_3___after__::cached_2_true::provider_3_ProviderKind__DeepSeek",
       "store::tests::new_task_admits_the_initial_input_in_one_rpc",
-      "state::conversations::tests::stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed",
-      "state::conversations::tests::provider_switch_projects_only_the_active_provider_sessions_capabilities"
+      "state::conversations::tests::provider_switch_projects_only_the_active_provider_sessions_capabilities",
+      "state::conversations::tests::stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed::moved_project_1_false",
+      "state::conversations::tests::stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed::moved_project_2_true"
     ]
   },
   "guards": {

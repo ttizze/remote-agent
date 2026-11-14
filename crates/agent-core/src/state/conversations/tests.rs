@@ -5,13 +5,24 @@ use agent_protocol::{
     orchestration::{self as model, projection::ThreadStreamItem},
 };
 
-#[test]
-fn stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed() {
+#[rstest::rstest]
+fn stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed(
+    #[values(false, true)] moved_project: bool,
+) {
     let id = SessionRef::new(None, "root-checkout".into()).unwrap();
     let mut snapshot = Snapshot::default();
+    snapshot.lists.threads = Some(Arc::new(
+        serde_json::from_value(serde_json::json!({"data":[],"projects":[
+        {"id":"project","name":"Original","roots":[{"path":"/another-root"},{"path":"/project"}]},
+        {"id":"moved","name":"Moved","roots":[{"path":"/moved"}]}
+    ],"limit":5,"hasMore":false,"hasMoreProjects":false}))
+        .unwrap(),
+    ));
     let mut opened = crate::test_conversations::opened(
-        serde_json::from_value(serde_json::json!({"thread":{"id":id,"cwd":"/project/worktree"}}))
-            .unwrap(),
+        serde_json::from_value(
+            serde_json::json!({"thread":{"id":id,"cwd":"/project/worktree","projectId":"project"}}),
+        )
+        .unwrap(),
         &mut snapshot,
     );
     opened.project_root = Some("/project".into());
@@ -20,12 +31,16 @@ fn stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed() {
     let mut next = snapshot.sessions.projections[&id].as_ref().clone();
     next.snapshot_sequence += 1;
     next.projection.thread.worktree_path = None;
+    if moved_project {
+        next.projection.thread.project_id = Some("moved".into());
+    }
+    let expected = if moved_project { "/moved" } else { "/project" };
     apply(&mut snapshot, &id, vec![ThreadStreamItem::Snapshot(next)]).unwrap();
     assert_eq!(
         snapshot.sessions.conversations[&id].cwd.as_deref(),
-        Some("/project")
+        Some(expected)
     );
-    assert_eq!(snapshot.panes.primary().navigation.cwd, "/project");
+    assert_eq!(snapshot.panes.primary().navigation.cwd, expected);
 }
 
 #[test]
