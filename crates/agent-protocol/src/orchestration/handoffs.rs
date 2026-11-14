@@ -171,9 +171,7 @@ pub fn select_history(
         )
     };
     let reserve = history_cost(&[], &context_for(messages.len(), max_omitted, &widest));
-    let mut remaining = budget
-        .checked_sub(reserve)
-        .ok_or("historical context metadata exceeds the available budget")?;
+    let mut remaining = budget.saturating_sub(reserve);
     let mut selected = std::collections::BTreeSet::new();
     let priority = [
         messages
@@ -217,12 +215,16 @@ pub fn select_history(
         .filter(|(index, _)| selected.contains(index))
         .map(|(_, message)| message.clone())
         .collect();
-    Ok(SelectedHistory {
+    let selected = SelectedHistory {
         messages: retained,
         context,
         omitted_item_ids,
         omitted_items,
-    })
+    };
+    if history_cost(&selected.messages, &selected.context) > budget {
+        return Err("historical context exceeds the available budget".into());
+    }
+    Ok(selected)
 }
 
 /// handoffBudget: current input is charged at one UTF-8 byte per token; leave
