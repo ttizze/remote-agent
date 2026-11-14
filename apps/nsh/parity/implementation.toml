@@ -3,9 +3,12 @@
 # Pure UI state does not require a new shared Rust business model.
 # This file is not a record of runtime acceptance results.
 
-revision = "912ba95983f37fa7ed2f660b2f6e987ba8f5c19c"
+revision = "d6ba4012785de014fba9274c682d133dc1dcd75f"
 
 [sources]
+rich_text = "apps/nsh/src/rich_text.rs"
+artifact_templates = "crates/agent-core/src/presentation/markdown/template.rs"
+template_actions = "crates/agent-core/src/composer/template.rs"
 clone_contract = "crates/agent-protocol/src/project_clone.rs"
 clone_host = "crates/host-daemon/src/project_clone.rs"
 clone_actions = "crates/agent-core/src/state/operations/project_clone.rs"
@@ -445,12 +448,12 @@ windows = { status = "missing", detail = "数式の描画がない。", evidence
 
 [[implementation]]
 components = ["artifact-template"]
-phase = "extension"
-next = "テンプレートを識別する共通部品と開始操作を追加する。"
-rust = { status = "missing", detail = "テンプレート種別とUse templateの操作契約がない。", evidence = ["markdown", "intents"] }
-mac = { status = "missing", detail = "成果物テンプレートカードがない。", evidence = ["mac_body"] }
-iphone = { status = "missing", detail = "成果物テンプレートカードがない。", evidence = ["iphone_content"] }
-windows = { status = "missing", detail = "成果物テンプレートカードがない。", evidence = ["win_rows"] }
+phase = "restore"
+next = "共通のテンプレート情報をネイティブのカード・種類アイコン・Use template操作へ接続する。"
+rust = { status = "present", detail = "10種のartifact-templateとgallery・skill情報をMarkdownRunへ保持する。コード例・未完の指示は本文として残し、表示名と種類のコピー用テキストも保持する。共通のUseArtifactTemplate操作はHostスコープを確認し、既存下書き・添付/Contextを保持して編集可能な入力だけを追加する。", evidence = ["artifact_templates", "template_actions", "markdown", "intents", "rich_text"] }
+mac = { status = "missing", detail = "テンプレート情報は共通Rustから渡せる。専用カード・ネイティブの種類アイコン・Use template操作は未接続。", evidence = ["mac_body"] }
+iphone = { status = "missing", detail = "テンプレート情報は共通Rustから渡せる。専用カード・ネイティブの種類アイコン・Use template操作は未接続。", evidence = ["iphone_content"] }
+windows = { status = "missing", detail = "テンプレート情報は共通Rustから渡せる。専用カード・ネイティブの種類アイコン・Use template操作は未接続。", evidence = ["win_rows"] }
 
 [[implementation]]
 components = ["markdown-media"]
