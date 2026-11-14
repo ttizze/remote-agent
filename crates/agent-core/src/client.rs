@@ -96,6 +96,61 @@ async fn gallery_request<T>(
     }
 }
 
+fn gallery_image(mut source: String, markdown: bool) -> SessionImage {
+    if markdown || source.starts_with("file:") {
+        source = crate::presentation::markdown::markdown_file_target(
+            source.clone(),
+            String::new(),
+            crate::presentation::markdown::MarkdownFileSurface::Mobile,
+        )
+        .map_or(source, |file| file.path);
+    }
+    match source.strip_prefix("data:image/png;base64,") {
+        Some(data) => SessionImage {
+            source: data.into(),
+            encoded: true,
+        },
+        None => SessionImage {
+            source,
+            encoded: false,
+        },
+    }
+}
+
+fn gallery_item_images(
+    body: &agent_protocol::orchestration::TurnItemBody,
+) -> Result<Vec<SessionImage>, PeerError> {
+    use agent_protocol::{items::MessagePart, orchestration::TurnItemBody};
+    match body {
+        TurnItemBody::AssistantMessage {
+            text, attachments, ..
+        } => {
+            let mut images: Vec<_> = crate::presentation::markdown::markdown_images(text)
+                .into_iter()
+                .map(|source| gallery_image(source, true))
+                .collect();
+            for part in crate::orchestration::attachment_parts(attachments)
+                .map_err(PeerError::InvalidMessage)?
+            {
+                if let MessagePart::Image { source } = part {
+                    images.push(gallery_image(source, false));
+                }
+            }
+            Ok(images)
+        }
+        TurnItemBody::DynamicTool {
+            tool_name, output, ..
+        } if tool_name.as_deref() == Some("image_gen.imagegen") => Ok(output
+            .as_ref()
+            .and_then(|output| output.get("savedPath"))
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(|path| vec![gallery_image(path.into(), false)])
+            .unwrap_or_default()),
+        _ => Ok(Vec::new()),
+    }
+}
+
 /// A recording owns its prepared connection until transcription finishes or
 /// capture is cancelled. The Store worker orders preparation before cancellation.
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
@@ -176,7 +231,7 @@ pub trait ClientExt {
     async fn session_images(
         &self,
         thread_id: &crate::session::SessionRef,
-        _session: Option<&crate::transport::Session>,
+        session: Option<&crate::transport::Session>,
     ) -> Result<Vec<SessionImage>, PeerError>;
 }
 impl ClientExt for Client {
@@ -282,98 +337,135 @@ impl ClientExt for Client {
         command_result(reply).map(|_| ())
     }
 
-    async fn session_images(
+    fn session_images(
         &self,
         thread_id: &crate::session::SessionRef,
-        _session: Option<&crate::transport::Session>,
-    ) -> Result<Vec<SessionImage>, PeerError> {
-        use agent_protocol::{
-            conversation::records,
-            orchestration::{self as model},
-        };
-        let (opened, mut stream) = self
-            .request_stream::<records::Opened>(&crate::protocol::Call::SubscribeConversation(
-                records::Subscribe {
-                    session: thread_id.clone(),
-                    subscription: uuid::Uuid::new_v4(),
-                    after_sequence: None,
-                },
-            ))
-            .await?;
-        if &opened.session != thread_id {
-            return Err(PeerError::InvalidMessage(
-                "gallery conversation identity changed".into(),
-            ));
-        }
-        let mut snapshot = None;
-        for message in opened.initial {
-            snapshot = crate::orchestration::receive(
-                &thread_id.application_id(),
-                snapshot.as_ref(),
-                message,
-            )
-            .map_err(|error| PeerError::InvalidMessage(error.into()))?;
-        }
-        let mut snapshot = snapshot
-            .ok_or_else(|| PeerError::InvalidMessage("gallery snapshot is missing".into()))?;
-        while let Some(cursor) = snapshot.history_cursor.clone() {
-            let page = gallery_request(
-                &mut snapshot,
-                &mut stream,
-                self.call(&records::Extend {
-                    session: thread_id.clone(),
-                    cursor: cursor.clone(),
-                }),
-            )
-            .await?;
-            if page.has_more_history && page.next_cursor.as_ref() == Some(&cursor) {
+        session: Option<&crate::transport::Session>,
+    ) -> impl std::future::Future<Output = Result<Vec<SessionImage>, PeerError>> {
+        // The snapshot and query futures must not inflate every caller's task stack.
+        Box::pin(async move {
+            use agent_protocol::{
+                conversation::records,
+                orchestration::{self as model},
+            };
+            let (opened, mut stream) = self
+                .request_stream::<records::Opened>(&crate::protocol::Call::SubscribeConversation(
+                    records::Subscribe {
+                        session: thread_id.clone(),
+                        subscription: uuid::Uuid::new_v4(),
+                        after_sequence: None,
+                    },
+                ))
+                .await?;
+            if &opened.session != thread_id {
                 return Err(PeerError::InvalidMessage(
-                    "history cursor did not advance".into(),
+                    "gallery conversation identity changed".into(),
                 ));
             }
-            if let Some(next) = crate::orchestration::receive_history(&snapshot, &cursor, page) {
-                snapshot = next;
+            let mut snapshot = None;
+            for message in opened.initial {
+                snapshot = crate::orchestration::receive(
+                    &thread_id.application_id(),
+                    snapshot.as_ref(),
+                    message,
+                )
+                .map_err(|error| PeerError::InvalidMessage(error.into()))?;
             }
-        }
-        let mut images = Vec::new();
-        let mut sources = std::collections::HashSet::new();
-        for row in snapshot.projection.visible_turn_items.iter().rev() {
-            if let model::TurnItemBody::AssistantMessage { attachments, .. } = &row.item.body {
-                for attachment in attachments.iter().rev() {
-                    if attachment.get("type").and_then(Value::as_str) != Some("image") {
-                        continue;
+            let mut snapshot = snapshot
+                .ok_or_else(|| PeerError::InvalidMessage("gallery snapshot is missing".into()))?;
+            let mut details =
+                std::collections::BTreeMap::<(String, String), model::TurnItem>::new();
+            loop {
+                if let Some(cursor) = snapshot.history_cursor.clone() {
+                    let page = gallery_request(
+                        &mut snapshot,
+                        &mut stream,
+                        self.call(&records::Extend {
+                            session: thread_id.clone(),
+                            cursor: cursor.clone(),
+                        }),
+                    )
+                    .await?;
+                    if let Some(next) =
+                        crate::orchestration::receive_history(&snapshot, &cursor, page)
+                    {
+                        if next.has_more_history && next.history_cursor.as_ref() == Some(&cursor) {
+                            return Err(PeerError::InvalidMessage(
+                                "history cursor did not advance".into(),
+                            ));
+                        }
+                        snapshot = next;
                     }
-                    let id = attachment
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            PeerError::InvalidMessage("image attachment ID is missing".into())
-                        })?;
-                    let extension = agent_protocol::paths::attachment_extension(
-                        attachment
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("image"),
-                        attachment.get("mimeType").and_then(Value::as_str),
-                    );
-                    let source = format!(
-                        "{}{id}.{extension}",
-                        agent_protocol::paths::ATTACHMENT_SCHEME
-                    );
-                    if sources.insert(source.clone()) {
-                        images.push(SessionImage {
-                            source,
-                            encoded: false,
-                        });
+                    continue;
+                }
+                let pending = snapshot.projection.visible_turn_items.iter().find(|row| {
+                matches!(&row.item.body, model::TurnItemBody::DynamicTool {tool_name, output_omitted:Some(true),..} if tool_name.as_deref() == Some("image_gen.imagegen"))
+                    && !details.get(&(row.source_thread_id.clone(), row.source_item_id.clone()))
+                        .is_some_and(|detail| crate::orchestration::same_detail_revision(&row.item, detail))
+            }).map(|row| (row.source_thread_id.clone(), row.source_item_id.clone()));
+                let Some((source, item)) = pending else {
+                    break;
+                };
+                let item_id: agent_protocol::ids::ItemId = item.clone().into();
+                let response = gallery_request(
+                    &mut snapshot,
+                    &mut stream,
+                    self.call(&records::Hydrate {
+                        session: agent_protocol::session::SessionRef::new(None, source.clone())
+                            .map_err(|error| PeerError::InvalidMessage(error.into()))?,
+                        item: item_id.clone(),
+                    }),
+                )
+                .await?;
+                let detail = gallery_request(
+                    &mut snapshot,
+                    &mut stream,
+                    resolve_hydration(response, &item_id, session),
+                )
+                .await?;
+                let current = snapshot
+                    .projection
+                    .visible_turn_items
+                    .iter()
+                    .find(|row| row.source_thread_id == source && row.source_item_id == item)
+                    .ok_or_else(|| {
+                        PeerError::InvalidMessage("gallery item is no longer available".into())
+                    })?;
+                let detail = detail.ok_or_else(|| {
+                    PeerError::InvalidMessage("gallery item is no longer available".into())
+                })?;
+                if crate::orchestration::same_detail_revision(&current.item, &detail) {
+                    details.insert((source, item), detail);
+                }
+            }
+            if snapshot.has_more_history {
+                return Err(PeerError::InvalidMessage("履歴が部分取得のため、画像一覧を完全には取得できません。会話内の画像から個別に開いてください。".into()));
+            }
+            let mut images = Vec::new();
+            let mut sources = std::collections::HashSet::new();
+            for row in snapshot.projection.visible_turn_items.iter().rev() {
+                let detail = details
+                    .get(&(row.source_thread_id.clone(), row.source_item_id.clone()))
+                    .filter(|detail| crate::orchestration::same_detail_revision(&row.item, detail));
+                for image in
+                    gallery_item_images(&detail.map_or(row.item.as_ref(), |item| item).body)?
+                        .into_iter()
+                        .rev()
+                {
+                    let key = if image.encoded {
+                        image.source.clone()
+                    } else {
+                        crate::presentation::media::image_path_key(&image.source)
+                    };
+                    if sources.insert((image.encoded, key)) {
+                        images.push(image);
                     }
                 }
             }
-        }
-        if snapshot.has_more_history {
-            return Err(PeerError::InvalidMessage("履歴が部分取得のため、画像一覧を完全には取得できません。会話内の画像から個別に開いてください。".into()));
-        }
+            images.reverse();
 
-        Ok(images)
+            Ok(images)
+        })
     }
 }
 

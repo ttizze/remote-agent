@@ -1,22 +1,9 @@
 use super::{ConversationRow, ConversationRowContent};
-use crate::presentation::markdown::{MarkdownFileSurface, markdown_file_target, markdown_images};
+use crate::presentation::{
+    markdown::markdown_images,
+    media::{image_key, image_path_key},
+};
 use std::collections::HashSet;
-
-fn image_key(source: &str) -> String {
-    let path = markdown_file_target(source.into(), String::new(), MarkdownFileSurface::Mobile)
-        .map_or_else(|| source.to_owned(), |file| file.path);
-    image_path_key(&path)
-}
-
-fn image_path_key(path: &str) -> String {
-    if agent_protocol::paths::is_windows_absolute_host_path(path)
-        || agent_protocol::paths::is_network_host_path(path)
-    {
-        path.replace('\\', "/").to_lowercase()
-    } else {
-        path.to_owned()
-    }
-}
 
 /// A visible inline image takes over its earlier standalone preview. Only
 /// responses in the same user exchange count; collapsed work cannot replace it.

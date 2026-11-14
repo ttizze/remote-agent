@@ -2,7 +2,26 @@
 //! quarter to four times the size that fits the viewer, a quarter at a time,
 //! by a pinch or a Ctrl (⌘ on the Mac) wheel in between, its reset titled with
 //! the percentage; and its gallery of the conversation's generated images.
-use crate::client::SessionImage;
+use crate::{
+    client::SessionImage,
+    presentation::markdown::{MarkdownFileSurface, markdown_file_target},
+};
+
+pub(crate) fn image_key(source: &str) -> String {
+    let path = markdown_file_target(source.into(), String::new(), MarkdownFileSurface::Mobile)
+        .map_or_else(|| source.to_owned(), |file| file.path);
+    image_path_key(&path)
+}
+
+pub(crate) fn image_path_key(path: &str) -> String {
+    if agent_protocol::paths::is_windows_absolute_host_path(path)
+        || agent_protocol::paths::is_network_host_path(path)
+    {
+        path.replace('\\', "/").to_lowercase()
+    } else {
+        path.to_owned()
+    }
+}
 
 /// A generated image's encoded data as a source the image views load, as the
 /// conversation shows it.
