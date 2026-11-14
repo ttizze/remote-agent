@@ -67,7 +67,6 @@ pub struct RenderedTurn {
     pub source: Arc<models::Turn>,
     // Native turn IDs may repeat; the occurrence also belongs to this cache entry.
     occurrence: usize,
-    initial_input: Option<Arc<RenderedItem>>,
     pending: PendingItems,
     requests: Vec<Arc<WireRequest>>,
     pub rows: Vec<ConversationRow>,
@@ -110,7 +109,7 @@ fn turn_key(turn: &str, occurrence: usize) -> String {
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ConversationRowContent {
     Preparation {
-        preparation: PreparationPresentation,
+        preparation: Box<PreparationPresentation>,
     },
     ProviderHandoff {
         text: String,
@@ -208,7 +207,6 @@ pub struct ActivityPresentation {
     pub activity_summary: String,
     pub activity_can_collapse: bool,
     pub is_in_progress: bool,
-    pub load_items: Option<crate::state::operations::LoadTurnItems>,
 }
 /// A strip on T3 Code's timeline minimap.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -437,15 +435,8 @@ impl RenderedConversation {
 }
 
 impl RenderedConversation {
-    fn initial_input(&self, id: &str) -> Option<&Arc<RenderedItem>> {
-        self.queued
-            .iter()
-            .chain(
-                self.turns
-                    .first()
-                    .and_then(|turn| turn.initial_input.as_ref()),
-            )
-            .find(|item| item.data.id == id)
+    fn pending_input(&self, id: &str) -> Option<&Arc<RenderedItem>> {
+        self.queued.iter().find(|item| item.data.id == id)
     }
 }
 
@@ -533,6 +524,7 @@ pub struct RenderedItem {
     language: Option<UiLanguage>,
     pub source: ItemSource,
     pub data: ItemPresentation,
+    delivery_unknown: bool,
 }
 // Prepared bodies are immutable render resources. Reusing their identity avoids
 // comparing or preparing long Markdown bodies again in each native surface.
@@ -553,10 +545,7 @@ impl RenderedItem {
     }
 
     pub fn unknown_submission_id(&self) -> Option<String> {
-        match &self.source {
-            ItemSource::Pending(id, pending) if pending.delivery_unknown => Some(id.clone()),
-            _ => None,
-        }
+        self.delivery_unknown.then(|| self.data.id.clone())
     }
     pub fn detail_blocks(&self) -> Vec<super::markdown::MarkdownBlock> {
         match &self.source {
@@ -589,9 +578,13 @@ impl RenderedItem {
         item: &Arc<models::Item>,
         provider: Option<crate::session::ProviderKind>,
         deferred: bool,
+        preparation: Option<&agent_protocol::session::PreparationStatus>,
         timestamp_ms: Option<u64>,
         previous: Option<&Arc<Self>>,
     ) -> Arc<Self> {
+        let delivery_unknown =
+            preparation == Some(&agent_protocol::session::PreparationStatus::Unknown);
+        let native_id = preparation.is_none().then(|| item.id.clone());
         // Plain messages have no translated copy, so retain their native Markdown
         // caches across a language change. Activity details and attachments do.
         let localized = match item.body() {
@@ -604,7 +597,9 @@ impl RenderedItem {
         .then_some(language);
         if let Some(previous) = previous
             && previous.language == localized
+            && previous.data.native_id == native_id
             && previous.data.deferred == deferred
+            && previous.delivery_unknown == delivery_unknown
             && previous.data.timestamp_ms == timestamp_ms
         {
             return previous.clone();
@@ -617,13 +612,14 @@ impl RenderedItem {
         Arc::new(Self {
             language: localized,
             source: ItemSource::Native(item.clone()),
+            delivery_unknown,
             data: ItemPresentation {
                 id: item
                     .client_input_id
                     .as_deref()
                     .unwrap_or(item.id.as_str())
                     .to_owned(),
-                native_id: Some(item.id.clone()),
+                native_id,
                 timestamp_ms,
                 kind: presentation.kind.into(),
                 title: presentation.title,
@@ -655,6 +651,7 @@ impl RenderedItem {
         Arc::new(Self {
             language: localized,
             source: ItemSource::Pending(id.into(), pending.clone()),
+            delivery_unknown: pending.delivery_unknown,
             data: ItemPresentation {
                 id: id.into(),
                 native_id: None,
@@ -691,13 +688,28 @@ pub fn project_conversation(
         .as_ref()
         .map(crate::state::DraftKey::from)
         .unwrap_or_else(|| draft_key.clone());
-    let preparation = source.preparation.as_ref();
-    let mut pending: PendingItems = pending_submissions
+    let preparations = &source.preparations;
+    let mut candidates = pending_submissions
         .iter()
         .filter(|(_, pending)| pending.draft_key == draft_key)
+        .peekable();
+    let delivered: HashSet<_> = if candidates.peek().is_none() {
+        HashSet::new()
+    } else {
+        source
+            .turns
+            .iter()
+            .flatten()
+            .flat_map(|turn| turn.items.iter().flatten())
+            .filter_map(|item| item.client_input_id.as_ref())
+            .collect()
+    };
+    let mut pending: PendingItems = candidates
+        .filter(|(id, _)| !delivered.contains(id))
         .filter(|(id, _)| {
-            preparation
-                .is_none_or(|preparation| &preparation.submission.client_user_message_id != *id)
+            preparations
+                .iter()
+                .all(|preparation| &preparation.submission.client_user_message_id != *id)
         })
         // The queue above the composer shows input that waits for a turn, and
         // the turn it starts shows it as the Host has it, edits included. Only
@@ -717,9 +729,9 @@ pub fn project_conversation(
     if let Some(previous) = previous
         && language == previous.language
         && Arc::ptr_eq(&source, &previous.source)
-        && preparation.is_none_or(|preparation| {
+        && preparations.iter().all(|preparation| {
             let id = &preparation.submission.client_user_message_id;
-            previous.initial_input(id.as_str()).is_none_or(|item| {
+            previous.pending_input(id.as_str()).is_none_or(|item| {
                 item.data.timestamp_ms
                     == pending_submissions
                         .get(id)
@@ -746,17 +758,8 @@ pub fn project_conversation(
         .map(|turn| ((turn.source.id.as_str(), turn.occurrence), turn))
         .collect();
     let native = source.turns.as_deref().unwrap_or_default();
-    let preparation_echoed = preparation.is_some_and(|preparation| {
-        native
-            .iter()
-            .flat_map(|turn| turn.items.iter().flatten())
-            .any(|item| {
-                item.client_input_id.as_ref()
-                    == Some(&preparation.submission.client_user_message_id)
-            })
-    });
-    let initial_input = preparation
-        .filter(|_| !preparation_echoed)
+    let unconfirmed: Vec<_> = preparations
+        .iter()
         .map(|preparation| {
             let id = &preparation.submission.client_user_message_id;
             let item = Arc::new(models::Item::new(
@@ -770,19 +773,21 @@ pub fn project_conversation(
                 },
             ));
             let old = previous
-                .and_then(|old| old.initial_input(id.as_str()))
+                .and_then(|old| old.pending_input(id.as_str()))
                 .filter(|old| matches!(&old.source, ItemSource::Native(native) if native == &item));
             RenderedItem::native(
                 language,
                 &item,
                 source.active_provider,
                 false,
+                Some(&preparation.status),
                 pending_submissions
                     .get(id)
                     .and_then(|pending| pending.submitted_at_ms),
                 old,
             )
-        });
+        })
+        .collect();
     let positions: HashMap<_, _> = if pending.is_empty() && requests.is_empty() {
         HashMap::new()
     } else {
@@ -792,8 +797,8 @@ pub fn project_conversation(
             .map(|(index, turn)| (turn.id.as_str(), index))
             .collect()
     };
-    // A submission made before any history belongs before the first turn once
-    // it arrives. An acknowledged queue entry still waits for its assigned turn.
+    // The local outbox keeps its captured placement until the canonical input
+    // arrives. A send made before any history precedes the first incoming turn.
     let mut pending_by_turn: HashMap<_, Vec<_>> = HashMap::new();
     for entry @ (_, submission) in &pending {
         let position = match submission.turn_id.as_deref() {
@@ -822,9 +827,6 @@ pub fn project_conversation(
         .iter()
         .enumerate()
         .map(|(index, turn)| {
-            // Startup owns the first input before the provider echoes it. Put
-            // it in that turn as soon as the turn arrives, ahead of its work.
-            let initial_input = (index == 0).then(|| initial_input.clone()).flatten();
             let next = occurrences.entry(turn.id.as_str()).or_insert(0usize);
             let occurrence = *next;
             *next += 1;
@@ -854,7 +856,6 @@ pub fn project_conversation(
             if let Some(old) = old
                 && language == old.language
                 && Arc::ptr_eq(turn, &old.source)
-                && initial_input == old.initial_input
                 && (turn.supports_fork.is_some() || supports_fork == previous_supports_fork)
                 && old.rows.iter().find_map(|row| match &row.content {
                     ConversationRowContent::ProviderHandoff { text } => Some(text),
@@ -875,7 +876,7 @@ pub fn project_conversation(
                 source.id.as_ref(),
                 supports_fork,
                 handoff,
-                (turn.clone(), occurrence, language, initial_input),
+                (turn.clone(), occurrence, language),
                 pending.cloned().collect(),
                 requests.cloned().collect(),
                 old,
@@ -903,11 +904,7 @@ pub fn project_conversation(
             )
         })
         .collect();
-    if native.is_empty()
-        && let Some(item) = initial_input
-    {
-        queued.insert(0, item);
-    }
+    queued.splice(0..0, unconfirmed);
     let mut session_rows: Vec<_> = session_requests
         .into_iter()
         .map(|source| ConversationRow {
@@ -929,26 +926,33 @@ pub fn project_conversation(
             queued: false,
             edit_turn_id: None,
             content: ConversationRowContent::Preparation {
-                preparation: preparation::project(language, &source, setup),
+                preparation: Box::new(preparation::project(language, &source, setup)),
             },
         });
-    } else if let Some(preparation) = preparation.filter(|preparation| match preparation.status {
-        agent_protocol::session::PreparationStatus::Unknown => !preparation_echoed,
-        // A provider turn that already runs shows its own working row.
-        agent_protocol::session::PreparationStatus::Preparing
-        | agent_protocol::session::PreparationStatus::Sending => !native
-            .iter()
-            .any(|turn| turn.status == models::TurnStatus::Running),
-        _ => true,
+    }
+    let running = native
+        .iter()
+        .any(|turn| turn.status == models::TurnStatus::Running);
+    for preparation in preparations.iter().filter(|input| {
+        source.workspace_setup.is_none()
+            && (!running
+                || !matches!(
+                    input.status,
+                    agent_protocol::session::PreparationStatus::Preparing
+                        | agent_protocol::session::PreparationStatus::Sending
+                ))
     }) {
         session_rows.push(ConversationRow {
-            id: "preparation".into(),
+            id: format!(
+                "preparation:{}",
+                preparation.submission.client_user_message_id
+            ),
             timestamp_ms: None,
             steer: false,
             queued: false,
             edit_turn_id: None,
             content: ConversationRowContent::Preparation {
-                preparation: preparation_presentation(language, preparation),
+                preparation: Box::new(preparation_presentation(language, preparation)),
             },
         });
     }
@@ -1034,6 +1038,7 @@ fn preparation_presentation(
         in_progress,
         shimmer: in_progress && preparation.stage == PreparationStage::Worktree,
         retry: retry.then(|| RetryPreparation {
+            input_id: preparation.submission.client_user_message_id.clone(),
             thread_id: preparation.submission.thread_id.clone(),
             work_locally: false,
         }),
@@ -1182,7 +1187,7 @@ mod preparation_tests {
         let id = SessionRef::new(ProviderKind::Codex, "admitted".into()).unwrap();
         models::Thread {
             id: Some(id.clone()),
-            preparation: Some(SessionPreparation {
+            preparations: vec![SessionPreparation {
                 submission: Submission {
                     fresh_context: false,
                     thread_id: id.clone(),
@@ -1197,7 +1202,7 @@ mod preparation_tests {
                 },
                 status: PreparationStatus::Preparing,
                 stage: PreparationStage::Workspace,
-            }),
+            }],
             ..Default::default()
         }
     }
@@ -1210,6 +1215,8 @@ mod preparation_tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             "input".into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
+                cursor: None,
                 sequence: 0,
                 submitted_at_ms: Some(12_000),
                 draft_key: id.clone().into(),
@@ -1258,36 +1265,7 @@ mod preparation_tests {
             panic!("missing preparation")
         };
         assert!(preparation.in_progress && preparation.retry.is_none());
-        thread.preparation.as_mut().unwrap().status = PreparationStatus::Sending;
-        thread.turns = Some(vec![Arc::new(models::Turn {
-            id: "starting".into(),
-            status: models::TurnStatus::Running,
-            ..Default::default()
-        })]);
-        let starting = project_conversation(
-            UiLanguage::Japanese,
-            &snapshot.panes.primary().navigation.draft_key,
-            &snapshot.sessions.pending_submissions,
-            Arc::new(thread.clone()),
-            &Some(prepared.clone()),
-        );
-        assert!(starting.queued.is_empty());
-        // The running provider turn's own working row replaces the startup row.
-        assert!(starting.session_rows.is_empty());
-        assert!(
-            starting.turns[0]
-                .rows
-                .iter()
-                .any(|row| matches!(row.content, ConversationRowContent::InProgress { .. }))
-        );
-        assert!(
-            starting.turns[0]
-                .rows
-                .iter()
-                .any(|row| matches!(row.content, ConversationRowContent::User { .. }))
-        );
-        thread.turns = None;
-        thread.preparation.as_mut().unwrap().status = PreparationStatus::Failed {
+        thread.preparations.first_mut().unwrap().status = PreparationStatus::Failed {
             error: Default::default(),
         };
         let failed = project_conversation(
@@ -1312,7 +1290,7 @@ mod preparation_tests {
             },
         );
         user.client_input_id = Some("input".into());
-        thread.preparation.as_mut().unwrap().status = PreparationStatus::Unknown;
+        thread.preparations.clear();
         thread.turns = Some(vec![Arc::new(models::Turn {
             id: "native-turn".into(),
             items: Some(vec![Arc::new(user)]),
@@ -1327,17 +1305,8 @@ mod preparation_tests {
         );
         assert!(echoed.queued.is_empty());
         assert!(echoed.session_rows.is_empty());
-        thread.preparation = None;
-        let complete = project_conversation(
-            UiLanguage::Japanese,
-            &snapshot.panes.primary().navigation.draft_key,
-            &snapshot.sessions.pending_submissions,
-            Arc::new(thread),
-            &Some(echoed),
-        );
-        assert!(complete.session_rows.is_empty());
         assert_eq!(
-            complete.turns[0]
+            echoed.turns[0]
                 .rows
                 .iter()
                 .filter(|row| matches!(row.content, ConversationRowContent::User { .. }))
@@ -1346,77 +1315,120 @@ mod preparation_tests {
         );
     }
 
-    #[rstest::rstest]
-    #[case(None)]
-    #[case(Some(Vec::new()))]
-    fn startup_keeps_input_above_work_before_and_after_the_provider_echo(
-        #[case] items: Option<Vec<Arc<models::Item>>>,
-    ) {
-        // A second client has no local pending submission to place in the turn.
+    #[test]
+    fn every_failed_input_has_its_own_recovery_after_the_saved_history() {
         let mut thread = preparing_thread();
+        thread.turns = Some(vec![Arc::new(models::Turn {
+            id: "previous-turn".into(),
+            status: models::TurnStatus::Completed,
+            items: Some(vec![Arc::new(models::Item::new(
+                "previous-reply".into(),
+                models::ItemStatus::Completed,
+                models::ItemBody::AssistantText {
+                    text: "previous answer".into(),
+                    phase: Default::default(),
+                },
+            ))]),
+            ..Default::default()
+        })]);
+        thread.preparations[0].status = PreparationStatus::Failed {
+            error: Default::default(),
+        };
+        let mut second = thread.preparations[0].clone();
+        second.submission.client_user_message_id = "second-input".into();
+        second.submission.input = vec![Input::Text {
+            text: "second text".into(),
+        }];
+        second.status = PreparationStatus::Unknown;
+        thread.preparations.push(second);
         let project = |thread: models::Thread, previous| {
             project_conversation(
-                UiLanguage::Japanese,
+                UiLanguage::English,
                 &Default::default(),
                 &Default::default(),
                 Arc::new(thread),
                 &previous,
             )
         };
-        let prepared = project(thread.clone(), None);
-        thread.preparation.as_mut().unwrap().status = PreparationStatus::Sending;
-        thread.turns = Some(vec![Arc::new(models::Turn {
-            id: "starting".into(),
-            status: models::TurnStatus::Running,
-            items,
-            ..Default::default()
-        })]);
-        let starting = project(thread.clone(), Some(prepared));
-        assert!(starting.queued.is_empty() && starting.session_rows.is_empty());
-        let rows = turn_rows(&starting.turns[0], &Default::default(), &Default::default());
-        assert!(matches!(&rows[..], [TurnRow::Row(ConversationRow {
-            content: ConversationRowContent::User { item }, ..
-        }), TurnRow::Working, TurnRow::Thinking] if item.data.body.as_deref() == Some("accepted text")));
-        let input_id = starting.turns[0].rows[0].id.clone();
-
-        // An unrelated thread update retains the same input and turn resources.
-        thread.name = Some("A title".into());
-        let renamed = project(thread.clone(), Some(starting.clone()));
-        assert!(Arc::ptr_eq(&starting.turns[0], &renamed.turns[0]));
-
-        let mut user = models::Item::new(
-            "native-input".into(),
-            models::ItemStatus::Completed,
-            models::ItemBody::UserMessage {
-                text: Some("accepted text".into()),
-                content: Vec::new(),
-            },
+        let failed = project(thread.clone(), None);
+        assert_eq!(
+            failed
+                .queued
+                .iter()
+                .map(|item| item.data.body.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("accepted text"), Some("second text")]
         );
-        user.client_input_id = Some("input".into());
-        Arc::make_mut(&mut thread.turns.as_mut().unwrap()[0]).items = Some(vec![Arc::new(user)]);
-        let echoed = project(thread.clone(), Some(renamed));
-        assert!(echoed.queued.is_empty() && echoed.session_rows.is_empty());
-        assert_eq!(echoed.turns[0].rows[0].id, input_id);
-        assert!(matches!(
-            &turn_rows(&echoed.turns[0], &Default::default(), &Default::default())[..],
-            [
-                TurnRow::Row(ConversationRow {
-                    content: ConversationRowContent::User { .. },
-                    ..
-                }),
-                TurnRow::Working,
-                TurnRow::Thinking
-            ]
-        ));
-
-        thread.preparation = None;
-        let settled = project(thread, Some(echoed));
-        assert_eq!(settled.turns[0].rows[0].id, input_id);
-        assert_eq!(settled.turns[0].items().count(), 1);
+        assert!(failed.turns[0].items().all(|item| item.data.kind != "user"));
+        assert_eq!(failed.session_rows.len(), 2);
+        assert_ne!(failed.session_rows[0].id, failed.session_rows[1].id);
+        let ConversationRowContent::Preparation { preparation } = &failed.session_rows[0].content
+        else {
+            panic!("missing retry")
+        };
+        assert_eq!(
+            preparation.retry.as_ref().unwrap().input_id.as_str(),
+            "input"
+        );
+        assert_eq!(failed.queued[0].unknown_submission_id(), None);
+        assert!(failed.queued[1].data.native_id.is_none());
+        assert_eq!(
+            failed.queued[1].unknown_submission_id().as_deref(),
+            Some("second-input")
+        );
+        thread.preparations.remove(0);
+        let remaining = project(thread, Some(failed.clone()));
+        assert_eq!(remaining.session_rows.len(), 1);
+        assert!(Arc::ptr_eq(&remaining.queued[0], &failed.queued[1]));
+        assert!(Arc::ptr_eq(&remaining.turns[0], &failed.turns[0]));
     }
 
     #[test]
-    fn startup_input_changes_do_not_reuse_stale_turn_rows() {
+    fn a_running_turn_hides_only_startup_rows_and_keeps_recovery_rows() {
+        for (status, recovery) in [
+            (PreparationStatus::Preparing, false),
+            (PreparationStatus::Sending, false),
+            (
+                PreparationStatus::Failed {
+                    error: Default::default(),
+                },
+                true,
+            ),
+            (PreparationStatus::Unknown, true),
+        ] {
+            let mut thread = preparing_thread();
+            thread.preparations[0].status = status;
+            thread.turns = Some(vec![Arc::new(models::Turn {
+                id: "running".into(),
+                status: models::TurnStatus::Running,
+                ..Default::default()
+            })]);
+            let projected = project_conversation(
+                UiLanguage::Japanese,
+                &Default::default(),
+                &Default::default(),
+                Arc::new(thread),
+                &None,
+            );
+            assert_eq!(
+                projected
+                    .session_rows
+                    .iter()
+                    .any(|row| row.id == "preparation:input"),
+                recovery
+            );
+            assert!(
+                projected
+                    .turns
+                    .iter()
+                    .flat_map(|turn| turn.rows.iter())
+                    .any(|row| matches!(row.content, ConversationRowContent::InProgress { .. }))
+            );
+        }
+    }
+
+    #[test]
+    fn pending_input_edits_do_not_change_saved_turn_rows() {
         let mut thread = preparing_thread();
         thread.turns = Some(vec![Arc::new(models::Turn {
             id: "starting".into(),
@@ -1426,10 +1438,10 @@ mod preparation_tests {
         let mut previous = None;
         for expected in [Some("accepted text"), Some("corrected text"), None] {
             if let Some(text) = expected {
-                thread.preparation.as_mut().unwrap().submission.input =
+                thread.preparations.first_mut().unwrap().submission.input =
                     vec![Input::Text { text: text.into() }];
             } else {
-                thread.preparation = None;
+                thread.preparations.clear();
             }
             let projected = project_conversation(
                 UiLanguage::Japanese,
@@ -1438,8 +1450,9 @@ mod preparation_tests {
                 Arc::new(thread.clone()),
                 &previous,
             );
-            let users: Vec<_> = projected.turns[0]
-                .items()
+            let users: Vec<_> = projected
+                .queued
+                .iter()
                 .filter(|item| item.data.kind == "user")
                 .map(|item| item.data.body.as_deref())
                 .collect();
@@ -1453,17 +1466,12 @@ fn render_turn(
     session: Option<&crate::session::SessionRef>,
     supports_fork: bool,
     handoff: Option<String>,
-    (source, turn_occurrence, language, initial_input): (
-        Arc<models::Turn>,
-        usize,
-        UiLanguage,
-        Option<Arc<RenderedItem>>,
-    ),
+    (source, turn_occurrence, language): (Arc<models::Turn>, usize, UiLanguage),
     pending: PendingItems,
     requests: Vec<Arc<WireRequest>>,
     previous: Option<&Arc<RenderedTurn>>,
 ) -> Arc<RenderedTurn> {
-    let session_provider = session.map(|session| session.provider);
+    let session_provider = session.and_then(|session| session.provider);
     let provider = source.provider.or(session_provider);
     let supports_fork = source.supports_fork.unwrap_or(supports_fork);
     let cached: HashMap<_, _> = previous
@@ -1473,19 +1481,7 @@ fn render_turn(
         .map(|item| (item.key(), item))
         .collect();
     let native = source.items.as_deref().unwrap_or_default();
-    let echoed: HashSet<_> = if pending.is_empty() {
-        HashSet::new()
-    } else {
-        native
-            .iter()
-            .filter_map(|item| item.client_input_id.as_ref())
-            .collect()
-    };
-    // Snapshot keys already make pending IDs unique.
-    let retained: Vec<_> = pending
-        .iter()
-        .filter(|(id, _)| !echoed.contains(id))
-        .collect();
+    let retained: Vec<_> = pending.iter().collect();
     let order = source_order(
         native.len(),
         |index| native[index].id.as_str(),
@@ -1512,6 +1508,7 @@ fn render_turn(
             item,
             provider,
             item.is_deferred(),
+            None,
             None,
             cached.get(&(None, Arc::as_ptr(item).cast())).copied(),
         )
@@ -1602,9 +1599,6 @@ fn render_turn(
     if let Some(text) = handoff {
         push(ProviderHandoff { text });
     }
-    if let Some(item) = &initial_input {
-        push(User { item: item.clone() });
-    }
     let segments: Vec<_> = project_items(language, &source, order.len(), metadata).collect();
     // The last assistant message owns a settled turn's actions. Image rows
     // do not take copy or fork actions away from its text.
@@ -1644,25 +1638,14 @@ fn render_turn(
                 push(User { item });
             }
         }
-        let summary = if source.items_summary {
-            Some(super::work_summary(language, &source))
-        } else {
-            segment.label.clone()
-        };
-        if let Some(summary) = summary {
+        if let Some(summary) = &segment.label {
             push(ActivityHeader {
                 activity: ActivityPresentation {
                     id: segment.id.clone(),
                     status: source.status.label().into(),
-                    activity_summary: summary,
-                    activity_can_collapse: segment.collapsible || source.items_summary,
+                    activity_summary: summary.clone(),
+                    activity_can_collapse: segment.collapsible,
                     is_in_progress: in_progress,
-                    load_items: session.filter(|_| source.items_summary).map(|thread_id| {
-                        crate::state::operations::LoadTurnItems {
-                            thread_id: thread_id.clone(),
-                            turn_id: source.id.clone(),
-                        }
-                    }),
                 },
             });
             for item in group(Role::Activity) {
@@ -1712,7 +1695,6 @@ fn render_turn(
         language,
         source,
         occurrence: turn_occurrence,
-        initial_input,
         pending,
         requests,
         rows: images::without_repeated_images(rows),
@@ -2271,6 +2253,7 @@ mod tests {
                                     (
                                         "work",
                                         models::ItemBody::CommandExecution {
+                                            output_omitted: false,
                                             command: "pwd".into(),
                                             cwd: None,
                                             output: "/fixture".into(),
@@ -2509,6 +2492,8 @@ mod tests {
         let pending = [(
             "pending".into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
+                cursor: None,
                 sequence: 0,
                 submitted_at_ms: None,
                 draft_key: snapshot.panes.primary().navigation.draft_key.clone(),
@@ -2619,7 +2604,7 @@ mod tests {
                 conversations: Arc::new(
                     [(
                         agent_protocol::session::SessionRef {
-                            provider: agent_protocol::session::ProviderKind::Codex,
+                            provider: Some(agent_protocol::session::ProviderKind::Codex),
                             id: "thread".into(),
                         },
                         Arc::new(thread),
@@ -2685,7 +2670,7 @@ mod tests {
     fn completed_edits_stay_in_collapsed_activity_when_details_load() {
         let mut snapshot = fixture();
         let session = agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            provider: Some(agent_protocol::session::ProviderKind::Codex),
             id: "thread".into(),
         };
         let thread = Arc::make_mut(
@@ -2758,7 +2743,7 @@ mod tests {
             &snapshot.panes.primary().navigation.draft_key,
             &snapshot.sessions.pending_submissions,
             snapshot.sessions.conversations[&agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                provider: Some(agent_protocol::session::ProviderKind::Codex),
                 id: "thread".into(),
             }]
                 .clone(),
@@ -2780,7 +2765,7 @@ mod tests {
             let mut snapshot = Snapshot::default();
             Arc::make_mut(&mut snapshot.sessions.conversations).insert(
                 agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 },
                 Arc::new(
@@ -2820,7 +2805,7 @@ mod tests {
             let mut snapshot = Snapshot::default();
             Arc::make_mut(&mut snapshot.sessions.conversations).insert(
                 agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 },
                 Arc::new(
@@ -3025,6 +3010,8 @@ mod tests {
             Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
                 id.into(),
                 Arc::new(PendingSubmission {
+                    new_draft_slot: None,
+                    cursor: None,
                     sequence: sequence as u64,
                     submitted_at_ms: None,
                     draft_key: session.clone().into(),
@@ -3221,7 +3208,7 @@ mod tests {
                     status: models::TurnStatus::Completed,
                     items: Some(vec![item, Arc::new(serde_json::from_value(json!({"id":"answer","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Here is the image","phase":"final"}}}}})).unwrap())]),
                     ..Default::default()
-                }), 0, UiLanguage::Japanese, None),
+                }), 0, UiLanguage::Japanese),
                 vec![],
                 vec![],
                 None,
@@ -3242,7 +3229,7 @@ mod tests {
         let thread = Arc::make_mut(
             Arc::make_mut(&mut snapshot.sessions.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -3274,7 +3261,7 @@ mod tests {
         let thread = Arc::make_mut(
             Arc::make_mut(&mut snapshot.sessions.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -3577,11 +3564,12 @@ mod tests {
     }
 
     #[test]
-    fn summaries_show_input_and_answer_with_activity_loaded_on_expansion() {
+    fn deferred_work_keeps_input_and_answer_visible_with_item_details_on_demand() {
         let source = Arc::new(serde_json::from_value(json!({
             "id":{"provider":"codex","id":"thread"},"turns":[{
-                "id":"turn","status":"completed","itemsSummary":true,"items":[
+                "id":"turn","status":"completed","items":[
                     {"id":"user","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},
+                    {"id":"work","status":"completed","body":{"deferred":{"summary":{"commandExecution":{"command":"inspect","cwd":null,"output":"","exitCode":0}}}}},
                     {"id":"answer","body":{"inline":{"body":{"assistantText":{"text":"answer","phase":"final"}}}}}
                 ]
             }]
@@ -3603,13 +3591,11 @@ mod tests {
         };
         assert!(!activity_is_expanded(&activity.status, None));
         assert!(activity.activity_can_collapse);
-        assert_eq!(activity.load_items.as_ref().unwrap().thread_id.id, "thread");
-        assert_eq!(
-            activity.load_items.as_ref().unwrap().turn_id.as_str(),
-            "turn"
+        assert!(
+            matches!(&rows[2].content, ConversationRowContent::Activity { item, .. } if item.data.deferred)
         );
         assert!(matches!(
-            &rows[2].content,
+            &rows[3].content,
             ConversationRowContent::Response { .. }
         ));
     }
@@ -3622,7 +3608,7 @@ mod tests {
                 sessions: crate::state::Sessions {
                     conversations: Arc::new(
                         [(
-                            agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() },
+                            agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "thread".into() },
                             Arc::new(
                                 serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"capabilities":{"steer":true,"fork":false,"rename":false,"modelChange":false},"turns":[{"id":"before","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"before","phase":"unknown"}}}}}]}]}))
                                 .unwrap(),
@@ -3639,7 +3625,7 @@ mod tests {
             for id in ["z-first", "a-second", "m-third"] {
                 Arc::make_mut(&mut snapshot.input.drafts).insert(
                     agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
+                        provider: Some(agent_protocol::session::ProviderKind::Codex),
                         id: "thread".into(),
                     }
                     .into(),
@@ -3653,7 +3639,7 @@ mod tests {
                     "",
                     Event::Intent(Intent::Submit {
                         thread_id: Some(agent_protocol::session::SessionRef {
-                            provider: agent_protocol::session::ProviderKind::Codex,
+                            provider: Some(agent_protocol::session::ProviderKind::Codex),
                             id: "thread".into(),
                         }),
                         client_user_message_id: id.into(),
@@ -3697,7 +3683,7 @@ mod tests {
             let thread = Arc::make_mut(
                 Arc::make_mut(&mut snapshot.sessions.conversations)
                     .get_mut(&agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
+                        provider: Some(agent_protocol::session::ProviderKind::Codex),
                         id: "thread".into(),
                     })
                     .unwrap(),
@@ -3725,12 +3711,12 @@ mod tests {
                 conversations: Arc::new(
                     [(
                         agent_protocol::session::SessionRef {
-                            provider: agent_protocol::session::ProviderKind::Codex,
+                            provider: Some(agent_protocol::session::ProviderKind::Codex),
                             id: "thread".into(),
                         },
                         Arc::new(models::Thread {
                             id: Some(agent_protocol::session::SessionRef {
-                                provider: agent_protocol::session::ProviderKind::Codex,
+                                provider: Some(agent_protocol::session::ProviderKind::Codex),
                                 id: "thread".into(),
                             }),
                             ..Default::default()
@@ -3748,7 +3734,7 @@ mod tests {
                 "",
                 Event::Intent(Intent::Submit {
                     thread_id: Some(agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
+                        provider: Some(agent_protocol::session::ProviderKind::Codex),
                         id: "thread".into(),
                     }),
                     client_user_message_id: id.into(),
@@ -3770,7 +3756,7 @@ mod tests {
         Arc::make_mut(
             Arc::make_mut(&mut snapshot.sessions.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -3797,10 +3783,12 @@ mod tests {
             Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
                 id.into(),
                 Arc::new(PendingSubmission {
+                    new_draft_slot: None,
+                    cursor: None,
                     sequence: sequence as u64,
                     submitted_at_ms: None,
                     draft_key: agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
+                        provider: Some(agent_protocol::session::ProviderKind::Codex),
                         id: "thread".into(),
                     }
                     .into(),
@@ -3816,7 +3804,7 @@ mod tests {
                 }),
             );
         }
-        Arc::make_mut(Arc::make_mut(&mut snapshot.sessions.conversations).get_mut(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }).unwrap())
+        Arc::make_mut(Arc::make_mut(&mut snapshot.sessions.conversations).get_mut(&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "thread".into() }).unwrap())
             .turns.as_mut().unwrap().push(Arc::new(serde_json::from_value(json!({"id":"echo-turn","items":[{"id":"echo","status":"unknown","clientInputId":"b","body":{"inline":{"body":{"userMessage":{"text":"native b","content":[]}}}}}],"status":"unknown"})).unwrap()));
         let rendered = project_snapshot(snapshot.clone(), None);
         let items: Vec<_> = rendered.turns.last().unwrap().items().collect();
@@ -3866,6 +3854,8 @@ mod tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             "pending".into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
+                cursor: None,
                 sequence: 0,
                 submitted_at_ms: Some(12_000),
                 draft_key: session.into(),
@@ -3918,10 +3908,12 @@ mod tests {
         Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
             "pending".into(),
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
+                cursor: None,
                 sequence: 0,
                 submitted_at_ms: Some(12_000),
                 draft_key: agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 }
                 .into(),
@@ -3956,7 +3948,7 @@ mod tests {
         let thread = Arc::make_mut(
             Arc::make_mut(&mut snapshot.sessions.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -3985,14 +3977,14 @@ mod tests {
         }
         .apply(
             &snapshot.sessions.conversations[&agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                provider: Some(agent_protocol::session::ProviderKind::Codex),
                 id: "thread".into(),
             }],
         )
         .unwrap();
         Arc::make_mut(&mut updated.sessions.conversations).insert(
             agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                provider: Some(agent_protocol::session::ProviderKind::Codex),
                 id: "thread".into(),
             },
             Arc::new(thread),
@@ -4018,7 +4010,7 @@ mod tests {
         let thread = Arc::make_mut(
             Arc::make_mut(&mut deferred.sessions.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -4052,7 +4044,7 @@ mod tests {
             let request: WireRequest = serde_json::from_value(value).unwrap();
             let request = Arc::new(request);
             let session = agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                provider: Some(agent_protocol::session::ProviderKind::Codex),
                 id: if request.id.as_str() == "3" {
                     "other"
                 } else {
@@ -4074,10 +4066,12 @@ mod tests {
         }
         let pending = |turn_id| {
             Arc::new(PendingSubmission {
+                new_draft_slot: None,
+                cursor: None,
                 sequence: 0,
                 submitted_at_ms: None,
                 draft_key: agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: Some(agent_protocol::session::ProviderKind::Codex),
                     id: "thread".into(),
                 }
                 .into(),
@@ -4348,7 +4342,6 @@ mod progress_tests {
                 language: UiLanguage::Japanese,
                 source,
                 occurrence: 0,
-                initial_input: None,
                 pending: Default::default(),
                 requests: vec![],
                 rows: vec![],
@@ -4590,6 +4583,7 @@ pub fn history_notice(language: UiLanguage, thread: &models::Thread) -> Option<S
         {
             return None;
         }
+        HistoryReadKind::Loading => "履歴を読み込んでいます。",
         HistoryReadKind::Partial => "履歴の一部を表示しています。",
         HistoryReadKind::Incomplete => "履歴の一部を読み取れませんでした。",
         HistoryReadKind::Unavailable => {
@@ -4614,11 +4608,12 @@ pub fn history_notice(language: UiLanguage, thread: &models::Thread) -> Option<S
 #[cfg(test)]
 mod history_notice_tests {
     use super::*;
-    use crate::session::{HistoryPage, HistoryReadKind, HistoryReadState};
+    use crate::session::{HistoryReadKind, HistoryReadState};
 
     #[test]
     fn history_headings_translate_without_changing_issue_identifiers() {
         for (kind, expected) in [
+            (HistoryReadKind::Loading, "Loading history."),
             (HistoryReadKind::Partial, "Some history is shown."),
             (
                 HistoryReadKind::Incomplete,
@@ -4660,45 +4655,32 @@ mod history_notice_tests {
 
     #[test]
     fn history_pages_keep_source_errors_visible_and_can_clear_them_after_recovery() {
-        let mut thread = models::Thread::default();
-        HistoryPage {
-            turns: Vec::new(),
-            next_cursor: None,
+        let mut thread = models::Thread {
             history_read_state: Some(HistoryReadState::new(
                 HistoryReadKind::Incomplete,
                 vec!["claude: Claude failed to start".into()],
             )),
-        }
-        .prepend_to(&mut thread);
+            ..Default::default()
+        };
         assert_eq!(
             history_notice(UiLanguage::Japanese, &thread).as_deref(),
             Some("履歴の一部を読み取れませんでした。\nclaude: Claude failed to start")
         );
-        HistoryPage {
-            turns: Vec::new(),
-            next_cursor: None,
-            history_read_state: Some(HistoryReadState::new(HistoryReadKind::Complete, Vec::new())),
-        }
-        .prepend_to(&mut thread);
+        thread.history_read_state =
+            Some(HistoryReadState::new(HistoryReadKind::Complete, Vec::new()));
         assert_eq!(history_notice(UiLanguage::Japanese, &thread), None);
     }
 
     #[test]
     fn normal_pagination_has_no_warning_before_or_after_loading_the_remaining_history() {
-        let mut thread = models::Thread::default();
-        HistoryPage {
-            history_read_state: None,
-            turns: Vec::new(),
-            next_cursor: Some("older-page".into()),
-        }
-        .prepend_to(&mut thread);
+        let mut thread = models::Thread {
+            history_cursor: Some("older-page".into()),
+            history_has_more: Some(true),
+            ..Default::default()
+        };
         assert_eq!(history_notice(UiLanguage::Japanese, &thread), None);
-        HistoryPage {
-            history_read_state: None,
-            turns: Vec::new(),
-            next_cursor: None,
-        }
-        .prepend_to(&mut thread);
+        thread.history_cursor = None;
+        thread.history_has_more = Some(false);
         assert_eq!(history_notice(UiLanguage::Japanese, &thread), None);
     }
 

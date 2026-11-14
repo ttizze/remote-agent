@@ -213,28 +213,26 @@ where
 }
 
 pub async fn resolve_item(
-    mut response: agent_protocol::operations::ItemResponse,
+    grant: TransferGrant,
+    expected: &agent_protocol::ids::ItemId,
     session: Option<&crate::transport::Session>,
-) -> Result<agent_protocol::operations::ItemResponse, PeerError> {
-    if let Some(grant) = response.transfer.take() {
-        let session = session.ok_or_else(|| {
-            PeerError::InvalidMessage("item transfer requires an iroh session".into())
-        })?;
-        let bytes = crate::transfers::download_bytes(grant, || async {
-            session.open_stream().await.map_err(std::io::Error::other)
-        })
-        .await
-        .map_err(PeerError::from)?;
-        let item: crate::models::Item = crate::protocol::decode(&bytes)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        if item.id != response.item.id {
-            return Err(PeerError::InvalidMessage(
-                "transferred item ID does not match".into(),
-            ));
-        }
-        response.item = item;
+) -> Result<crate::models::Item, PeerError> {
+    let session = session.ok_or_else(|| {
+        PeerError::InvalidMessage("item transfer requires an iroh session".into())
+    })?;
+    let bytes = crate::transfers::download_bytes(grant, || async {
+        session.open_stream().await.map_err(std::io::Error::other)
+    })
+    .await
+    .map_err(PeerError::from)?;
+    let item: crate::models::Item = crate::protocol::decode(&bytes)
+        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+    if item.id != *expected {
+        return Err(PeerError::InvalidMessage(
+            "transferred item ID does not match".into(),
+        ));
     }
-    Ok(response)
+    Ok(item)
 }
 
 #[cfg(test)]

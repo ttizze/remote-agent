@@ -589,6 +589,16 @@ async fn a_change_in_the_copies_quiet_period_is_written_before_the_app_stops(
             })
         };
         Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), named("first"));
+        Arc::make_mut(&mut snapshot.sessions.replicas).insert(
+            id.clone(),
+            Arc::new(crate::test_conversations::replica(
+                crate::models::ThreadResponse {
+                    thread: named("first").as_ref().clone(),
+                    ..Default::default()
+                },
+                1,
+            )),
+        );
         let (updates, snapshots) = watch::channel(Arc::new(snapshot));
         let saving = tokio::spawn(persistence.start(snapshots).unwrap());
         let saved_name = || async {
@@ -607,6 +617,16 @@ async fn a_change_in_the_copies_quiet_period_is_written_before_the_app_stops(
         // The copies now wait ten quiet seconds before their next write.
         let mut renamed = updates.borrow().as_ref().clone();
         Arc::make_mut(&mut renamed.sessions.conversations).insert(id.clone(), named("second"));
+        Arc::make_mut(&mut renamed.sessions.replicas).insert(
+            id.clone(),
+            Arc::new(crate::test_conversations::replica(
+                crate::models::ThreadResponse {
+                    thread: named("second").as_ref().clone(),
+                    ..Default::default()
+                },
+                1,
+            )),
+        );
         let renamed = Arc::new(renamed);
         updates.send_replace(renamed.clone());
         if quitting {
@@ -644,16 +664,27 @@ async fn conversation_copies_are_saved_restored_and_cleared_on_pairing() {
             ..Default::default()
         };
         snapshot.connection.connected = true;
-        snapshot.lists.threads = Some(Arc::new(ThreadList {
-            revision: 1,
-            limit: 5,
-            data: vec![thread.clone()],
-            projects: Vec::new(),
-            has_more: false,
-            has_more_projects: false,
-            project_pages: Default::default(),
-            provider_errors: None,
-        }));
+        crate::state::list_sync::seed(
+            &mut snapshot,
+            ThreadList {
+                limit: 5,
+                data: vec![thread.clone()],
+                projects: Vec::new(),
+                has_more: false,
+                has_more_projects: false,
+                provider_errors: None,
+            },
+        );
+        Arc::make_mut(&mut snapshot.sessions.replicas).insert(
+            id.clone(),
+            Arc::new(crate::test_conversations::replica(
+                crate::models::ThreadResponse {
+                    thread: thread.clone(),
+                    ..Default::default()
+                },
+                1,
+            )),
+        );
         Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), Arc::new(thread));
         draft(&mut snapshot, "host draft");
         remember(
@@ -912,6 +943,8 @@ async fn autosave_keeps_each_kind_of_host_owned_work() {
             Arc::make_mut(&mut snapshot.sessions.pending_submissions).insert(
                 "pending".into(),
                 Arc::new(crate::state::PendingSubmission {
+                    new_draft_slot: None,
+                    cursor: None,
                     sequence: 1,
                     submitted_at_ms: None,
                     draft_key: "draft".into(),

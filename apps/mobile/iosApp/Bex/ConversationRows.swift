@@ -159,13 +159,15 @@ struct ThreadItemRow: View, Equatable {
     let media: ConversationMediaAccess
     let selection: ConversationSelectionActions
     let isExpanded: Bool
+    let detail: ItemDetail
     let toggleExpanded: () -> Void
     let loadDetails: () async -> String?
+    let watchOutput: (Bool) -> Void
     @State private var detailError: String?
     @State private var retry = 0
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.item === rhs.item && lhs.isExpanded == rhs.isExpanded
+        lhs.item === rhs.item && lhs.isExpanded == rhs.isExpanded && lhs.detail == rhs.detail
             && lhs.media.host == rhs.media.host && lhs.media.cwd == rhs.media.cwd && lhs.media.draft == rhs.media
             .draft
             && (lhs.selection.askInSideChat == nil) == (rhs.selection.askInSideChat == nil)
@@ -193,6 +195,15 @@ struct ThreadItemRow: View, Equatable {
                 )) {
                     if isExpanded {
                         let body = item.data.deferred ? "" : item.source.expandedBody()
+                        if let error = detail.error, !item.data.deferred {
+                            HStack {
+                                ErrorTextView(text: error).font(.caption).foregroundStyle(.red)
+                                Button { Task { _ = await loadDetails() } } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                }
+                                .accessibilityLabel("再読み込み")
+                            }
+                        }
                         if item.data.deferred {
                             VStack(alignment: .leading, spacing: 10) {
                                 if let detailError {
@@ -227,5 +238,16 @@ struct ThreadItemRow: View, Equatable {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
+        .onAppear {
+            if isExpanded {
+                watchOutput(true)
+            }
+        }
+        .onChange(of: isExpanded) { _, expanded in watchOutput(expanded) }
+        .onDisappear {
+            if isExpanded {
+                watchOutput(false)
+            }
+        }
     }
 }

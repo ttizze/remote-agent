@@ -156,11 +156,10 @@ impl Snapshot {
         model: Option<&ModelRef>,
     ) -> Option<ProviderKind> {
         model.map(|model| model.provider).or_else(|| match key {
-            crate::state::DraftKey::Session { session } => Some(
-                self.thread_metadata(session)
-                    .and_then(|thread| thread.active_provider)
-                    .unwrap_or(session.provider),
-            ),
+            crate::state::DraftKey::Session { session } => self
+                .thread_metadata(session)
+                .and_then(|thread| thread.active_provider)
+                .or(session.provider),
             crate::state::DraftKey::Local { .. } => None,
         })
     }
@@ -613,7 +612,7 @@ mod tests {
                 ..Default::default()
             };
             let (next, _) = reduce(&snapshot, "", Event::Intent(Intent::NewChat { cwd: "/project".into() }));
-            let key = crate::state::DraftKey::from("new:/project");
+            let key = next.panes.primary().navigation.draft_key.clone();
             proptest::prop_assert_eq!(next.model_provider_for_draft(key.clone()), Some(provider));
             proptest::prop_assert_eq!(next.input.drafts[&key].model.as_ref().unwrap().provider, provider);
             proptest::prop_assert!(snapshot.input.drafts.is_empty());
@@ -697,7 +696,7 @@ mod tests {
             };
             for (provider, effort) in [(ProviderKind::Codex, "high"), (ProviderKind::Claude, "low")] {
                 let selected = ModelRef { provider, id: id.clone() };
-                for key in [crate::state::DraftKey::from("local"), crate::session::SessionRef { provider, id: "session".into() }.into()] {
+                for key in [crate::state::DraftKey::from("local"), crate::session::SessionRef { provider: Some(provider), id: "session".into() }.into()] {
                     Arc::make_mut(&mut snapshot.input.drafts).insert(key.clone(), Arc::new(Draft {model:Some(selected.clone()),..Default::default()}));
                     proptest::prop_assert_eq!(snapshot.model_provider_for_draft(key.clone()), Some(provider));
                     proptest::prop_assert_eq!(snapshot.model_for_provider(key.clone(), provider), Some(selected.clone()));

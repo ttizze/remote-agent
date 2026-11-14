@@ -25,6 +25,18 @@ pub fn assert_project_directory(cwd: &Path, project: &Path, worktrees: Option<&P
     }
 }
 
+/// Seed the current Host store without depending on an obsolete file format.
+pub fn seed_projects(
+    directory: &Path,
+    projects: Vec<agent_protocol::models::Project>,
+) -> Result<()> {
+    let service = HostRpcService::new([], directory.join("bex-worktrees.json"));
+    service
+        .fixture_projects()
+        .replace_fixture_projects(&projects)
+        .map_err(anyhow::Error::msg)
+}
+
 #[derive(Default)]
 pub struct Memory {
     bytes: Mutex<Option<Zeroizing<Vec<u8>>>>,
@@ -44,6 +56,7 @@ pub struct HostFixture {
     pub credentials: Arc<HostCredentials>,
     pub memory: Arc<Memory>,
     pub ticket: Ticket,
+    pub projects: ProjectStore,
     pub stop: CancellationToken,
     pub running: tokio::task::JoinHandle<Result<()>>,
     _stop_on_drop: DropGuard,
@@ -125,10 +138,8 @@ impl HostFixture {
             );
         }
         eprintln!("Host fixture: providers ready; starting RPC");
-        let service = HostRpcService::new(
-            backends,
-            ProjectStore::new(directory.join("bex-worktrees.json")),
-        );
+        let service = HostRpcService::new(backends, directory.join("bex-worktrees.json"));
+        let projects = service.fixture_projects();
         #[cfg(unix)]
         service
             .enable_browser(directory.join("browser"))
@@ -150,6 +161,7 @@ impl HostFixture {
         // without spending a production minute between each test phase.
         let running = tokio::spawn(runtime.run(stop.clone(), Duration::from_millis(100)));
         Ok(Self {
+            projects,
             server: server.ok(),
             credentials,
             memory,

@@ -38,6 +38,9 @@ fn context_edits_keep_draft_settings_and_reject_old_host_updates() {
     assert_eq!(stale.input.drafts[&key].as_ref(), &original);
     assert!(effects.is_empty());
     let (next, effects) = reduce(&previous, "", action("scope"));
+    assert!(!next.input.drafts.contains_key(&key));
+    let key = next.panes.primary().navigation.draft_key.clone();
+    assert!(!key.is_empty());
     assert_eq!(next.input.drafts[&key].text, original.text);
     assert_eq!(next.input.drafts[&key].effort, original.effort);
     assert_eq!(next.input.drafts[&key].contexts, [context_record("output")]);
@@ -51,7 +54,13 @@ fn context_edits_keep_draft_settings_and_reject_old_host_updates() {
 
 #[test]
 fn context_only_input_is_captured_and_failed_sends_restore_it_beside_new_input() {
-    let mut previous = Snapshot::default();
+    let (mut previous, _) = reduce(
+        &Snapshot::default(),
+        "",
+        Event::Intent(Intent::NewChat {
+            cwd: "/repo".into(),
+        }),
+    );
     let key = previous.panes.primary().navigation.draft_key.clone();
     let draft = Arc::new(Draft {
         model: Some(crate::models::ModelRef {

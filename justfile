@@ -10,6 +10,19 @@ default:
 check *args:
     cargo check --locked "$@"
 
+# Run the pinned RELAX compiler on the configured builder.
+[group('portable')]
+relax *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Keep compiled project code and captured test output private.
+    umask 077
+    mkdir -p target/tool-cache
+    agent_relax_package=$(nix build --no-update-lock-file --out-link target/.relax-package --print-out-paths .#relax)
+    # Upstream clean refuses run-directory overrides; this cache is cleared manually.
+    export MAKEPAD_RUN_CACHE_DIR="${MAKEPAD_RUN_CACHE_DIR:-$PWD/target/tool-cache/relax}"
+    exec "$agent_relax_package/bin/relax" "$@"
+
 # Check handwritten functions against the configured complexity limits.
 complexity:
     #!/usr/bin/env bash

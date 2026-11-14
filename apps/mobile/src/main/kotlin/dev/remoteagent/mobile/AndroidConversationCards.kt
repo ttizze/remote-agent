@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +43,7 @@ import dev.remoteagent.core.OperationPhase
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.PreparationPresentation
 import dev.remoteagent.core.PreparationStep
+import dev.remoteagent.core.ReadItem
 import dev.remoteagent.core.RenderedItem
 import dev.remoteagent.core.SetupTerminal
 import dev.remoteagent.core.preparationElapsed
@@ -243,11 +245,13 @@ internal fun ThreadActivityCard(
     item: RenderedItem,
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    loadDetails: (String) -> Unit,
+    read: ReadItem?,
+    detailState: dev.remoteagent.core.ItemDetail?,
 ) {
     val content = remember(item) { item.presentation() }
     var expanded by remember(content.id) { mutableStateOf(false) }
-    val detail = remember(item, expanded) { if (expanded) item.expandedBody() else null }
+    WatchActivityOutput(read, content.nativeId, content.kind == "command", expanded, perform)
+
     Card(
         Modifier.fillMaxWidth()
             .then(
@@ -255,7 +259,7 @@ internal fun ThreadActivityCard(
                     Modifier.clickable {
                         expanded = !expanded
                         if (expanded && content.deferred) {
-                            loadDetails(content.nativeId ?: content.id)
+                            read?.let { perform(Intent.ReadItem(it)) {} }
                         }
                     }
                 else Modifier
@@ -268,11 +272,35 @@ internal fun ThreadActivityCard(
                     style = MaterialTheme.typography.labelLarge,
                 )
             }
-            if (expanded && !content.deferred) {
-                val blocks = remember(item) { item.detailBlocks() }
-                ConversationBlocks(blocks, cwd, perform)
-            } else (if (expanded) detail else content.body)?.let { Text(it, maxLines = 1) }
+            if (expanded) {
+                detailState?.error?.let { ErrorTextView(it) }
+                if (detailState?.loading == true) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                if (content.deferred) {
+                    val body = remember(item) { item.expandedBody() }
+                    Text(body, maxLines = 1)
+                } else {
+                    val blocks = remember(item) { item.detailBlocks() }
+                    ConversationBlocks(blocks, cwd, perform)
+                }
+            } else {
+                content.body?.let { Text(it, maxLines = 1) }
+            }
         }
+    }
+}
+
+@Composable
+private fun WatchActivityOutput(
+    read: ReadItem?,
+    nativeId: String?,
+    command: Boolean,
+    expanded: Boolean,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+) {
+    DisposableEffect(read, nativeId, command, expanded, perform) {
+        val watching = read?.takeIf { expanded && command && nativeId != null }
+        watching?.let { perform(Intent.WatchCommandOutput(it.threadId, it.itemId, true)) {} }
+        onDispose { watching?.let { perform(Intent.WatchCommandOutput(it.threadId, it.itemId, false)) {} } }
     }
 }
 

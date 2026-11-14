@@ -22,12 +22,6 @@ pub struct ConversationRowPolicy {
     pub progress: ProgressRows,
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct ActivityExpansionChange {
-    pub expansion: HashMap<String, String>,
-    pub load_items: Option<crate::state::operations::LoadTurnItems>,
-}
-
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ConversationRowOrigin {
@@ -173,7 +167,7 @@ impl ConversationRows {
                 provider: turn
                     .source
                     .provider
-                    .or_else(|| source.source.id.as_ref().map(|id| id.provider)),
+                    .or_else(|| source.source.id.as_ref().and_then(|id| id.provider)),
                 started_at: turn.source.started_at,
             };
             rows.extend(project_rows(
@@ -259,12 +253,12 @@ impl ConversationRows {
     pub fn session_rows(&self) -> Vec<Arc<VisibleConversationRow>> {
         self.rows[self.queued_end..].to_vec()
     }
-    /// Return the native owner's next choice and optional load, without updating either.
+    /// Return the native owner's next expansion choice without changing the frame.
     pub fn toggle_activity(
         &self,
         id: String,
         mut expansion: HashMap<String, String>,
-    ) -> Option<ActivityExpansionChange> {
+    ) -> Option<HashMap<String, String>> {
         let row = self.rows.iter().find(|row| row.id == id)?;
         let ConversationRowContent::ActivityHeader { activity } = &row.data.content else {
             return None;
@@ -279,10 +273,7 @@ impl ConversationRows {
         } else {
             expansion.insert(id, activity.status.clone());
         }
-        Some(ActivityExpansionChange {
-            expansion,
-            load_items: (!expanded).then(|| activity.load_items.clone()).flatten(),
-        })
+        Some(expansion)
     }
     /// Accessibility counts the unfiltered source, independently of presentation policy.
     pub fn source_item_count(&self) -> u32 {

@@ -37,30 +37,38 @@ enum ConversationMarkdownContent {
             switch block {
             case let .disclosure(summary, _, children, style):
                 paragraphs.append(contentsOf: blocks(summary, style: style, startingID: paragraphs.count))
-                appendParts(paragraphs, to: &result)
-                paragraphs.removeAll(keepingCapacity: true)
+                appendParts(&paragraphs, to: &result)
                 appendChildren(children, to: &result)
             case let .callout(kind, children, style):
-                let marker = MarkdownRun(text: markdownCalloutMarker(kind: kind), template: nil, strong: false, emphasis: false,
-                                         strikethrough: false, code: false, math: false, link: nil, image: nil,
-                                         file: nil, darkColor: nil, lightColor: nil)
+                let marker = MarkdownRun(
+                    text: markdownCalloutMarker(kind: kind),
+                    template: nil,
+                    strong: false,
+                    emphasis: false,
+                    strikethrough: false,
+                    code: false,
+                    math: false,
+                    link: nil,
+                    image: nil,
+                    file: nil,
+                    darkColor: nil,
+                    lightColor: nil
+                )
                 paragraphs.append(contentsOf: blocks([marker], style: style, startingID: paragraphs.count))
-                appendParts(paragraphs, to: &result)
-                paragraphs.removeAll(keepingCapacity: true)
+                appendParts(&paragraphs, to: &result)
                 appendChildren(children, to: &result)
             case let .paragraph(runs, style):
                 paragraphs.append(contentsOf: blocks(runs, style: style, startingID: paragraphs.count))
             case let .visualization(path, _):
-                appendParts(paragraphs, to: &result)
-                paragraphs.removeAll(keepingCapacity: true)
+                appendParts(&paragraphs, to: &result)
                 result.append(Part(id: result.count, blocks: [], tableRows: [], visualizationPath: path))
             case let .table(source, columns, rows, _):
-                appendParts(paragraphs, to: &result)
-                paragraphs.removeAll(keepingCapacity: true)
+                appendParts(&paragraphs, to: &result)
                 let cells = rows.map { cells in
                     cells.enumerated().map { column, cell in
                         blocks(cell.runs, style: MarkdownStyle(alignment: columns[column],
-                                                               header: nil, marker: nil, code: false, math: false, quoted: false,
+                                                               header: nil, marker: nil, code: false, math: false,
+                                                               quoted: false,
                                                                listDepth: 0, language: nil, filename: nil,
                                                                rule: false))
                     }
@@ -71,7 +79,7 @@ enum ConversationMarkdownContent {
                                        .map { $0.map { $0.runs.map(\.text).joined() } })))
             }
         }
-        appendParts(paragraphs, to: &result)
+        appendParts(&paragraphs, to: &result)
         return result
     }
 
@@ -101,7 +109,7 @@ enum ConversationMarkdownContent {
         return result
     }
 
-    private nonisolated static func appendParts(_ blocks: [Block], to parts: inout [Part]) {
+    private nonisolated static func appendParts(_ blocks: inout [Block], to parts: inout [Part]) {
         var paragraphs: [Block] = []
         for block in blocks {
             if block.imageURL != nil || block.style.code {
@@ -117,5 +125,6 @@ enum ConversationMarkdownContent {
         if !paragraphs.isEmpty {
             parts.append(Part(id: parts.count, blocks: paragraphs, tableRows: []))
         }
+        blocks.removeAll(keepingCapacity: true)
     }
 }

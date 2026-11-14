@@ -5,13 +5,9 @@ use serde::{Deserialize, Serialize};
 pub const TASK_ACTIVITY_PUSH_TTL_SECONDS: u32 = 10 * 60;
 pub const TASK_ACTIVITY_DISMISS_SECONDS: u32 = 60;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadTaskActivity {}
-
-/// Host revision prevents a delayed initial read from replacing a newer notification.
+/// Compact display facts derived from the committed conversation headers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskActivityState {
-    pub revision: u64,
     pub display: TaskActivityDisplay,
     pub statuses: Vec<(crate::session::SessionRef, crate::models::SessionStatus)>,
     /// User conversations awaiting a response; subagent requests are excluded.

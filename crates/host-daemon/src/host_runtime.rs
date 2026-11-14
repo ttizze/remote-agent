@@ -546,10 +546,7 @@ mod tests {
             .await
             .unwrap();
         let runtime = HostRuntime::new(
-            HostRpcService::new(
-                [],
-                crate::ProjectStore::new(directory.path().join("projects.json")),
-            ),
+            HostRpcService::new([], directory.path().join("projects.json")),
             endpoint.clone(),
             credentials.clone(),
             "Host".into(),
@@ -614,10 +611,7 @@ mod tests {
                 .unwrap(),
         );
         let runtime = HostRuntime::new(
-            HostRpcService::new(
-                [],
-                crate::ProjectStore::new(directory.path().join("projects.json")),
-            ),
+            HostRpcService::new([], directory.path().join("projects.json")),
             endpoint.clone(),
             restored,
             "Host".into(),
@@ -696,10 +690,7 @@ mod tests {
         let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Loopback)
             .await
             .unwrap();
-        let service = HostRpcService::new(
-            [],
-            crate::ProjectStore::new(directory.path().join("projects.json")),
-        );
+        let service = HostRpcService::new([], directory.path().join("projects.json"));
         service.set_history_scope(directory.path().to_owned(), true);
         let runtime = HostRuntime::new(
             service,
@@ -780,7 +771,7 @@ mod tests {
                 .unwrap();
             let service = HostRpcService::new(
                 std::iter::empty::<crate::providers::Backend>(),
-                crate::ProjectStore::new(directory.path().join("projects.json")),
+                directory.path().join("projects.json"),
             );
             let runtime = Arc::new(
                 HostRuntime::new(

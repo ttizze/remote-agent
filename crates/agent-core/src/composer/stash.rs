@@ -538,7 +538,13 @@ mod tests {
 
     #[test]
     fn stashes_persist_with_the_cleared_composer_and_stay_in_their_host_storage_scope() {
-        let mut state = Snapshot::default();
+        let (mut state, _) = reduce(
+            &Snapshot::default(),
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/project".into(),
+            }),
+        );
         state.connection.storage_scope = "a".into();
         let key = state.panes.primary().navigation.draft_key.clone();
         Arc::make_mut(&mut state.input.drafts).insert(key.clone(), Arc::new(content()));
@@ -586,7 +592,13 @@ mod tests {
 
     #[tokio::test]
     async fn offline_store_dispatch_moves_prompts_and_updates_the_shared_composer() {
-        let mut initial = Snapshot::default();
+        let (mut initial, _) = reduce(
+            &Snapshot::default(),
+            "",
+            Event::Intent(Intent::NewChat {
+                cwd: "/project".into(),
+            }),
+        );
         initial.connection.storage_scope = "host".into();
         let key = initial.panes.primary().navigation.draft_key.clone();
         Arc::make_mut(&mut initial.input.drafts).insert(key.clone(), Arc::new(content()));

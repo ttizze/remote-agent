@@ -169,7 +169,9 @@ mod tests {
     #[tokio::test]
     async fn cancellation_during_progress_reaps_the_supervised_process() {
         let directory = tempfile::tempdir().unwrap();
-        let owner = Clones::new(ProjectStore::new(directory.path().join("worktrees.json")));
+        let owner = Clones::new(ProjectStore::fixture(
+            directory.path().join("worktrees.json"),
+        ));
         let id = uuid::Uuid::new_v4().to_string();
         owner
             .registry()

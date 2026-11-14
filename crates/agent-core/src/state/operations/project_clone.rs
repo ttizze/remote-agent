@@ -78,9 +78,8 @@ impl Snapshot {
         if completed.is_empty() {
             return Vec::new();
         }
-        let mut effects = vec![Effect::execute(ListSessions::new(
-            (*self.lists.list_query).clone(),
-        ))];
+        // Project registration already publishes the canonical list change.
+        let mut effects = Vec::new();
         let panes: Vec<_> = self
             .panes
             .0
@@ -177,6 +176,9 @@ mod tests {
     #[test]
     fn notification_wins_over_a_delayed_read_and_completion_refreshes_projects_once() {
         let mut state = Snapshot::default();
+        state.connection.connected = true;
+        Arc::make_mut(&mut Arc::make_mut(state.panes.primary_mut()).navigation).cwd =
+            "/repo".into();
         assert!(
             state
                 .accept_project_clones(catalog("first", 4, ProjectClonePhase::Fetching))

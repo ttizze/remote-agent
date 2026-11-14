@@ -1,17 +1,17 @@
 use agent_core::client::ClientExt;
 use agent_protocol::requests::{Answer, Request};
+use agent_protocol::{
+    conversation::{self as decision, records},
+    session::{ProviderKind, SessionRef},
+};
 #[allow(dead_code)]
 #[path = "support/host.rs"]
 mod host_fixture;
 use agent_core::state::operations::{
-    CancelAccountLogin, CreateSession, ForkSession, Interrupt, ListAccounts, ListFiles,
-    ListSessions, ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings,
+    CancelAccountLogin, ListAccounts, ListFiles, ReadAccountLogin, ReadFile, ReadWorktreeSettings,
     ReviewWorkspace, SelectAccount, StartAccountLogin, UpdateWorktreeSettings,
 };
-use agent_protocol::{
-    models::{ListQuery, WorktreeSettings},
-    operations::*,
-};
+use agent_protocol::{models::WorktreeSettings, operations::*};
 use agent_transport::{client::Client, peer::PeerError};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -29,46 +29,113 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         };
     }
     let result = match text(command, "type") {
-        "listThreads" => {
-            let query: ListQuery = serde_json::from_value(command["query"].clone()).unwrap();
-            call!(ListSessions { query })
+        "subscribeList" => {
+            let output = client
+                .call(&records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::from_u128(2),
+                    cached: None,
+                })
+                .await?;
+            json!(output.initial)
         }
-        "startThread" => serde_json::to_value(
-            client
-                .call(&CreateSession {
-                    initial_input: None,
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                    cwd: optional(command, "cwd").map(str::to_owned),
-                    model: serde_json::from_value(command["model"].clone()).unwrap(),
-                })
-                .await?
-                .response,
-        )
-        .unwrap(),
-        "readThread" | "readOlder" => serde_json::to_value(
-            client
-                .call(&agent_core::state::operations::OpenThread {
-                    read: &ReadThread {
-                        limit: if command["type"] == "readOlder" {
-                            10
-                        } else {
-                            5
-                        },
-                        ..ReadThread::new(
-                            serde_json::from_value(command["threadId"].clone()).unwrap(),
-                        )
-                    },
-                    known_version: None,
-                })
-                .await?
-                .response,
-        )
-        .unwrap(),
-        "readItem" => call!(ReadItem {
-            thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
-            turn_id: text(command, "turnId").into(),
-            item_id: text(command, "itemId").into()
+        "searchList" => call!(records::SearchList {
+            term: text(command, "term").into(),
+            limit: Some(command["limit"].as_u64().unwrap() as u32)
         }),
+        "startThread" => {
+            let opened = client
+                .call(&records::Create {
+                    workspace: None,
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    session: SessionRef {
+                        provider: None,
+                        id: uuid::Uuid::from_u128(3).to_string(),
+                    },
+                    subscription: uuid::Uuid::from_u128(2),
+                    cwd: optional(command, "cwd").map(str::to_owned),
+                    selection: records::Selection {
+                        model: serde_json::from_value(command["model"].clone()).unwrap(),
+                        ..Default::default()
+                    },
+                    initial: None,
+                })
+                .await?;
+            json!(opened.session)
+        }
+        "readThread" => {
+            let id: SessionRef = serde_json::from_value(command["threadId"].clone()).unwrap();
+            let opened = client
+                .call(&records::Subscribe {
+                    session: id.clone(),
+                    subscription: uuid::Uuid::from_u128(2),
+                    cached: None,
+                    window: None,
+                })
+                .await?;
+            let replica = records::Replica::new(agent_protocol::sync::Scope::Conversation(id), 1)
+                .apply(1, opened.initial)
+                .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            json!(
+                records::project(&replica).ok_or_else(|| PeerError::InvalidMessage(
+                    "conversation header is missing".into()
+                ))?
+            )
+        }
+        "readItem" => {
+            let session: SessionRef = serde_json::from_value(command["threadId"].clone()).unwrap();
+            let (opened, mut stream) = client
+                .request_stream::<records::Opened>(
+                    &agent_protocol::protocol::Call::SubscribeConversation(records::Subscribe {
+                        session: session.clone(),
+                        subscription: uuid::Uuid::from_u128(2),
+                        cached: None,
+                        window: None,
+                    }),
+                )
+                .await?;
+            let mut replica = records::Replica::new(
+                agent_protocol::sync::Scope::Conversation(session.clone()),
+                1,
+            )
+            .apply(1, opened.initial)
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            let reply = client
+                .call(&records::Hydrate {
+                    session,
+                    subscription: uuid::Uuid::from_u128(2),
+                    item: text(command, "itemId").into(),
+                })
+                .await?;
+            assert!(
+                reply.transfer.is_none(),
+                "this corpus covers inline item bodies"
+            );
+            let item = loop {
+                let response = records::project(&replica).unwrap();
+                if let Some(item) = response
+                    .thread
+                    .turns
+                    .iter()
+                    .flatten()
+                    .flat_map(|turn| turn.items.iter().flatten())
+                    .find(|item| item.id.as_str() == text(command, "itemId") && !item.is_deferred())
+                {
+                    break item.as_ref().clone();
+                }
+                let message: records::Message = stream
+                    .read()
+                    .await
+                    .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?
+                    .ok_or_else(|| {
+                        PeerError::ConnectionClosed("item subscription closed".into())
+                    })?;
+                replica = replica
+                    .apply(1, message)
+                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            };
+            json!(item)
+        }
         "sendTurn" => {
             let input = &command["input"];
             let mut items = Vec::new();
@@ -89,27 +156,36 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     }
                 });
             }
-            let reply = client
-                .call(&Submission {
-                    fresh_context: false,
-                    thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
-                    client_user_message_id: text(input, "clientUserMessageId").into(),
-                    input: items,
-                    model: serde_json::from_value(command["model"].clone()).unwrap(),
-                    effort: optional(command, "effort").map(str::to_owned),
-                    service_tier: optional(command, "serviceTierForTurn").map(str::to_owned),
-                    follow_up: serde_json::from_value(command["followUp"].clone())
-                        .unwrap_or_default(),
-                })
-                .await?
-                .turn_id;
-            json!(reply)
+            let id: agent_protocol::ids::ClientInputId = text(input, "clientUserMessageId").into();
+            call!(records::Change {
+                session: serde_json::from_value(command["threadId"].clone()).unwrap(),
+                operation: uuid::Uuid::parse_str(id.as_str()).unwrap(),
+                command: decision::Command::Submit {
+                    id,
+                    content: decision::InputContent {
+                        fresh_context: false,
+                        parts: items,
+                        model: serde_json::from_value(command["model"].clone()).unwrap(),
+                        effort: optional(command, "effort").map(str::to_owned),
+                        service_tier: optional(command, "serviceTierForTurn").map(str::to_owned),
+                        follow_up: serde_json::from_value(command["followUp"].clone())
+                            .unwrap_or_default(),
+                    }
+                },
+            })
         }
         "interruptTurn" => {
-            call!(Interrupt {
-                thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
-                turn_id: text(command, "turnId").into()
-            });
+            client
+                .call(&records::Change {
+                    session: serde_json::from_value(command["threadId"].clone()).unwrap(),
+                    operation: uuid::Uuid::from_u128(1),
+                    command: decision::Command::Interrupt {
+                        turn: Some(text(command, "turnId").into()),
+                    },
+                })
+                .await?
+                .accepted()
+                .map_err(|error| PeerError::InvalidMessage(error.message))?;
             Value::Null
         }
         "models" => json!(
@@ -143,7 +219,16 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             let request: Request = serde_json::from_value(command["request"].clone()).unwrap();
             let answer: Answer = serde_json::from_value(command["answer"].clone())
                 .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-            client.respond(&request, &answer).await?;
+            client
+                .respond(
+                    &SessionRef {
+                        provider: Some(ProviderKind::Codex),
+                        id: "thread-1".into(),
+                    },
+                    &request,
+                    &answer,
+                )
+                .await?;
             Value::Null
         }
         "listFiles" => call!(ListFiles {
@@ -188,9 +273,13 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             });
             Value::Null
         }
-        "forkThread" => call!(ForkSession {
-            thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
-            last_turn_id: text(command, "lastTurnId").into(),
+        "forkThread" => call!(records::Fork {
+            source: serde_json::from_value(command["threadId"].clone()).unwrap(),
+            target: SessionRef {
+                provider: None,
+                id: uuid::Uuid::from_u128(3).to_string()
+            },
+            through: text(command, "lastTurnId").into(),
         }),
         kind => panic!("unknown operation {kind}"),
     };
@@ -218,8 +307,21 @@ async fn run_case(case: &Value) {
                         .params_json()
                         .unwrap()
                 };
+                let mut params = request["params"].clone();
+                if let Some(expected) = exchange["params"].get("operation") {
+                    assert!(uuid::Uuid::parse_str(params["operation"].as_str().unwrap()).is_ok());
+                    if case["command"]["type"] == "respond" {
+                        params["operation"] = expected.clone();
+                    }
+                }
+                if let Some(expected) = exchange["params"].get("subscription") {
+                    assert!(
+                        uuid::Uuid::parse_str(params["subscription"].as_str().unwrap()).is_ok()
+                    );
+                    params["subscription"] = expected.clone();
+                }
                 assert_eq!(
-                    normalize(request["params"].clone()),
+                    normalize(params),
                     normalize(exchange["params"].clone()),
                     "{}",
                     case["name"]
@@ -248,11 +350,9 @@ async fn run_case(case: &Value) {
     .unwrap_or_else(|error| panic!("bounded operation {}: {error}", text(case, "name")));
     if let Some(expected) = case.get("result") {
         let expected = match text(&case["command"], "type") {
-            "listThreads" => normalize::<agent_protocol::models::ThreadList>(expected),
-            "startThread" | "readThread" | "readOlder" | "forkThread" => {
-                normalize::<agent_protocol::models::ThreadResponse>(expected)
-            }
-            "readItem" => normalize::<ItemResponse>(expected),
+            "searchList" => normalize::<agent_protocol::models::ThreadList>(expected),
+            "readThread" => expected.clone(),
+            "readItem" => normalize::<agent_protocol::models::Item>(expected),
             "models" => normalize::<Vec<agent_protocol::models::Model>>(expected),
             "accounts" => normalize::<Accounts>(expected),
             "selectAccount" => normalize::<AccountSelection>(expected),
@@ -260,7 +360,12 @@ async fn run_case(case: &Value) {
             "accountLoginStatus" => normalize::<AccountLoginStatus>(expected),
             _ => expected.clone(),
         };
-        assert_eq!(result.unwrap(), expected, "{}", case["name"]);
+        let actual = result.unwrap();
+        if matches!(text(&case["command"], "type"), "readThread") {
+            assert_fields(&actual, &expected, text(case, "name"));
+        } else {
+            assert_eq!(actual, expected, "{}", case["name"]);
+        }
     } else {
         let error = result.expect_err("expected operation failure");
         let expected = case["errorContains"].as_str().unwrap();
@@ -277,13 +382,7 @@ async fn run_case(case: &Value) {
             };
             assert_eq!(
                 serde_json::from_str::<Value>(&raw).unwrap(),
-                if case["errorRaw"].get("response").is_some() {
-                    normalize::<agent_protocol::session::OpenedSession>(&case["errorRaw"])
-                } else if case["errorRaw"].get("item").is_some() {
-                    normalize::<ItemResponse>(&case["errorRaw"])
-                } else {
-                    normalize::<agent_protocol::error::RpcFailure>(&case["errorRaw"])
-                },
+                normalize::<agent_protocol::error::RpcFailure>(&case["errorRaw"]),
                 "{}",
                 case["name"]
             );
@@ -304,4 +403,19 @@ async fn operation_corpus() {
 
 fn normalize<T: serde::de::DeserializeOwned + serde::Serialize>(value: &Value) -> Value {
     serde_json::to_value(serde_json::from_value::<T>(value.clone()).unwrap()).unwrap()
+}
+
+fn assert_fields(actual: &Value, expected: &Value, name: &str) {
+    if let Some(fields) = expected.as_object() {
+        for (key, value) in fields {
+            assert_fields(&actual[key], value, name);
+        }
+    } else if let Some(values) = expected.as_array() {
+        assert_eq!(actual.as_array().unwrap().len(), values.len(), "{name}");
+        for (actual, expected) in actual.as_array().unwrap().iter().zip(values) {
+            assert_fields(actual, expected, name);
+        }
+    } else {
+        assert_eq!(actual, expected, "{name}");
+    }
 }

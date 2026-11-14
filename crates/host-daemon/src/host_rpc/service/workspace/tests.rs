@@ -1,10 +1,7 @@
 use super::*;
 
 fn service(directory: &Path) -> HostRpcService {
-    HostRpcService::new(
-        [],
-        crate::ProjectStore::new(directory.join("projects.json")),
-    )
+    HostRpcService::new([], directory.join("projects.json"))
 }
 
 async fn change(
@@ -139,7 +136,15 @@ async fn plain_folder_scripts_are_isolated_and_failed_writes_keep_the_previous_s
         .await
         .unwrap();
     assert!(scripts(&service, &second).await.is_empty());
-    service.inner.store.reject_state_writes(true);
+    let database = rusqlite::Connection::open(
+        service
+            .inner
+            .projects
+            .path()
+            .with_file_name("bex-conversations.sqlite"),
+    )
+    .unwrap();
+    database.execute_batch("CREATE TRIGGER reject_script_write BEFORE INSERT ON workspace_scripts BEGIN SELECT RAISE(ABORT,'script write failed'); END;").unwrap();
     assert!(
         change(&service, &first, save(Some("Run"), "Changed", "echo two"))
             .await
@@ -161,7 +166,9 @@ async fn plain_folder_scripts_are_isolated_and_failed_writes_keep_the_previous_s
             command: "echo one".into()
         }]
     );
-    service.inner.store.reject_state_writes(false);
+    database
+        .execute_batch("DROP TRIGGER reject_script_write")
+        .unwrap();
     let (a, b) = tokio::join!(
         change(&service, &second, save(None, "A", "echo a")),
         change(&service, &second, save(None, "B", "echo b"))
@@ -192,10 +199,22 @@ async fn script_validation_and_corrupt_storage_fail_without_replacing_saved_data
     assert!(validate_script("a".into(), "x".repeat(16385)).is_err());
     assert!(validate_script("a".repeat(120), "x".repeat(16384)).is_ok());
     let key = script_key(directory.path()).unwrap();
-    service
-        .inner
-        .store
-        .save_state(&key, &vec!["invalid record"])
+    let database = rusqlite::Connection::open(
+        service
+            .inner
+            .projects
+            .path()
+            .with_file_name("bex-conversations.sqlite"),
+    )
+    .unwrap();
+    database
+        .execute(
+            "INSERT INTO workspace_scripts(root,body) VALUES (?1,?2)",
+            rusqlite::params![
+                key,
+                agent_protocol::protocol::encode(vec!["invalid record"]).unwrap()
+            ],
+        )
         .unwrap();
     assert!(
         service
@@ -213,7 +232,16 @@ async fn script_validation_and_corrupt_storage_fail_without_replacing_saved_data
             .is_err()
     );
     assert_eq!(
-        service.inner.store.load_state::<Vec<String>>(&key).unwrap(),
+        agent_protocol::protocol::decode::<Vec<String>>(
+            &database
+                .query_row(
+                    "SELECT body FROM workspace_scripts WHERE root=?1",
+                    [&key],
+                    |row| row.get::<_, Vec<u8>>(0)
+                )
+                .unwrap()
+        )
+        .unwrap(),
         ["invalid record"]
     );
 }

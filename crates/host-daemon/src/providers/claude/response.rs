@@ -34,8 +34,16 @@ pub(super) struct Observation<'a> {
 }
 
 #[derive(Default)]
+enum Interruption {
+    #[default]
+    None,
+    Pending(String),
+    Confirmed,
+}
+
+#[derive(Default)]
 pub(super) struct ResponseState {
-    interrupted: bool,
+    interruption: Interruption,
     /// Input that joins the response at once ends what it was doing; that
     /// stop is not the response's outcome.
     steered: bool,
@@ -48,17 +56,37 @@ pub(super) struct ResponseState {
 
 impl ResponseState {
     pub(super) fn interrupted(&self) -> bool {
-        self.interrupted
+        !matches!(self.interruption, Interruption::None)
     }
-
-    pub(super) fn interrupt(&mut self) {
-        self.interrupted = true;
+    pub(super) fn pending_interrupt(&self) -> Option<&str> {
+        match &self.interruption {
+            Interruption::Pending(id) => Some(id),
+            _ => None,
+        }
     }
-
-    /// A refused stop leaves the response running.
-    pub(super) fn interrupt_result(&mut self, error: Option<String>) -> Result<(), String> {
-        self.interrupted = error.is_none();
-        error.map_or(Ok(()), Err)
+    pub(super) fn interrupt(&mut self, id: &str) -> bool {
+        if matches!(self.interruption, Interruption::Confirmed) {
+            return false;
+        }
+        self.interruption = Interruption::Pending(id.into());
+        true
+    }
+    /// A refused stop leaves the response and its background roster running.
+    /// An acknowledgement from an older request cannot settle a later retry.
+    pub(super) fn interrupt_result(
+        &mut self,
+        id: &str,
+        error: Option<String>,
+    ) -> Option<Result<(), String>> {
+        if self.pending_interrupt() != Some(id) {
+            return None;
+        }
+        self.interruption = if error.is_none() {
+            Interruption::Confirmed
+        } else {
+            Interruption::None
+        };
+        Some(error.map_or(Ok(()), Err))
     }
 
     pub(super) fn answered(&self) -> bool {
@@ -66,7 +94,7 @@ impl ResponseState {
     }
 
     pub(super) fn finished(&self) -> bool {
-        self.answered() && (!self.background.pending() || self.interrupted)
+        self.answered() && (!self.background.pending() || self.interrupted())
     }
 
     /// Whether Claude still runs work that a new process would end.
@@ -82,15 +110,14 @@ impl ResponseState {
     /// Claude answered; input that awaits its turn, or a stop, owns the
     /// response instead.
     fn answered_input(&self) -> bool {
-        self.result_received && self.pending_inputs.is_empty() && !self.interrupted
+        self.result_received && self.pending_inputs.is_empty() && !self.interrupted()
     }
 
-    /// The work an answered response waits on, as T3 Code's Waiting roster.
-    pub(super) fn waiting(&self) -> &[BackgroundTask] {
-        if self.answered_input() {
-            self.roster.tasks()
-        } else {
+    pub(super) fn background_tasks(&self) -> &[BackgroundTask] {
+        if matches!(self.interruption, Interruption::Confirmed) {
             &[]
+        } else {
+            self.roster.tasks()
         }
     }
 
@@ -103,7 +130,7 @@ impl ResponseState {
     pub(super) fn delivery(&self) -> InputDelivery {
         if self.background.pending() {
             InputDelivery::Background
-        } else if self.answered() && !self.interrupted {
+        } else if self.answered() && !self.interrupted() {
             InputDelivery::NewTurn
         } else {
             InputDelivery::CurrentTurn
@@ -155,7 +182,7 @@ impl ResponseState {
         // Claude runs input it did not fold into a response as the next prompt,
         // right after the result and without an idle level. As in the
         // transcript, input consumed after a result starts its own turn.
-        let opens_turn = self.result_received && !self.interrupted;
+        let opens_turn = self.result_received && !self.interrupted();
         consumed
             .into_iter()
             .enumerate()
@@ -230,14 +257,14 @@ impl ResponseState {
                     message["terminal_reason"].as_str(),
                     Some("aborted_streaming" | "aborted_tools")
                 );
-                if self.steered && aborted && !self.interrupted {
+                if self.steered && aborted && !self.interrupted() {
                     return MessageDisposition::Applied;
                 }
                 self.steered = false;
                 // Claude Code ends a stopped response, including one awaiting
                 // an answer, with an execution error. The stop is its outcome,
                 // as in T3 Code.
-                if message["is_error"] == true && !self.interrupted {
+                if message["is_error"] == true && !self.interrupted() {
                     return MessageDisposition::Failed;
                 }
                 if message["origin"]["kind"] == "task-notification" {
@@ -246,7 +273,7 @@ impl ResponseState {
                 }
                 self.background.response_finished();
                 self.result_received = true;
-                if self.interrupted {
+                if self.interrupted() {
                     return MessageDisposition::Interrupted;
                 }
             }
@@ -301,10 +328,10 @@ mod tests {
     }
 
     #[test]
-    fn only_an_answered_response_waits_on_its_background_work() {
+    fn a_task_roster_survives_later_foreground_input_until_completion_or_stop() {
         let ids = |response: &ResponseState| {
             response
-                .waiting()
+                .background_tasks()
                 .iter()
                 .map(|task| task.id.clone())
                 .collect::<Vec<_>>()
@@ -315,14 +342,18 @@ mod tests {
             json!({"type":"system","subtype":"task_started","task_id":"agent","task_type":"local_agent"}),
         );
         assert!(response.has_background());
-        assert!(ids(&response).is_empty(), "Claude is still responding");
+        assert_eq!(
+            ids(&response),
+            ["agent"],
+            "the Host tracks ownership while Claude responds"
+        );
         // A background subagent keeps the SDK from going idle after the result.
         observe(&mut response, json!({"type":"result"}));
         assert_eq!(ids(&response), ["agent"]);
         response.accept("queued".into());
-        assert!(ids(&response).is_empty(), "input awaits its turn");
+        assert_eq!(ids(&response), ["agent"]);
         observe(&mut response, json!({"type":"user","uuid":"queued"}));
-        assert!(ids(&response).is_empty());
+        assert_eq!(ids(&response), ["agent"]);
         observe(&mut response, json!({"type":"result"}));
         assert_eq!(ids(&response), ["agent"]);
         observe(
@@ -339,8 +370,40 @@ mod tests {
         );
         settle(&mut stopped);
         assert_eq!(ids(&stopped), ["shell"]);
-        stopped.interrupt();
-        assert!(ids(&stopped).is_empty(), "a stop ends the wait");
+        stopped.interrupt("first");
+        assert_eq!(
+            ids(&stopped),
+            ["shell"],
+            "a pending stop must keep the recoverable roster"
+        );
+        assert!(
+            stopped
+                .interrupt_result("first", Some("refused".into()))
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(ids(&stopped), ["shell"]);
+        stopped.interrupt("retry");
+        assert!(
+            stopped.interrupt_result("first", None).is_none(),
+            "an old acknowledgement cannot settle the retry"
+        );
+        assert_eq!(ids(&stopped), ["shell"]);
+        stopped.interrupt_result("retry", None).unwrap().unwrap();
+        stopped.interrupt("duplicate");
+        assert!(
+            stopped
+                .interrupt_result("duplicate", Some("late refusal".into()))
+                .is_none()
+        );
+        assert!(
+            stopped.interrupted(),
+            "a repeated stop cannot undo an acknowledged interruption"
+        );
+        assert!(
+            ids(&stopped).is_empty(),
+            "an acknowledged stop ends the wait"
+        );
     }
 
     #[test]
@@ -432,13 +495,19 @@ mod tests {
         );
         assert!(response.finished());
         response.accept("pending".into());
+        response.interrupt("interrupt");
         assert!(
             response
-                .interrupt_result(Some("not interrupted".into()))
+                .interrupt_result("interrupt", Some("not interrupted".into()))
+                .unwrap()
                 .is_err()
         );
         assert!(!response.interrupted());
-        response.interrupt_result(None).unwrap();
+        response.interrupt("interrupt");
+        response
+            .interrupt_result("interrupt", None)
+            .unwrap()
+            .unwrap();
         assert!(response.interrupted());
         assert_eq!(
             observe(&mut response, json!({"type":"result"})),
@@ -449,14 +518,19 @@ mod tests {
     #[test]
     fn a_requested_stop_owns_the_error_result_unless_it_is_refused() {
         let mut stopped = ResponseState::default();
-        stopped.interrupt();
+        stopped.interrupt("interrupt");
         assert_eq!(
             observe(&mut stopped, json!({"type":"result","is_error":true})),
             MessageDisposition::Interrupted
         );
         let mut refused = ResponseState::default();
-        refused.interrupt();
-        assert!(refused.interrupt_result(Some("refused".into())).is_err());
+        refused.interrupt("interrupt");
+        assert!(
+            refused
+                .interrupt_result("interrupt", Some("refused".into()))
+                .unwrap()
+                .is_err()
+        );
         assert!(!refused.interrupted());
         assert_eq!(
             observe(&mut refused, json!({"type":"result","is_error":true})),
@@ -497,7 +571,7 @@ mod tests {
         observe(&mut response, json!({"type":"user","uuid":"input"}));
         settle(&mut response);
         assert_eq!(response.delivery(), InputDelivery::NewTurn);
-        response.interrupt();
+        response.interrupt("interrupt");
         assert_eq!(response.delivery(), InputDelivery::CurrentTurn);
     }
 
@@ -546,7 +620,7 @@ mod tests {
         );
         settle(&mut response);
         response.accept("queued".into());
-        response.interrupt();
+        response.interrupt("interrupt");
         let message = json!({"type":"user","uuid":"queued"});
         assert_eq!(
             response.observe(&message).unwrap().echoes,
@@ -706,7 +780,7 @@ mod tests {
         let mut response = ResponseState::default();
         observe(&mut response, json!({"type":"assistant"}));
         response.steer();
-        response.interrupt();
+        response.interrupt("interrupt");
         let aborted = json!({"type":"result","is_error":true,"terminal_reason":"aborted_tools"});
         assert_eq!(
             observe(&mut response, aborted),

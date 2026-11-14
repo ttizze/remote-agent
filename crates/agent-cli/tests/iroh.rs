@@ -33,7 +33,15 @@ async fn exercise(command: &[&str], expected: Value) {
         let mut reads = 0;
         let mut lists = 0;
         // Connected owns initial reads; the command consumes that same state.
-        while let Ok(Some(request)) = reader.read_request().await {
+        loop {
+            let request = match reader.read_request().await {
+                Ok(Some(request)) => request,
+                Ok(None) => break,
+                // Once the command has its answer, the process closes QUIC.
+                // The child exit status and stdout below verify that it consumed it.
+                Err(_) if handled => break,
+                Err(error) => panic!("CLI request framing: {error}"),
+            };
             let result = match request["method"].as_str() {
                 Some("host/device/identify") => {
                     json!({"storageScope":"fixture-storage","ticket":""})
@@ -42,82 +50,79 @@ async fn exercise(command: &[&str], expected: Value) {
                     assert_eq!(request["params"]["requestId"], *approval.as_ref().unwrap());
                     json!({"provider":"codex","id":"fixture-thread"})
                 }
-                Some("host/session/answer") => {
-                    assert_eq!(
-                        request["params"],
-                        json!({"requestId":approval.as_ref().unwrap(),"answer":{"approval":{"choiceId":"decline-choice"}}})
-                    );
-                    assert!(!handled);
-                    handled = true;
-                    json!({})
-                }
                 Some("host/model/list") => json!({"data":[],"nextCursor":null}),
                 Some("host/account/list") => json!({"accounts":[], "selected":{}}),
-                Some("host/taskActivity/read") => {
-                    json!({"revision":0,"statuses":[],"waiting":[],"unread":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
-                }
-                Some("host/session/list") => {
+                Some("host/list/subscribe") => {
                     lists += 1;
-                    let (limit, search) = if mode == "list" {
-                        (11, "CLI search")
-                    } else {
-                        (5, "")
-                    };
-                    assert_eq!(
-                        request["params"],
-                        json!({"limit":limit,"projectLimit":5,"searchTerm":search,"part":null,"projectLimits":null})
-                    );
-                    if mode == "list" {
-                        assert!(!handled);
-                        handled = true;
-                    }
-                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5})
+                    assert!(request["params"]["cached"].is_null());
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false})
                 }
-                Some("host/session/open") => {
+                Some("host/list/search") => {
+                    assert_eq!(mode, "list");
+                    assert_eq!(request["params"], json!({"term":"CLI search","limit":50}));
+                    assert!(!handled);
+                    handled = true;
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"projects":[],"limit":50,"hasMore":false,"hasMoreProjects":false})
+                }
+                Some("host/conversation/subscribe") => {
                     reads += 1;
                     assert_eq!(
-                        request["params"],
-                        json!({"session":{"provider":"codex","id":"fixture-thread"},"limit":10,"includeActivity":false})
+                        request["params"]["session"],
+                        json!({"provider":"codex","id":"fixture-thread"})
                     );
+                    assert!(request["params"]["cached"].is_null());
                     let mut thread = json!({"id":{"provider":"codex","id":"fixture-thread"},"cwd":"/fixture","status":"idle","turns":[]});
                     if let Some(id) = &approval {
-                        thread["requests"] = json!({id.as_str().unwrap():{"id":id,"target":"session","delivery":"awaiting","body":{"approval":{"kind":"command","description":"fixture","details":"","choices":[{"id":"accept-choice","label":"承認","description":"","effect":"allow"},{"id":"session-choice","label":"セッション中","description":"","effect":"allowLasting"},{"id":"decline-choice","label":"拒否","description":"","effect":"deny"}]}}}});
+                        thread["turns"] =
+                            json!([{"id":"fixture-turn","status":"running","items":[]}]);
+                        thread["requests"] = json!({id.as_str().unwrap():{"id":id,"target":{"turn":{"turnId":"fixture-turn","itemId":null}},"delivery":"awaiting","body":{"approval":{"kind":"command","description":"fixture","details":"","choices":[{"id":"accept-choice","label":"承認","description":"","effect":"allow"},{"id":"session-choice","label":"セッション中","description":"","effect":"allowLasting"},{"id":"decline-choice","label":"拒否","description":"","effect":"deny"}]}}}});
                     }
-                    json!({"session":request["params"]["session"],"subscriptionId":"00000000-0000-0000-0000-000000000001","revision":0,"response":{"thread":thread}})
+                    json!({"thread":thread})
                 }
                 Some("host/workspace/review") => {
                     assert_eq!(request["params"], json!({"cwd":"/fixture"}));
                     json!({"controls":agent_protocol::models::WorkspaceControls::default(),"branch":"main","base_ref":"origin/main","additions":0,"deletions":0,"files":[],"diff":""})
                 }
-                Some("host/session/submit") => {
-                    assert_eq!(mode, "send");
+                Some("host/conversation/change") => {
                     assert!(!handled);
                     assert_eq!(
-                        request["params"],
-                        json!({"threadId":{"provider":"codex","id":"fixture-thread"},"clientUserMessageId":"fixture-message","followUp":"queue","model":null,"effort":null,"serviceTierForTurn":null,"input":[{"text":{"text":"hello"}}]})
+                        request["params"]["session"],
+                        json!({"provider":"codex","id":"fixture-thread"})
                     );
+                    let command = &request["params"]["command"];
+                    if mode == "send" {
+                        assert_eq!(
+                            command["Submit"]["id"],
+                            "00000000-0000-0000-0000-000000000007"
+                        );
+                        assert_eq!(
+                            command["Submit"]["content"]["parts"],
+                            json!([{"text":{"text":"hello"}}])
+                        );
+                        assert_eq!(request["params"]["operation"], command["Submit"]["id"]);
+                    } else {
+                        assert_eq!(
+                            *command,
+                            json!({"Answer":{"id":approval.as_ref().unwrap(),"answer":{"approval":{"choiceId":"decline-choice"}}}})
+                        );
+                    }
                     handled = true;
-                    json!({"turnId":"fixture-turn"})
+                    json!({})
                 }
                 Some(method) => panic!("unexpected command RPC: {method}"),
                 None => panic!("unframed approval response is retired"),
             };
             // Keep QUIC alive until the command consumes its reply and closes.
-            if writer
-                .reply(&request, json!({"result":result}))
-                .await
-                .is_err()
-            {
-                // The completed CLI can cancel any remaining initial read.
+            if let Err(error) = writer.reply(&request, json!({"result":result})).await {
+                eprintln!("CLI reply ended: {error}");
                 break;
+            }
+            if request["method"] == "host/conversation/change" && mode == "send" {
+                writer.notify(json!({"method":"fixture/session/change","session":{"provider":"codex","id":"fixture-thread"},"change":{"type":"turn","turn":{"id":"fixture-turn","status":"running","items":[{"id":"00000000-0000-0000-0000-000000000007","clientInputId":"00000000-0000-0000-0000-000000000007","status":"completed","body":{"inline":{"body":{"userMessage":{"content":[{"text":{"text":"hello"}}]}}}}}]},"completed":false}})).await.unwrap();
             }
         }
         session.close();
-        assert!(handled);
-        assert_eq!(reads, usize::from(mode == "send" || mode == "approve"));
-        if mode == "list" {
-            assert_eq!(lists, 1);
-        }
+        (handled, reads, lists)
     };
     let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-cli"))
         .arg("--ticket")
@@ -137,29 +142,31 @@ async fn exercise(command: &[&str], expected: Value) {
         );
         output
     };
-    let ((), output) = tokio::time::timeout(Duration::from_secs(20), async {
+    let ((handled, reads, lists), output) = tokio::time::timeout(Duration::from_secs(20), async {
         tokio::join!(server, child)
     })
     .await
     .expect("bounded CLI session");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        if mode == "list" {
-            serde_json::to_value(
-                serde_json::from_value::<agent_protocol::models::ThreadList>(expected).unwrap(),
-            )
-            .unwrap()
-        } else {
-            expected
-        }
-    );
+    assert!(handled);
+    assert_eq!(reads, usize::from(mode == "send" || mode == "approve"));
+    if mode == "list" {
+        assert_eq!(lists, 1);
+    }
+    let actual: Value = serde_json::from_slice(&output.stdout).unwrap();
+    if mode == "list" {
+        assert_eq!(actual["data"][0]["id"], expected["data"][0]["id"]);
+        assert_eq!(actual["data"][0]["name"], "Search result");
+        assert_eq!(actual["limit"], 11);
+    } else {
+        assert_eq!(actual, expected);
+    }
     endpoint.close().await;
 }
 #[tokio::test]
 async fn cli_lists_over_iroh() {
     exercise(
         &["list", "--limit", "11", "--search", "CLI search"],
-        json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5}),
+        json!({"data":[{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5}),
     )
     .await;
 }
@@ -171,7 +178,7 @@ async fn cli_sends_over_iroh() {
             r#"{"provider":"codex","id":"fixture-thread"}"#,
             "hello",
             "--client-message-id",
-            "fixture-message",
+            "00000000-0000-0000-0000-000000000007",
         ],
         json!("fixture-turn"),
     )

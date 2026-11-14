@@ -72,7 +72,7 @@ internal class AndroidMobileRepository(private val context: Context) {
                 throw AgentException.Failed(error.message ?: error.toString()).apply { initCause(error) }
             }
 
-        private val file = AtomicFile(File(directory, "agent-snapshot-${encodedId(id)}.json"))
+        private val file = AtomicFile(File(directory, "agent-snapshot-v3-${encodedId(id)}.json"))
 
         override fun load(): ByteArray = access {
             if (file.baseFile.exists()) file.openRead().use { it.readBytes() } else byteArrayOf()

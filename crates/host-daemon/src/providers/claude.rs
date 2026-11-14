@@ -137,7 +137,7 @@ impl Idle {
 struct Running {
     turn_id: agent_protocol::ids::TurnId,
     input: mpsc::Sender<Command>,
-    interrupt: watch::Receiver<Option<Result<(), String>>>,
+    interrupt: watch::Receiver<Option<(String, Result<(), String>)>>,
     effort: Option<String>,
     work: watch::Receiver<Work>,
 }
@@ -156,6 +156,7 @@ struct Work {
 const BACKGROUND_BLOCKS_CHANGE: &str = "Claudeのバックグラウンドのエージェントやコマンドが実行中のため、モデルや設定を変更するとそれらが終了します。完了を待つか停止してから、もう一度送信してください。: Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
 
 pub(crate) struct Command {
+    pub(crate) execution: Option<Uuid>,
     pub(crate) value: SdkInput,
     pub(crate) user: Option<Item>,
     /// Confirms the write; the SDK may not have assigned the input's turn yet.
@@ -247,7 +248,7 @@ impl Claude {
         let response = ThreadResponse {
             thread: Thread {
                 id: Some(SessionRef {
-                    provider: ProviderKind::Claude,
+                    provider: Some(ProviderKind::Claude),
                     id: session_id.to_string(),
                 }),
                 cwd: Some(cwd.to_string_lossy().into_owned()),
@@ -365,7 +366,7 @@ impl Claude {
             let record = record.lock().await;
             threads.push(Thread {
                 id: Some(SessionRef {
-                    provider: ProviderKind::Claude,
+                    provider: Some(ProviderKind::Claude),
                     id: record.session_id.to_string(),
                 }),
                 cwd: Some(record.cwd.clone()),
@@ -421,7 +422,7 @@ impl Claude {
                 };
                 let mut thread = Thread {
                     id: Some(SessionRef {
-                        provider: ProviderKind::Claude,
+                        provider: Some(ProviderKind::Claude),
                         id: id.into(),
                     }),
                     cwd: Some(record.cwd.clone()),
@@ -448,7 +449,7 @@ impl Claude {
         }
     }
 
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, OperationError> {
+    async fn read_item(&self, params: &op::ReadItem) -> Result<Item, OperationError> {
         let native = Uuid::parse_str(&params.thread_id.id).map_err(|_| "invalid Claude ID")?;
         let home = self.native_home.clone();
         let native_history = tokio::task::spawn_blocking(move || {
@@ -466,20 +467,7 @@ impl Claude {
         let item = &turns[turn].items.as_ref().unwrap()[item];
         let mut item = (**item).clone();
         if let Some(path) = native_history.output_paths.get(&item.id) {
-            use tokio::io::AsyncReadExt;
-            let file = tokio::fs::File::open(path)
-                .await
-                .map_err(|error| error.to_string())?;
-            let mut bytes = Vec::new();
-            file.take(history::MAX_FILE_BYTES + 1)
-                .read_to_end(&mut bytes)
-                .await
-                .map_err(|error| error.to_string())?;
-            if bytes.len() as u64 > history::MAX_FILE_BYTES {
-                return Err("native output exceeds parser read budget".into());
-            }
-            let content =
-                Value::String(String::from_utf8(bytes).map_err(|error| error.to_string())?);
+            let content = Value::String(read_tool_output(path).await?);
             item.body = ItemContent::Inline {
                 body: Box::new(native::tool_result_body(
                     item.body(),
@@ -509,10 +497,7 @@ impl Claude {
                 });
             }
         }
-        Ok(op::ItemResponse {
-            item,
-            transfer: None,
-        })
+        Ok(item)
     }
 
     async fn discard_workspace_processes(&self, directory: &Path) -> anyhow::Result<()> {
@@ -551,21 +536,23 @@ impl Claude {
             }
             (running.input.clone(), running.interrupt.clone())
         };
-        if interrupt.borrow().is_none() {
-            input
-                .send(Command {
-                    value: SdkInput::Interrupt {
-                        request_id: "interrupt".into(),
-                    },
-                    user: None,
-                    delivered: None,
-                })
-                .await
-                .map_err(|_| "Claude SDK input is closed")?;
-        }
+        let request_id = Uuid::new_v4().to_string();
+        input
+            .send(Command {
+                execution: None,
+                value: SdkInput::Interrupt {
+                    request_id: request_id.clone(),
+                },
+                user: None,
+                delivered: None,
+            })
+            .await
+            .map_err(|_| "Claude SDK input is closed")?;
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
-                if let Some(result) = interrupt.borrow().clone() {
+                if let Some((id, result)) = interrupt.borrow().clone()
+                    && id == request_id
+                {
                     return result;
                 }
                 interrupt
@@ -603,6 +590,7 @@ impl Claude {
         &self,
         params: &op::Submission,
         steer: Option<&str>,
+        execution: Uuid,
     ) -> Result<Option<agent_protocol::ids::TurnId>, OperationError> {
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
@@ -635,6 +623,7 @@ impl Claude {
         let (delivered, receipt) = tokio::sync::oneshot::channel();
         sender
             .send(Command {
+                execution: Some(execution),
                 value: if steer.is_some() {
                     SdkInput::Steer {
                         id: id.clone(),
@@ -681,6 +670,7 @@ impl Claude {
         &self,
         params: &op::Submission,
         browser: Option<Value>,
+        execution: Uuid,
     ) -> Result<agent_protocol::ids::TurnId, OperationError> {
         let record = self.record(&params.thread_id.id).await?;
         if self.stop.is_cancelled() {
@@ -801,10 +791,13 @@ impl Claude {
         });
         drop(state);
         let target = SessionRef {
-            provider: ProviderKind::Claude,
+            provider: Some(ProviderKind::Claude),
             id: params.thread_id.id.clone(),
         };
         let worker = Worker {
+            execution,
+            turn_scopes: [(turn_id.clone(), execution)].into(),
+            input_scopes: Default::default(),
             record,
             events: self.events.clone(),
             live: agent_protocol::session::Timeline {
@@ -837,6 +830,9 @@ impl Claude {
 }
 
 struct Worker {
+    execution: Uuid,
+    turn_scopes: HashMap<agent_protocol::ids::TurnId, Uuid>,
+    input_scopes: HashMap<agent_protocol::ids::ItemId, Uuid>,
     instance: Uuid,
     auth_revision: u64,
     record: Arc<AsyncMutex<Record>>,
@@ -847,9 +843,9 @@ struct Worker {
     input: mpsc::Sender<Command>,
     stop: CancellationToken,
     stream: Option<String>,
-    interrupt: watch::Sender<Option<Result<(), String>>>,
+    interrupt: watch::Sender<Option<(String, Result<(), String>)>>,
     work: watch::Sender<Work>,
-    /// The roster last published as the conversation's Waiting state.
+    /// The last published background roster, including while the turn is running.
     waiting: Vec<BackgroundTask>,
     /// Background work that ended while Claude waited, keyed by its task, for
     /// the notification that starts the turn Claude wakes for.
@@ -860,19 +856,69 @@ struct Worker {
     effort: Option<String>,
 }
 
+async fn read_tool_output(path: &str) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(history::MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > history::MAX_FILE_BYTES {
+        return Err("native output exceeds parser read budget".into());
+    }
+    String::from_utf8(bytes).map_err(|error| error.to_string())
+}
+
+async fn read_tool_output_tail(path: &str) -> Result<(String, bool), String> {
+    use agent_protocol::sync::TAIL_CHARS;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let length = file
+        .metadata()
+        .await
+        .map_err(|error| error.to_string())?
+        .len();
+    let offset = length.saturating_sub((TAIL_CHARS * 4 * 3) as u64);
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(length - offset)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    let boundary = if offset == 0 {
+        0
+    } else {
+        bytes
+            .iter()
+            .position(|byte| byte & 0xc0 != 0x80)
+            .unwrap_or(bytes.len())
+    };
+    Ok((
+        String::from_utf8_lossy(&bytes[boundary..]).into_owned(),
+        offset != 0,
+    ))
+}
+
 impl Worker {
     fn settled(&self) -> bool {
         self.work.borrow().settled
     }
 
-    /// Publishes what the answered response waits on, as T3 Code's Waiting roster.
+    /// Publishes the live background roster, as T3 Code's Waiting roster.
     async fn publish_waiting(&mut self, response: &ResponseState) -> Result<(), String> {
         self.work
             .send_modify(|work| work.background = response.has_background());
-        if response.waiting() == self.waiting.as_slice() {
+        if response.background_tasks() == self.waiting.as_slice() {
             return Ok(());
         }
-        self.waiting = response.waiting().to_vec();
+        self.waiting = response.background_tasks().to_vec();
         self.change(SessionChange::Background {
             tasks: self.waiting.clone(),
         })
@@ -999,6 +1045,13 @@ impl Worker {
             .as_mut()
             .ok_or("Claude execution state is unavailable")?
             .turn_id = turn_id.clone();
+        self.execution = self
+            .input_scopes
+            .get(&agent_protocol::ids::ItemId::from(turn_id.to_string()))
+            .copied()
+            .or_else(|| self.turn_scopes.get(&turn_id).copied())
+            .unwrap_or_else(Uuid::new_v4);
+        self.turn_scopes.insert(turn_id.clone(), self.execution);
         self.turn_id = turn_id.clone();
         self.reports.clear();
         self.wake_frame = None;
@@ -1071,12 +1124,28 @@ impl Worker {
         let (live, result) = change.apply_timeline(std::mem::take(&mut self.live));
         self.live = live;
         result.map_err(|e| e.to_string())?;
-        emit(
+        let input = match &change {
+            SessionChange::Item { item, .. }
+                if matches!(item.body(), ItemBody::UserMessage { .. }) =>
+            {
+                self.input_scopes.get(&item.id).copied()
+            }
+            _ => None,
+        };
+        let execution = input
+            .or_else(|| {
+                change
+                    .turn_id()
+                    .and_then(|id| self.turn_scopes.get(id).copied())
+            })
+            .unwrap_or(self.execution);
+        crate::providers::emit_for(
             &self.events,
             AgentChange::Session {
                 session: self.session.clone(),
                 change,
             },
+            Some(execution),
         )
         .await
     }
@@ -1088,6 +1157,7 @@ impl Worker {
                 let _ = events
                     .send(AgentEvent {
                         change: AgentChange::SourceClosed(instance),
+                        execution: None,
                         applied: None,
                     })
                     .await;
@@ -1101,7 +1171,7 @@ impl Worker {
                 let event = tokio::select! {
                     biased;
                     _ = self.stop.cancelled() => {
-                        response.interrupt();
+                        response.interrupt("shutdown");
                         process.write(&SdkInput::Interrupt { request_id: "shutdown".into() }).await?;
                         return Ok(());
                     }
@@ -1110,7 +1180,11 @@ impl Worker {
                     message = process.read() => message?.ok_or("Claude SDK exited before the turn completed")?,
                     command = input.recv() => {
                         let command = command.ok_or("Claude input queue is closed")?;
-                        let stops = matches!(command.value, SdkInput::Interrupt { .. });
+                        let stop=match &command.value {SdkInput::Interrupt {request_id}=>Some(request_id.clone()),_=>None};
+                        if let Some(id) = &stop && !response.interrupt(id) {
+                            self.interrupt.send_replace(Some((id.clone(), Ok(()))));
+                            continue;
+                        }
                         let steers = matches!(command.value, SdkInput::Steer { .. });
                         // Input after a settled answer starts its own turn, as in T3 Code.
                         let delivery = if self.settled() { InputDelivery::NewTurn } else { response.delivery() };
@@ -1119,11 +1193,6 @@ impl Worker {
                             if steers {
                                 response.steer();
                             }
-                        }
-                        // A requested stop owns the response's terminal result,
-                        // which can reach the Host before its acknowledgement.
-                        if stops {
-                            response.interrupt();
                         }
                         self.publish_waiting(&response).await?;
                         continue;
@@ -1143,9 +1212,8 @@ impl Worker {
                         continue;
                     }
                     SdkEvent::Interrupted { request_id, error } => {
-                        if request_id == "interrupt" {
-                            let result = response.interrupt_result(error);
-                            self.interrupt.send_replace(Some(result));
+                        if let Some(result)=response.interrupt_result(&request_id,error) {
+                            self.interrupt.send_replace(Some((request_id,result)));
                             // Only background work remains, so no result will follow.
                             if response.interrupted() && response.answered() {
                                 return Ok(());
@@ -1190,8 +1258,8 @@ impl Worker {
             }
         }.await;
         // The stopped response ended; a still unacknowledged stop has its effect.
-        if response.interrupted() && self.interrupt.borrow().is_none() {
-            self.interrupt.send_replace(Some(Ok(())));
+        if let Some(id) = response.pending_interrupt() {
+            self.interrupt.send_replace(Some((id.to_owned(), Ok(()))));
         }
         // Reject commands that lost the race with completion before retaining the process.
         drop(input);
@@ -1232,6 +1300,9 @@ impl Worker {
         if result.is_ok()
             && let Some(user) = command.user
         {
+            if let Some(execution) = command.execution {
+                self.input_scopes.insert(user.id.clone(), execution);
+            }
             // An answered response gives new input its own turn,
             // as in the transcript and T3 Code.
             if delivery == InputDelivery::NewTurn {
@@ -1399,7 +1470,7 @@ impl Worker {
             &self.turn_id,
             request,
         )?;
-        emit(
+        crate::providers::emit_for(
             &self.events,
             AgentChange::Request {
                 session: self.session.clone(),
@@ -1411,8 +1482,44 @@ impl Worker {
                 ),
                 request: adapted.request,
             },
+            Some(self.execution),
         )
         .await
+    }
+
+    // Background work may finish after its turn settled for a later input.
+    async fn complete_background(
+        &mut self,
+        outcome: &native::TaskOutcome<'_>,
+    ) -> Result<bool, String> {
+        let Some((turn_id, mut item)) = self.live.turns.iter().flatten().rev().find_map(|turn| {
+            let item = turn
+                .items
+                .iter()
+                .flatten()
+                .find(|item| item.id.as_str() == outcome.tool_id)?;
+            Some((turn.id.clone(), outcome.item(item.id.clone(), item.body())?))
+        }) else {
+            return Ok(false);
+        };
+        if let Some(path) = outcome.output_path
+            && let Ok((output, omitted)) = read_tool_output_tail(path).await
+        {
+            let mut body =
+                native::tool_result_body(item.body(), &Value::String(output), &Value::Null);
+            if let ItemBody::CommandExecution { output_omitted, .. } = &mut body {
+                *output_omitted = omitted;
+            }
+            item.body = ItemContent::Inline {
+                body: Box::new(body),
+            };
+        }
+        self.change(SessionChange::Item {
+            turn_id,
+            item: Arc::new(item),
+        })
+        .await?;
+        Ok(true)
     }
 
     async fn message(&mut self, message: Value) -> Result<(), String> {
@@ -1488,22 +1595,9 @@ impl Worker {
         } else {
             None
         };
-        // Background work can finish after its turn settled for a later input.
         if let Some(outcome) = outcome
-            && let Some((turn_id, item)) = self.live.turns.iter().flatten().rev().find_map(|turn| {
-                let item = turn
-                    .items
-                    .iter()
-                    .flatten()
-                    .find(|item| item.id.as_str() == outcome.tool_id)?;
-                Some((turn.id.clone(), outcome.item(item.id.clone(), item.body())?))
-            })
+            && self.complete_background(&outcome).await?
         {
-            self.change(SessionChange::Item {
-                turn_id,
-                item: Arc::new(item),
-            })
-            .await?;
             return Ok(());
         }
         if kind == "user" && message["origin"]["kind"] == "task-notification" {
@@ -2049,6 +2143,7 @@ impl crate::providers::AnswerSource for RequestSource {
         Ok(async move {
             let (delivered, receipt) = tokio::sync::oneshot::channel();
             permit.send(Command {
+                execution: None,
                 value: SdkInput::Answer {
                     request_id,
                     response: Some(result),
@@ -2076,212 +2171,9 @@ impl crate::providers::AnswerSource for RequestSource {
 }
 
 #[async_trait::async_trait]
-impl Agent for Claude {
+impl crate::providers::Configuration for Claude {
     fn data_recipient(&self) -> &'static str {
         "Anthropic"
-    }
-    fn capabilities(&self) -> agent_protocol::session::Capabilities {
-        agent_protocol::session::Capabilities {
-            feedback: false,
-            steer: true,
-            fork: true,
-            rename: false,
-            model_change: true,
-        }
-    }
-    fn validate_create(&self) -> Result<(), Failure> {
-        if self.stop.is_cancelled() {
-            return Err(Failure::new(
-                "provider_unavailable",
-                "agent is shutting down",
-            ));
-        }
-        Ok(())
-    }
-    fn availability(&self) -> Result<(), Failure> {
-        self.validate_create()?;
-        let path = std::env::var_os("PATH");
-        process::executable(&self.program, path.as_deref())
-            .map_err(|error| Failure::new("provider_unavailable", error))?;
-        process::runtime().map_err(|error| Failure::new("provider_unavailable", error))?;
-        Ok(())
-    }
-    fn storage_directory(&self) -> &Path {
-        &self.native_home
-    }
-    async fn list(
-        &self,
-        search: &str,
-        cursor: Option<String>,
-        scope: SessionListScope<'_>,
-        limit: u32,
-    ) -> Result<SessionPage, Failure> {
-        let owned = match scope {
-            SessionListScope::Descendants(_) => {
-                return Ok(SessionPage {
-                    data: vec![],
-                    next_cursor: None,
-                });
-            }
-            SessionListScope::Loaded => {
-                let limit = limit.max(1) as usize;
-                let mut threads = self.loaded_threads().await;
-                threads.sort_by(|a, b| a.id.cmp(&b.id));
-                let mut data: Vec<_> = threads
-                    .into_iter()
-                    .filter(|thread| {
-                        cursor
-                            .as_ref()
-                            .is_none_or(|cursor| thread.id.as_ref().unwrap().id > *cursor)
-                    })
-                    .take(limit + 1)
-                    .map(|thread| SessionSummary {
-                        thread,
-                        branch: None,
-                    })
-                    .collect();
-                let next_cursor = (data.len() > limit).then(|| {
-                    data.truncate(limit);
-                    data.last().unwrap().thread.id.as_ref().unwrap().id.clone()
-                });
-                return Ok(SessionPage { data, next_cursor });
-            }
-            SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => Some(
-                owned
-                    .iter()
-                    .filter(|id| id.provider == ProviderKind::Claude)
-                    .map(|id| id.id.clone())
-                    .collect(),
-            ),
-            SessionListScope::All => None,
-        };
-        Claude::list(self, search, cursor, owned, limit)
-            .await
-            .map_err(|e| Failure::new("session_list_failed", e))
-    }
-
-    async fn open(
-        &self,
-        id: &str,
-        limit: usize,
-        _include_activity: bool,
-    ) -> Result<ThreadResponse, Failure> {
-        self.read(id, Some(limit))
-            .await
-            .map_err(|e| Failure::new("session_read_failed", e))
-    }
-    async fn read_history(
-        &self,
-        id: &str,
-        cursor: &str,
-        _include_activity: bool,
-    ) -> Result<agent_protocol::session::HistoryPage, Failure> {
-        let end = cursor
-            .parse::<usize>()
-            .ok()
-            .filter(|end| *end > 0)
-            .ok_or_else(|| Failure::new("invalid_cursor", "invalid Claude history cursor"))?;
-        let native =
-            Uuid::parse_str(id).map_err(|error| Failure::new("session_read_failed", error))?;
-        let home = self.native_home.clone();
-        tokio::task::spawn_blocking(move || {
-            history::read_page(&history::resolve(&home, native)?, end)
-        })
-        .await
-        .map_err(|error| Failure::new("session_read_failed", error))?
-        .map_err(|error| Failure::new("session_read_failed", error))
-    }
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure> {
-        Claude::read_item(self, params).await.map_err(Into::into)
-    }
-    async fn read_turn_items(
-        &self,
-        _id: &str,
-        _turn_id: &agent_protocol::ids::TurnId,
-    ) -> Result<Vec<Arc<agent_protocol::models::Item>>, Failure> {
-        Err(Failure::new(
-            "unsupported_operation",
-            "Claude already loads turn activity",
-        ))
-    }
-    async fn create(
-        &self,
-        cwd: &str,
-        model: Option<&str>,
-        _browser: Option<Value>,
-    ) -> Result<ThreadResponse, Failure> {
-        Claude::create(self, cwd, model.unwrap_or("default"))
-            .await
-            .map_err(|e| Failure::new("provider_unavailable", e))
-    }
-    async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
-        // Queued input needs the owned runtime and current titles, not a replay
-        // of its transcript. Idle sessions still observe native history changes.
-        let record = self.records.lock().await.get(id).cloned();
-        let running_model = if let Some(record) = record {
-            let record = record.lock().await;
-            record.running.as_ref().map(|_| record.model.clone())
-        } else {
-            None
-        };
-        let mut response = self
-            .read(id, running_model.is_none().then_some(1))
-            .await
-            .map_err(|e| Failure::new("session_read_failed", e))?;
-        if let Some(model) = running_model {
-            response.model = Some(agent_protocol::models::ModelRef {
-                provider: ProviderKind::Claude,
-                id: model,
-            });
-        }
-        let record = self.records.lock().await.get(id).cloned();
-        if let Some(record) = record {
-            let record = record.lock().await;
-            // A settled answer waits on background work without a running turn.
-            if let Some(running) = record
-                .running
-                .as_ref()
-                .filter(|running| !running.work.borrow().settled)
-            {
-                response.thread.status = SessionStatus::Running;
-                response.thread.turns = Some(vec![Arc::new(Turn {
-                    id: running.turn_id.clone(),
-                    status: TurnStatus::Running,
-                    ..Default::default()
-                })]);
-            }
-        }
-        Ok(SubmissionState {
-            response,
-            needs_reload: false,
-        })
-    }
-    async fn submit(
-        &self,
-        input: &op::Submission,
-        route: crate::providers::SubmissionTarget<'_>,
-        _reload: bool,
-        browser: Option<Value>,
-    ) -> Result<op::SubmissionReceipt, Failure> {
-        use crate::providers::SubmissionTarget;
-        let turn_id = match route {
-            SubmissionTarget::Steer(turn) => self.send_running(input, Some(turn)).await?,
-            // Claude waiting on background work after its answer runs the
-            // input as its next turn.
-            SubmissionTarget::Start { .. } if self.takes_input(&input.thread_id.id).await => {
-                self.send_running(input, None).await?
-            }
-            SubmissionTarget::Start { .. } => Some(self.start_turn(input, browser).await?),
-        };
-        Ok(op::SubmissionReceipt { turn_id })
-    }
-    async fn interrupt(
-        &self,
-        id: &str,
-        turn: &agent_protocol::ids::TurnId,
-    ) -> Result<agent_protocol::models::Empty, Failure> {
-        Claude::interrupt(self, id, turn).await?;
-        Ok(agent_protocol::models::Empty {})
     }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
         Ok(op::ModelPage {
@@ -2363,6 +2255,223 @@ impl Agent for Claude {
         }
         catalog
     }
+    async fn read_permissions(
+        &self,
+    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
+        permissions::read_claude_permissions(&self.native_home)
+    }
+    async fn update_permissions(
+        &self,
+        mode: agent_protocol::permissions::PermissionMode,
+        version: &str,
+    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
+        permissions::update_claude_permissions(&self.native_home, mode, version)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::providers::Discovery for Claude {
+    fn storage_directory(&self) -> &Path {
+        &self.native_home
+    }
+    async fn list(
+        &self,
+        search: &str,
+        cursor: Option<String>,
+        scope: SessionListScope<'_>,
+        limit: u32,
+    ) -> Result<SessionPage, Failure> {
+        let owned = match scope {
+            SessionListScope::Descendants(_) => {
+                return Ok(SessionPage {
+                    data: vec![],
+                    next_cursor: None,
+                });
+            }
+            SessionListScope::Loaded => {
+                let limit = limit.max(1) as usize;
+                let mut threads = self.loaded_threads().await;
+                threads.sort_by(|a, b| a.id.cmp(&b.id));
+                let mut data: Vec<_> = threads
+                    .into_iter()
+                    .filter(|thread| {
+                        cursor
+                            .as_ref()
+                            .is_none_or(|cursor| thread.id.as_ref().unwrap().id > *cursor)
+                    })
+                    .take(limit + 1)
+                    .map(|thread| SessionSummary {
+                        thread,
+                        branch: None,
+                    })
+                    .collect();
+                let next_cursor = (data.len() > limit).then(|| {
+                    data.truncate(limit);
+                    data.last().unwrap().thread.id.as_ref().unwrap().id.clone()
+                });
+                return Ok(SessionPage { data, next_cursor });
+            }
+            SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => Some(
+                owned
+                    .iter()
+                    .filter(|id| id.provider == Some(ProviderKind::Claude))
+                    .map(|id| id.id.clone())
+                    .collect(),
+            ),
+            SessionListScope::All => None,
+        };
+        Claude::list(self, search, cursor, owned, limit)
+            .await
+            .map_err(|e| Failure::new("session_list_failed", e))
+    }
+
+    async fn open(
+        &self,
+        id: &str,
+        limit: usize,
+        _include_activity: bool,
+    ) -> Result<ThreadResponse, Failure> {
+        self.read(id, Some(limit))
+            .await
+            .map_err(|e| Failure::new("session_read_failed", e))
+    }
+    async fn read_history(
+        &self,
+        id: &str,
+        cursor: &str,
+        _include_activity: bool,
+    ) -> Result<agent_protocol::session::HistoryPage, Failure> {
+        let end = cursor
+            .parse::<usize>()
+            .ok()
+            .filter(|end| *end > 0)
+            .ok_or_else(|| Failure::new("invalid_cursor", "invalid Claude history cursor"))?;
+        let native =
+            Uuid::parse_str(id).map_err(|error| Failure::new("session_read_failed", error))?;
+        let home = self.native_home.clone();
+        tokio::task::spawn_blocking(move || {
+            history::read_page(&history::resolve(&home, native)?, end)
+        })
+        .await
+        .map_err(|error| Failure::new("session_read_failed", error))?
+        .map_err(|error| Failure::new("session_read_failed", error))
+    }
+    async fn read_item(&self, params: &op::ReadItem) -> Result<Item, Failure> {
+        Claude::read_item(self, params).await.map_err(Into::into)
+    }
+}
+
+#[async_trait::async_trait]
+impl Agent for Claude {
+    fn capabilities(&self) -> agent_protocol::session::Capabilities {
+        agent_protocol::session::Capabilities {
+            steer: true,
+            fork: true,
+            model_change: true,
+            ..Default::default()
+        }
+    }
+    fn validate_create(&self) -> Result<(), Failure> {
+        if self.stop.is_cancelled() {
+            return Err(Failure::new(
+                "provider_unavailable",
+                "agent is shutting down",
+            ));
+        }
+        Ok(())
+    }
+    fn availability(&self) -> Result<(), Failure> {
+        self.validate_create()?;
+        let path = std::env::var_os("PATH");
+        process::executable(&self.program, path.as_deref())
+            .map_err(|error| Failure::new("provider_unavailable", error))?;
+        process::runtime().map_err(|error| Failure::new("provider_unavailable", error))?;
+        Ok(())
+    }
+    async fn create(
+        &self,
+        cwd: &str,
+        model: Option<&str>,
+        _browser: Option<Value>,
+    ) -> Result<ThreadResponse, Failure> {
+        Claude::create(self, cwd, model.unwrap_or("default"))
+            .await
+            .map_err(|e| Failure::new("provider_unavailable", e))
+    }
+    async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
+        // Queued input needs the owned runtime and current titles, not a replay
+        // of its transcript. Idle sessions still observe native history changes.
+        let record = self.records.lock().await.get(id).cloned();
+        let running_model = if let Some(record) = record {
+            let record = record.lock().await;
+            record.running.as_ref().map(|_| record.model.clone())
+        } else {
+            None
+        };
+        let mut response = self
+            .read(id, running_model.is_none().then_some(1))
+            .await
+            .map_err(|e| Failure::new("session_read_failed", e))?;
+        if let Some(model) = running_model {
+            response.model = Some(agent_protocol::models::ModelRef {
+                provider: ProviderKind::Claude,
+                id: model,
+            });
+        }
+        let record = self.records.lock().await.get(id).cloned();
+        if let Some(record) = record {
+            let record = record.lock().await;
+            // A settled answer waits on background work without a running turn.
+            if let Some(running) = record
+                .running
+                .as_ref()
+                .filter(|running| !running.work.borrow().settled)
+            {
+                response.thread.status = SessionStatus::Running;
+                response.thread.turns = Some(vec![Arc::new(Turn {
+                    id: running.turn_id.clone(),
+                    status: TurnStatus::Running,
+                    ..Default::default()
+                })]);
+            }
+        }
+        Ok(SubmissionState {
+            response,
+            needs_reload: false,
+        })
+    }
+    async fn submit(
+        &self,
+        input: &op::Submission,
+        route: crate::providers::SubmissionTarget<'_>,
+        _reload: bool,
+        browser: Option<Value>,
+        execution: uuid::Uuid,
+    ) -> Result<op::SubmissionReceipt, Failure> {
+        use crate::providers::SubmissionTarget;
+        let turn_id = match route {
+            SubmissionTarget::Steer(turn) => {
+                self.send_running(input, Some(turn), execution).await?
+            }
+            // Claude waiting on background work after its answer runs the
+            // input as its next turn.
+            SubmissionTarget::Start { .. } if self.takes_input(&input.thread_id.id).await => {
+                self.send_running(input, None, execution).await?
+            }
+            SubmissionTarget::Start { .. } => {
+                Some(self.start_turn(input, browser, execution).await?)
+            }
+        };
+        Ok(op::SubmissionReceipt { turn_id })
+    }
+    async fn interrupt(
+        &self,
+        id: &str,
+        turn: &agent_protocol::ids::TurnId,
+    ) -> Result<agent_protocol::models::Empty, Failure> {
+        Claude::interrupt(self, id, turn).await?;
+        Ok(agent_protocol::models::Empty {})
+    }
     async fn workspace_idle_warning(&self, id: &str) -> Option<&'static str> {
         let record = self.records.lock().await.get(id).cloned();
         if let Some(record) = record
@@ -2397,18 +2506,6 @@ impl Agent for Claude {
                 .map_err(|error| Failure::new("provider_unload_failed", error))?;
         }
         Ok(())
-    }
-    async fn read_permissions(
-        &self,
-    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
-        permissions::read_claude_permissions(&self.native_home)
-    }
-    async fn update_permissions(
-        &self,
-        mode: agent_protocol::permissions::PermissionMode,
-        version: &str,
-    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
-        permissions::update_claude_permissions(&self.native_home, mode, version)
     }
     async fn fork(
         &self,
@@ -2477,16 +2574,6 @@ impl Agent for Claude {
             .await
             .map_err(|error| failure(format!("{error:#}")))
     }
-    async fn rename(
-        &self,
-        _id: &str,
-        _name: &str,
-    ) -> Result<agent_protocol::models::Empty, Failure> {
-        Err(Failure::new(
-            "unsupported_operation",
-            "rename is unsupported by this provider",
-        ))
-    }
     fn event_stream(&self) -> Option<mpsc::Receiver<AgentEvent>> {
         self.event_receiver
             .lock()
@@ -2506,7 +2593,7 @@ impl Agent for Claude {
 }
 
 #[cfg(test)]
-mod execution_tests {
+pub(crate) mod execution_tests {
     use super::*;
 
     #[tokio::test]
@@ -2723,9 +2810,15 @@ mod execution_tests {
         let mut observed = Vec::new();
         let mut running = 0;
         for expected_count in [50, 50, 25] {
-            let page = Agent::list(&claude, "", cursor, SessionListScope::Loaded, 50)
-                .await
-                .unwrap();
+            let page = crate::providers::Discovery::list(
+                &claude,
+                "",
+                cursor,
+                SessionListScope::Loaded,
+                50,
+            )
+            .await
+            .unwrap();
             assert_eq!(page.data.len(), expected_count);
             for summary in page.data {
                 assert!(summary.thread.turns.is_none());
@@ -2738,7 +2831,7 @@ mod execution_tests {
         assert_eq!(observed, expected);
         assert_eq!(running, 1);
         assert!(cursor.is_none());
-        let page = Agent::list(
+        let page = crate::providers::Discovery::list(
             &claude,
             "",
             Some(expected[74].clone()),
@@ -2749,12 +2842,13 @@ mod execution_tests {
         .unwrap();
         assert_eq!(page.data.len(), 50);
         assert!(page.next_cursor.is_none());
-        let page = Agent::list(&claude, "", None, SessionListScope::Loaded, 0)
-            .await
-            .unwrap();
+        let page =
+            crate::providers::Discovery::list(&claude, "", None, SessionListScope::Loaded, 0)
+                .await
+                .unwrap();
         assert_eq!(page.data.len(), 1);
         assert!(page.next_cursor.is_some());
-        let page = Agent::list(
+        let page = crate::providers::Discovery::list(
             &claude,
             "",
             Some(expected.last().unwrap().clone()),
@@ -2764,9 +2858,10 @@ mod execution_tests {
         .await
         .unwrap();
         assert!(page.data.is_empty() && page.next_cursor.is_none());
-        let recent = Agent::list(&claude, "", None, SessionListScope::Roots(&[]), 30)
-            .await
-            .unwrap();
+        let recent =
+            crate::providers::Discovery::list(&claude, "", None, SessionListScope::Roots(&[]), 30)
+                .await
+                .unwrap();
         assert_eq!(
             recent.data.len(),
             1,
@@ -2796,11 +2891,11 @@ mod execution_tests {
         .unwrap();
         let owned = [
             SessionRef {
-                provider: ProviderKind::Claude,
+                provider: Some(ProviderKind::Claude),
                 id: Uuid::from_u128(1).to_string(),
             },
             SessionRef {
-                provider: ProviderKind::Codex,
+                provider: Some(ProviderKind::Codex),
                 id: Uuid::from_u128(2).to_string(),
             },
         ];
@@ -2816,13 +2911,14 @@ mod execution_tests {
                 vec!["cli", "sdk-cli", "sdk-py", "sdk-ts"],
             ),
         ] {
-            let mut listed: Vec<_> = Agent::list(&claude, "", None, scope, 10)
-                .await
-                .unwrap()
-                .data
-                .into_iter()
-                .map(|summary| summary.thread.preview.unwrap())
-                .collect();
+            let mut listed: Vec<_> =
+                crate::providers::Discovery::list(&claude, "", None, scope, 10)
+                    .await
+                    .unwrap()
+                    .data
+                    .into_iter()
+                    .map(|summary| summary.thread.preview.unwrap())
+                    .collect();
             listed.sort();
             assert_eq!(listed, expected);
         }
@@ -2874,20 +2970,22 @@ mod execution_tests {
             // A turn that ended or changed takes no steer.
             assert_eq!(
                 claude
-                    .send_running(&submission, Some("earlier"))
+                    .send_running(&submission, Some("earlier"), Uuid::new_v4())
                     .await
                     .unwrap_err()
                     .delivery,
                 agent_transport::peer::Delivery::NotSent
             );
-            let (result, ()) =
-                tokio::join!(claude.send_running(&submission, Some("turn")), async move {
+            let (result, ()) = tokio::join!(
+                claude.send_running(&submission, Some("turn"), Uuid::new_v4()),
+                async move {
                     if enqueued {
                         // Once accepted by the worker queue, closing the receipt
                         // does not establish whether the native write happened.
                         drop(receiver.recv().await.unwrap());
                     }
-                },);
+                },
+            );
             assert_eq!(
                 result.unwrap_err().delivery,
                 if enqueued {
@@ -2954,7 +3052,7 @@ mod execution_tests {
             // A forwarded input reaches the worker queue, which drops it unwritten.
             let worker = tokio::spawn(async move { receiver.recv().await.is_some() });
             let error = claude
-                .send_running(&submission(model, effort), None)
+                .send_running(&submission(model, effort), None, Uuid::new_v4())
                 .await
                 .unwrap_err();
             record.lock().await.running = None;
@@ -3031,14 +3129,37 @@ mod execution_tests {
             "message:0"
         );
     }
-    /// A worker in turn `turn` whose changes reach `router`.
-    fn routed_worker() -> (crate::host_rpc::routing::SessionRouter, SessionRef, Worker) {
-        let router = crate::host_rpc::routing::SessionRouter::new();
+    #[derive(Clone, Default)]
+    struct Observed(Arc<std::sync::Mutex<agent_protocol::models::Thread>>);
+    impl Observed {
+        fn apply(&self, change: SessionChange) -> Result<(), String> {
+            let mut thread = self.0.lock().unwrap();
+            *thread = change.apply(&thread).map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        fn turn(&self, turn: &str) -> Option<Arc<Turn>> {
+            self.0
+                .lock()
+                .unwrap()
+                .turns
+                .iter()
+                .flatten()
+                .rev()
+                .find(|candidate| candidate.id.as_str() == turn)
+                .cloned()
+        }
+    }
+
+    fn routed_worker() -> (Observed, SessionRef, Worker) {
+        let router = Observed::default();
         let (events, mut receiver) = mpsc::channel::<AgentEvent>(256);
         let consumer = router.clone();
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                let result = consumer.apply(event.change, &[]);
+                let result = match event.change {
+                    AgentChange::Session { change, .. } => consumer.apply(change),
+                    _ => Ok(()),
+                };
                 if let Some(applied) = event.applied {
                     let _ = applied.send(result);
                 }
@@ -3046,19 +3167,21 @@ mod execution_tests {
         });
         let uuid = Uuid::new_v4();
         let session = SessionRef::new(ProviderKind::Claude, uuid.to_string()).unwrap();
-        router.session_change(
-            &session,
-            SessionChange::Turn {
+        router
+            .apply(SessionChange::Turn {
                 turn: agent_protocol::models::Turn {
                     id: "turn".into(),
                     ..Default::default()
                 },
                 completed: false,
-            },
-        );
+            })
+            .unwrap();
         let (input, _receiver) = mpsc::channel(1);
         let (interrupt, interrupted) = watch::channel(None);
         let worker = Worker {
+            execution: Uuid::new_v4(),
+            turn_scopes: Default::default(),
+            input_scopes: Default::default(),
             instance: Uuid::new_v4(),
             auth_revision: 0,
             record: Arc::new(AsyncMutex::new(Record {
@@ -3098,6 +3221,187 @@ mod execution_tests {
         };
         (router, session, worker)
     }
+
+    /// Exercise the production process reader and response/input state machine.
+    /// The reference query bridge has no idle envelope: its returned result is
+    /// adapted to Bex's explicit response-idle envelope for these text-only queries.
+    pub(crate) async fn replay_sdk(
+        rows: &[Value],
+        events: mpsc::Sender<AgentEvent>,
+    ) -> Result<(SessionRef, tokio::task::JoinHandle<()>, CancellationToken), String> {
+        let (_, _, mut worker) = routed_worker();
+        worker.events = events;
+        let native = rows
+            .iter()
+            .filter(|row| row["type"] == "emit_inbound")
+            .map(|row| &row["frame"])
+            .filter(|frame| frame["type"] == "system" && frame["subtype"] == "init")
+            .find_map(|frame| frame["session_id"].as_str())
+            .unwrap();
+        worker.record.lock().await.session_id = Uuid::parse_str(native).unwrap();
+        worker.session = SessionRef::new(ProviderKind::Claude, native.into()).unwrap();
+        let session = worker.session.clone();
+        let prompt = rows
+            .iter()
+            .find(|row| row["type"] == "expect_outbound" && row["frame"]["type"] == "prompt.offer")
+            .unwrap();
+        worker
+            .change(SessionChange::Item {
+                turn_id: worker.turn_id.clone(),
+                item: Arc::new(Item::new(
+                    "replay-input-0".into(),
+                    ItemStatus::Completed,
+                    ItemBody::UserMessage {
+                        text: Some(
+                            prompt["frame"]["message"]["message"]["content"]
+                                .as_str()
+                                .unwrap()
+                                .into(),
+                        ),
+                        content: Vec::new(),
+                    },
+                )),
+            })
+            .await?;
+        let (input, receiver) = mpsc::channel(1);
+        worker.input = input;
+        let file = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+        std::fs::write(
+            file.path(),
+            serde_json::to_vec(rows).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let script = r#"
+import { readFileSync } from 'node:fs';
+const rows = JSON.parse(readFileSync(process.argv[1], 'utf8'));
+const emit = event => process.stdout.write(JSON.stringify(event)+'\n');
+emit({type:'ready',initialized:{}});
+for (const row of rows) {
+  if(row.type!=='emit_inbound') continue;
+  // This bridge supplies the input UUID for the single offered query.
+  const message=['assistant','result'].includes(row.frame.type) ? {...row.frame,user_message_uuid:'replay-input-0'} : row.frame;
+  emit({type:'message',message});
+  if(row.frame.type==='result') emit({type:'message',message:{type:'system',subtype:'session_state_changed',state:'idle'}});
+}
+"#;
+        let path = std::env::var_os("PATH");
+        let node = process::executable(Path::new("node"), path.as_deref())?;
+        let mut command = tokio::process::Command::new(node);
+        command
+            .args(["--input-type=module", "-e", script])
+            .arg(file.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut process = Process::spawn_command(command)?;
+        assert!(matches!(
+            process.read().await?,
+            Some(SdkEvent::Ready { .. })
+        ));
+        let stop = worker.stop.clone();
+        let running = tokio::spawn(worker.run(process, receiver));
+        Ok((session, running, stop))
+    }
+
+    #[tokio::test]
+    async fn recorded_claude_sdk_messages_cross_the_native_content_adapter() {
+        let manifest: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/manifest.json")).unwrap();
+        for recording in manifest
+            .iter()
+            .filter(|entry| entry["provider"] == "claude")
+        {
+            let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/providers/fixtures")
+                .join(recording["file"].as_str().unwrap());
+            let (observed, _, mut worker) = routed_worker();
+            let rows: Vec<Value> = std::fs::read_to_string(file)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            for (index, row) in rows.iter().enumerate() {
+                if row["type"] == "expect_outbound" && row["frame"]["type"] == "query.open" {
+                    let native = rows[index + 1..]
+                        .iter()
+                        .take_while(|row| row["frame"]["type"] != "query.open")
+                        .filter(|row| {
+                            row["type"] == "emit_inbound"
+                                && row["frame"]["type"] == "system"
+                                && row["frame"]["subtype"] == "init"
+                        })
+                        .find_map(|row| row["frame"]["session_id"].as_str())
+                        .or_else(|| row["frame"]["options"]["sessionId"].as_str())
+                        .or_else(|| row["frame"]["options"]["resume"].as_str())
+                        .unwrap();
+                    worker.record.lock().await.session_id = Uuid::parse_str(native).unwrap();
+                    worker.session = SessionRef::new(ProviderKind::Claude, native.into()).unwrap();
+                }
+                if row["type"] != "emit_inbound" {
+                    continue;
+                }
+                let frame = row["frame"].clone();
+                if frame["type"] == "permission.request" {
+                    continue;
+                }
+                worker
+                    .message(frame)
+                    .await
+                    .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording["file"]));
+            }
+            if recording["scenario"] == "simple" {
+                let turn = observed.turn("turn").unwrap();
+                assert!(turn.items.iter().flatten().any(|item| matches!(item.body(), ItemBody::AssistantText {text,..} if text == "fixture simple ok")));
+            }
+        }
+    }
+    #[tokio::test]
+    async fn background_completion_marks_only_actually_truncated_output() {
+        for text in ["short 日".into(), "日".repeat(1_000_000)] {
+            let (observed, _, mut worker) = routed_worker();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), &text).unwrap();
+            worker
+                .change(SessionChange::Item {
+                    turn_id: "turn".into(),
+                    item: Arc::new(Item::new(
+                        "command".into(),
+                        ItemStatus::Running,
+                        ItemBody::CommandExecution {
+                            command: "echo output".into(),
+                            cwd: None,
+                            output: String::new(),
+                            output_omitted: false,
+                            exit_code: None,
+                        },
+                    )),
+                })
+                .await
+                .unwrap();
+            let outcome = native::task_outcome(
+                Some("command"),
+                Some("completed"),
+                Some("done"),
+                file.path().to_str(),
+            )
+            .unwrap();
+            assert!(worker.complete_background(&outcome).await.unwrap());
+            let turn = observed.turn("turn").unwrap();
+            let item = turn
+                .items
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|item| item.id.as_str() == "command")
+                .unwrap();
+            assert!(
+                matches!(item.body(), ItemBody::CommandExecution { output, output_omitted, .. } if text.ends_with(output) && *output_omitted == (text.len() > agent_protocol::sync::TAIL_CHARS * 4 * 3))
+            );
+            assert_eq!(item.status, ItemStatus::Completed);
+        }
+    }
+
     #[tokio::test]
     async fn sdk_completion_and_input_echo_assign_the_actual_turn() {
         let path = std::env::var_os("PATH");
@@ -3203,6 +3507,7 @@ for await (const line of createInterface({input: process.stdin})) {
                 receipts.push(receipt);
                 input
                     .send(Command {
+                        execution: None,
                         value: SdkInput::Message {
                             id: (*id).into(),
                             content: content.clone(),
@@ -3264,6 +3569,70 @@ for await (const line of createInterface({input: process.stdin})) {
     }
 
     #[tokio::test]
+    async fn repeated_stop_after_confirmation_acknowledges_without_another_sdk_write() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let path = std::env::var_os("PATH");
+            let node = process::executable(Path::new("node"), path.as_deref()).unwrap();
+            let script = r#"
+import { createInterface } from 'node:readline';
+const emit = event => process.stdout.write(JSON.stringify(event) + '\n');
+emit({ type: 'ready', initialized: {} });
+for await (const line of createInterface({input: process.stdin})) {
+  const {type, requestId} = JSON.parse(line);
+  if (type !== 'interrupt') continue;
+  if (requestId === 'second') throw new Error('a confirmed stop must not be sent twice');
+  emit({type: 'interrupted', requestId});
+}
+"#;
+            let mut command = tokio::process::Command::new(node);
+            command
+                .args(["--input-type=module", "-e", script])
+                .kill_on_drop(true);
+            let mut process = Process::spawn_command(command).unwrap();
+            assert!(matches!(
+                process.read().await.unwrap(),
+                Some(SdkEvent::Ready { .. })
+            ));
+            let (_, _, mut worker) = routed_worker();
+            let stop = worker.stop.clone();
+            let mut acknowledged = worker.interrupt.subscribe();
+            let (events, mut changes) = mpsc::channel::<AgentEvent>(256);
+            worker.events = events;
+            let drain = tokio::spawn(async move {
+                while let Some(event) = changes.recv().await {
+                    if let Some(applied) = event.applied {
+                        let _ = applied.send(Ok(()));
+                    }
+                }
+            });
+            let (input, receiver) = mpsc::channel(1);
+            let run = tokio::spawn(worker.run(process, receiver));
+            for id in ["first", "second"] {
+                input
+                    .send(Command {
+                        execution: None,
+                        value: SdkInput::Interrupt {
+                            request_id: id.into(),
+                        },
+                        user: None,
+                        delivered: None,
+                    })
+                    .await
+                    .unwrap();
+                acknowledged
+                    .wait_for(|result| matches!(result, Some((current, Ok(()))) if current == id))
+                    .await
+                    .unwrap();
+            }
+            stop.cancel();
+            run.await.unwrap();
+            drain.await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn stop_ends_the_response_interrupted_in_either_acknowledgement_order() {
         let path = std::env::var_os("PATH");
         let node = process::executable(Path::new("node"), path.as_deref()).unwrap();
@@ -3313,6 +3682,7 @@ for await (const line of createInterface({input: process.stdin})) {
             let (input, receiver) = mpsc::channel(1);
             input
                 .send(Command {
+                    execution: None,
                     value: SdkInput::Interrupt {
                         request_id: "interrupt".into(),
                     },
@@ -3349,7 +3719,7 @@ for await (const line of createInterface({input: process.stdin})) {
                 .unwrap();
             assert_eq!(ended.status, TurnStatus::Interrupted, "{first}");
             assert!(ended.error.is_none(), "{first}: {:?}", ended.error);
-            assert_eq!(*stopped.borrow(), Some(Ok(())), "{first}");
+            assert!(matches!(&*stopped.borrow(), Some((_, Ok(())))), "{first}");
         }
     }
 
@@ -3544,7 +3914,7 @@ for await (const line of createInterface({input: process.stdin})) {
             process.read().await.unwrap(),
             Some(SdkEvent::Ready { .. })
         ));
-        let (router, session, mut worker) = routed_worker();
+        let (router, _, mut worker) = routed_worker();
         let (input, receiver) = mpsc::channel(2);
         worker.input = input.clone();
         let record = worker.record.clone();
@@ -3558,11 +3928,7 @@ for await (const line of createInterface({input: process.stdin})) {
             observed
         };
         let run = tokio::spawn(worker.run(process, receiver));
-        let roster = |router: &crate::host_rpc::routing::SessionRouter| {
-            router
-                .overlay_execution(&session, agent_protocol::models::Thread::default())
-                .background
-        };
+        let roster = |router: &Observed| router.0.lock().unwrap().background.clone();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while roster(&router).len() < 3 {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -3600,6 +3966,7 @@ for await (const line of createInterface({input: process.stdin})) {
         );
         input
             .send(Command {
+                execution: None,
                 value: SdkInput::Interrupt {
                     request_id: "interrupt".into(),
                 },
@@ -3617,7 +3984,7 @@ for await (const line of createInterface({input: process.stdin})) {
 
     #[tokio::test]
     async fn background_work_reports_to_the_turn_it_ran_in_after_input_opens_another() {
-        let (router, session, mut worker) = routed_worker();
+        let (router, _, mut worker) = routed_worker();
         worker
             .message(json!({"type":"assistant","message":{"id":"call","content":[
                 {"type":"tool_use","id":"work","name":"Bash","input":{"command":"work"}}]}}))
@@ -3656,7 +4023,7 @@ for await (const line of createInterface({input: process.stdin})) {
             .find(|item| item.id == "work".into())
             .unwrap();
         assert_eq!(work.status, ItemStatus::Completed);
-        let next = router.current_turn(&session, "next").unwrap();
+        let next = router.turn("next").unwrap();
         assert_eq!(next.status, TurnStatus::Running);
         assert!(
             next.items
@@ -3710,7 +4077,7 @@ for await (const line of createInterface({input: process.stdin})) {
         }
         worker.message(json!({"type":"assistant","uuid":"envelope","message":{"id":"message","content":[{"type":"text","text":"answer"}]}})).await.unwrap();
         worker.stream_event(&json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"abandoned"}})).await.unwrap();
-        let turn = router.current_turn(&session, "turn").unwrap();
+        let turn = router.turn("turn").unwrap();
         let items = turn.items.as_ref().unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].id.as_str(), "message:0");
@@ -3727,15 +4094,12 @@ for await (const line of createInterface({input: process.stdin})) {
             .stream_event(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}))
             .await
             .unwrap();
-        assert_eq!(
-            phase(router.current_turn(&session, "turn").unwrap()),
-            AssistantPhase::Final
-        );
+        assert_eq!(phase(router.turn("turn").unwrap()), AssistantPhase::Final);
         worker
             .message(json!({"type":"system","subtype":"api_retry","attempt":1}))
             .await
             .unwrap();
-        let turn = router.current_turn(&session, "turn").unwrap();
+        let turn = router.turn("turn").unwrap();
         let items = turn.items.as_ref().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id.as_str(), "message:0");
@@ -3802,7 +4166,7 @@ for await (const line of createInterface({input: process.stdin})) {
                         .last()
                         .unwrap()
                         .status,
-                    ItemStatus::Running
+                    ItemStatus::Completed
                 );
             }
             worker.message(notice.clone()).await.unwrap();
@@ -3841,7 +4205,7 @@ for await (const line of createInterface({input: process.stdin})) {
         .unwrap();
         let history = history::read(&path, 10).unwrap();
         let saved = history.thread.turns.unwrap();
-        let live = router.current_turn(&session, "turn").unwrap();
+        let live = router.turn("turn").unwrap();
         assert_eq!(live.items, saved[0].items);
         let items = live.items.as_ref().unwrap();
         assert_eq!(items.len(), 9);
@@ -3909,4 +4273,34 @@ for await (const line of createInterface({input: process.stdin})) {
             ErrorCategory::Provider(future)
         );
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn background_output_reads_only_a_bounded_utf8_tail_of_large_files() {
+    use std::io::{Seek, Write};
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.as_file_mut()
+        .seek(std::io::SeekFrom::Start(history::MAX_FILE_BYTES + 1))
+        .unwrap();
+    let suffix = "日".repeat(30_000);
+    file.write_all(suffix.as_bytes()).unwrap();
+    let (output, truncated) = read_tool_output_tail(file.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert!(output.len() <= agent_protocol::sync::TAIL_CHARS * 4 * 3);
+    assert!(output.ends_with(&suffix));
+    assert!(truncated);
+    std::fs::write(file.path(), "short 日").unwrap();
+    let (small, truncated) = read_tool_output_tail(file.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert!(!truncated);
+    assert_eq!(small, "short 日");
+    std::fs::write(file.path(), b"before\xffafter").unwrap();
+    let (binary, truncated) = read_tool_output_tail(file.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(binary, "before\u{fffd}after");
+    assert!(!truncated);
 }

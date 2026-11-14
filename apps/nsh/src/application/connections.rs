@@ -252,9 +252,7 @@ impl Application {
                         self.client.reconnect(host.id.clone());
                         continue;
                     };
-                    Intent::ListSessions(agent_core::state::operations::ListSessions::new(
-                        (*value.snapshot.lists.list_query).clone(),
-                    ))
+                    Intent::ListSessions((*value.snapshot.lists.list_query).clone())
                 }
                 ListRequest::MoreChats => Intent::ExpandThreadList { project_id: None },
                 ListRequest::MoreProjects => Intent::ExpandProjects,
@@ -276,11 +274,8 @@ impl Application {
             }
             let mut query = (*value.snapshot.lists.list_query).clone();
             query.search_term = search_term.into();
-            self.client.dispatch(
-                host,
-                None,
-                Intent::ListSessions(agent_core::state::operations::ListSessions::new(query)),
-            );
+            self.client
+                .dispatch(host, None, Intent::ListSessions(query));
         }
     }
 }
@@ -301,10 +296,11 @@ mod tests {
         snapshot.lists.threads = Some(Arc::new(
             serde_json::from_value(serde_json::json!({
                 "projects": [], "data": [], "limit":60, "hasMore":false,
-                "hasMoreProjects":false, "projectPages":{}
+                "hasMoreProjects":false
             }))
             .unwrap(),
         ));
+        crate::seed_catalog(&mut snapshot);
         let publication = |snapshot: Snapshot| {
             Shared(Presentation::project(Arc::new(snapshot), "", None).unwrap())
         };
@@ -337,7 +333,7 @@ mod tests {
         let mut offline = snapshot.clone();
         offline.connection.connected = false;
         let mut no_list = snapshot.clone();
-        no_list.lists.threads = None;
+        no_list.lists.replica = None;
         let mut searching = snapshot.clone();
         Arc::make_mut(&mut searching.lists.list_query).search_term = "query".into();
         let mut loading = snapshot.clone();
@@ -595,7 +591,7 @@ mod tests {
             snapshot.lists.threads = Some(Arc::new(serde_json::from_value(serde_json::json!({
                 "data":[{"id":{"provider":"codex","id":"same-task"},"name":"Same task","projectId":"same-project"}],
                 "projects":[{"id":"same-project","name":"Same project","roots":[]}],
-                "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5
+                "hasMore":false,"hasMoreProjects":false,"limit":5
             })).unwrap()));
             state.publications.insert(
                 id.into(),

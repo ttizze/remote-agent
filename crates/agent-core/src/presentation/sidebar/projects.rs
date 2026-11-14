@@ -45,31 +45,29 @@ impl Snapshot {
         use crate::state::operations::OperationKey;
         self.lists.list_query.search_term.trim().is_empty()
             && !self.operations.contains_key(&OperationKey::SessionList)
-            && !self
-                .lists
-                .unconfirmed_lists
-                .contains(&OperationKey::SessionList)
+            && self.lists.subscription.is_some()
+            && self.lists.replica.as_ref().is_some_and(|replica| {
+                agent_protocol::conversation::records::catalog_ready(replica)
+            })
     }
 
     pub fn sidebar_route(&self, host_id: String, navigation: &Navigation) -> ProjectRoute {
         let project = if !self.lists.list_query.search_term.trim().is_empty() {
             ProjectMembership::Unknown {}
         } else if let Some(id) = &navigation.thread_id {
-            crate::state::projects::chat_placement(
+            crate::state::projects::ChatPlacements::new(
                 self.lists
                     .project_preferences
                     .get(&self.connection.storage_scope),
-                id,
             )
+            .get(id)
             .map(|project| ProjectMembership::Assigned(project.to_owned()))
             .or_else(|| {
                 self.thread_metadata(id)
                     .map(|thread| thread.project_id.clone())
             })
             .unwrap_or_default()
-        } else if matches!(&navigation.draft_key, DraftKey::Local { key } if key.is_empty())
-            || !self.sidebar_catalog_ready()
-        {
+        } else if self.is_welcome_draft(&navigation.draft_key) || !self.sidebar_catalog_ready() {
             ProjectMembership::Unknown {}
         } else if let Some(project) = self.directory_project(&navigation.cwd) {
             ProjectMembership::Assigned(project.id)
@@ -310,7 +308,7 @@ mod tests {
                     "projects": [{"id":"source", "name":"Source", "roots":[]},
                                  {"id":"destination", "name":"Destination", "roots":[]}],
                     "data": [{"id":id, "projectId":original}], "limit":60,
-                    "hasMore":false, "hasMoreProjects":false, "projectPages":{}
+                    "hasMore":false, "hasMoreProjects":false
                 }))
                 .unwrap(),
             ));
@@ -432,7 +430,10 @@ mod tests {
     #[test]
     fn route_membership_waits_for_history_or_catalog_and_recognizes_project_drafts() {
         let mut snapshot = Snapshot::default();
-        let default_route = snapshot.sidebar_route("host".into(), &Navigation::default());
+        let default_route = snapshot.sidebar_route(
+            "host".into(),
+            &crate::state::Snapshot::default().panes.primary().navigation,
+        );
         assert_eq!(default_route.project, ProjectMembership::Unknown {});
         let navigation = Navigation {
             cwd: "/repo".into(),
@@ -445,11 +446,15 @@ mod tests {
         );
         snapshot.lists.threads = Some(std::sync::Arc::new(
             serde_json::from_value(json!({
-                "projects": [{"id":"repo", "name":"Repo", "roots":[{"path":"/repo"}]}],
-                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":true, "projectPages":{}
+                "projects": [{"id":"repo", "name":"Repo", "roots":[{"path":"/repo"}]}, {"id":"z-later", "name":"Later", "roots":[{"path":"/later"}]}],
+                "data": [], "limit":60, "hasMore":false, "hasMoreProjects":true
             }))
             .unwrap(),
         ));
+        let page = snapshot.lists.threads.as_ref().unwrap().as_ref().clone();
+        std::sync::Arc::make_mut(&mut snapshot.lists.list_query).project_limit = 1;
+        crate::state::list_sync::seed(&mut snapshot, page);
+        snapshot.lists.subscription = Some(uuid::Uuid::new_v4());
         let in_project = snapshot.sidebar_route("host".into(), &navigation);
         assert_eq!(in_project.host_id, "host");
         assert_eq!(in_project.draft, navigation.draft_key);
@@ -466,8 +471,8 @@ mod tests {
             snapshot.sidebar_route("host".into(), &standalone).project,
             ProjectMembership::Unknown {}
         );
-        std::sync::Arc::make_mut(snapshot.lists.threads.as_mut().unwrap()).has_more_projects =
-            false;
+        std::sync::Arc::make_mut(&mut snapshot.lists.list_query).project_limit = 2;
+        crate::state::list_sync::project(&mut snapshot, false);
         assert_eq!(
             snapshot.sidebar_route("host".into(), &standalone).project,
             ProjectMembership::Unassigned {}
@@ -479,6 +484,35 @@ mod tests {
             ProjectMembership::Unknown {},
             "an initial empty composer does not discard restored scope"
         );
+        let edited = crate::state::reduce(
+            &snapshot,
+            "",
+            crate::state::Event::Intent(crate::state::Intent::SetDraftText {
+                thread_id: DraftKey::default(),
+                text: "welcome work".into(),
+            }),
+        )
+        .0;
+        assert!(!edited.panes.primary().navigation.draft_key.is_empty());
+        let returned = crate::state::reduce(
+            &edited,
+            "",
+            crate::state::Event::Intent(crate::state::Intent::ShowThreadList),
+        )
+        .0;
+        let restored =
+            crate::persistence::decode(&crate::persistence::encode(&edited).unwrap()).unwrap();
+        for welcome in [edited, returned, restored] {
+            let route = welcome.sidebar_route("host".into(), &welcome.panes.primary().navigation);
+            assert_eq!(route.project, ProjectMembership::Unknown {});
+            assert!(!widens_scope(
+                &[ProjectKey {
+                    host_id: "host".into(),
+                    project_id: "project".into()
+                }],
+                &route
+            ));
+        }
         let id = serde_json::from_value(json!({"provider":"codex", "id":"linked-thread"})).unwrap();
         let linked = Navigation {
             thread_id: Some(id),
@@ -510,8 +544,7 @@ mod tests {
             serde_json::from_value(json!({
                 "projects": [{"id": "repo", "name": "日本語 Project", "roots": []}],
                 "data": [{"id":{"provider":"codex","id":"chat"}, "name":"Standalone"}],
-                "limit": 60, "hasMore": true, "hasMoreProjects": true,
-                "projectPages": {}
+                "limit": 60, "hasMore": true, "hasMoreProjects": true
             }))
             .unwrap(),
         ));
@@ -525,10 +558,13 @@ mod tests {
         snapshot.lists.threads = Some(std::sync::Arc::new(
             serde_json::from_value(json!({
                 "projects": [], "data": [], "limit":60, "hasMore":false,
-                "hasMoreProjects":false, "projectPages":{}
+                "hasMoreProjects":false
             }))
             .unwrap(),
         ));
+        let page = snapshot.lists.threads.as_ref().unwrap().as_ref().clone();
+        crate::state::list_sync::seed(&mut snapshot, page);
+        snapshot.lists.subscription = Some(uuid::Uuid::new_v4());
         let navigation = Navigation {
             cwd: "/repo".into(),
             draft_key: "new:/repo".into(),
@@ -562,13 +598,12 @@ mod tests {
             );
         }
         std::sync::Arc::make_mut(&mut snapshot.operations).clear();
-        std::sync::Arc::make_mut(&mut snapshot.lists.unconfirmed_lists)
-            .insert(OperationKey::SessionList);
+        snapshot.lists.subscription = None;
         assert_eq!(
             snapshot.sidebar_route("host".into(), &navigation).project,
             ProjectMembership::Unknown {}
         );
-        std::sync::Arc::make_mut(&mut snapshot.lists.unconfirmed_lists).clear();
+        snapshot.lists.subscription = Some(uuid::Uuid::new_v4());
         assert_eq!(
             snapshot.sidebar_route("host".into(), &navigation).project,
             ProjectMembership::Unassigned {}

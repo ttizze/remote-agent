@@ -46,6 +46,8 @@ pub(super) struct Registry {
     entries: Registrations,
     generation: u64,
     pub host_id: String,
+    #[serde(skip)]
+    display: Option<TaskActivityDisplay>,
 }
 mod entries {
     use super::*;
@@ -69,15 +71,21 @@ mod entries {
     }
 }
 impl Registry {
+    pub fn is_ready(&self) -> bool {
+        self.display.is_some()
+    }
     pub fn register(
         &mut self,
         owner: &str,
         params: &RegisterLiveActivity,
         host_name: &str,
-        display: TaskActivityDisplay,
         now: u64,
     ) -> Result<(), &'static str> {
         params.validate()?;
+        let display = self
+            .display
+            .clone()
+            .ok_or("Host task state is still initializing")?;
         let key = (owner.to_owned(), params.activity_id.clone());
         if !self.entries.contains_key(&key)
             && (self.entries.len() >= 256
@@ -159,6 +167,7 @@ impl Registry {
         self.entries.retain(|(principal, _), _| principal != owner);
     }
     pub fn update(&mut self, display: TaskActivityDisplay, now: u64) -> bool {
+        self.display = Some(display.clone());
         let previous = self.generation;
         for ((_, activity), entry) in &mut self.entries {
             if activity.is_some() && !entry.content.display.ongoing {
@@ -280,6 +289,17 @@ impl Registry {
 mod tests {
     use super::*;
     use agent_protocol::live_activity::{PushEnvironment, TaskActivitySummary};
+    fn register(
+        registry: &mut Registry,
+        owner: &str,
+        params: &RegisterLiveActivity,
+        host_name: &str,
+        display: TaskActivityDisplay,
+        now: u64,
+    ) -> Result<(), &'static str> {
+        registry.update(display, now);
+        registry.register(owner, params, host_name, now)
+    }
     fn params(activity: &str, token: u8) -> RegisterLiveActivity {
         RegisterLiveActivity {
             activity_id: Some(activity.into()),
@@ -311,20 +331,38 @@ mod tests {
     #[test]
     fn rotation_is_owned_by_its_device_and_fences_inflight_deliveries() {
         let mut registry = Registry::default();
-        registry
-            .register("phone", &params("activity", 1), "PC", display(1, 0, 0), 100)
-            .unwrap();
-        registry
-            .register("other", &params("activity", 2), "PC", display(1, 0, 0), 100)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 1),
+            "PC",
+            display(1, 0, 0),
+            100,
+        )
+        .unwrap();
+        register(
+            &mut registry,
+            "other",
+            &params("activity", 2),
+            "PC",
+            display(1, 0, 0),
+            100,
+        )
+        .unwrap();
         let old = registry
             .deliveries(100)
             .into_iter()
             .find(|d| d.owner == "phone")
             .unwrap();
-        registry
-            .register("phone", &params("activity", 3), "PC", display(1, 0, 0), 101)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 3),
+            "PC",
+            display(1, 0, 0),
+            101,
+        )
+        .unwrap();
         assert!(!registry.current(&old));
         registry.complete(&old, ResultKind::Expired, 101);
         assert_eq!(registry.entries.len(), 2);
@@ -344,9 +382,15 @@ mod tests {
         let mut production = params("release", 2);
         production.environment = PushEnvironment::Production;
         for registration in [params("development", 1), production.clone()] {
-            registry
-                .register("phone", &registration, "PC", display(1, 0, 0), 100)
-                .unwrap();
+            register(
+                &mut registry,
+                "phone",
+                &registration,
+                "PC",
+                display(1, 0, 0),
+                100,
+            )
+            .unwrap();
         }
         let environments = |registry: &mut Registry, now| {
             let mut targets: Vec<_> = registry
@@ -365,9 +409,15 @@ mod tests {
             ]
         );
         production.environment = PushEnvironment::Sandbox;
-        registry
-            .register("phone", &production, "PC", display(1, 0, 0), 101)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &production,
+            "PC",
+            display(1, 0, 0),
+            101,
+        )
+        .unwrap();
         let bytes = Zeroizing::new(serde_json::to_vec(&registry).unwrap());
         let mut restarted: Registry = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
@@ -381,9 +431,15 @@ mod tests {
     #[test]
     fn the_activity_ends_only_when_the_authoritative_display_is_empty() {
         let mut registry = Registry::default();
-        registry
-            .register("phone", &params("activity", 1), "PC", display(1, 1, 0), 100)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 1),
+            "PC",
+            display(1, 1, 0),
+            100,
+        )
+        .unwrap();
         let first = registry.deliveries(100).remove(0);
         assert_eq!(
             aps(&first)["content-state"]["display"],
@@ -409,9 +465,15 @@ mod tests {
         registry.complete(&remaining, ResultKind::Accepted, 101);
         registry.update(display(0, 0, 0), 102);
         registry.update(display(1, 0, 0), 103);
-        registry
-            .register("phone", &params("activity", 2), "PC", display(1, 0, 0), 103)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 2),
+            "PC",
+            display(1, 0, 0),
+            103,
+        )
+        .unwrap();
         let final_push = registry.deliveries(103).remove(0);
         assert_eq!(aps(&final_push)["event"], "end");
         assert_eq!(aps(&final_push)["dismissal-date"], 163);
@@ -424,9 +486,15 @@ mod tests {
     #[test]
     fn an_unchanged_unknown_display_does_not_end_or_flood_the_activity() {
         let mut registry = Registry::default();
-        registry
-            .register("phone", &params("activity", 1), "PC", display(1, 0, 0), 100)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 1),
+            "PC",
+            display(1, 0, 0),
+            100,
+        )
+        .unwrap();
         let first = registry.deliveries(100).remove(0);
         assert!(first.urgent);
         assert!(aps(&first).get("stale-date").is_none());
@@ -455,9 +523,15 @@ mod tests {
     #[test]
     fn a_task_change_before_the_first_delivery_cannot_lower_registration_priority() {
         let mut registry = Registry::default();
-        registry
-            .register("phone", &params("activity", 1), "PC", display(1, 0, 0), 100)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 1),
+            "PC",
+            display(1, 0, 0),
+            100,
+        )
+        .unwrap();
         registry.update(display(2, 0, 0), 100);
         let initial = registry.deliveries(100).remove(0);
         assert!(initial.urgent);
@@ -472,58 +546,70 @@ mod tests {
     fn registration_capacity_expiry_and_payload_size_are_bounded() {
         let mut registry = Registry::default();
         for i in 0..16 {
-            registry
-                .register(
-                    "phone",
-                    &params(&i.to_string(), 1),
+            register(
+                &mut registry,
+                "phone",
+                &params(&i.to_string(), 1),
+                "PC",
+                display(1, 0, 0),
+                100,
+            )
+            .unwrap();
+        }
+        assert!(
+            register(
+                &mut registry,
+                "phone",
+                &params("overflow", 1),
+                "PC",
+                display(1, 0, 0),
+                100
+            )
+            .is_err()
+        );
+        for i in 1..16 {
+            for activity in 0..16 {
+                register(
+                    &mut registry,
+                    &format!("phone{i}"),
+                    &params(&activity.to_string(), 1),
                     "PC",
                     display(1, 0, 0),
                     100,
                 )
                 .unwrap();
-        }
-        assert!(
-            registry
-                .register("phone", &params("overflow", 1), "PC", display(1, 0, 0), 100)
-                .is_err()
-        );
-        for i in 1..16 {
-            for activity in 0..16 {
-                registry
-                    .register(
-                        &format!("phone{i}"),
-                        &params(&activity.to_string(), 1),
-                        "PC",
-                        display(1, 0, 0),
-                        100,
-                    )
-                    .unwrap();
             }
         }
         assert!(
-            registry
-                .register("last", &params("overflow", 1), "PC", display(1, 0, 0), 100)
-                .is_err()
+            register(
+                &mut registry,
+                "last",
+                &params("overflow", 1),
+                "PC",
+                display(1, 0, 0),
+                100
+            )
+            .is_err()
         );
-        registry
-            .register(
-                "phone",
-                &params("0", 2),
-                "PC",
-                display(1, 0, 0),
-                100 + LIFETIME - 1,
-            )
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("0", 2),
+            "PC",
+            display(1, 0, 0),
+            100 + LIFETIME - 1,
+        )
+        .unwrap();
         assert!(registry.deliveries(100 + LIFETIME).is_empty());
-        registry
-            .register(
-                "phone",
-                &params("new", 1),
-                "PC",
-                display(1, 0, 0),
-                100 + LIFETIME,
-            )
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("new", 1),
+            "PC",
+            display(1, 0, 0),
+            100 + LIFETIME,
+        )
+        .unwrap();
         let delivery = registry.deliveries(100 + LIFETIME).remove(0);
         registry.complete(&delivery, ResultKind::Expired, 100 + LIFETIME);
         assert!(registry.entries.is_empty());
@@ -535,9 +621,7 @@ mod tests {
             ..Default::default()
         };
         let mut start = start_params();
-        registry
-            .register("phone", &start, "PC", display(1, 0, 0), 100)
-            .unwrap();
+        register(&mut registry, "phone", &start, "PC", display(1, 0, 0), 100).unwrap();
         let delivery = registry.deliveries(100).remove(0);
         assert_eq!(aps(&delivery)["event"], "start");
         assert_eq!(aps(&delivery)["attributes"]["hostID"], "host");
@@ -551,9 +635,15 @@ mod tests {
             "確認待ち 1件"
         );
         registry.complete(&delivery, ResultKind::Accepted, 110);
-        registry
-            .register("phone", &params("activity", 2), "PC", display(0, 1, 0), 111)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 2),
+            "PC",
+            display(0, 1, 0),
+            111,
+        )
+        .unwrap();
         registry.unregister("phone", "activity");
         let bytes = Zeroizing::new(serde_json::to_vec(&registry).unwrap());
         let mut restarted: Registry = serde_json::from_slice(&bytes).unwrap();
@@ -567,9 +657,7 @@ mod tests {
         assert!(replacement.urgent);
         restarted.complete(&replacement, ResultKind::Accepted, 200);
         start.token = vec![3; 32];
-        restarted
-            .register("phone", &start, "PC", display(2, 0, 0), 201)
-            .unwrap();
+        register(&mut restarted, "phone", &start, "PC", display(2, 0, 0), 201).unwrap();
         assert!(
             restarted.deliveries(201).is_empty(),
             "rotation cannot duplicate an accepted start"
@@ -591,14 +679,26 @@ mod tests {
     fn expired_activities_recover_without_waiting_for_tasks_to_finish() {
         for reaches_lifetime in [false, true] {
             let mut registry = Registry::default();
-            registry
-                .register("phone", &start_params(), "PC", display(1, 0, 0), 100)
-                .unwrap();
+            register(
+                &mut registry,
+                "phone",
+                &start_params(),
+                "PC",
+                display(1, 0, 0),
+                100,
+            )
+            .unwrap();
             let start = registry.deliveries(100).remove(0);
             registry.complete(&start, ResultKind::Accepted, 100);
-            registry
-                .register("phone", &params("activity", 2), "PC", display(1, 0, 0), 101)
-                .unwrap();
+            register(
+                &mut registry,
+                "phone",
+                &params("activity", 2),
+                "PC",
+                display(1, 0, 0),
+                101,
+            )
+            .unwrap();
             let update = registry.deliveries(101).remove(0);
             registry.complete(&update, ResultKind::Accepted, 101);
             let now = if reaches_lifetime {
@@ -624,13 +724,25 @@ mod tests {
     #[test]
     fn removing_one_device_activity_preserves_other_activities_and_start_permission() {
         let mut registry = Registry::default();
-        registry
-            .register("phone", &start_params(), "PC", display(1, 0, 0), 100)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &start_params(),
+            "PC",
+            display(1, 0, 0),
+            100,
+        )
+        .unwrap();
         for (owner, activity) in [("phone", "first"), ("phone", "second"), ("other", "other")] {
-            registry
-                .register(owner, &params(activity, 2), "PC", display(1, 0, 0), 100)
-                .unwrap();
+            register(
+                &mut registry,
+                owner,
+                &params(activity, 2),
+                "PC",
+                display(1, 0, 0),
+                100,
+            )
+            .unwrap();
         }
         registry.unregister("phone", "first");
         let deliveries = registry.deliveries(100);
@@ -642,9 +754,15 @@ mod tests {
         );
         let mut disabled = start_params();
         disabled.allow_start = false;
-        registry
-            .register("phone", &disabled, "PC", display(1, 0, 0), 101)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &disabled,
+            "PC",
+            display(1, 0, 0),
+            101,
+        )
+        .unwrap();
         registry.unregister("phone", "second");
         assert!(
             registry
@@ -656,14 +774,26 @@ mod tests {
     #[test]
     fn a_delayed_end_cannot_duplicate_a_newer_push_start() {
         let mut registry = Registry::default();
-        registry
-            .register("phone", &start_params(), "PC", display(1, 0, 0), 100)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &start_params(),
+            "PC",
+            display(1, 0, 0),
+            100,
+        )
+        .unwrap();
         let first = registry.deliveries(100).remove(0);
         registry.complete(&first, ResultKind::Accepted, 100);
-        registry
-            .register("phone", &params("activity", 2), "PC", display(1, 0, 0), 101)
-            .unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 2),
+            "PC",
+            display(1, 0, 0),
+            101,
+        )
+        .unwrap();
         registry.update(display(0, 0, 0), 102);
         let end = registry.deliveries(102).remove(0);
         assert_eq!(aps(&end)["event"], "end");
@@ -682,17 +812,19 @@ mod tests {
         let mut registry = Registry::default();
         let mut start = start_params();
         start.allow_start = false;
-        registry
-            .register("phone", &start, "PC", display(1, 0, 0), 100)
-            .unwrap();
+        register(&mut registry, "phone", &start, "PC", display(1, 0, 0), 100).unwrap();
         assert!(registry.deliveries(100).is_empty());
         start.allow_start = true;
-        registry
-            .register("phone", &start, "PC", display(1, 0, 0), 101)
-            .unwrap();
-        registry
-            .register("phone", &params("activity", 2), "PC", display(1, 0, 0), 101)
-            .unwrap();
+        register(&mut registry, "phone", &start, "PC", display(1, 0, 0), 101).unwrap();
+        register(
+            &mut registry,
+            "phone",
+            &params("activity", 2),
+            "PC",
+            display(1, 0, 0),
+            101,
+        )
+        .unwrap();
         assert!(
             registry
                 .deliveries(101)
@@ -706,7 +838,7 @@ mod tests {
         #[test]
         fn counts_fit_push_payload_even_with_many_tasks(count in 1u32..10000) {
             let mut registry = Registry::default();
-            registry.register("phone", &params("activity", 1), "PC", display(count, 0, 0), 100).unwrap();
+            register(&mut registry, "phone", &params("activity", 1), "PC", display(count, 0, 0), 100).unwrap();
             let delivery = registry.deliveries(100).remove(0);
             proptest::prop_assert!(delivery.payload.len() < 4096);
             proptest::prop_assert_eq!(aps(&delivery)["content-state"]["display"]["current"]["total"].as_u64(), Some(u64::from(count)));

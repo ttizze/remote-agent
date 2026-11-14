@@ -90,6 +90,7 @@ pub struct Codex {
     processed: tokio::sync::watch::Sender<u64>,
     subscriptions: Arc<retention::Subscriptions>,
     rosters: Arc<background::Rosters>,
+    scopes: Arc<super::scopes::Scopes>,
 }
 pub use codex_app_server::AppServerConfig as Config;
 
@@ -134,6 +135,9 @@ impl Codex {
                     .map(|dirs| dirs.home_dir().join(".codex"))
                     .unwrap_or_default()
             });
+        let scopes = Arc::new(super::scopes::Scopes::default());
+        let (processed, progress) = tokio::sync::watch::channel(0);
+        let stopped = tokio_util::sync::CancellationToken::new();
         Self {
             cli: cli::Updater::new(Config::default()),
             accounts: Arc::default(),
@@ -142,10 +146,15 @@ impl Codex {
             directory,
             instance: uuid::Uuid::new_v4(),
             process,
-            stopped: Default::default(),
-            processed: tokio::sync::watch::channel(0).0,
-            subscriptions: Arc::default(),
+            stopped: stopped.clone(),
+            processed,
+            subscriptions: Arc::new(retention::Subscriptions::new(
+                scopes.clone(),
+                progress,
+                stopped,
+            )),
             rosters: Arc::default(),
+            scopes,
         }
     }
     pub async fn enable_accounts(
@@ -193,6 +202,36 @@ impl Codex {
         reply.value.outcome.map_err(|error| native_failure(&error))
     }
 
+    async fn request_execution<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &Value,
+        thread: &str,
+        execution: uuid::Uuid,
+    ) -> Result<T, Failure> {
+        let reply = self
+            .server()?
+            .request_sequenced::<_, T>(method, params)
+            .await;
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(error) => {
+                let error = Failure::from(error);
+                if error.delivery == agent_protocol::error::Delivery::NotSent {
+                    self.scopes.cancel(thread, execution);
+                }
+                return Err(error);
+            }
+        };
+        self.wait_for_events(reply.sequence).await?;
+        if reply.value.outcome.is_err() {
+            // All notifications preceding this explicit rejection are settled.
+            // Keep any bound turn, but do not let a later wake adopt its reservation.
+            self.scopes.cancel(thread, execution);
+        }
+        reply.value.outcome.map_err(|error| native_failure(&error))
+    }
+
     async fn thread_response<P: Serialize>(
         &self,
         method: &str,
@@ -215,9 +254,13 @@ impl Codex {
         reload: bool,
     ) -> Result<(), Failure> {
         let params = thread_config(serde_json::json!({"threadId":id,"cwd":cwd}), browser);
-        let resume = self
-            .thread_response("thread/resume", &params)
-            .map(|reply| reply.map(drop).map_err(Failure::before_submission));
+        let resume = async {
+            self.scopes.suspend(id);
+            self.thread_response("thread/resume", &params)
+                .await
+                .map(|response| self.scopes.history(&response))
+                .map_err(Failure::before_submission)
+        };
         self.subscriptions.start(id, reload, resume).await
     }
 
@@ -308,7 +351,6 @@ impl Codex {
             .map(|mut turn| {
                 if !include_activity {
                     turn.items = turn.items.map(native::summary_items);
-                    turn.items_summary = true;
                 }
                 Arc::new(turn)
             })
@@ -495,24 +537,56 @@ fn notification_change(
 }
 
 /// Provider-specific notifications end at this adapter boundary.
-pub(crate) fn event_change(
+pub(crate) fn event_changes(
     instance: uuid::Uuid,
     message: &RpcMessage<'_>,
-) -> Result<Option<AgentChange>, String> {
+) -> Result<Vec<AgentChange>, String> {
     if matches!(
         message.method(),
         Some("process/outputDelta" | "process/exited")
     ) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     if message.kind() != RpcMessageKind::Notification {
         return Err("expected native notification".into());
     }
     let params: Value = message.params().map_err(|e| e.to_string())?;
+    let children: Vec<&str> = match (message.method(), params["item"]["type"].as_str()) {
+        (Some("item/started" | "item/completed"), Some("collabAgentToolCall"))
+            if params["item"]["tool"] == "spawnAgent" =>
+        {
+            params["item"]["receiverThreadIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect()
+        }
+        (Some("item/started" | "item/completed"), Some("subAgentActivity"))
+            if params["item"]["kind"] == "started" =>
+        {
+            params["item"]["agentThreadId"]
+                .as_str()
+                .into_iter()
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut changes = Vec::new();
+    for child in children {
+        changes.push(AgentChange::TaskParent {
+            session: SessionRef::new(ProviderKind::Codex, child.into()).map_err(str::to_owned)?,
+            parent: SessionRef::new(
+                ProviderKind::Codex,
+                params["threadId"].as_str().unwrap_or_default().into(),
+            )
+            .map_err(str::to_owned)?,
+        });
+    }
     let change = if message.method() == Some("thread/started") {
         let thread = native::parse_thread(params["thread"].clone()).map_err(|e| e.to_string())?;
         let Some(parent) = thread.parent_id else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         AgentChange::TaskParent {
             session: thread.id.expect("native thread has an ID"),
@@ -545,9 +619,10 @@ pub(crate) fn event_change(
                 .map_err(|e| e.to_string())?,
         }
     } else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    Ok(Some(change))
+    changes.push(change);
+    Ok(changes)
 }
 
 #[derive(serde::Deserialize)]
@@ -674,55 +749,66 @@ impl Identity for Codex {
 }
 
 #[async_trait::async_trait]
-impl Agent for Codex {
-    async fn upload_feedback(
-        &self,
-        id: &str,
-        reason: Option<&str>,
-        include_logs: bool,
-    ) -> Result<agent_protocol::feedback::FeedbackReceipt, Failure> {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Uploaded {
-            thread_id: String,
-        }
-        let response: Uploaded = self.request("feedback/upload", &serde_json::json!({
-            "classification":"bug", "threadId":id, "reason":reason, "includeLogs":include_logs,
-        })).await?;
-        Ok(agent_protocol::feedback::FeedbackReceipt {
-            feedback_id: response.thread_id,
-        })
-    }
+impl crate::providers::Configuration for Codex {
     async fn codex_cli(&self, update: bool) -> Result<op::CodexCliStatus, Failure> {
         Ok(self.cli.request(update).await)
     }
     fn data_recipient(&self) -> &'static str {
         "OpenAI"
     }
-    fn capabilities(&self) -> agent_protocol::session::Capabilities {
-        agent_protocol::session::Capabilities {
-            feedback: true,
-            steer: true,
-            fork: true,
-            rename: true,
-            model_change: true,
+    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
+        let config: Result<Value, _> = self
+            .request("config/read", &serde_json::json!({"includeLayers":false}))
+            .await;
+        let configured = config
+            .as_ref()
+            .ok()
+            .and_then(|value| value["config"]["model"].as_str());
+        let page: Page<Value> = self.request("model/list", &serde_json::json!({"limit":params.limit,"cursor":params.cursor,"includeHidden":true})).await?;
+        let mut data = page
+            .data
+            .into_iter()
+            .filter(|value| value["hidden"] != true || value["model"].as_str() == configured)
+            .map(native::parse_model)
+            .collect::<Result<Vec<_>, _>>()?;
+        if params.cursor.is_none()
+            && let Ok(config) = config
+        {
+            let account: Result<Value, _> = self
+                .request("account/read", &serde_json::json!({"refreshToken":false}))
+                .await;
+            let account_type = account
+                .as_ref()
+                .ok()
+                .and_then(|value| value["account"]["type"].as_str());
+            native::include_configured_model(&mut data, &config["config"], account_type);
         }
+        Ok(op::ModelPage {
+            data,
+            next_cursor: page.next_cursor,
+            provider_errors: None,
+        })
     }
-    fn summary_items(
+
+    async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
+        self.composer_catalog(cwd).await
+    }
+    async fn read_permissions(
         &self,
-        items: &[Arc<agent_protocol::items::Item>],
-    ) -> Option<Vec<Arc<agent_protocol::items::Item>>> {
-        Some(native::summary_items(items.to_vec()))
+    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
+        Codex::read_permissions(self).await
     }
-    fn availability(&self) -> Result<(), Failure> {
-        self.server().map(|_| ())
+    async fn update_permissions(
+        &self,
+        mode: agent_protocol::permissions::PermissionMode,
+        version: &str,
+    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
+        Codex::update_permissions(self, mode, version).await
     }
-    fn requires_restart_snapshot(&self) -> bool {
-        self.process.is_ok()
-    }
-    fn validate_create(&self) -> Result<(), Failure> {
-        self.availability()
-    }
+}
+
+#[async_trait::async_trait]
+impl crate::providers::Discovery for Codex {
     fn storage_directory(&self) -> &std::path::Path {
         &self.directory
     }
@@ -851,38 +937,10 @@ impl Agent for Codex {
         self.history_page(id, Some(cursor), include_activity).await
     }
 
-    async fn read_turn_items(
-        &self,
-        id: &str,
-        turn_id: &agent_protocol::ids::TurnId,
-    ) -> Result<Vec<Arc<Item>>, Failure> {
-        if turn_id.is_empty() {
-            return Err(Failure::new("invalid_params", "turn ID is required"));
-        }
-        let mut items = Vec::new();
-        let mut cursor = None;
-        let mut seen = std::collections::HashSet::new();
-        loop {
-            let page = self.item_page(id, turn_id, cursor.as_deref()).await?;
-            items.extend(page.data.into_iter().map(|entry| entry.item));
-            cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
-            let Some(next) = &cursor else {
-                break;
-            };
-            if !seen.insert(next.clone()) {
-                return Err(Failure::new(
-                    "invalid_thread_history",
-                    "item cursor repeated",
-                ));
-            }
-        }
-        Ok(items)
-    }
-
     async fn read_item(
         &self,
         params: &op::ReadItem,
-    ) -> Result<agent_protocol::operations::ItemResponse, Failure> {
+    ) -> Result<agent_protocol::models::Item, Failure> {
         if [
             params.thread_id.id.as_str(),
             params.turn_id.as_str(),
@@ -906,10 +964,7 @@ impl Agent for Codex {
                 entry.turn_id.as_deref() == Some(params.turn_id.as_str())
                     && entry.item.id == params.item_id
             }) {
-                return Ok(agent_protocol::operations::ItemResponse {
-                    item: Arc::unwrap_or_clone(entry.item),
-                    transfer: None,
-                });
+                return Ok(Arc::unwrap_or_clone(entry.item));
             }
             cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
             let Some(next) = &cursor else {
@@ -925,6 +980,47 @@ impl Agent for Codex {
                 ));
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl Agent for Codex {
+    async fn upload_feedback(
+        &self,
+        id: &str,
+        reason: Option<&str>,
+        include_logs: bool,
+    ) -> Result<agent_protocol::feedback::FeedbackReceipt, Failure> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Uploaded {
+            thread_id: String,
+        }
+        let response: Uploaded = self.request("feedback/upload", &serde_json::json!({"classification":"bug", "threadId":id,"reason":reason,"includeLogs":include_logs})).await?;
+        Ok(agent_protocol::feedback::FeedbackReceipt {
+            feedback_id: response.thread_id,
+        })
+    }
+    fn capabilities(&self) -> agent_protocol::session::Capabilities {
+        agent_protocol::session::Capabilities {
+            feedback: true,
+            steer: true,
+            fork: true,
+            model_change: true,
+            ..Default::default()
+        }
+    }
+    fn availability(&self) -> Result<(), Failure> {
+        self.server().map(|_| ())
+    }
+    fn requires_restart_snapshot(&self) -> bool {
+        self.process.is_ok()
+    }
+    fn validate_create(&self) -> Result<(), Failure> {
+        if let Some(error) = self.restoration_error.borrow().as_ref() {
+            return Err(Failure::new("account_unavailable", error));
+        }
+        self.availability()
     }
     async fn create(
         &self,
@@ -978,15 +1074,19 @@ impl Agent for Codex {
         }
     }
     async fn unload(&self, id: &str) -> Result<(), Failure> {
+        if self.subscriptions.busy(id) {
+            return Err(Failure::new(
+                "provider_switch_busy",
+                "サブエージェントの応答・確認が終わってからAIを切り替えてください。",
+            ));
+        }
         self.subscriptions
             .release(self.server()?, id, false)
             .await
             .map_err(|error| Failure::unknown("provider_unload_failed", error))
     }
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
-        if let Some(error) = self.restoration_error.borrow().as_ref() {
-            return Err(Failure::new("account_unavailable", error));
-        }
+        self.validate_create()?;
         let native: Value = self
             .request(
                 "thread/read",
@@ -1008,6 +1108,7 @@ impl Agent for Codex {
         route: crate::providers::SubmissionTarget<'_>,
         reload: bool,
         browser: Option<Value>,
+        execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
         use crate::providers::SubmissionTarget;
         let mut params = serde_json::json!({
@@ -1017,22 +1118,58 @@ impl Agent for Codex {
         });
         let turn_id = match route {
             SubmissionTarget::Steer(turn) => {
+                if op::Input::is_compaction(&input.input) {
+                    return Err(Failure::new(
+                        "invalid_submission",
+                        "Context compaction must run as a separate turn.",
+                    ));
+                }
+                self.scopes.reserve(&input.thread_id.id, execution);
+                self.scopes
+                    .bind(&input.thread_id.id, turn.into(), execution);
                 params["expectedTurnId"] = turn.into();
-                self.request::<_, agent_protocol::models::Empty>("turn/steer", &params)
-                    .await?;
+                self.request_execution::<agent_protocol::models::Empty>(
+                    "turn/steer",
+                    &params,
+                    &input.thread_id.id,
+                    execution,
+                )
+                .await?;
                 Some(turn.into())
             }
             SubmissionTarget::Start { cwd } => {
                 self.resume(&input.thread_id.id, Some(cwd), browser, reload)
                     .await?;
+                self.scopes.reserve(&input.thread_id.id, execution);
                 params["model"] = serde_json::json!(input.model.as_ref().map(|model| &model.id));
                 params["effort"] = serde_json::json!(input.effort);
                 params["serviceTierForTurn"] = serde_json::json!(input.service_tier);
                 params["summary"] = REASONING_SUMMARY.into();
-                let reply: Value = self.request("turn/start", &params).await?;
-                Some(native_turn_id(reply["turn"]["id"].as_str())?)
+                // Codex compacts through a dedicated RPC; `/compact` is not a prompt.
+                let compact = op::Input::is_compaction(&input.input);
+                let (method, params) = if compact {
+                    (
+                        "thread/compact/start",
+                        serde_json::json!({"threadId": input.thread_id.id}),
+                    )
+                } else {
+                    ("turn/start", params)
+                };
+                let reply = self
+                    .request_execution::<Value>(method, &params, &input.thread_id.id, execution)
+                    .await?;
+                if compact {
+                    // This RPC returns Empty. The reserved execution adopts turn/started.
+                    None
+                } else {
+                    Some(native_turn_id(reply["turn"]["id"].as_str())?)
+                }
             }
         };
+        if let Some(turn) = &turn_id {
+            self.scopes
+                .bind(&input.thread_id.id, turn.clone(), execution);
+        }
         Ok(op::SubmissionReceipt { turn_id })
     }
     async fn continue_turn(
@@ -1041,12 +1178,16 @@ impl Agent for Codex {
         model: Option<&str>,
         effort: Option<&str>,
         service_tier: Option<&str>,
+        execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
-        let reply: Value = self
-            .request("turn/start", &serde_json::json!({"threadId":id,"input":[],"model":model,"effort":effort,"serviceTierForTurn":service_tier,"summary":REASONING_SUMMARY}))
+        self.scopes.reserve(id, execution);
+        let reply = self
+            .request_execution::<Value>("turn/start", &serde_json::json!({"threadId":id,"input":[],"model":model,"effort":effort,"serviceTierForTurn":service_tier,"summary":REASONING_SUMMARY}), id, execution)
             .await?;
+        let turn = native_turn_id(reply["turn"]["id"].as_str())?;
+        self.scopes.bind(id, turn.clone(), execution);
         Ok(op::SubmissionReceipt {
-            turn_id: Some(native_turn_id(reply["turn"]["id"].as_str())?),
+            turn_id: Some(turn),
         })
     }
     async fn interrupt(
@@ -1077,57 +1218,8 @@ impl Agent for Codex {
         }
         Ok(agent_protocol::models::Empty {})
     }
-    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        let config: Result<Value, _> = self
-            .request("config/read", &serde_json::json!({"includeLayers":false}))
-            .await;
-        let configured = config
-            .as_ref()
-            .ok()
-            .and_then(|value| value["config"]["model"].as_str());
-        let page: Page<Value> = self.request("model/list", &serde_json::json!({"limit":params.limit,"cursor":params.cursor,"includeHidden":true})).await?;
-        let mut data = page
-            .data
-            .into_iter()
-            .filter(|value| value["hidden"] != true || value["model"].as_str() == configured)
-            .map(native::parse_model)
-            .collect::<Result<Vec<_>, _>>()?;
-        if params.cursor.is_none()
-            && let Ok(config) = config
-        {
-            let account: Result<Value, _> = self
-                .request("account/read", &serde_json::json!({"refreshToken":false}))
-                .await;
-            let account_type = account
-                .as_ref()
-                .ok()
-                .and_then(|value| value["account"]["type"].as_str());
-            native::include_configured_model(&mut data, &config["config"], account_type);
-        }
-        Ok(op::ModelPage {
-            data,
-            next_cursor: page.next_cursor,
-            provider_errors: None,
-        })
-    }
-
-    async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
-        self.composer_catalog(cwd).await
-    }
     async fn discard_workspace_processes(&self, _dir: &std::path::Path) -> Result<(), Failure> {
         Ok(())
-    }
-    async fn read_permissions(
-        &self,
-    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
-        Codex::read_permissions(self).await
-    }
-    async fn update_permissions(
-        &self,
-        mode: agent_protocol::permissions::PermissionMode,
-        version: &str,
-    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
-        Codex::update_permissions(self, mode, version).await
     }
     async fn fork(
         &self,
@@ -1147,13 +1239,6 @@ impl Agent for Codex {
         self.subscribed(&response);
         Ok(response)
     }
-    async fn rename(&self, id: &str, name: &str) -> Result<agent_protocol::models::Empty, Failure> {
-        self.request(
-            "thread/name/set",
-            &serde_json::json!({"threadId":id,"name":name}),
-        )
-        .await
-    }
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>> {
         // Subscribe before spawning the pump. Otherwise Codex can emit a
         // server request in the scheduling gap and it would be lost before
@@ -1169,9 +1254,8 @@ impl Agent for Codex {
         let process = codex.clone();
         let subscriptions = self.subscriptions.clone();
         let rosters = self.rosters.clone();
-        subscriptions
-            .clone()
-            .spawn_releaser(codex.clone(), stopped.clone());
+        let scopes = self.scopes.clone();
+        subscriptions.clone().spawn_releaser(codex.clone());
         let (output, receiver) = tokio::sync::mpsc::channel(256);
         tokio::spawn(async move {
             let (cause, reason) = loop {
@@ -1194,43 +1278,50 @@ impl Agent for Codex {
                                 refresh_auth_tokens(&accounts, &process, &line).await;
                             });
                         } else if request.kind() == RpcMessageKind::Request {
-                            let admission = match serde_json::from_str(&line)
-                                .map_err(|e| e.to_string())
-                                .and_then(|request| {
-                                    request_change(
-                                        instance,
-                                        stopped.clone(),
-                                        request,
-                                        process.clone(),
-                                    )
-                                }) {
-                                Ok(change) => emit(&output, change).await,
-                                Err(error) => Err(error),
-                            };
-                            if let Err(error) = &admission {
-                                tracing::warn!(target: "agent", operation = "host.codex.request_rejected", message = %error);
-                            }
-                            if let Err(error) = admission
-                                && let Ok(response) = request.error(-32000, &error)
-                            {
-                                let _ = process.send_raw(&response).await;
-                            }
+                            admit_request(
+                                instance,
+                                stopped.clone(),
+                                &process,
+                                &output,
+                                &scopes,
+                                &line,
+                            )
+                            .await;
                         } else {
-                            let result = match event_change(instance, &request) {
-                                Ok(Some(change)) => {
-                                    subscriptions.observe(&change);
-                                    let background = rosters.observe(
-                                        &change,
-                                        &request.params::<Value>().unwrap_or_default(),
-                                    );
-                                    wake(&process, &change, background.continuations);
-                                    if matches!(change, AgentChange::TaskParent { .. }) {
+                            let result = match event_changes(instance, &request) {
+                                Ok(changes) => {
+                                    async {
+                                        for change in changes {
+                                            subscriptions.observe(&change);
+                                            let background = rosters.observe(
+                                                &change,
+                                                &request.params::<Value>().unwrap_or_default(),
+                                            );
+                                            wake(&process, &change, background.continuations);
+                                            let child =
+                                                if let AgentChange::TaskParent { session, .. } =
+                                                    &change
+                                                {
+                                                    Some(session.id.clone())
+                                                } else {
+                                                    None
+                                                };
+                                            let execution = scopes.observe(&change);
+                                            let result = emit_all(
+                                                &output,
+                                                [Some(change), background.roster],
+                                                execution,
+                                            )
+                                            .await;
+                                            result?;
+                                            if let Some(child) = child {
+                                                scopes.admit(&child);
+                                            }
+                                        }
                                         Ok(())
-                                    } else {
-                                        emit_all(&output, [Some(change), background.roster]).await
                                     }
+                                    .await
                                 }
-                                Ok(None) => Ok(()),
                                 Err(error) => Err(error),
                             };
                             if let Err(error) = result {
@@ -1272,7 +1363,7 @@ impl Agent for Codex {
             if let Err(error) = process.shutdown().await {
                 tracing::error!(target: "agent", operation = "host.codex.shutdown", message = %error);
             }
-            let _=emit(&output,AgentChange::Stopped {provider:ProviderKind::Codex,reason:"エージェントとの接続が終了しました。ホストを再起動してから再送信してください。".into()}).await;
+            let _=emit(&output,AgentChange::Stopped {provider:ProviderKind::Codex,error:agent_protocol::execution::ExecutionError {message:"エージェントとの接続が終了しました。ホストを再起動してから再送信してください。".into(),category:agent_protocol::execution::ErrorCategory::Network,..Default::default()}}).await;
         });
         Some(receiver)
     }
@@ -1312,9 +1403,10 @@ fn wake(process: &Arc<CodexAppServer>, change: &AgentChange, prompts: Vec<String
 async fn emit_all(
     output: &tokio::sync::mpsc::Sender<AgentEvent>,
     changes: impl IntoIterator<Item = Option<AgentChange>>,
+    execution: Option<uuid::Uuid>,
 ) -> Result<(), String> {
     for change in changes.into_iter().flatten() {
-        emit(output, change).await?;
+        crate::providers::emit_for(output, change, execution).await?;
     }
     Ok(())
 }
@@ -1351,8 +1443,307 @@ async fn refresh_auth_tokens(
     let _ = process.send_raw(&line).await;
 }
 
+async fn admit_request(
+    instance: uuid::Uuid,
+    stopped: tokio_util::sync::CancellationToken,
+    process: &Arc<CodexAppServer>,
+    output: &tokio::sync::mpsc::Sender<AgentEvent>,
+    scopes: &super::scopes::Scopes,
+    line: &str,
+) {
+    let result: Result<(), String> = async {
+        let request = serde_json::from_str(line).map_err(|error| error.to_string())?;
+        let change = request_change(instance, stopped, request, process.clone())?;
+        let execution = scopes.observe(&change);
+        crate::providers::emit_for(output, change, execution).await
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(target: "agent", operation="host.codex.request_rejected", message=%error);
+        if let Ok(request) = RpcMessage::parse(line)
+            && let Ok(response) = request.error(-32000, &error)
+        {
+            let _ = process.send_raw(&response).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_native_rejection_does_not_adopt_a_later_background_turn() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("codex-fixture");
+        std::fs::write(&program, r##"#!/usr/bin/env node
+const rl = require('node:readline').createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  if (message.method === 'initialize') {
+    process.stdout.write(JSON.stringify({id:message.id,result:{userAgent:'reject-fixture',codexHome:process.env.CODEX_HOME}})+'\n');
+  } else if (message.method === 'turn/start') {
+    if (message.params.input === undefined) {
+      process.stdout.write(JSON.stringify({id:message.id,error:{code:-32000,message:'explicit rejection'}})+'\n');
+    } else {
+      const p = message.params;
+      if (Object.keys(p).length !== 6 || p.threadId !== 'thread' || JSON.stringify(p.input) !== '[]' ||
+          p.model !== 'model' || p.effort !== 'high' || p.serviceTierForTurn !== 'priority' || p.summary !== 'detailed') process.exit(3);
+      process.stdout.write(JSON.stringify({id:message.id,result:{turn:{id:'continued-native'}}})+'\n');
+    }
+  } else if (message.method === 'fixture/wake') {
+    process.stdout.write(JSON.stringify({method:'turn/started',params:{threadId:'thread',turn:{id:'background',status:'inProgress',items:[]}}})+'\n');
+    process.stdout.write(JSON.stringify({id:message.id,result:{}})+'\n');
+  } else process.exit(2);
+});
+"##).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(Config {
+                program,
+                codex_home: Some(directory.path().join("codex")),
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let agent = Arc::new(Codex::new(Ok(server)));
+        agent
+            .restoration_error
+            .send_replace(Some("ログインするアカウントを選択してください。".into()));
+        assert!(agent.availability().is_ok());
+        assert_eq!(
+            agent.validate_create().unwrap_err().code,
+            "account_unavailable"
+        );
+        assert_eq!(
+            agent.state("thread").await.err().unwrap().code,
+            "account_unavailable"
+        );
+        let (providers, _) = crate::providers::Registry::new([crate::providers::Backend {
+            provider: ProviderKind::Codex,
+            agent: Ok(agent.clone()),
+            dictation: None,
+        }]);
+        assert_eq!(providers.data_recipients(), ["OpenAI"]);
+        agent.restoration_error.send_replace(None);
+        let mut events = agent.event_stream().unwrap();
+        let rejected = uuid::Uuid::new_v4();
+        agent.scopes.reserve("thread", rejected);
+        assert!(
+            agent
+                .request_execution::<Value>(
+                    "turn/start",
+                    &serde_json::json!({"threadId":"thread"}),
+                    "thread",
+                    rejected
+                )
+                .await
+                .is_err()
+        );
+        let params = serde_json::json!({});
+        let (result, background) =
+            tokio::join!(agent.request::<_, Value>("fixture/wake", &params), async {
+                let mut event = events.recv().await.unwrap();
+                event.applied.take().unwrap().send(Ok(())).unwrap();
+                event
+            });
+        result.unwrap();
+        assert!(background.execution.is_some());
+        assert_ne!(background.execution, Some(rejected));
+        assert!(
+            matches!(background.change, AgentChange::Session { change: SessionChange::Turn { ref turn, completed: false, .. }, .. } if turn.id.as_str() == "background")
+        );
+        let continued = agent
+            .continue_turn(
+                "thread",
+                Some("model"),
+                Some("high"),
+                Some("priority"),
+                uuid::Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(continued.turn_id.unwrap().as_str(), "continued-native");
+        agent.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recorded_forks_send_the_selected_native_boundary() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        for data in [
+            include_str!("../fixtures/thread_fork_native_prior_turn/codex_transcript.ndjson"),
+            include_str!("../fixtures/thread_fork_native_continue/codex_transcript.ndjson"),
+            include_str!("../fixtures/thread_fork_native_siblings/codex_transcript.ndjson"),
+        ] {
+            let rows: Vec<Value> = data
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let forks: Vec<_> = rows
+                .iter()
+                .filter(|row| {
+                    row["type"] == "expect_outbound" && row["frame"]["method"] == "thread/fork"
+                })
+                .map(|row| {
+                    let frame = &row["frame"];
+                    let reply = rows
+                        .iter()
+                        .find(|row| {
+                            row["type"] == "emit_inbound"
+                                && row["frame"]["id"] == frame["id"]
+                                && row["frame"]["result"].is_object()
+                        })
+                        .unwrap();
+                    serde_json::json!({"request":frame,"result":reply["frame"]["result"]})
+                })
+                .collect();
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(
+                directory.path().join("forks.json"),
+                serde_json::to_vec(&forks).unwrap(),
+            )
+            .unwrap();
+            let program = directory.path().join("codex-fixture");
+            std::fs::write(&program, r##"#!/usr/bin/env node
+const assert=require('node:assert/strict'), fs=require('node:fs');
+const forks=JSON.parse(fs.readFileSync(__dirname+'/forks.json'));let cursor=0;
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+ const message=JSON.parse(line);if(message.id===undefined)return;
+ let result;
+ if(message.method==='initialize')result={userAgent:'fork-fixture',codexHome:process.env.CODEX_HOME};
+ else {
+  const reference=forks[cursor++];assert.equal(message.method,'thread/fork');
+  for(const key of ['threadId','lastTurnId'])assert.equal(message.params[key],reference.request.params[key]);
+  assert.equal(message.params.excludeTurns,false);result=reference.result;
+ }
+ process.stdout.write(JSON.stringify({id:message.id,result})+'\n');
+});
+"##).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let server = Arc::new(
+                CodexAppServer::spawn(Config {
+                    program,
+                    codex_home: Some(directory.path().join("codex")),
+                    ..Default::default()
+                })
+                .await
+                .unwrap(),
+            );
+            let agent = Codex::new(Ok(server));
+            let _events = agent.event_stream().unwrap();
+            let mut ids = std::collections::HashSet::new();
+            for fork in &forks {
+                let params = &fork["request"]["params"];
+                let response = agent
+                    .fork(
+                        params["threadId"].as_str().unwrap(),
+                        params["lastTurnId"].as_str().unwrap(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.thread.id.as_ref().unwrap().id,
+                    fork["result"]["thread"]["id"].as_str().unwrap()
+                );
+                assert!(ids.insert(response.thread.id.unwrap()));
+            }
+            agent.shutdown().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_recorded_subagent_without_thread_started_can_ask_for_approval_and_finish() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let rows: Vec<Value> = include_str!("../fixtures/subagent_v2_approval/codex_transcript.ndjson")
+                .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            let root = rows.iter().find(|row| row["frame"]["method"] == "thread/started").unwrap()["frame"]["params"]["thread"]["id"].as_str().unwrap();
+            let approval = rows.iter().position(|row| row["frame"]["method"] == "item/commandExecution/requestApproval").unwrap();
+            let child = rows[approval]["frame"]["params"]["threadId"].as_str().unwrap();
+            let before: Vec<_> = rows[..=approval].iter().filter(|row| row["type"] == "emit_inbound").map(|row| &row["frame"]).filter(|frame| {
+                let item = &frame["params"]["item"];
+                frame["method"] == "thread/started" || frame["method"] == "turn/started"
+                    || item["type"] == "subAgentActivity" && item["kind"] == "started"
+                    || frame["method"] == "item/commandExecution/requestApproval"
+            }).collect();
+            assert!(before.iter().all(|frame| frame["method"] != "thread/started" || frame["params"]["thread"]["id"] != child));
+            let after: Vec<_> = rows[approval + 1..].iter().filter(|row| row["type"] == "emit_inbound")
+                .map(|row| &row["frame"]).filter(|frame| frame["params"]["threadId"] == child &&
+                    (frame["method"] == "turn/completed" || frame["method"] == "item/completed" && frame["params"]["item"]["type"] == "agentMessage")).collect();
+            let answer = &rows.iter().find(|row| row["type"] == "expect_outbound" && row["frame"]["result"]["decision"] == "accept").unwrap()["frame"];
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("frames.json"), serde_json::to_vec(&serde_json::json!({"before":before,"after":after,"answer":answer})).unwrap()).unwrap();
+            let program = directory.path().join("codex-fixture");
+            std::fs::write(&program, r##"#!/usr/bin/env node
+const fs = require('node:fs'), assert = require('node:assert/strict');
+const data = JSON.parse(fs.readFileSync(__dirname + '/frames.json'));
+const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+ const message = JSON.parse(line);
+ if (message.method === 'initialize') send({id:message.id,result:{userAgent:'subagent-fixture',codexHome:process.env.CODEX_HOME}});
+ else if (message.method === 'fixture/start') {data.before.forEach(send);send({id:message.id,result:{}});}
+ else if (!message.method && message.id !== undefined) {assert.deepEqual(message,data.answer);data.after.forEach(send);}
+});
+"##).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let server = Arc::new(CodexAppServer::spawn(Config {program,codex_home:Some(directory.path().join("codex")),..Default::default()}).await.unwrap());
+            let agent = Codex::new(Ok(server));
+            let mut events = agent.event_stream().unwrap();
+            let root_execution = uuid::Uuid::new_v4();
+            agent.scopes.reserve(root, root_execution);
+            let params = serde_json::json!({});
+            let request = agent.request::<_, Value>("fixture/start", &params);
+            let consume = async {
+                let mut linked = false;
+                let mut execution = None;
+                let mut written = false;
+                loop {
+                    let mut event = events.recv().await.unwrap();
+                    let mut write = None;
+                    let mut completed = false;
+                    match &event.change {
+                        AgentChange::TaskParent {session,parent} if session.id == child => {assert_eq!(parent.id,root);linked=true;}
+                        AgentChange::Session {session,change:SessionChange::Turn {completed:false,..}} if session.id == child => {
+                            assert!(linked);assert!(event.execution.is_some());assert_ne!(event.execution,Some(root_execution));execution=event.execution;
+                        }
+                        AgentChange::Request {session,origin,request} if session.id == child => {
+                            assert_eq!(event.execution,execution);assert!(execution.is_some());
+                            // A completed parent must retain a child still awaiting approval.
+                            for (id, status) in [(root, agent_protocol::models::SessionStatus::Idle), (child, agent_protocol::models::SessionStatus::Running)] {
+                                agent.subscriptions.observe(&AgentChange::Session {session: SessionRef::new(ProviderKind::Codex, id.into()).unwrap(), change: SessionChange::Status {status}});
+                            }
+                            assert_eq!(agent.unload(root).await.unwrap_err().code, "provider_switch_busy");
+                            let agent_protocol::requests::RequestBody::Approval {choices,..} = &request.body else {panic!("child approval was lost")};
+                            let choice_id=choices.iter().find(|choice| choice.effect == agent_protocol::requests::ChoiceEffect::Allow).unwrap().id.clone();
+                            write=Some(origin.source.prepare(&origin.native_id,&request.body,&agent_protocol::requests::Answer::Approval {choice_id}).await.unwrap());
+                        }
+                        AgentChange::Session {session,change:SessionChange::Item {item,..}} if session.id == child => {
+                            if let agent_protocol::items::ItemBody::AssistantText {text,..}=item.body() {assert_eq!(text.trim(),"Written.");written=true;}
+                        }
+                        AgentChange::Session {session,change:SessionChange::Turn {turn,completed:true}} if session.id == child => {
+                            assert!(written);assert_eq!(event.execution,execution);assert_eq!(turn.status,agent_protocol::execution::TurnStatus::Completed);completed=true;
+                        }
+                        _=>{}
+                    }
+                    event.applied.take().unwrap().send(Ok(())).unwrap();
+                    if let Some(write)=write {write.await.unwrap();}
+                    if completed {break;}
+                }
+            };
+            let (result,())=tokio::join!(request,consume);
+            result.unwrap();
+            agent.shutdown().await;
+        }).await.unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn restart_snapshot_checks_loaded_codex_even_after_connection_closes() {
@@ -1393,7 +1784,7 @@ rl.on('line', line => {
                     agent: Ok(agent.clone()),
                     dictation: None,
                 }],
-                crate::ProjectStore::new(directory.path().join(name)),
+                directory.path().join(name),
             );
             service.set_history_scope(directory.path().to_owned(), true);
             service
@@ -1401,6 +1792,112 @@ rl.on('line', line => {
         service("healthy.json").prepare_update().await.unwrap();
         server.shutdown().await.unwrap();
         assert!(service("broken.json").prepare_update().await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standalone_compact_uses_the_native_rpc_and_adopts_its_started_turn() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("codex-fixture");
+        std::fs::write(&program, r##"#!/usr/bin/env node
+const rl = require('node:readline').createInterface({ input: process.stdin });
+rl.on('line', line => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  let result;
+  switch (message.method) {
+    case 'initialize': result = {userAgent:'compact-fixture',codexHome:process.env.CODEX_HOME}; break;
+    case 'thread/resume': result = {thread:{id:'thread',turns:[]}}; break;
+    case 'thread/compact/start':
+      if (JSON.stringify(message.params) !== JSON.stringify({threadId:'thread'})) process.exit(2);
+      process.stdout.write(JSON.stringify({method:'turn/started',params:{threadId:'thread',turn:{id:'compact-turn',status:'inProgress',items:[]}}})+'\n');
+      result = {}; break;
+    case 'turn/start':
+      if (message.params.input[0].text.trim().toLowerCase() === '/compact' && message.params.input.length === 1) process.exit(3);
+      result = {turn:{id:'normal-turn'}}; break;
+    default: process.exit(4);
+  }
+  process.stdout.write(JSON.stringify({id:message.id,result})+'\n');
+});
+"##).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(Config {
+                program,
+                codex_home: Some(directory.path().join("codex")),
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let agent = Codex::new(Ok(server));
+        let mut events = agent.event_stream().unwrap();
+        let mut input = op::Submission {
+            fresh_context: false,
+            thread_id: SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap(),
+            client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+            input: vec![op::Input::Text {
+                text: "  /CoMpAcT\n".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+            follow_up: Default::default(),
+        };
+        let execution = uuid::Uuid::new_v4();
+        let (receipt, started) = tokio::join!(
+            agent.submit(
+                &input,
+                crate::providers::SubmissionTarget::Start { cwd: "/fixture" },
+                false,
+                None,
+                execution
+            ),
+            async {
+                let mut started = events.recv().await.unwrap();
+                started.applied.take().unwrap().send(Ok(())).unwrap();
+                started
+            }
+        );
+        assert!(receipt.unwrap().turn_id.is_none());
+        assert_eq!(started.execution, Some(execution));
+        assert!(
+            matches!(started.change, AgentChange::Session { change: SessionChange::Turn { ref turn, completed: false, .. }, .. } if turn.id.as_str() == "compact-turn")
+        );
+        for parts in [
+            vec![op::Input::Text {
+                text: "/compact please".into(),
+            }],
+            vec![
+                op::Input::Text {
+                    text: "/compact".into(),
+                },
+                op::Input::LocalImage {
+                    path: "/image.png".into(),
+                },
+            ],
+        ] {
+            input.input = parts;
+            assert_eq!(
+                agent
+                    .submit(
+                        &input,
+                        crate::providers::SubmissionTarget::Start { cwd: "/fixture" },
+                        false,
+                        None,
+                        uuid::Uuid::new_v4()
+                    )
+                    .await
+                    .unwrap()
+                    .turn_id
+                    .unwrap()
+                    .as_str(),
+                "normal-turn"
+            );
+        }
+        agent.shutdown().await;
     }
 
     #[cfg(unix)]
@@ -1454,7 +1951,7 @@ rl.on('line', line => {
                 vec!["task", "review", "helper"],
             ),
         ] {
-            let page = super::Agent::list(&agent, "", None, scope, 10)
+            let page = crate::providers::Discovery::list(&agent, "", None, scope, 10)
                 .await
                 .unwrap();
             let ids: Vec<_> = page
@@ -1471,8 +1968,9 @@ rl.on('line', line => {
         for name in [Some("New name"), None] {
             let line = serde_json::json!({"method":"thread/name/updated","params":{"threadId":"task","threadName":name}}).to_string();
             let change =
-                super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
+                super::event_changes(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
                     .unwrap()
+                    .pop()
                     .unwrap();
             let super::AgentChange::Renamed {
                 session,
@@ -1487,11 +1985,61 @@ rl.on('line', line => {
     }
 
     #[test]
+    fn recorded_spawn_agent_links_the_child_when_the_receiver_becomes_known() {
+        use super::*;
+        let rows = include_str!("../fixtures/subagent/codex_transcript.ndjson");
+        let mut checked = Vec::new();
+        for line in rows.lines() {
+            let row: Value = serde_json::from_str(line).unwrap();
+            let frame = &row["frame"];
+            if row["type"] != "emit_inbound" || frame["params"]["item"]["tool"] != "spawnAgent" {
+                continue;
+            }
+            let line = frame.to_string();
+            let changes =
+                event_changes(uuid::Uuid::nil(), &RpcMessage::parse(&line).unwrap()).unwrap();
+            let links: Vec<_> = changes
+                .iter()
+                .filter_map(|change| match change {
+                    AgentChange::TaskParent { session, parent } => {
+                        Some((session.id.as_str(), parent.id.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let receivers = frame["params"]["item"]["receiverThreadIds"]
+                .as_array()
+                .unwrap();
+            let expected: Vec<_> = receivers
+                .iter()
+                .map(|child| {
+                    (
+                        child.as_str().unwrap(),
+                        frame["params"]["threadId"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(links, expected);
+            checked.push((frame["method"].as_str().unwrap().to_owned(), links.len()));
+        }
+        assert_eq!(
+            checked,
+            [
+                ("item/started".into(), 0),
+                ("item/completed".into(), 1),
+                ("item/started".into(), 0),
+                ("item/completed".into(), 1)
+            ]
+        );
+    }
+
+    #[test]
     fn started_subagents_report_parent_for_subscription_retention() {
         let line = serde_json::json!({"method":"thread/started","params":{"thread":{"id":"child","parentThreadId":"parent"}}}).to_string();
         let change =
-            super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
+            super::event_changes(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
                 .unwrap()
+                .pop()
                 .unwrap();
         let super::AgentChange::TaskParent { session, parent } = change else {
             panic!("parent was not published")
@@ -1501,9 +2049,9 @@ rl.on('line', line => {
         let root = serde_json::json!({"method":"thread/started","params":{"thread":{"id":"root"}}})
             .to_string();
         assert!(
-            super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&root).unwrap())
+            super::event_changes(uuid::Uuid::nil(), &super::RpcMessage::parse(&root).unwrap())
                 .unwrap()
-                .is_none()
+                .is_empty()
         );
     }
 
@@ -1559,18 +2107,13 @@ rl.on('line', line => {
 
     #[tokio::test]
     async fn provider_process_events_cannot_mutate_host_owned_terminals() {
-        use futures_util::FutureExt;
-        let router = crate::host_rpc::routing::SessionRouter::new();
-        let mut connection = router.open_session();
         for method in ["process/outputDelta", "process/exited"] {
             let line = serde_json::json!({"method":method,"params":{"processHandle":"owned","deltaBase64":"aW5qZWN0ZWQ=","exitCode":0}}).to_string();
-            if let Some(change) =
-                super::event_change(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
+            assert!(
+                super::event_changes(uuid::Uuid::nil(), &super::RpcMessage::parse(&line).unwrap())
                     .unwrap()
-            {
-                router.apply(change, &[]).unwrap();
-            }
-            assert!(connection.recv().now_or_never().is_none());
+                    .is_empty()
+            );
         }
     }
     #[test]

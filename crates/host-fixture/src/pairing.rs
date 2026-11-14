@@ -1,7 +1,7 @@
 //! Loopback-only UI test controls. No saved application profiles are used.
 
 use crate::{Result, test_support::Connection};
-use agent_protocol::operations::{CreateInvitation, CreateSession, IdentifyDevice, Pair};
+use agent_protocol::operations::{CreateInvitation, IdentifyDevice, Pair};
 use agent_transport::transport::{Identity, Ticket};
 use serde_json::json;
 use std::fs;
@@ -35,7 +35,12 @@ pub struct PairingServer {
 }
 
 impl PairingServer {
-    pub fn start(root: &Path, ticket: Ticket, identity: Identity) -> Result<Self> {
+    pub fn start(
+        root: &Path,
+        projects: host_daemon::ProjectStore,
+        ticket: Ticket,
+        identity: Identity,
+    ) -> Result<Self> {
         let root = dunce::canonicalize(root)?;
         let server = Server::http((Ipv4Addr::LOCALHOST, 0))?;
         let port = server
@@ -59,6 +64,7 @@ impl PairingServer {
                 } else {
                     route(
                         &root,
+                        &projects,
                         &runtime,
                         &ticket,
                         &identity,
@@ -148,6 +154,7 @@ fn history_conversation(root: &Path, path: &str) -> Result<bool> {
 
 fn route(
     root: &Path,
+    projects: &host_daemon::ProjectStore,
     runtime: &tokio::runtime::Runtime,
     ticket: &Ticket,
     identity: &Identity,
@@ -201,10 +208,11 @@ fn route(
                 fs::remove_file(root.join("auth-token-unavailable"))?;
             }
         }
-        "/merge-worktree/fresh" | "/merge-worktree/merged" | "/merge-worktree/new-work"
-        | "/merge-worktree/dirty" | "/merge-worktree/clean" => {
-            merge_worktree(root, path)?
-        }
+        "/merge-worktree/fresh"
+        | "/merge-worktree/merged"
+        | "/merge-worktree/new-work"
+        | "/merge-worktree/dirty"
+        | "/merge-worktree/clean" => merge_worktree(root, path)?,
         // A changed file Git has no text diff for, which the diff names binary.
         "/binary-file" => fs::write(root.join("project").join("pixel.bin"), [0, 1, 2, 255, 0])?,
         // The Codex fixture's background command and subagent finish.
@@ -229,7 +237,9 @@ fn route(
                 "historyMode":"paginated","path":rollout}]),
             )?;
         }
-        "/list-fixture" | "/title-fixture" | "/list-fixture/reset" => list_fixture(root, path)?,
+        "/list-fixture" | "/title-fixture" | "/list-fixture/reset" => {
+            list_fixture(root, projects, path)?
+        }
         "/paired-device" => pair_device(runtime, ticket, identity)?,
         "/import-candidates" => import_candidates(root)?,
         // A favicon the Host's icon discovery finds in the project's root,
@@ -239,15 +249,35 @@ fn route(
             r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#22c55e"/><path d="M4.5 8.5l2.5 2.5 4.5-5" stroke="#ffffff" stroke-width="2" fill="none"/></svg>"##,
         )?,
         "/background-task" => {
-            let response = rpc(
-                runtime,
-                ticket,
-                identity,
-                &CreateSession { initial_input: None,provider: agent_protocol::session::ProviderKind::Codex, cwd: Some(root.join("project").to_string_lossy().into_owned()), model: None},
-            )?;
+            let native = format!("fixture-background-{}", uuid::Uuid::new_v4());
+            let path = root.join("list-fixture.json");
+            let mut rows: Vec<serde_json::Value> = if path.exists() {
+                serde_json::from_slice(&fs::read(&path)?)?
+            } else {
+                Vec::new()
+            };
+            rows.push(json!({
+                "id":native,"cwd":root.join("project"),"name":"Simulator conversation",
+                "createdAt":10000,"updatedAt":10000,"status":{"type":"notLoaded"},"turns":[]
+            }));
+            write_json(path, &rows)?;
+            runtime.block_on(async {
+                let connection =
+                    Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
+                let _ = connection
+                    .peer
+                    .call(&agent_protocol::conversation::records::SubscribeList {
+                        subscription: uuid::Uuid::new_v4(),
+                        cached: None,
+                        refresh: true,
+                    })
+                    .await?;
+                connection.close().await;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+            })?;
             return Ok((
                 200,
-                serde_json::to_vec(&json!({"threadId":response.response.thread.id}))?,
+                serde_json::to_vec(&json!({"threadId":{"provider":"codex","id":native}}))?,
             ));
         }
         "/background-reply" => {
@@ -267,11 +297,46 @@ fn route(
             let connection =
                 Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
             let result: Result<()> = async {
-                connection.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(serde_json::from_value::<agent_protocol::session::OpenSession>(json!({"session":{"provider":"codex","id":"fixture-external-thread"},"limit":5})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap())?;
-                connection.peer.call(&serde_json::from_value::<agent_protocol::operations::Submission>(json!({"threadId":{"provider":"codex","id":"fixture-external-thread"},"clientUserMessageId":"fixture-other-client",
-                        "input":[{"text":{"text":"[success] Reply from another Bex client"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap())?;
+                use agent_protocol::{
+                    conversation::{Command, InputContent, records},
+                    session::{ProviderKind, SessionRef},
+                };
+                let target =
+                    SessionRef::new(ProviderKind::Codex, "fixture-external-thread".into()).unwrap();
+                connection
+                    .peer
+                    .call(&records::Subscribe {
+                        session: target.clone(),
+                        subscription: uuid::Uuid::new_v4(),
+                        cached: None,
+                        window: None,
+                    })
+                    .await?;
+                let operation = uuid::Uuid::new_v4();
+                let acknowledged = connection
+                    .peer
+                    .call(&records::Change {
+                        session: target,
+                        operation,
+                        command: Command::Submit {
+                            id: operation.to_string().into(),
+                            content: InputContent {
+                                fresh_context: false,
+                                parts: vec![agent_protocol::operations::Input::Text {
+                                    text: "[success] Reply from another Bex client".into(),
+                                }],
+                                model: None,
+                                effort: None,
+                                service_tier: None,
+                                follow_up: agent_protocol::operations::FollowUp::Queue,
+                            },
+                        },
+                    })
+                    .await?;
+                acknowledged.accepted().map_err(|error| error.message)?;
                 Ok(())
-            }.await;
+            }
+            .await;
             connection.close().await;
             result
         })?,
@@ -305,39 +370,24 @@ fn route(
 // use its persisted public address. Unmanaged fixture sessions own their ID.
 fn session_identity(root: &Path, native: &str) -> Result<serde_json::Value> {
     use rusqlite::OptionalExtension;
-    let path = root.join("bex-transcripts.sqlite");
-    let rows: Vec<serde_json::Value> = if path.exists() {
+    let path = root.join("bex-conversations.sqlite");
+    let identity = if path.exists() {
         let connection = rusqlite::Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         connection.busy_timeout(Duration::from_secs(10))?;
-        let bytes: Option<Vec<u8>> = connection
-            .query_row(
-                "SELECT body FROM host_state WHERE name = 'bindings'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        bytes
-            .map(|bytes| serde_json::from_slice(&bytes))
-            .transpose()?
-            .unwrap_or_default()
+        connection.query_row(
+            "SELECT t.provider,t.id FROM sources s JOIN threads t ON t.key=s.thread WHERE s.provider='codex' AND s.native_id=?1",
+            [native], |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,String>(1)?)),
+        ).optional()?
     } else {
-        Vec::new()
+        None
     };
-    let native = json!({"provider":"codex", "id":native});
-    Ok(rows
-        .iter()
-        .find(|row| {
-            row["bindings"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|binding| binding["session"] == native)
-        })
-        .map(|row| row["id"].clone())
-        .unwrap_or(native))
+    Ok(match identity {
+        Some((provider, id)) => json!({"provider":provider,"id":id}),
+        None => json!({"provider":"codex","id":native}),
+    })
 }
 
 fn merge_worktree(root: &Path, path: &str) -> Result<()> {
@@ -497,13 +547,14 @@ fn set_upload_storage_available(root: &Path, available: bool) -> Result<()> {
     Ok(())
 }
 
-fn list_fixture(root: &Path, path: &str) -> Result<()> {
-    let projects_path = root.join("bex-projects.json");
+fn list_fixture(root: &Path, store: &host_daemon::ProjectStore, path: &str) -> Result<()> {
     let backup = root.join("projects-before-list-fixture.json");
     let fixture = root.join("list-fixture.json");
     if path.ends_with("/reset") {
         if backup.exists() {
-            fs::copy(&backup, projects_path)?;
+            let projects: Vec<agent_protocol::models::Project> =
+                serde_json::from_slice(&fs::read(&backup)?)?;
+            store.replace_fixture_projects(&projects)?;
             fs::remove_file(backup)?;
         }
         match fs::remove_file(fixture) {
@@ -514,15 +565,21 @@ fn list_fixture(root: &Path, path: &str) -> Result<()> {
         return Ok(());
     }
     if !backup.exists() {
-        fs::copy(&projects_path, &backup)?;
+        write_json(backup.clone(), &store.fixture_projects()?)?;
     }
     let mut projects = Vec::new();
     let mut threads = Vec::new();
     for number in 1..=16 {
         let id = format!("pagination-project-{number}");
         let cwd = root.join(&id);
-        projects
-            .push(json!({"id":id,"name":format!("Project {number:02}"),"roots":[{"path":cwd}]}));
+        projects.push(agent_protocol::models::Project {
+            id,
+            name: format!("Project {number:02}"),
+            roots: vec![agent_protocol::models::ProjectRoot {
+                path: cwd.to_string_lossy().into_owned(),
+            }],
+            icon: None,
+        });
         if path == "/title-fixture" {
             for conversation in 1..=16 {
                 threads.push(json!({"id":format!("pagination-project-thread-{number}-{conversation}"),"cwd":cwd,
@@ -539,7 +596,7 @@ fn list_fixture(root: &Path, path: &str) -> Result<()> {
     for number in 1..=16 {
         threads.push(json!({"id":format!("pagination-chat-{number}"),"cwd":unassigned,"name":format!("Chat {number:02}"),"updatedAt":100 + number}));
     }
-    write_json(projects_path, &projects)?;
+    store.replace_fixture_projects(&projects)?;
     write_json(fixture, &threads)
 }
 
@@ -591,15 +648,39 @@ fn import_candidates(root: &Path) -> Result<()> {
 }
 
 fn write_json(path: PathBuf, value: &impl serde::Serialize) -> Result<()> {
-    let mut file = std::io::BufWriter::new(fs::File::create(path)?);
-    serde_json::to_writer(&mut file, value)?;
-    file.flush()?;
-    Ok(())
+    agent_local_host::save_private_json(&path, value).map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_controls_update_the_live_project_owner_and_restore_original_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let store = host_daemon::HostRpcService::new([], root.path().join("bex-worktrees.json"))
+            .fixture_projects();
+        let original = vec![agent_protocol::models::Project {
+            id: "original-project".into(),
+            name: "Original".into(),
+            roots: vec![agent_protocol::models::ProjectRoot {
+                path: root.path().join("project").to_string_lossy().into_owned(),
+            }],
+            icon: None,
+        }];
+        store.replace_fixture_projects(&original).unwrap();
+        let observer = store.clone();
+        list_fixture(root.path(), &store, "/list-fixture").unwrap();
+        let listed = observer.fixture_projects().unwrap();
+        assert_eq!(listed.len(), 16);
+        assert!(
+            listed
+                .iter()
+                .any(|project| project.id == "pagination-project-16")
+        );
+        list_fixture(root.path(), &store, "/list-fixture/reset").unwrap();
+        assert_eq!(observer.fixture_projects().unwrap(), original);
+    }
 
     fn isolated_control_peer() -> (tokio::runtime::Runtime, Ticket, Identity) {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -632,6 +713,8 @@ mod tests {
             assert_eq!(
                 route(
                     root.path(),
+                    &host_daemon::HostRpcService::new([], root.path().join("bex-worktrees.json"))
+                        .fixture_projects(),
                     &runtime,
                     &ticket,
                     &identity,
@@ -669,6 +752,11 @@ mod tests {
                 assert_eq!(
                     route(
                         root.path(),
+                        &host_daemon::HostRpcService::new(
+                            [],
+                            root.path().join("bex-worktrees.json")
+                        )
+                        .fixture_projects(),
                         &runtime,
                         &ticket,
                         &identity,

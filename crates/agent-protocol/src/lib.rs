@@ -4,6 +4,7 @@ pub mod browser_import;
 pub mod browser_native;
 pub mod composer;
 pub mod context;
+pub mod conversation;
 pub mod diagnostics;
 pub mod dsh;
 pub mod editors;
@@ -28,8 +29,6 @@ pub mod providers;
 pub mod requests;
 pub mod session;
 pub mod snapshot;
+pub mod sync;
 pub mod tool_output;
 pub mod workspace;
-
-#[cfg(test)]
-mod sync_model;

@@ -1,0 +1,530 @@
+diff --git a/libs/relax/compiler/src/forkexec.rs b/libs/relax/compiler/src/forkexec.rs
+index 1947a97..7612302 100644
+--- a/libs/relax/compiler/src/forkexec.rs
++++ b/libs/relax/compiler/src/forkexec.rs
+@@ -117,7 +117,7 @@ pub(crate) extern "C" fn relax_fork_exec_done(pid: i32) -> u32 {
+     match unbuilt {
+         Some(slot) => {
+             crate::jit::with_slot_name(slot, &mut |n| eprintln!("makepad run: a forked child ended at `{}`, not built before its fork: built now, forking again", String::from_utf8_lossy(n)));
+-            crate::jit::precompile_from(slot);
++            crate::jit::precompile_from(&[slot], false);
+             1
+         }
+         None => 0,
+diff --git a/libs/relax/compiler/src/harness.rs b/libs/relax/compiler/src/harness.rs
+index b1d8ae1..30f2ce4 100644
+--- a/libs/relax/compiler/src/harness.rs
++++ b/libs/relax/compiler/src/harness.rs
+@@ -293,3 +293,157 @@ pub(crate) unsafe fn reset_statics() {
+     live::reset_statics();
+     reach::reset_statics();
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const SOURCE: &str = r#"
++static mut FLAGS: [u8; 2] = [0; 2];
++trait Work { fn indirect_target(&self) -> u32; }
++struct Job;
++impl Work for Job {
++    #[inline(never)]
++    fn indirect_target(&self) -> u32 { 7 }
++}
++#[inline(never)]
++fn invoke(job: &dyn Work) -> u32 { job.indirect_target() }
++#[inline(never)]
++fn table_first() -> u32 { 11 }
++#[inline(never)]
++fn table_second() -> u32 { 13 }
++const CALLBACKS: (u32, [fn() -> u32; 2]) = (1, [table_first, table_second]);
++#[test]
++fn chosen_a() {
++    extern "C" { fn __relax_precompile(roots: *const usize, len: usize, exhaustive: bool) -> u64; }
++    // Supplied by the host, so these addresses are not statically reachable from this body.
++    let roots: Vec<usize> = std::env::args().next().unwrap().split(',').map(|s| s.parse().unwrap()).collect();
++    assert_eq!(unsafe { __relax_precompile(roots.as_ptr(), roots.len(), true) }, 0,
++        "selected tests, their Termination adapter and indirect callees must be prepared before any test starts");
++    unsafe { FLAGS[0] += 1; }
++}
++#[test]
++fn chosen_result() -> Result<(), ()> {
++    assert_eq!(invoke(&Job), 7);
++    // Host input keeps both table elements reachable instead of folding a constant index.
++    assert_eq!(CALLBACKS.1[std::env::args().count() % 2](), 11);
++    unsafe { FLAGS[1] += 1; }
++    Ok(())
++}
++#[test]
++#[ignore]
++fn chosen_ignored() { panic!("ignored test ran"); }
++#[test]
++fn excluded() { panic!("filtered test ran"); }
++pub fn flags(out: *mut [u8; 2]) { unsafe { *out = FLAGS; } }
++"#;
++
++    fn fixture(args: &[&str]) -> (Box<Unit>, u32, std::path::PathBuf, u32) {
++        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
++        let root = std::env::temp_dir().join(format!("relax-harness-prepare-{}", std::process::id()));
++        std::fs::create_dir_all(&root).unwrap();
++        let path = root.join("lib.rs");
++        std::fs::write(&path, SOURCE).unwrap();
++        let mut session = crate::Session::default();
++        session.options.tier1 = false;
++        session.options.tyck_ahead = false;
++        let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(session), path.to_str().unwrap(), "harness_fixture", true).unwrap();
++        crate::layout::set_root_crate(krate);
++        let mut tcx = crate::tcx::Tcx::new();
++        tcx.collect(&prog);
++        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
++        let mut u = Unit::new(prog, tcx, core);
++        unsafe { jit::UNIT = &mut *u; }
++        let (first_arg, callback) = crate::owner::call(crate::owner::Class::Program, || {
++            let result = find_fn(&u, "harness_fixture::chosen_result").unwrap();
++            let ret = u.tcx.fn_sig(&u.prog, result).unwrap().ret;
++            let start = find_fn(&u, "std::relax::test::__relax_test_start").unwrap();
++            let adapter = u.fn_id(FnKey::Inst(start, vec![ret]));
++            let selected = u.fn_id(FnKey::Inst(result, Vec::new()));
++            let def = u.prog.defs.iter().enumerate().find_map(|(i, d)| {
++                (u.prog.syms.str(d.name) == "indirect_target" && u.prog.def(d.parent).kind == DefKind::Impl)
++                    .then_some(DefId(i as u32))
++            }).unwrap();
++            let callback = u.fn_id(FnKey::Inst(def, Vec::new()));
++            let table: Vec<_> = ["harness_fixture::table_first", "harness_fixture::table_second"].iter().map(|name| {
++                let def = find_fn(&u, name).unwrap();
++                let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
++                u.entry(slot).to_string()
++            }).collect();
++            (format!("{},{},{},{}", u.entry(adapter), u.entry(selected), u.entry(callback), table.join(",")).into_bytes(), callback)
++        });
++        let mut argv = vec![first_arg];
++        argv.extend(args.iter().map(|s| s.as_bytes().to_vec()));
++        jit::set_program_args(argv);
++        (u, krate, root, callback)
++    }
++
++    fn finish(mut u: Box<Unit>, root: std::path::PathBuf, executed: [u8; 2], callback: u32) {
++        crate::owner::call(crate::owner::Class::Program, || {
++            for name in ["harness_fixture::chosen_ignored", "harness_fixture::excluded"] {
++                let def = find_fn(&u, name).unwrap();
++                let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
++                assert!(!u.fns[slot as usize].compiled, "unselected body was prepared: {name}");
++            }
++        });
++        assert_eq!(u.fns[callback as usize].compiled, executed[0] != 0, "indirect callback preparation");
++        let entry = crate::owner::call(crate::owner::Class::Program, || {
++            let def = find_fn(&u, "harness_fixture::flags").unwrap();
++            let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
++            u.entry(slot)
++        });
++        let up = &mut *u as *mut Unit;
++        let mut flags = [0u8; 2];
++        unsafe { jit::call_jit(up, entry, &mut flags as *mut [u8; 2] as u64) }.map_err(|p| p.message).unwrap();
++        assert_eq!(flags, executed);
++        // The one-shot CLI keeps its unit alive while worker threads retire after reporting.
++        Box::leak(u);
++        std::fs::remove_dir_all(root).unwrap();
++    }
++
++    #[test]
++    fn precompile_respects_filter_ignore_and_return_values() {
++        isolated_test!(precompile_respects_filter_ignore_and_return_values);
++        let (mut u, krate, root, callback) = fixture(&["chosen", "--precompile", "--test-threads=1"]);
++        let found = collect(&u.prog, &[krate]);
++        assert_eq!(found.len(), 4);
++        assert_eq!(found.iter().filter(|t| t.ignore).count(), 1);
++        let up = &mut *u as *mut Unit;
++        assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0);
++        finish(u, root, [1, 1], callback); // each selected body ran exactly once; none ran as a warm-up
++    }
++
++    #[test]
++    fn precompile_follows_previously_compiled_code_after_ir_eviction() {
++        isolated_test!(precompile_follows_previously_compiled_code_after_ir_eviction);
++        let (mut u, krate, root, callback) = fixture(&["chosen", "--precompile", "--test-threads=1"]);
++        let slot = crate::owner::call(crate::owner::Class::Program, || {
++            let def = find_fn(&u, "harness_fixture::chosen_result").unwrap();
++            u.fn_id(FnKey::Inst(def, Vec::new()))
++        });
++        let up = &mut *u as *mut Unit;
++        unsafe { jit::compile_slot(up, slot); }
++        crate::owner::call(crate::owner::Class::Program, || {
++            // Model completed-body eviction before this run's code has reached the disk cache.
++            u.fns[slot as usize].rir = None;
++            u.cache = None;
++        });
++        assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0);
++        finish(u, root, [1, 1], callback);
++    }
++
++    #[test]
++    fn precompile_list_does_not_prepare_or_run_test_bodies() {
++        isolated_test!(precompile_list_does_not_prepare_or_run_test_bodies);
++        let (mut u, krate, root, callback) = fixture(&["chosen", "--list", "--precompile"]);
++        let up = &mut *u as *mut Unit;
++        assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0);
++        crate::owner::call(crate::owner::Class::Program, || {
++            for t in collect(&u.prog, &[krate]) {
++                let slot = u.fn_id(FnKey::Inst(t.def, Vec::new()));
++                assert!(!u.fns[slot as usize].compiled, "--list prepared {}", t.name);
++            }
++        });
++        finish(u, root, [0, 0], callback);
++    }
++}
+diff --git a/libs/relax/compiler/src/jit.rs b/libs/relax/compiler/src/jit.rs
+index 6c88e00..66f04d5 100644
+--- a/libs/relax/compiler/src/jit.rs
++++ b/libs/relax/compiler/src/jit.rs
+@@ -1977,30 +1977,36 @@ pub(crate) fn fork_child() {
+ /// Most functions one `__relax_precompile` builds (a pre_exec closure reaching a large library
+ /// stops there; the rest compiles in the parent on first use, and a forked child that reaches
+ /// it ends with its name: forkexec.rs).
+-#[cfg(unix)]
+ const FORK_PRECOMPILE_MAX: usize = 4096;
+
+-/// `__relax_precompile(addr)` (Relax std's fork_exec, before its fork): builds the function at
+-/// `addr` (its code, thunk or lazy stub) and every function its code calls or takes the address
++/// `__relax_precompile(roots, len, exhaustive)` builds each root (its code, thunk or lazy stub)
++/// and every function its code calls or takes the address
+ /// of, transitively, on the calling thread as its lazy compiles would. Returns how many were
+-/// built. A forked child runs only code built before the fork (forkexec.rs).
+-#[cfg(unix)]
+-pub(crate) extern "C" fn relax_precompile(addr: u64) -> u64 {
++/// built. Tests request the whole graph before their clocks start; fork_exec keeps its
++/// bounded preparation (a forked child runs only code built before the fork: forkexec.rs).
++/// # Safety
++/// `roots` must point to `len` initialized addresses for this synchronous call.
++pub(crate) unsafe extern "C" fn relax_precompile(roots: *const usize, len: usize, exhaustive: bool) -> u64 {
++    let addr = roots as usize;
+     crate::jit::host_boundary("relax_precompile", move || {
+         let _keep = os::proc::KeepLastError::new();
+         let up = cur_unit();
+-        if up.is_null() || addr == 0 || crate::forkexec::exec_child() {
++        if up.is_null() || addr == 0 || len == 0 {
+             return 0;
+         }
++        #[cfg(unix)]
++        if crate::forkexec::exec_child() { return 0; }
+         ensure_altstack();
+-        let root = owner::publish(|| unsafe {
++        // The caller keeps this immutable address table alive until the synchronous return.
++        let addresses = unsafe { std::slice::from_raw_parts(addr as *const usize, len) };
++        let roots: Vec<u32> = owner::publish(|| unsafe {
+             let u = &*up;
+-            u.find_fn(addr).or_else(|| (0..2).find_map(|k| u.slots.find(k, addr).map(|x| x.0))).filter(|&id| (id as usize) < u.fns.len())
++            addresses.iter().filter_map(|&addr| {
++                let addr = addr as u64;
++                u.find_fn(addr).or_else(|| (0..2).find_map(|k| u.slots.find(k, addr).map(|x| x.0))).filter(|&id| (id as usize) < u.fns.len())
++            }).collect()
+         });
+-        match root {
+-            Some(root) => precompile_from(root),
+-            None => 0,
+-        }
++        precompile_from(&roots, exhaustive)
+     })
+ }
+
+@@ -2015,24 +2021,24 @@ pub(crate) fn precompile_reachable(up: *mut Unit, addr: u64) -> u64 {
+         let u = &*up;
+         u.find_fn(addr).or_else(|| (0..2).find_map(|k| u.slots.find(k, addr).map(|x| x.0))).filter(|&id| (id as usize) < u.fns.len())
+     });
+-    let built = root.map_or(0, precompile_from);
++    let built = root.map_or(0, |root| precompile_from(&[root], false));
+     queue::warm_workers_for_test();
+     CUR_UNIT.with(|c| c.set(prev));
+     built
+ }
+
+-/// `relax_precompile` from slot `root`.
+-#[cfg(unix)]
+-pub(crate) fn precompile_from(root: u32) -> u64 {
++/// `relax_precompile` from the root slots.
++pub(crate) fn precompile_from(roots: &[u32], exhaustive: bool) -> u64 {
+     let up = cur_unit();
+     if up.is_null() {
+         return 0;
+     }
+-    let mut todo = vec![root];
++    let limit = if exhaustive { usize::MAX } else { FORK_PRECOMPILE_MAX };
++    let mut todo = roots.to_vec();
+     let mut seen = std::collections::HashSet::new();
+     let mut built = 0u64;
+     while let Some(id) = todo.pop() {
+-        if seen.len() >= FORK_PRECOMPILE_MAX {
++        if seen.len() >= limit {
+             break;
+         }
+         if !seen.insert(id) {
+@@ -2042,35 +2048,68 @@ pub(crate) fn precompile_from(root: u32) -> u64 {
+             unsafe { compile_slot(up, id) };
+             built += 1;
+         }
+-        // the lowered body's callees (before inlining: an inlined callee's own calls are among
+-        // its callees') and its call / fn-address sites
+-        let mut next: Vec<u32> = owner::publish(|| unsafe {
+-            let f = &(&*up).fns[id as usize];
+-            f.calls.iter().chain(f.rir_refs.iter()).copied().collect()
++        let next = owner::call(owner::Class::Program, || unsafe {
++            let u = &*up;
++            let f = &u.fns[id as usize];
++            let mut next: Vec<u32> = f.calls.iter().chain(f.rir_refs.iter()).copied().collect();
++            // Every code installation records references, including cached/image code.
++            // Unlike RIR these survive completed-body eviction before the walk reaches it.
++            let code = u.code.read().unwrap_or_else(|e| e.into_inner());
++            if let Some(refs) = code.refs_at(f.code) {
++                next.extend(realtime_ref_slots(u, refs));
++            }
++            next
+         });
+-        if next.is_empty() {
+-            // code linked from the disk cache or the startup image has no lowered body here: its
+-            // cache entry's relocations name what it calls
+-            next = owner::call(owner::Class::Program, || unsafe {
+-                let u = &*up;
+-                let slot_at = |addr: u64| u.find_fn(addr).or_else(|| (0..2).find_map(|k| u.slots.find(k, addr).map(|x| x.0))).filter(|&id| (id as usize) < u.fns.len());
+-                cache_lookup(up, id).map_or(Vec::new(), |c| {
+-                    c.2.iter()
+-                        .filter_map(|r| match r.target {
+-                            relax_backend::rir::Reloc::Slot(c) | relax_backend::rir::Reloc::Thunk(c) | relax_backend::rir::Reloc::Call(c) => Some(c),
+-                            // the linker has resolved it: a callee's thunk or stub by address
+-                            relax_backend::rir::Reloc::Value(addr) => slot_at(addr),
+-                            _ => None,
+-                        })
+-                        .collect()
+-                })
+-            });
+-        }
+         todo.extend(next.into_iter().filter(|c| !seen.contains(c)));
+     }
+     built
+ }
+
++#[cfg(test)]
++mod precompile_tests {
++    use super::*;
++
++    #[test]
++    fn exhaustive_precompile_reaches_beyond_the_fork_budget() {
++        isolated_test!(exhaustive_precompile_reaches_beyond_the_fork_budget);
++        const LEAVES: usize = FORK_PRECOMPILE_MAX + 4;
++        let root = std::env::temp_dir().join(format!("relax-precompile-{}", std::process::id()));
++        std::fs::create_dir_all(&root).unwrap();
++        let path = root.join("lib.rs");
++        let mut source = String::from("#![no_std] pub fn root(out: *mut usize) {");
++        for i in 0..LEAVES { source.push_str(&format!("leaf_{i}(out);")); }
++        source.push('}');
++        for i in 0..LEAVES {
++            source.push_str(&format!("#[inline(never)] fn leaf_{i}(out: *mut usize) {{ unsafe {{ *out = {i}; }} }}"));
++        }
++        std::fs::write(&path, source).unwrap();
++        let mut session = crate::Session::default();
++        session.options.tier1 = false;
++        session.options.tyck_ahead = false;
++        let session = std::sync::Arc::new(session);
++        let mut prog = crate::program::Program::new(&session);
++        prog.load_crate("precompile", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
++        let mut tcx = crate::tcx::Tcx::new();
++        tcx.collect(&prog);
++        let def = crate::program::DefId(prog.defs.iter().position(|d| prog.syms.str(d.name) == "root").unwrap() as u32);
++        let mut u = Unit::new(prog, tcx, 0);
++        let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
++        let entry = u.entry(slot);
++        let up = &mut *u as *mut Unit;
++        let previous = CUR_UNIT.with(|c| c.replace(up));
++        let roots = [entry as usize, entry as usize];
++        assert_eq!(unsafe { relax_precompile(roots.as_ptr(), roots.len(), false) }, FORK_PRECOMPILE_MAX as u64);
++        assert_eq!(unsafe { relax_precompile(roots.as_ptr(), roots.len(), true) }, (LEAVES + 1 - FORK_PRECOMPILE_MAX) as u64);
++        assert_eq!(unsafe { relax_precompile(roots.as_ptr(), roots.len(), true) }, 0, "prepared code is reused");
++        CUR_UNIT.with(|c| c.set(previous));
++        let mut value = 0usize;
++        unsafe { call_jit(up, entry, &mut value as *mut usize as u64) }.map_err(|p| p.message).unwrap();
++        assert_eq!(value, LEAVES - 1);
++        drop(u);
++        std::fs::remove_dir_all(root).unwrap();
++    }
++}
++
+ /// A thread-local of the runtime that program code reaches (format buffers, the panic being
+ /// raised). Program code runs during thread exit -- its thread-locals' destructors (tls_exit),
+ /// after the host's own thread-locals are destroyed -- so std must never destroy these: the
+@@ -23706,7 +23745,6 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
+         // (the C library's atexit is there too; and a handler in its list would run after this
+         // thread's locals are gone, where a lazy compile of it cannot run: makepad-remote's cleanup)
+         b"atexit" => Some(os::proc::program_atexit as *const () as usize),
+-        #[cfg(unix)]
+         b"__relax_precompile" => Some(relax_precompile as *const () as usize),
+         #[cfg(unix)]
+         b"__relax_fork_exec" => Some(crate::forkexec::relax_fork_exec as *const () as usize),
+diff --git a/libs/relax/compiler/src/syms.rs b/libs/relax/compiler/src/syms.rs
+index efa10dc..bd9dd47 100644
+--- a/libs/relax/compiler/src/syms.rs
++++ b/libs/relax/compiler/src/syms.rs
+@@ -531,11 +531,11 @@ pub fn read_leaf(u: &Unit, s: Sym, m: Mem) -> relax_backend::passes::RoRead {
+     read_obj(u, s, n)
+ }
+
+-/// The functions a constant data object at `addr` points at, directly or through the data
++/// The functions a constant data object containing `addr` points at, directly or through the data
+ /// objects it points at (vtables and their supertrait vtables, fn tables, constants holding fn
+ /// pointers): what code reading it can call (real-time reach, jit.rs realtime).
+ pub(crate) fn data_thunks(u: &Unit, addr: u64, out: &mut Vec<u32>) {
+-    let objs: Vec<u32> = u.syms.data_at(addr).into_iter().filter_map(|s| match u.syms.kind(s.id) { Some(SymKind::Data(i)) => Some(i), _ => None }).collect();
++    let objs: Vec<u32> = u.syms.containing(addr).into_iter().filter_map(|s| match u.syms.kind(s.id) { Some(SymKind::Data(i)) => Some(i), _ => None }).collect();
+     obj_thunks(u, objs, out);
+ }
+
+@@ -545,12 +545,11 @@ pub(crate) fn data_obj_thunks(u: &Unit, idx: u32, out: &mut Vec<u32>) {
+ }
+
+ fn obj_thunks(u: &Unit, mut todo: Vec<u32>, out: &mut Vec<u32>) {
+-    let mut seen = Vec::new();
++    let mut seen = std::collections::HashSet::new();
+     while let Some(idx) = todo.pop() {
+-        if seen.contains(&idx) || seen.len() > 4096 {
++        if !seen.insert(idx) {
+             continue;
+         }
+-        seen.push(idx);
+         let Some((_, _, ptrs, _)) = obj_ptrs(u, idx) else { continue };
+         for (_, s) in ptrs.iter() {
+             match s.and_then(|s| u.syms.kind(s.id)) {
+@@ -757,6 +756,32 @@ fn provenance(u: &Unit, v: u64) -> Option<Sym> {
+ mod provenance_tests {
+     use super::*;
+
++    #[test]
++    fn data_thunks_follows_deep_chains_and_stops_at_cycles_and_mutable_data() {
++        isolated_test!(data_thunks_follows_deep_chains_and_stops_at_cycles_and_mutable_data);
++        let session = std::sync::Arc::new(crate::Session::default());
++        let u = Unit::new(crate::program::Program::new(&session), crate::tcx::Tcx::new(), 0);
++        let mut storage = vec![[0u64; 2]; 4100];
++        let objects: Vec<_> = storage.iter_mut().map(|v| (v.as_mut_ptr() as u64, 16, 8, None)).collect();
++        let callback = u.syms.intern(SymKind::Thunk(7), 0);
++        let chain = u.syms.add_data_batch(&objects, |i, syms| {
++            if i + 1 < syms.len() { vec![(0, syms[i + 1])] }
++            else { vec![(0, syms[0]), (8, callback)] }
++        });
++        let mut found = Vec::new();
++        data_thunks(&u, u.syms.addr(chain[0]), &mut found);
++        assert_eq!(found, [7], "deep and cyclic immutable data still reaches its callback");
++        found.clear();
++        data_thunks(&u, u.syms.addr(chain[0]) + 8, &mut found);
++        assert_eq!(found, [7], "an interior pointer reaches the containing object's callbacks");
++        let mut mutable = 0u64;
++        let sym = u.syms.add_data(&mut mutable as *mut u64 as u64, 8, 8, DataKind::Relocs(vec![(0, callback)]), true);
++        found.clear();
++        data_thunks(&u, u.syms.addr(sym), &mut found);
++        assert!(found.is_empty(), "mutable function pointers cannot be predicted");
++    }
++
++
+     #[test]
+     fn address_maps_are_lazy_and_extend_for_new_defs() {
+         isolated_test!(address_maps_are_lazy_and_extend_for_new_defs);
+diff --git a/libs/relax/compiler/std/std/process_unix.rs b/libs/relax/compiler/std/std/process_unix.rs
+index ed759ef..ce92caa 100644
+--- a/libs/relax/compiler/std/std/process_unix.rs
++++ b/libs/relax/compiler/std/std/process_unix.rs
+@@ -730,9 +730,11 @@ impl Command {
+         // none of its effects left: the loader built that code, and the fork goes again.
+         let loader = ForkLoader::get();
+         if let Some(pre) = loader.precompile {
+-            pre(Self::fork_child_half as usize);
++            let run = Self::fork_child_half as usize;
++            pre(&run, 1, false);
+             for p in &self.closures {
+-                pre(p.run as usize);
++                let run = p.run as usize;
++                pre(&run, 1, false);
+             }
+         }
+         let mut again = 0;
+@@ -855,7 +857,7 @@ pub(crate) unsafe fn run_pre_exec<F: FnMut() -> io::Result<()>>(f: *mut u8) -> i
+ /// when std runs without Relax, e.g. under rustc in std/check_os).
+ #[cfg(not(target_os = "android"))]
+ struct ForkLoader {
+-    precompile: Option<extern "C" fn(usize) -> u64>,
++    precompile: Option<unsafe extern "C" fn(*const usize, usize, bool) -> u64>,
+     fork_exec: Option<extern "C" fn() -> sys::pid_t>,
+     fork_exec_done: Option<extern "C" fn(sys::pid_t) -> u32>,
+ }
+@@ -879,7 +881,7 @@ impl ForkLoader {
+         unsafe {
+             let (p, f, d) = (sym(c"__relax_precompile"), sym(c"__relax_fork_exec"), sym(c"__relax_fork_exec_done"));
+             ForkLoader {
+-                precompile: (p != 0).then(|| core::mem::transmute::<usize, extern "C" fn(usize) -> u64>(p)),
++                precompile: (p != 0).then(|| core::mem::transmute::<usize, unsafe extern "C" fn(*const usize, usize, bool) -> u64>(p)),
+                 fork_exec: (f != 0).then(|| core::mem::transmute::<usize, extern "C" fn() -> sys::pid_t>(f)),
+                 fork_exec_done: (d != 0).then(|| core::mem::transmute::<usize, extern "C" fn(sys::pid_t) -> u32>(d)),
+             }
+diff --git a/libs/relax/compiler/std/std/relax/test.rs b/libs/relax/compiler/std/std/relax/test.rs
+index e399e56..a8612f7 100644
+--- a/libs/relax/compiler/std/std/relax/test.rs
++++ b/libs/relax/compiler/std/std/relax/test.rs
+@@ -2,7 +2,8 @@
+ //! (library/test: lib.rs run_test, test_result.rs calc_result, console.rs, cli.rs), running in
+ //! the program. The loader collects the crate's `#[test]` fns and hands their table to `main`;
+ //! the command line after `--` is libtest's (filters, --exact, --skip, --ignored,
+-//! --include-ignored, --test-threads, --list, --nocapture, -q).
++//! --include-ignored, --test-threads, --list, --nocapture, -q). `--precompile` builds selected
++//! tests and their callees before starting any test, keeping JIT work outside async deadlines.
+ //! Not here: output capture (every test prints as under --nocapture), benches, --format.
+
+ use crate::string::String;
+@@ -91,6 +92,7 @@ struct Opts {
+     /// libtest OutputFormat::Terse (`-q` / `--format=terse`): one character per test
+     quiet: bool,
+     threads: usize,
++    precompile: bool,
+ }
+
+ /// libtest cli.rs get_format: `--format` (pretty, terse; json and junit only on nightly with
+@@ -105,11 +107,12 @@ fn format_terse(v: &str) -> Result<bool, String> {
+ }
+
+ fn parse_args() -> Result<Opts, String> {
+-    let mut o = Opts { filters: Vec::new(), skip: Vec::new(), exact: false, ignored: false, include_ignored: false, list: false, quiet: false, threads: 0 };
++    let mut o = Opts { filters: Vec::new(), skip: Vec::new(), exact: false, ignored: false, include_ignored: false, list: false, quiet: false, threads: 0, precompile: false };
+     let mut format: Option<bool> = None;
+     let mut args = crate::env::args().skip(1);
+     while let Some(a) = args.next() {
+         match a.as_str() {
++            "--precompile" => o.precompile = true,
+             "--exact" => o.exact = true,
+             "--ignored" => o.ignored = true,
+             "--include-ignored" => o.include_ignored = true,
+@@ -286,6 +289,19 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
+         let names: Vec<&str> = selected.iter().map(|&i| descs[i].name.as_str()).collect();
+         eprintln!("makepad test selection: selected={:?}", names);
+     }
++    // Prepare every selected test before starting any of them: preparation alongside a
++    // running async test would still consume that test's real deadlines.
++    if opts.precompile {
++        extern "C" { fn __relax_precompile(roots: *const usize, len: usize, exhaustive: bool) -> u64; }
++        let mut roots = Vec::with_capacity(selected.len() * 2);
++        for &i in &selected {
++            let d = &descs[i];
++            if d.ignore { continue; }
++            roots.push(d.run);
++            if d.start != 0 { roots.push(d.start); }
++        }
++        unsafe { __relax_precompile(roots.as_ptr(), roots.len(), true); }
++    }
+     let started = crate::time::Instant::now();
+     println!();
+     println!("running {} test{}", selected.len(), if selected.len() == 1 { "" } else { "s" });
+diff --git a/tools/run/runner/src/help.rs b/tools/run/runner/src/help.rs
+index f306f69..c556887 100644
+--- a/tools/run/runner/src/help.rs
++++ b/tools/run/runner/src/help.rs
+@@ -340,6 +340,7 @@ fn test_page(st: &Style) -> String {
+     p.blank();
+     p.text("Runs the crate's tests in-process; the optional filter is passed to the");
+     p.text("test harness.");
++    p.row("-- --precompile", "Prepare package tests and cold callees before running them (keeps JIT work outside async deadlines)");
+     p.usage("makepad test --live <package> [--lib | --test <name>] [-- <test args>]");
+     p.text("Keeps one target warm (default --lib); body edits rerun tests that entered the changed functions, including inlinees.");
+     p.text("Non-body edits, unknown reach or changed unattributed code rerun all; the verdict says why.");

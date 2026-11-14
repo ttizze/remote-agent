@@ -180,23 +180,58 @@ impl Worktrees {
 
     /// Roll back a checkout, including its branch, made for a session start
     /// that failed before any conversation recorded it.
-    pub(crate) async fn discard(&self, cwd: String) -> Result<()> {
+    pub(crate) async fn discard(&self, cwd: String, expected_branch: Option<String>) -> Result<()> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
-            let (target, root) = state
+            let owned = state
                 .workspace_roots
                 .iter()
                 .filter(|(target, _)| Path::new(&cwd).starts_with(target))
                 .max_by_key(|(target, _)| target.len())
-                .map(|(target, root)| (target.clone(), root.clone()))
-                .context("Bexが作成したワークツリーではありません。")?;
-            let branch = crate::git::text(Path::new(&target), &["branch", "--show-current"])?;
-            remove_checkout(Path::new(&root), Path::new(&target), branch.trim())?;
+                .map(|(target, root)| (target.clone(), root.clone()));
+            let Some((target, root)) = owned else {
+                if !Path::new(&cwd).exists() {
+                    return Ok(());
+                }
+                anyhow::bail!("Bexが作成したワークツリーではありません。");
+            };
+            let root = Path::new(&root);
+            let listing = crate::git::text(root, &["worktree", "list", "--porcelain", "-z"])?;
+            let registered = listing
+                .split("\0\0")
+                .any(|entry| worktree_path(entry) == Some(Path::new(&target)));
+            let branch = if Path::new(&target).exists() {
+                let actual = crate::git::text(Path::new(&target), &["branch", "--show-current"])?;
+                let actual = actual.trim().to_owned();
+                anyhow::ensure!(
+                    expected_branch
+                        .as_ref()
+                        .is_none_or(|expected| expected == &actual),
+                    "prepared worktree branch changed"
+                );
+                actual
+            } else {
+                expected_branch.context("cancelled checkout branch is missing")?
+            };
+            if registered {
+                remove_linked_worktree(root, Path::new(&target), true)?;
+            } else {
+                anyhow::ensure!(
+                    !Path::new(&target).exists(),
+                    "prepared worktree is no longer registered"
+                );
+            }
+            let reference = format!("refs/heads/{branch}");
+            let refs =
+                crate::git::text(root, &["for-each-ref", "--format=%(refname)", &reference])?;
+            if refs.lines().any(|name| name == reference) {
+                crate::git::text(root, &["branch", "-D", &branch])?;
+            }
             state.workspace_roots.remove(&target);
             save(&path, &state)?;
-            remove_session_container(Path::new(&target), Path::new(&root));
+            remove_session_container(Path::new(&target), root);
             Ok(())
         })
         .await?
@@ -276,15 +311,6 @@ impl Worktrees {
         ?
     }
 
-    pub(crate) async fn prepare<F: std::future::Future<Output = Result<()>>>(
-        &self,
-        cwd: Option<&str>,
-        on_create: impl FnOnce() -> F,
-    ) -> Result<Option<PathBuf>> {
-        self.prepare_options(cwd, None, on_create, Observer::default())
-            .await
-    }
-
     pub(crate) async fn prepare_selected(
         &self,
         cwd: &str,
@@ -292,35 +318,10 @@ impl Worktrees {
         fetch: bool,
         observer: Observer,
     ) -> Result<PathBuf> {
-        self.prepare_options(
-            Some(cwd),
-            Some((base, fetch)),
-            || async { Ok(()) },
-            observer,
-        )
-        .await?
-        .context("selected worktree was not created")
-    }
-
-    async fn prepare_options<F: std::future::Future<Output = Result<()>>>(
-        &self,
-        cwd: Option<&str>,
-        selection: Option<(String, bool)>,
-        on_create: impl FnOnce() -> F,
-        observer: Observer,
-    ) -> Result<Option<PathBuf>> {
-        // Automatic worktrees need an explicitly selected checkout.
-        let Some(cwd) = cwd else {
-            return Ok(None);
-        };
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         let state_path = path.clone();
         let mut state = tokio::task::spawn_blocking(move || read(&state_path)).await??;
-        if selection.is_none() && !state.settings.create_on_new_session {
-            return Ok(None);
-        }
-        on_create().await?;
         let cwd = PathBuf::from(cwd);
         tokio::task::spawn_blocking(move || {
             let cwd = dunce::canonicalize(&cwd)?;
@@ -328,8 +329,7 @@ impl Worktrees {
                 crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
             )?;
             let relative_cwd = cwd.strip_prefix(&root)?;
-            let (requested, fetch) = selection.unwrap_or_else(|| (String::new(), true));
-            let base = preparation::start_ref(&root, &requested, fetch, &observer)?;
+            let base = preparation::start_ref(&root, &base, fetch, &observer)?;
             let original = match state
                 .workspace_roots
                 .get(root.to_str().context("project path is not UTF-8")?)
@@ -446,7 +446,7 @@ impl Worktrees {
                 let _ = save(&path, &state);
                 return Err(discard_checkout(&root, &destination, &branch, error));
             }
-            Ok(Some(target))
+            Ok(target)
         })
         .await?
     }
@@ -950,9 +950,13 @@ mod tests {
                 .await
                 .unwrap();
             let cwd = store
-                .prepare(root.to_str(), || async { Ok(()) })
+                .prepare_selected(
+                    root.to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default(),
+                )
                 .await
-                .unwrap()
                 .unwrap();
             fs::write(cwd.join("tracked.txt"), "worktree commit").unwrap();
             crate::git::text(&cwd, &["add", "tracked.txt"]).unwrap();
@@ -1141,9 +1145,13 @@ mod tests {
             base: base.clone(),
         };
         let fresh = store
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         store
             .remove(fresh.to_str().unwrap().into(), unchanged(None))
@@ -1152,9 +1160,13 @@ mod tests {
         assert!(!fresh.exists(), "a checkout without commits is unchanged");
 
         let cwd = store
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let target = cwd.to_str().unwrap().to_owned();
         let branch = crate::git::text(&cwd, &["branch", "--show-current"])
@@ -1222,9 +1234,13 @@ mod tests {
             .await
             .unwrap();
         let cwd = store
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         commit(&cwd, "work");
         let base = integration_base(&root).unwrap();
@@ -1267,16 +1283,23 @@ mod tests {
             .await
             .unwrap();
         let cwd = store
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let branch = crate::git::text(&cwd, &["branch", "--show-current"])
             .unwrap()
             .trim()
             .to_owned();
         fs::write(cwd.join("partial.txt"), "written before the start failed").unwrap();
-        store.discard(cwd.to_str().unwrap().into()).await.unwrap();
+        store
+            .discard(cwd.to_str().unwrap().into(), None)
+            .await
+            .unwrap();
         assert!(!cwd.exists());
         assert!(
             !cwd.parent().unwrap().exists(),
@@ -1284,9 +1307,41 @@ mod tests {
         );
         assert!(crate::git::text(&root, &["rev-parse", "--verify", "--quiet", &branch]).is_err());
         assert!(store.list().await.unwrap().is_empty());
+        store
+            .discard(cwd.to_str().unwrap().into(), Some(branch))
+            .await
+            .unwrap();
+        let partial = store
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let branch = crate::git::text(&partial, &["branch", "--show-current"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        crate::git::text(
+            &root,
+            &["worktree", "remove", "--force", partial.to_str().unwrap()],
+        )
+        .unwrap();
+        assert!(crate::git::text(&root, &["rev-parse", "--verify", "--quiet", &branch]).is_ok());
+        store
+            .discard(partial.to_str().unwrap().into(), Some(branch.clone()))
+            .await
+            .unwrap();
+        assert!(crate::git::text(&root, &["rev-parse", "--verify", "--quiet", &branch]).is_err());
+        assert!(store.list().await.unwrap().is_empty());
         assert!(
-            store.discard(cwd.to_str().unwrap().into()).await.is_err(),
-            "only recorded checkouts can be discarded"
+            store
+                .discard(root.to_str().unwrap().into(), None)
+                .await
+                .is_err(),
+            "an existing unowned folder must be preserved"
         );
     }
 
@@ -1409,14 +1464,22 @@ mod tests {
             .await
             .unwrap();
         let first = worktrees
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let other = worktrees
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         let first_path = first.to_str().unwrap().to_owned();
         let branch = crate::git::text(&first, &["branch", "--show-current"])
@@ -1544,9 +1607,13 @@ mod tests {
         assert_eq!(Worktrees::new(&state).list().await.unwrap().len(), 2);
         assert_eq!(fs::read_to_string(unrelated).unwrap(), "preserve");
         let registered = worktrees
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         fs::remove_dir_all(&registered).unwrap();
         let entries = worktrees.list().await.unwrap();
@@ -1569,46 +1636,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_worktree_preparation_prevents_checkout_creation() {
-        let directory = repository();
-        let root = dunce::canonicalize(directory.path()).unwrap();
-        let store = Worktrees::new(&root.join("projects.json"));
-        store
-            .settings(Some(WorktreeSettings {
-                create_on_new_session: true,
-                ..Default::default()
-            }))
-            .await
-            .unwrap();
-        let error = store
-            .prepare(root.to_str(), || async { anyhow::bail!("cancelled") })
-            .await
-            .unwrap_err();
-        assert_eq!(error.to_string(), "cancelled");
-        assert!(store.list().await.unwrap().is_empty());
-        assert!(!root.join(".worktree").exists());
-        assert!(
-            store
-                .prepare(root.to_str(), || async { Ok(()) })
-                .await
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn settings_persist_and_toggles_control_real_worktree_creation_and_copying() {
+    async fn settings_persist_and_control_checkout_copying() {
         let directory = repository();
         let root = dunce::canonicalize(directory.path()).unwrap();
         let projects = root.join("projects.json");
         let store = Worktrees::new(&projects);
-        assert!(
-            store
-                .prepare(None, || async { anyhow::bail!("no worktree was selected") })
-                .await
-                .unwrap()
-                .is_none()
-        );
         fs::write(root.join("tracked.txt"), "uncommitted\n").unwrap();
         fs::write(root.join("config.txt"), "local config\n").unwrap();
         fs::write(root.join(".env"), "FIXTURE_TOKEN=isolated\n").unwrap();
@@ -1621,9 +1653,13 @@ mod tests {
         let loaded = Worktrees::new(&projects);
         assert_eq!(loaded.configure(None).await.unwrap(), settings);
         let first = loaded
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         assert_eq!(first.file_name(), root.file_name());
         assert_eq!(
@@ -1677,27 +1713,16 @@ mod tests {
             .await
             .unwrap();
         let second = store
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         assert_ne!(first, second);
         assert!(!second.join(".env").exists());
-        store
-            .configure(Some(
-                json!({"createOnNewSession":false,"copyOnCreate":true,"copyPaths":[".env"]}),
-            ))
-            .await
-            .unwrap();
-        assert!(
-            store
-                .prepare(root.to_str(), || async {
-                    anyhow::bail!("automatic worktrees are disabled")
-                })
-                .await
-                .unwrap()
-                .is_none()
-        );
         assert_eq!(
             fs::read_to_string(root.join("tracked.txt")).unwrap(),
             "uncommitted\n"
@@ -1728,7 +1753,12 @@ mod tests {
                 .unwrap();
             assert!(
                 store
-                    .prepare(root.to_str(), || async { Ok(()) })
+                    .prepare_selected(
+                        root.to_str().unwrap(),
+                        String::new(),
+                        true,
+                        crate::worktrees::Observer::default()
+                    )
                     .await
                     .is_err(),
                 "{path} must be rejected"
@@ -1798,9 +1828,13 @@ mod tests {
         store.configure(Some(settings.clone())).await.unwrap();
         let restarted = Worktrees::new(&projects);
         let first = restarted
-            .prepare(root.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         assert_eq!(first.file_name(), root.file_name());
         assert_eq!(
@@ -1819,9 +1853,13 @@ mod tests {
         settings["worktreeDirectory"] = json!(real_parent.join("second"));
         store.configure(Some(settings)).await.unwrap();
         let second = restarted
-            .prepare(first.to_str(), || async { Ok(()) })
+            .prepare_selected(
+                first.to_str().unwrap(),
+                String::new(),
+                true,
+                crate::worktrees::Observer::default(),
+            )
             .await
-            .unwrap()
             .unwrap();
         assert_eq!(second.file_name(), root.file_name());
         assert_eq!(
@@ -1887,9 +1925,13 @@ mod tests {
             save(&projects.with_file_name("bex-worktrees.json"), &state).unwrap();
             let store = Worktrees::new(&projects);
             let first = store
-                .prepare(legacy.join("packages/app").to_str(), || async { Ok(()) })
+                .prepare_selected(
+                    legacy.join("packages/app").to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default(),
+                )
                 .await
-                .unwrap()
                 .unwrap();
             let checkout = first.parent().unwrap().parent().unwrap();
             assert_eq!(
@@ -1911,9 +1953,13 @@ mod tests {
             );
             assert!(!root.join("packages/app/source.txt").exists());
             let second = Worktrees::new(&projects)
-                .prepare(first.to_str(), || async { Ok(()) })
+                .prepare_selected(
+                    first.to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default(),
+                )
                 .await
-                .unwrap()
                 .unwrap();
             let second_checkout = second.parent().unwrap().parent().unwrap();
             assert_eq!(second_checkout.file_name(), root.file_name());
@@ -1959,14 +2005,24 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .prepare(directory.path().to_str(), || async { Ok(()) })
+                .prepare_selected(
+                    directory.path().to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default()
+                )
                 .await
                 .is_err()
         );
         crate::git::text(directory.path(), &["init", "--quiet"]).unwrap();
         assert!(
             store
-                .prepare(directory.path().to_str(), || async { Ok(()) })
+                .prepare_selected(
+                    directory.path().to_str().unwrap(),
+                    String::new(),
+                    true,
+                    crate::worktrees::Observer::default()
+                )
                 .await
                 .is_err()
         );

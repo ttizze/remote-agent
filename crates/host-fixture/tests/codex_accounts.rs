@@ -1,6 +1,11 @@
-use agent_protocol::{models::SessionStatus, session::SessionChange};
+use agent_protocol::{
+    conversation::{self as decision, records},
+    protocol::{Call, Response},
+    session::{ProviderKind, SessionRef},
+    sync::Scope,
+};
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{HostRpcService, HostSession, ProjectStore};
+use host_daemon::{HostRpcService, HostSession};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -43,61 +48,124 @@ async fn call(
         !line.contains("account/chatgptAuthTokens/refresh"),
         "Host forwarded a private credential request to mobile"
     );
-    let mut result: Value = serde_json::from_str(&line).unwrap();
+    let result: Value = serde_json::from_str(&line).unwrap();
     assert!(result.get("result").is_some() || result.get("error").is_some());
-    if matches!(method, "host/session/open" | "host/session/create")
-        && result.get("error").is_none()
-    {
-        result["result"] = result["result"]["response"].take();
-    }
     result
+}
+
+async fn opened(
+    service: &HostRpcService,
+    session: &HostSession,
+    thread: &SessionRef,
+) -> (records::Replica, host_daemon::HostSubscription) {
+    let reply = service
+        .dispatch(
+            session.id(),
+            &Call::SubscribeConversation(records::Subscribe {
+                session: thread.clone(),
+                subscription: uuid::Uuid::new_v4(),
+                cached: None,
+                window: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let Response::Success { result } =
+        agent_protocol::protocol::decode::<Response<records::Opened>>(&reply.initial).unwrap()
+    else {
+        panic!("open failed")
+    };
+    let replica = records::Replica::new(Scope::Conversation(thread.clone()), 1)
+        .apply(1, result.initial)
+        .unwrap();
+    (replica, reply.updates.unwrap())
+}
+
+async fn open(
+    service: &HostRpcService,
+    session: &HostSession,
+    thread: &SessionRef,
+) -> agent_protocol::models::ThreadResponse {
+    records::project(&opened(service, session, thread).await.0).unwrap()
+}
+
+async fn create(
+    service: &HostRpcService,
+    session: &mut HostSession,
+    cwd: &std::path::Path,
+) -> SessionRef {
+    let request = records::Create {
+        workspace: None,
+        session: SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap(),
+        provider: ProviderKind::Codex,
+        subscription: uuid::Uuid::new_v4(),
+        cwd: Some(cwd.to_str().unwrap().into()),
+        selection: Default::default(),
+        initial: None,
+    };
+    let result = call(service, session, "host/conversation/create", json!(request)).await;
+    assert!(result.get("error").is_none(), "{result}");
+    let opened: records::Opened = serde_json::from_value(result["result"].clone()).unwrap();
+    opened.session
 }
 
 async fn completed_turn(
     service: &HostRpcService,
     session: &mut HostSession,
-    thread: &str,
+    thread: &SessionRef,
     text: &str,
 ) {
-    let open = agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
-        include_activity: false,
-        known_version: None,
-        session: agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
-            id: thread.into(),
-        },
-        limit: 5,
-    });
-    let reply = service.dispatch(session.id(), &open).await.unwrap();
-    let mut updates = reply.updates.unwrap();
+    let (mut replica, mut updates) = opened(service, session, thread).await;
+    let id = uuid::Uuid::new_v4();
     let result = call(
         service,
         session,
-        "host/session/submit",
-        json!({"threadId":{"provider":"codex","id":thread},"clientUserMessageId":text,"input":[{"text":{"text":text}}]}),
+        "host/conversation/change",
+        json!(records::Change {
+            session: thread.clone(),
+            operation: id,
+            command: decision::Command::Submit {
+                id: id.to_string().into(),
+                content: decision::InputContent {
+                    fresh_context: false,
+                    parts: vec![agent_protocol::operations::Input::Text { text: text.into() }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                    follow_up: Default::default(),
+                },
+            },
+        }),
     )
     .await;
     assert!(result.get("error").is_none(), "{result}");
-    let id = result["result"]["turnId"].as_str().unwrap();
-    let mut completed = false;
+    let receipt: records::Acknowledged = serde_json::from_value(result["result"].clone()).unwrap();
+    receipt.accepted().unwrap();
     loop {
-        let event =
-            agent_protocol::protocol::decode::<SessionChange>(&updates.recv().await.unwrap())
-                .unwrap();
-        match event {
-            SessionChange::Turn {
-                turn,
-                completed: true,
-            } if turn.id.as_str() == id => {
-                completed = true;
-            }
-            // The fixture publishes idle separately after the completed turn.
-            // Observe it before comparing snapshots across an account switch.
-            SessionChange::Status {
-                status: SessionStatus::Idle,
-            } if completed => return,
-            _ => {}
+        let view = records::project(&replica).unwrap();
+        assert!(
+            !view.thread.preparations.iter().any(|preparation| matches!(
+                preparation.status,
+                agent_protocol::session::PreparationStatus::Failed { .. }
+            )),
+            "{text}: {:?}",
+            view.thread.preparations
+        );
+        if view.thread.turns.iter().flatten().any(|turn| {
+            turn.status == agent_protocol::execution::TurnStatus::Completed
+                && turn.items.iter().flatten().any(|item| {
+                    item.client_input_id
+                        .as_ref()
+                        .is_some_and(|input| input.as_str() == id.to_string())
+                })
+        }) {
+            return;
         }
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), updates.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no turn update for {text}: {:?}", view.thread));
+        let message = agent_protocol::protocol::decode(&bytes.unwrap()).unwrap();
+        replica = replica.apply(1, message).unwrap();
     }
 }
 
@@ -113,7 +181,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let adapter = host_daemon::providers::codex::Codex::new(Ok(server.clone()));
         let accounts_dir = directory.path().join("accounts");
         adapter.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
-        let service = HostRpcService::new([adapter.into()], ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new([adapter.into()], home.join("bex-worktrees.json"));
         let mut session = service.open_session();
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"][0]["email"], "desktop@example.invalid");
@@ -141,12 +209,10 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let usage = usage.await.unwrap();
         assert_eq!(usage["result"]["windows"][0]["remainingPercent"], 72);
         assert_eq!(usage["result"]["windows"][1]["remainingPercent"], 86);
-        let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
-        let thread = started["result"]["thread"]["id"]["id"].as_str().unwrap();
-        completed_turn(&service, &mut session, thread, "before switch").await;
-        let before = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
-        assert!(before.get("error").is_none(), "{before}");
-        assert_eq!(before["result"]["thread"]["turns"].as_array().unwrap().len(), 1);
+        let thread = create(&service,&mut session,&home).await;
+        completed_turn(&service, &mut session, &thread, "before switch").await;
+        let before = open(&service,&session,&thread).await;
+        assert_eq!(before.thread.turns.as_ref().unwrap().len(), 1);
         let canceled = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
         assert!(call(&service, &mut session, "host/account/login/cancel", json!({"loginId":canceled["result"]["loginId"]})).await.get("error").is_none());
         // Dismissing an already discarded login must still allow another attempt.
@@ -169,11 +235,11 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(server.initialize_response().codex_home, dunce::canonicalize(&home).unwrap(), "account selection must retain the conversation configuration home");
         let refreshed = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
         assert_eq!(refreshed, json!({"accountId":"desktop","hasToken":true}));
-        let after = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
-        assert_eq!(before["result"]["thread"], after["result"]["thread"]);
-        completed_turn(&service, &mut session, thread, "after switch").await;
-        let after = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
-        assert_eq!(after["result"]["thread"]["turns"].as_array().unwrap().len(), 2);
+        let after = open(&service,&session,&thread).await;
+        assert_eq!(before.thread, after.thread);
+        completed_turn(&service, &mut session, &thread, "after switch").await;
+        let after = open(&service,&session,&thread).await;
+        assert_eq!(after.thread.turns.as_ref().unwrap().len(), 2);
         let invalid = call(&service, &mut session, "host/account/select", json!({"accountId":"missing"})).await;
         assert!(invalid.get("error").is_some());
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
@@ -192,7 +258,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let adapter = host_daemon::providers::codex::Codex::new(Ok(server.clone()));
         adapter.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
-        let service = HostRpcService::new([adapter.into()], ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new([adapter.into()], home.join("bex-worktrees.json"));
         let mut session = service.open_session();
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
         assert_eq!(server.initialize_response().codex_home, dunce::canonicalize(&home).unwrap(), "account selection must retain the conversation configuration home");
@@ -209,16 +275,27 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let adapter = host_daemon::providers::codex::Codex::new(Ok(server.clone()));
         adapter.enable_accounts(accounts_dir, config).await.unwrap();
-        let service = HostRpcService::new([adapter.into()], ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new([adapter.into()], home.join("bex-worktrees.json"));
         let mut session = service.open_session();
         let accounts = call(&service, &mut session, "host/account/list", json!({})).await;
         assert!(accounts["result"]["selected"]["codex"].is_null());
         assert!(accounts["result"]["errors"]["codex"].is_string());
-        assert!(call(&service, &mut session, "host/session/list", json!({})).await.get("error").is_none());
-        assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":"any"},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
+        assert!(call(&service, &mut session, "host/list/subscribe", json!(records::SubscribeList { refresh: false, subscription:uuid::Uuid::new_v4(),cached:None })).await.get("error").is_none());
+        let operation=uuid::Uuid::new_v4();
+        let rejected=call(&service,&mut session,"host/conversation/change",json!(records::Change {
+            session:thread.clone(),operation,command:decision::Command::Submit {
+                id:operation.to_string().into(),content:decision::InputContent {
+                fresh_context: false,
+                    parts:vec![agent_protocol::operations::Input::Text {text:"must not use a different account".into()}],
+                    model:None,effort:None,service_tier:None,follow_up:Default::default(),
+                },
+            },
+        })).await;
+        let rejected:records::Acknowledged=serde_json::from_value(rejected["result"].clone()).unwrap();
+        assert!(matches!(&rejected.outcome,decision::Outcome::Rejected(reason) if reason == "Codexにログインしてください。"),"{:?}",rejected.outcome);
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
-        let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
-        completed_turn(&service, &mut session, started["result"]["thread"]["id"]["id"].as_str().unwrap(), "recovered account").await;
+        let recovered=create(&service,&mut session,&home).await;
+        completed_turn(&service,&mut session,&recovered,"recovered account").await;
         let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":second})).await;
         assert!(logged_out.get("error").is_none(), "{logged_out}");
         let remaining = call(&service, &mut session, "host/account/list", json!({})).await;
@@ -244,19 +321,9 @@ async fn helper_initialization_does_not_block_completed_turns() {
             .enable_accounts(home.join("accounts"), config)
             .await
             .unwrap();
-        let service = HostRpcService::new(
-            [adapter.into()],
-            ProjectStore::new(home.join("bex-worktrees.json")),
-        );
+        let service = HostRpcService::new([adapter.into()], home.join("bex-worktrees.json"));
         let mut session = service.open_session();
-        let started = call(
-            &service,
-            &mut session,
-            "host/session/create",
-            json!({"provider":"codex","cwd":home}),
-        )
-        .await;
-        let thread = started["result"]["thread"]["id"]["id"].as_str().unwrap();
+        let thread = create(&service, &mut session, home).await;
         let gate = home.join("initialize-release");
         std::fs::write(
             home.join("fixture-config.json"),
@@ -284,23 +351,20 @@ async fn helper_initialization_does_not_block_completed_turns() {
         }
         let completion = tokio::time::timeout(
             Duration::from_secs(2),
-            completed_turn(&service, &mut session, thread, "while logging in"),
+            completed_turn(&service, &mut session, &thread, "while logging in"),
         )
         .await;
         std::fs::write(&gate, []).unwrap();
         assert!(login.await.unwrap().get("error").is_none());
         completion.expect("turn waited for unrelated account helper initialization");
-        let read = call(
-            &service,
-            &mut session,
-            "host/session/open",
-            json!({"session":{"provider":"codex","id":thread},"limit":5}),
-        )
-        .await;
-        assert_eq!(read["result"]["thread"]["turns"][0]["status"], "completed");
+        let read = open(&service, &session, &thread).await;
+        assert_eq!(
+            read.thread.turns.as_ref().unwrap()[0].status,
+            agent_protocol::execution::TurnStatus::Completed
+        );
         assert!(
-            read["result"]["thread"]
-                .to_string()
+            serde_json::to_string(&read.thread)
+                .unwrap()
                 .contains("while logging in")
         );
         drop(session);
@@ -327,7 +391,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let adapter = host_daemon::providers::codex::Codex::new(Ok(server.clone()));
         adapter.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
-        let service = HostRpcService::new([adapter.into()], ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new([adapter.into()], home.join("bex-worktrees.json"));
         let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["selected"]["codex"], "desktop");
@@ -346,7 +410,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let adapter = host_daemon::providers::codex::Codex::new(Ok(server.clone()));
         adapter.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
-        let service = HostRpcService::new([adapter.into()], ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new([adapter.into()], home.join("bex-worktrees.json"));
         let mut session = service.open_session();
         assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selected"]["codex"], "desktop");
         let invalid = call(&service, &mut session, "host/account/logout", json!({"accountId":"missing"})).await;
@@ -374,7 +438,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let adapter = host_daemon::providers::codex::Codex::new(Ok(server.clone()));
         adapter.enable_accounts(accounts_dir.clone(), config).await.unwrap();
-        let service = HostRpcService::new([adapter.into()], ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new([adapter.into()], home.join("bex-worktrees.json"));
         let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["accounts"], json!([]));

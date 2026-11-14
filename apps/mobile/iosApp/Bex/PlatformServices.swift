@@ -13,14 +13,14 @@ final class MobileSessionStorage: ClientStorage, ClientPlatform, @unchecked Send
         self.host = host
     }
 
-    private func location() throws -> URL {
+    private func location(_ fileExtension: String) throws -> URL {
         let directory = try FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true
         ).appendingPathComponent("snapshots", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let name = Data(host.utf8).base64EncodedString().replacingOccurrences(of: "/", with: "_")
-        return directory.appendingPathComponent(name).appendingPathExtension("json")
+        return directory.appendingPathComponent(name).appendingPathExtension(fileExtension)
     }
 
     private func access<T>(_ body: () throws -> T) throws -> T {
@@ -29,13 +29,13 @@ final class MobileSessionStorage: ClientStorage, ClientPlatform, @unchecked Send
 
     func load() throws -> Data {
         try access {
-            let url = try location()
+            let url = try location("v3.json")
             return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
         }
     }
 
     func save(bytes: Data) throws {
-        try access { try bytes.write(to: location(), options: .atomic) }
+        try access { try bytes.write(to: location("v3.json"), options: .atomic) }
     }
 
     func identity() throws -> Data {
@@ -43,7 +43,7 @@ final class MobileSessionStorage: ClientStorage, ClientPlatform, @unchecked Send
     }
 
     func diagnosticsDirectory() throws -> String? {
-        try access { try location().deletingPathExtension().appendingPathExtension("diagnostics").path }
+        try access { try location("diagnostics").path }
     }
 
     func conversationDirectory() throws -> String? {
@@ -52,7 +52,7 @@ final class MobileSessionStorage: ClientStorage, ClientPlatform, @unchecked Send
 
     /// Saved conversation copies for this Host; removing the Host removes them.
     func conversations() throws -> URL {
-        try location().deletingPathExtension().appendingPathExtension("conversations")
+        try location("conversations")
     }
 }
 

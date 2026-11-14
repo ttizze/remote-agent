@@ -29,7 +29,10 @@ fn main() {
                 run().await
             }
         })
-        .unwrap_or(1);
+        .unwrap_or_else(|error| {
+            eprintln!("provider supervisor failed: {error}");
+            1
+        });
     // Tokio's stdin reader may still be blocked after a native process exits.
     // All owned children have already been killed/reaped before reaching here.
     std::process::exit(code);

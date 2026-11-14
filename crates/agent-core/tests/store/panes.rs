@@ -40,10 +40,10 @@ async fn side_chat_retries_creation_and_initializes_its_quote_once(
         }
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
-    assert_eq!(request["method"], "host/session/create");
+    assert_eq!(request["method"], "host/conversation/create");
     assert_eq!(request["params"]["provider"], expected_provider);
     assert_eq!(request["params"]["cwd"], "/fixture");
-    assert!(request["params"]["initialInput"].is_null());
+    assert!(request["params"]["initial"].is_null());
     writer.reply(&request, json!({"error":{"code":"request_failed","message":"fixture failure","delivery":"notSent"}})).await.unwrap();
     assert!(failed.await.unwrap().is_err());
     assert!(
@@ -76,7 +76,7 @@ async fn side_chat_retries_creation_and_initializes_its_quote_once(
         }
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
-    assert_eq!(request["method"], "host/session/create");
+    assert_eq!(request["method"], "host/conversation/create");
     if abandon_waiter {
         retry.abort();
     }
@@ -86,9 +86,15 @@ async fn side_chat_retries_creation_and_initializes_its_quote_once(
     );
     tokio::pin!(concurrent);
     assert!(futures_util::poll!(concurrent.as_mut()).is_pending());
-    writer.reply(&request, json!({"result":{"thread":{
-        "id":{"provider":expected_provider,"id":"side"},"cwd":"/fixture","turns":[],"status":"idle"
-    }}})).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"thread":{
+                "cwd":"/fixture","turns":[],"status":"idle"
+            }}}),
+        )
+        .await
+        .unwrap();
     if abandon_waiter {
         assert!(retry.await.unwrap_err().is_cancelled());
     } else {
@@ -146,12 +152,11 @@ async fn explaining_a_selection_starts_a_conversation_that_asks_at_once(#[case] 
     let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
     let pane = store.open_pane("/fixture".into()).unwrap();
     let mut created = Vec::new();
-    for (index, start) in [
+    for start in [
         SideChatStart::Quote("Earlier".into()),
         SideChatStart::Explain("日本語 Needle".into()),
     ]
     .into_iter()
-    .enumerate()
     .skip(usize::from(!shown))
     {
         let starting = tokio::spawn({
@@ -159,32 +164,30 @@ async fn explaining_a_selection_starts_a_conversation_that_asks_at_once(#[case] 
             async move { pane.start_side_chat(None, start).await }
         });
         let request = read_after_reviews(&mut reader, &mut writer).await;
-        assert_eq!(request["method"], "host/session/create");
-        assert!(request["params"]["initialInput"].is_null());
-        let id = format!("side-{index}");
+        assert_eq!(request["method"], "host/conversation/create");
+        assert!(request["params"]["initial"].is_null());
+        let target: SessionRef =
+            serde_json::from_value(request["params"]["session"].clone()).unwrap();
         writer
             .reply(
                 &request,
                 json!({"result":{"thread":{
-                    "id":{"provider":"codex","id":id},"cwd":"/fixture","turns":[],"status":"idle"
+                    "cwd":"/fixture","turns":[],"status":"idle"
                 }}}),
             )
             .await
             .unwrap();
-        created.push((SessionRef::new(ProviderKind::Codex, id).unwrap(), starting));
+        created.push((target, starting));
     }
     let (explained, explaining) = created.pop().unwrap();
     let submit = read_after_reviews(&mut reader, &mut writer).await;
-    assert_eq!(submit["method"], "host/session/submit");
-    assert_eq!(submit["params"]["threadId"]["id"], explained.id.as_str());
+    assert_eq!(submit["method"], "host/conversation/change");
+    assert_eq!(submit["params"]["session"]["id"], explained.id.as_str());
     assert_eq!(
-        submit["params"]["input"][0]["text"]["text"],
+        submit["params"]["command"]["Submit"]["content"]["parts"][0]["text"]["text"],
         "次の選択範囲について詳しく説明してください。\n\n日本語 Needle"
     );
-    writer
-        .reply(&submit, json!({"result":{"turnId":"explained"}}))
-        .await
-        .unwrap();
+    writer.reply(&submit, json!({"result":{}})).await.unwrap();
     explaining.await.unwrap().unwrap();
     let snapshot = pane.snapshot().unwrap();
     assert_eq!(
@@ -239,15 +242,21 @@ async fn abandoning_side_chat_creation_does_not_keep_its_pane_alive() {
         }
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
-    assert_eq!(request["method"], "host/session/create");
+    assert_eq!(request["method"], "host/conversation/create");
     preparing.abort();
     assert!(preparing.await.unwrap_err().is_cancelled());
     drop(pane);
     assert!(weak.upgrade().is_none());
     assert!(store.snapshot().panes.get(&id).is_none());
-    writer.reply(&request, json!({"result":{"thread":{
-        "id":{"provider":"codex","id":"abandoned-side"},"cwd":"/fixture","turns":[],"status":"idle"
-    }}})).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"thread":{
+                "cwd":"/fixture","turns":[],"status":"idle"
+            }}}),
+        )
+        .await
+        .unwrap();
     store.close().await.unwrap();
 }
 
@@ -271,6 +280,13 @@ async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_p
         })
         .await
         .unwrap();
+    let original = store
+        .snapshot()
+        .panes
+        .primary()
+        .navigation
+        .draft_key
+        .clone();
     let pane = store.open_pane("/fixture".into()).unwrap();
     let preparing = tokio::spawn({
         let pane = pane.clone();
@@ -281,19 +297,25 @@ async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_p
         }
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
-    assert_eq!(request["method"], "host/session/create");
+    assert_eq!(request["method"], "host/conversation/create");
     let primary = store.snapshot().panes.primary().clone();
     pane.close();
-    writer.reply(&request, json!({"result":{"thread":{
-        "id":{"provider":"codex","id":"closed-side"},"cwd":"/fixture","turns":[],"status":"idle"
-    }}})).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"thread":{
+                "cwd":"/fixture","turns":[],"status":"idle"
+            }}}),
+        )
+        .await
+        .unwrap();
     assert!(preparing.await.unwrap().is_err());
     let snapshot = store.snapshot();
     assert_eq!(
         snapshot.input.drafts[&original].text,
         "Keep the original draft"
     );
-    let closed = SessionRef::new(ProviderKind::Codex, "closed-side".into()).unwrap();
+    let closed: SessionRef = serde_json::from_value(request["params"]["session"].clone()).unwrap();
     assert!(
         snapshot
             .input
@@ -303,6 +325,7 @@ async fn closing_a_side_chat_during_creation_cannot_apply_its_quote_to_another_p
     );
     assert!(pane.snapshot().is_err());
     assert!(snapshot.sessions.conversations.contains_key(&closed));
+    assert!(!snapshot.sessions.subscriptions.contains_key(&closed));
     assert!(snapshot.panes.get(pane.id()).is_none());
     assert!(Arc::ptr_eq(&primary, snapshot.panes.primary()));
     store.close().await.unwrap();
@@ -565,13 +588,43 @@ async fn changing_host_storage_keeps_secondary_new_chat_drafts_separate() {
         store.open_pane("/same".into()).unwrap(),
         store.open_pane("/same".into()).unwrap(),
     ];
-    let before = store.snapshot();
+    let mut before = store.snapshot().as_ref().clone();
+    for (index, pane) in panes.iter().enumerate() {
+        let key = before
+            .panes
+            .get(pane.id())
+            .unwrap()
+            .navigation
+            .draft_key
+            .clone();
+        Arc::make_mut(&mut before.input.drafts).insert(
+            key,
+            Arc::new(Draft {
+                text: format!("original draft {index}"),
+                ..Default::default()
+            }),
+        );
+    }
     let changed = agent_core::state::reduce(
         &before,
         "",
         agent_core::state::Event::StorageScope("another-host".into()),
     )
     .0;
+    assert_ne!(
+        changed
+            .panes
+            .get(panes[0].id())
+            .unwrap()
+            .navigation
+            .draft_key,
+        changed
+            .panes
+            .get(panes[1].id())
+            .unwrap()
+            .navigation
+            .draft_key
+    );
     for pane in &panes {
         let view = changed.panes.get(pane.id()).unwrap();
         let expected = pane
@@ -583,7 +636,11 @@ async fn changing_host_storage_keeps_secondary_new_chat_drafts_separate() {
             .navigation
             .draft_key
             .clone();
-        assert_eq!(view.navigation.draft_key, expected);
+        assert_ne!(
+            view.navigation.draft_key, expected,
+            "each Host has its own unsubmitted address"
+        );
+        let expected = view.navigation.draft_key.clone();
         let navigated = agent_core::state::reduce(
             &changed,
             pane.id(),
@@ -596,6 +653,23 @@ async fn changing_host_storage_keeps_secondary_new_chat_drafts_separate() {
             navigated.panes.get(pane.id()).unwrap().navigation.draft_key,
             expected,
             "changing Host storage must not merge secondary input with the main pane"
+        );
+    }
+    let restored = agent_core::state::reduce(
+        &changed,
+        "",
+        agent_core::state::Event::StorageScope("original-host".into()),
+    )
+    .0;
+    for (index, pane) in panes.iter().enumerate() {
+        let key = &before.panes.get(pane.id()).unwrap().navigation.draft_key;
+        assert_eq!(
+            &restored.panes.get(pane.id()).unwrap().navigation.draft_key,
+            key
+        );
+        assert_eq!(
+            restored.input.drafts[key].text,
+            format!("original draft {index}")
         );
     }
     store.close().await.unwrap();
@@ -740,7 +814,7 @@ async fn answer_open(
     source: &Thread,
 ) {
     let request = read(reader).await;
-    assert_eq!(request["method"], "host/session/open");
+    assert_eq!(request["method"], "host/conversation/subscribe");
     writer
         .reply(&request, json!({"result":{"thread":source}}))
         .await
@@ -847,7 +921,7 @@ async fn connection_reopens_every_pane_in_one_shared_subscription_map() {
     let mut sources = BTreeMap::new();
     for (name, pane_id) in [("primary", ""), ("side", side_id.as_str())] {
         let id = SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: name.into(),
         };
         let mut source = thread(name);
@@ -871,19 +945,16 @@ async fn connection_reopens_every_pane_in_one_shared_subscription_map() {
     let (peer, mut reader, writer) = host_fixture::connect(&initial).await;
     let store = Store::new(peer, initial, None);
     let mut opened = std::collections::BTreeSet::new();
-    for _ in 0..8 {
+    for _ in 0..7 {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
-            "host/session/list" => {
-                json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5})
+            "host/list/subscribe" => {
+                json!({"data":[],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5})
             }
             "host/model/list" => json!({"data":[]}),
             "host/account/list" => json!({"accounts":[],"selected":{}}),
-            "host/taskActivity/read" => {
-                json!({"revision":0,"statuses":[],"waiting":[],"unread":[],"display":agent_protocol::live_activity::TaskActivitySummary::default().display()})
-            }
             "host/workspace/review" => review(),
-            "host/session/open" => {
+            "host/conversation/subscribe" => {
                 let id: SessionRef =
                     serde_json::from_value(request["params"]["session"].clone()).unwrap();
                 opened.insert(id.clone());
@@ -1070,7 +1141,7 @@ async fn closed_dictation_cannot_append_to_a_reopened_panes_input(
         preparation: None,
         audio: vec![1, 0],
         send,
-        client_user_message_id: "closed-voice".into(),
+        client_user_message_id: "2de8b590-9866-5461-8bc9-faa433565f09".into(),
     }));
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/dictation/transcribe");

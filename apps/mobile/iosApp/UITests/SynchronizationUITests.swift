@@ -159,7 +159,7 @@ extension LaunchUITests {
         app.activate()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitUntilExists(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)[identifier].waitUntilExists(timeout: 20),
-                      "Foreground return did not fetch the conversation created by another client")
+                      "Foreground return did not fetch the conversation discovered from the provider")
         XCTAssertFalse(app.staticTexts["notice"].exists)
         let project = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.project."))
             .firstMatch
@@ -183,7 +183,7 @@ extension LaunchUITests {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitUntilExists(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)[identifier].waitUntilExists(timeout: 20),
-                      "Returning to the list did not fetch the conversation created by another client")
+                      "Returning to the list did not fetch the conversation discovered from the provider")
         captureScreen(app, named: "New conversation fetched when returning to the list")
     }
 
@@ -195,7 +195,7 @@ extension LaunchUITests {
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "value == %@", "完了・未確認")).firstMatch.exists)
         startSimulatorConversation(app, promptText: "[success] Notify when this task finishes")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:bex-task:")
+        let row = prefixedElement(app, prefix: "tasks.row.bex:")
         XCTAssertTrue(row.waitUntilExists(timeout: 10))
         let running = expectation(for: NSPredicate(format: "value == %@", "実行中"), evaluatedWith: row)
         wait(for: [running], timeout: 10)

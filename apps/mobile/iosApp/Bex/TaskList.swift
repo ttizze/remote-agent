@@ -48,9 +48,6 @@ struct ThreadsScreen: View {
                     })
                     Section {
                         DisclosureGroup(isExpanded: expanded) {
-                            if project.loading, !project.hasMore {
-                                ProgressView().taskListRowStyle(leading: 40)
-                            }
                             if let error = project.error {
                                 AppNotice(text: error).taskListRowStyle(leading: 40)
                                 Button("再試行") {
@@ -67,14 +64,8 @@ struct ThreadsScreen: View {
                                 Button {
                                     model.expandTaskList(projectId: project.id, host: project.hostId)
                                 } label: {
-                                    HStack(spacing: 8) {
-                                        if project.loading {
-                                            ProgressView().controlSize(.mini)
-                                        }
-                                        Text("もっと見る")
-                                    }
+                                    Text("もっと見る")
                                 }
-                                .disabled(project.loading)
                                 .accessibilityIdentifier("tasks.project.\(project.id).more")
                                 .taskListRowStyle(leading: 40)
                             }
@@ -265,7 +256,7 @@ private extension ProjectSummary {
 
 private extension ThreadSummary {
     var listKey: String {
-        "\(hostId):\(id.provider.bexKey):\(id.id)"
+        "\(hostId):\((id.provider?.bexKey ?? "bex")):\(id.id)"
     }
 }
 
@@ -295,7 +286,7 @@ private struct ThreadListRow: View {
     let open: () -> Void
 
     private var accessibilityID: String {
-        "\(thread.id.provider.bexKey):\(thread.id.id)"
+        "\((thread.id.provider?.bexKey ?? "bex")):\(thread.id.id)"
     }
 
     var body: some View {

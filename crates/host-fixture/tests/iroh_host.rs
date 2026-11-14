@@ -11,7 +11,7 @@ use agent_transport::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{HostCredentials, HostRpcService, ProjectStore};
+use host_daemon::{HostCredentials, HostRpcService};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -21,7 +21,11 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod codex_fixture;
-use host_fixture::test_support::{HostFixture, Memory, assert_project_directory};
+// Shared scenarios exercise different subsets of the transport helpers.
+#[allow(dead_code)]
+#[path = "support/conversations.rs"]
+mod conversations;
+use host_fixture::test_support::{HostFixture, Memory, assert_project_directory, seed_projects};
 
 // These transport Hosts run without account management and use an explicit
 // Codex new-chat preference.
@@ -50,11 +54,12 @@ fn codex_chat_snapshot() -> agent_core::state::Snapshot {
 }
 
 fn next_submission_id() -> String {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    format!(
-        "fixture-{}",
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )
+    uuid::Uuid::new_v4().to_string()
+}
+fn input_id(label: &str) -> agent_protocol::ids::ClientInputId {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, label.as_bytes())
+        .to_string()
+        .into()
 }
 async fn start_host(directory: &Path) -> HostFixture {
     HostFixture::start(
@@ -69,72 +74,86 @@ async fn start_host(directory: &Path) -> HostFixture {
     .await
     .unwrap()
 }
-async fn open_session(
-    peer: &Client,
-    id: &Value,
-    limit: usize,
-) -> (Value, agent_transport::framing::Reader) {
-    let (opened, updates) = peer
-        .request_stream::<agent_protocol::session::OpenedSession>(
-            &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
-                include_activity: false,
-                known_version: None,
-                session: serde_json::from_value(id.clone()).unwrap(),
-                limit,
-            }),
-        )
+
+async fn completed_chat(client: &Client, cwd: Option<String>) -> models::Thread {
+    let mut request = conversations::create_request(ProviderKind::Codex, cwd, None);
+    request.initial = Some((
+        next_submission_id().into(),
+        agent_protocol::conversation::InputContent {
+            fresh_context: false,
+            parts: vec![rpc::Input::Text {
+                text: "[success] [immediate] prepare workspace".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+            follow_up: Default::default(),
+        },
+    ));
+    let created = conversations::created(client, request).await.unwrap();
+    let mut conversation = conversations::Conversation::open(client, &created.thread.id.unwrap())
         .await
         .unwrap();
-    (serde_json::to_value(opened).unwrap(), updates)
-}
-async fn next_change(events: &mut agent_transport::framing::Reader, kind: &str) -> Value {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let change: agent_protocol::session::SessionChange =
-                events.read().await.unwrap().expect("subscription closed");
-            let value = serde_json::to_value(change).unwrap();
-            if value["type"] == kind {
-                return value;
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("subscription did not produce {kind} within its deadline"))
-}
-async fn completed_turn(events: &mut agent_transport::framing::Reader) -> Value {
+    // Creation may finish before subscribing, so inspect its saved turn as well.
     loop {
-        let change = next_change(events, "turn").await;
-        if change["completed"] == true {
-            return change["turn"].clone();
+        let thread = conversation.view().thread;
+        if thread
+            .turns
+            .iter()
+            .flatten()
+            .any(|turn| turn.status == models::TurnStatus::Completed)
+        {
+            return thread;
         }
+        conversation.next().await;
     }
 }
-/// A conversation's first open imports its native history in the background;
-/// later opens read the Host transcript, which reports its version.
-async fn imported(fixture: &HostFixture, session: &agent_protocol::session::SessionRef) {
-    let local = fixture.local().await.unwrap();
-    for _ in 0..1000 {
-        let opened = local
-            .peer
-            .request::<agent_protocol::session::OpenedSession>(
-                &agent_protocol::protocol::Call::OpenSession(
-                    agent_protocol::session::OpenSession {
-                        session: session.clone(),
-                        limit: 1,
-                        include_activity: false,
-                        known_version: None,
-                    },
-                ),
-            )
-            .await
-            .unwrap();
-        if opened.response.thread.transcript_version.is_some() {
-            local.close().await;
+async fn open_conversation(peer: &Client, id: &Value) -> (Value, conversations::Conversation) {
+    let session = serde_json::from_value(id.clone()).unwrap();
+    let stream = conversations::Conversation::open(peer, &session)
+        .await
+        .unwrap();
+    (serde_json::to_value(stream.view()).unwrap(), stream)
+}
+async fn next_request(events: &mut conversations::Conversation) -> Value {
+    loop {
+        if let Some(request) =
+            events.view().thread.requests.values().find(|request| {
+                request.delivery == agent_protocol::session::RequestDelivery::Awaiting
+            })
+        {
+            return json!(request);
+        }
+        events.next().await;
+    }
+}
+async fn resolved(events: &mut conversations::Conversation, id: &Value) {
+    loop {
+        if !events
+            .view()
+            .thread
+            .requests
+            .keys()
+            .any(|key| json!(key) == *id)
+        {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        events.next().await;
     }
-    panic!("{session:?} was not imported");
+}
+async fn completed_turn(events: &mut conversations::Conversation) -> Value {
+    json!(events.finished().await)
+}
+async fn imported(fixture: &HostFixture, session: &SessionRef) {
+    let local = fixture.local().await.unwrap();
+    let stream = conversations::Conversation::open(&local.peer, session)
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.view().thread.history_read_state.unwrap().kind,
+        agent_protocol::session::HistoryReadKind::Complete
+    );
+    local.close().await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_active_sessions() {
@@ -144,30 +163,30 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
         let local = fixture.local().await.unwrap();
         let stranger = fixture.connect(Identity::generate()).await.unwrap();
         assert!(
-            stranger
-                .peer
-                .request::<agent_protocol::session::OpenedSession>(
-                    &agent_protocol::protocol::Call::CreateSession(
-                        serde_json::from_value::<op::CreateSession>(
-                            json!({"provider":"codex","cwd":directory.path()}),
-                        )
-                        .unwrap()
-                    )
+            conversations::created(
+                &stranger.peer,
+                conversations::create_request(
+                    ProviderKind::Codex,
+                    Some(serde_json::from_value::<String>(json!(directory.path())).unwrap()),
+                    None
                 )
-                .await
-                .is_err()
+            )
+            .await
+            .is_err()
         );
         stranger.endpoint.close().await;
         assert_eq!(
             local
                 .peer
-                .request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                    rpc::ListSessions::new(Default::default())
-                ))
+                .call(&agent_protocol::conversation::records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None
+                })
                 .await
-                .map(|output| serde_json::to_value(output).unwrap())
-                .unwrap()["data"],
-            json!([])
+                .map(|output| conversations::list_ids(output.initial))
+                .unwrap(),
+            Vec::<SessionRef>::new()
         );
         let invitation: Invitation = local.peer.call(&op::CreateInvitation {}).await.unwrap();
         assert_eq!(invitation.host_name, "isolated Host");
@@ -324,9 +343,11 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
         assert!(
             paired
                 .peer
-                .request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                    rpc::ListSessions::new(Default::default())
-                ))
+                .call(&agent_protocol::conversation::records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None
+                })
                 .await
                 .is_err()
         );
@@ -335,9 +356,11 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
         assert!(
             revoked
                 .peer
-                .request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                    rpc::ListSessions::new(Default::default())
-                ))
+                .call(&agent_protocol::conversation::records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None
+                })
                 .await
                 .is_err()
         );
@@ -386,33 +409,33 @@ async fn simultaneous_clients_share_one_request_and_only_one_valid_answer_wins()
         let second = fixture.local().await.unwrap();
 
 
-        let started = first.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::CreateSession(serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap())).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let started = conversations::created(&first.peer,conversations::create_request(ProviderKind::Codex,Some(serde_json::from_value::<String>(json!(directory.path())).unwrap()),None)).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         let id = &started["thread"]["id"];
-        let (_, mut first_events) = open_session(&first.peer, id, 5).await;
-        let (_, mut second_events) = open_session(&second.peer, id, 5).await;
-        first.peer.call(&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"[approval]"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        let a = next_change(&mut first_events, "request").await["request"].clone();
-        let b = next_change(&mut second_events, "request").await["request"].clone();
+        let (_, mut first_events) = open_conversation(&first.peer, id).await;
+        let (_, mut second_events) = open_conversation(&second.peer, id).await;
+        conversations::submit(&first.peer,&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"[approval]"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+        let a = next_request(&mut first_events).await;
+        let b = next_request(&mut second_events).await;
         assert_eq!(
             a["id"], b["id"],
             "all devices share one native execution request"
         );
-        assert!(
-            first
-                .peer.request::<models::Empty>(&agent_protocol::protocol::Call::AnswerSession(serde_json::from_value::<rpc::SessionAnswer>(json!({"requestId":a["id"],"answer":{"approval":{"choiceId":"invalid"}}})).unwrap())).await
-                .is_err()
-        );
-        let answer = json!({"requestId":a["id"],"answer":{"approval":{"choiceId":a["body"]["approval"]["choices"][0]["id"]}}});
-        let (one, two) = tokio::join!(
-            (async { first
-                .peer.request::<models::Empty>(&agent_protocol::protocol::Call::AnswerSession(serde_json::from_value::<rpc::SessionAnswer>((answer).clone()).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()) }),
-            (async { second
-                .peer.request::<models::Empty>(&agent_protocol::protocol::Call::AnswerSession(serde_json::from_value::<rpc::SessionAnswer>((answer).clone()).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()) })
+        let session=serde_json::from_value(id.clone()).unwrap();
+        let request_id=serde_json::from_value(a["id"].clone()).unwrap();
+        assert!(conversations::command(&first.peer,&session, uuid::Uuid::new_v4(),agent_protocol::conversation::Command::Answer {
+            id:request_id,answer:agent_protocol::requests::Answer::Approval {choice_id:"invalid".into()},
+        }).await.is_err());
+        let answer=agent_protocol::conversation::Command::Answer {
+            id:serde_json::from_value(a["id"].clone()).unwrap(),
+            answer:agent_protocol::requests::Answer::Approval {choice_id:a["body"]["approval"]["choices"][0]["id"].as_str().unwrap().into()},
+        };
+        let (one,two)=tokio::join!(
+            conversations::command(&first.peer,&session, uuid::Uuid::new_v4(),answer.clone()),
+            conversations::command(&second.peer,&session, uuid::Uuid::new_v4(),answer),
         );
         assert_ne!(one.is_ok(), two.is_ok(), "one validated answer must win");
         for events in [&mut first_events, &mut second_events] {
-            let resolved = next_change(events, "resolveRequest").await;
-            assert_eq!(resolved["requestId"], a["id"]);
+            resolved(events,&a["id"]).await;
             assert_eq!(completed_turn(events).await["status"], "completed");
         }
         first.close().await;
@@ -468,9 +491,11 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         let other = fixture.local().await.unwrap();
         other
             .peer
-            .request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                rpc::ListSessions::new(Default::default()),
-            ))
+            .call(&agent_protocol::conversation::records::SubscribeList {
+                refresh: false,
+                subscription: uuid::Uuid::new_v4(),
+                cached: None,
+            })
             .await
             .map(|output| serde_json::to_value(output).unwrap())
             .unwrap();
@@ -636,13 +661,15 @@ async fn reconnecting_during_session_cleanup_keeps_host_requests_available() {
         // a sequential reconnect or an imitation of the accept loop misses it.
         for attempt in 0..128 {
             assert_eq!(
-                peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                    rpc::ListSessions::new(Default::default())
-                ))
+                peer.call(&agent_protocol::conversation::records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None
+                })
                 .await
-                .map(|output| serde_json::to_value(output).unwrap())
-                .unwrap()["data"],
-                json!([])
+                .map(|output| conversations::list_ids(output.initial))
+                .unwrap(),
+                Vec::<SessionRef>::new()
             );
             let close = async {
                 tokio::task::yield_now().await;
@@ -657,13 +684,15 @@ async fn reconnecting_during_session_cleanup_keeps_host_requests_available() {
                 .unwrap();
         }
         assert_eq!(
-            peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                rpc::ListSessions::new(Default::default())
-            ))
+            peer.call(&agent_protocol::conversation::records::SubscribeList {
+                refresh: false,
+                subscription: uuid::Uuid::new_v4(),
+                cached: None
+            })
             .await
-            .map(|output| serde_json::to_value(output).unwrap())
-            .unwrap()["data"],
-            json!([])
+            .map(|output| conversations::list_ids(output.initial))
+            .unwrap(),
+            Vec::<SessionRef>::new()
         );
         peer.close().await;
         session.close();
@@ -740,7 +769,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
             store
                 .dispatch(Intent::Submit {
                     thread_id: None,
-                    client_user_message_id: "offline".into(),
+                    client_user_message_id: input_id("offline"),
                     alternate: false,
                 })
                 .await
@@ -767,7 +796,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
         store
             .dispatch(Intent::Submit {
                 thread_id: None,
-                client_user_message_id: "sent".into(),
+                client_user_message_id: input_id("sent"),
                 alternate: false,
             })
             .await
@@ -794,7 +823,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
                     .conversations
                     .get(&id)
                     .is_some_and(|thread| {
-                        thread.preparation.is_none()
+                        thread.preparations.is_empty()
                             && thread.turns.as_ref().is_some_and(|turns| {
                                 turns.iter().any(|turn| {
                                     turn.status == agent_protocol::execution::TurnStatus::Running
@@ -818,14 +847,14 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
             "first submission must not wait for an empty history read"
         );
         let client = fixture.local().await.unwrap();
-        let current = open_session(&client.peer, &json!(id), 5).await.0;
-        assert_eq!(current["response"]["thread"]["id"], json!(id));
+        let current = open_conversation(&client.peer, &json!(id)).await.0;
+        assert_eq!(current["thread"]["id"], json!(id));
         assert_eq!(
-            current["response"]["thread"]["historyReadState"]["type"], "complete",
+            current["thread"]["historyReadState"]["type"], "complete",
             "a natively unmaterialized history is empty, not a failed history read"
         );
         assert!(
-            current["response"]["thread"]["turns"]
+            current["thread"]["turns"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -978,14 +1007,14 @@ async fn chat_preparation_recovers_in_the_same_conversation_after_reconnecting()
         std::fs::write(&blocked, "not a directory").unwrap();
         store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
         store.dispatch(Intent::SetDraftText { thread_id: store.snapshot().panes.primary().navigation.draft_key.clone(), text: "[success] recover preparation".into() }).await.unwrap();
-        assert!(matches!(store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "recover-chat".into(), alternate: false }).await.unwrap(), Outcome::StartedThread { .. }));
+        assert!(matches!(store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: input_id("recover-chat"), alternate: false }).await.unwrap(), Outcome::StartedThread { .. }));
         let id = store.snapshot().panes.primary().navigation.thread_id.clone().unwrap();
         let mut updates = store.subscribe();
         loop {
             let snapshot = updates.borrow_and_update().clone();
-            if let Some(preparation) = snapshot.sessions.conversations[&id].preparation.as_ref().filter(|preparation| matches!(preparation.status, agent_protocol::session::PreparationStatus::Failed { .. })) {
+            if let Some(preparation) = snapshot.sessions.conversations[&id].preparations.iter().find(|preparation| matches!(preparation.status, agent_protocol::session::PreparationStatus::Failed { .. })) {
                 assert!(preparation.submission.input.iter().any(|input| matches!(input, rpc::Input::Text { text } if text == "[success] recover preparation")));
-                assert!(snapshot.sessions.pending_submissions[&agent_protocol::ids::ClientInputId::from("recover-chat")].accepted);
+                assert_eq!(snapshot.sessions.conversations[&id].submissions.get(&input_id("recover-chat")), Some(&agent_protocol::session::SubmissionDelivery::Rejected));
                 assert!(snapshot.selected_directory(snapshot.panes.primary()).is_empty());
                 break;
             }
@@ -994,10 +1023,10 @@ async fn chat_preparation_recovers_in_the_same_conversation_after_reconnecting()
         std::fs::remove_file(&blocked).unwrap();
         store.disconnect().await.unwrap();
         store.reconnect(&endpoint, &fixture.ticket, None, "Fixture device").await.unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), work_locally: false })).await.unwrap();
+        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), input_id: input_id("recover-chat"), work_locally: false })).await.unwrap();
         loop {
             let snapshot = updates.borrow_and_update().clone();
-            if snapshot.sessions.conversations[&id].preparation.is_none() && snapshot.sessions.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 1 && turns[0].status == agent_protocol::execution::TurnStatus::Completed) {
+            if snapshot.sessions.conversations[&id].preparations.is_empty() && snapshot.sessions.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 1 && turns[0].status == agent_protocol::execution::TurnStatus::Completed) {
                 assert_eq!(snapshot.panes.primary().navigation.thread_id.as_ref(), Some(&id));
                 assert_eq!(Path::new(&snapshot.panes.primary().navigation.cwd), blocked);
                 break;
@@ -1042,7 +1071,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
         std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({
             "settings":{"createOnNewSession":automatic,"worktreeDirectory":destination}
         })).unwrap()).unwrap();
-        std::fs::write(root.join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"default","name":"Default checkout","roots":[{"path":root}]}])).unwrap()).unwrap();
+        seed_projects(&root, serde_json::from_value(json!([{"id":"default","name":"Default checkout","roots":[{"path":root}]}])).unwrap()).unwrap();
         let source = root.join("photo.png");
         let bytes = include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
         std::fs::write(&source, bytes).unwrap();
@@ -1071,8 +1100,8 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
                 let current = store.snapshot();
                 Some(current.input.drafts[&current.panes.primary().navigation.draft_key].attachments[0].path.clone())
             } else { None };
-            let sent = store.dispatch(Intent::Submit { thread_id: thread_id.clone(), client_user_message_id: format!("client-{number}").into(), alternate: false }).await.unwrap_or_else(|error| panic!("{prompt}: {error}"));
-            assert!(if number == 0 { matches!(sent, Outcome::StartedThread { .. }) } else { matches!(sent, Outcome::Submitted { .. }) });
+            let sent = store.dispatch(Intent::Submit { thread_id: thread_id.clone(), client_user_message_id: input_id(&format!("client-{number}")), alternate: false }).await.unwrap_or_else(|error| panic!("{prompt}: {error}"));
+            assert!(if number == 0 { matches!(sent, Outcome::StartedThread { .. }) } else { matches!(sent, Outcome::Submitted) });
             let id = store.snapshot().panes.primary().navigation.thread_id.clone().unwrap();
             if let Some(previous) = &thread_id { assert_eq!(&id, previous); }
             let mut updates = store.subscribe();
@@ -1096,10 +1125,10 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
                 assert_eq!(snapshot.sessions.conversations[&id].cwd.as_deref(), root.join("bex-chats").to_str());
             }
             store.dispatch(Intent::ShowThreadList).await.unwrap();
-            store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+            store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
             if project {
                 store.dispatch(Intent::SetProjectExpanded { project_id: "default".into(), expanded: true }).await.unwrap();
-                store.dispatch(Intent::ListSessions(op::ListSessions::new((*store.snapshot().lists.list_query).clone()))).await.unwrap();
+                store.dispatch(Intent::ListSessions((*store.snapshot().lists.list_query).clone())).await.unwrap();
                 loop {
                     if updates.borrow_and_update().lists.project_threads.get("default").is_some_and(|page| page.data.iter().any(|thread| thread.id.as_ref() == Some(&id))) { break; }
                     updates.changed().await.unwrap();
@@ -1214,13 +1243,15 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
             .unwrap();
         assert_eq!(
             direct_peer
-                .request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                    rpc::ListSessions::new(Default::default())
-                ))
+                .call(&agent_protocol::conversation::records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None
+                })
                 .await
-                .map(|output| serde_json::to_value(output).unwrap())
-                .unwrap()["data"],
-            json!([])
+                .map(|output| conversations::list_ids(output.initial))
+                .unwrap(),
+            Vec::<SessionRef>::new()
         );
         assert!((direct_peer).call(&op::CreateInvitation {}).await.is_err());
         manager_a
@@ -1287,53 +1318,56 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
         let invitation: Invitation = local.peer.call(&op::CreateInvitation {}).await.unwrap();
         let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), Some(invitation.invitation), "Fixture device", None).await.unwrap();
-        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
         // A paired mobile client must resume without local management privileges.
         tokio::time::timeout(Duration::from_millis(500), store.resume(&endpoint, &fixture.ticket, "Fixture device")).await.unwrap().unwrap();
-        store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider:agent_protocol::session::ProviderKind::Codex,id:"selected".into()}.into(), text: "Unsent draft".into() }).await.unwrap();
+        store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider:Some(agent_protocol::session::ProviderKind::Codex),id:"selected".into()}.into(), text: "Unsent draft".into() }).await.unwrap();
         let mut saved = None;
         let mut owner = Some(store);
         for cached in [false, true] {
             let store = if let Some(store) = owner.take() { store } else {
                 Store::connect(&endpoint, &fixture.ticket, saved.take().unwrap(), None, "Fixture device", None).await.unwrap()
             };
-            assert_eq!(store.snapshot().sessions.conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }), cached);
+            assert_eq!(store.snapshot().sessions.conversations.contains_key(&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() }), cached);
             if cached {
                 // The imported transcript answers; a native change made outside
                 // the Host waits for the project to be imported again.
-                imported(&fixture, &agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }).await;
+                imported(&fixture, &agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() }).await;
                 std::fs::write(root.join("background-reply"), "Latest reply from another client").unwrap();
             } else {
                 std::fs::write(root.join("hold-history-reads"), []).unwrap();
             }
-            let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() })));
+            let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() })));
             tokio::pin!(opening);
             assert_eq!(store.snapshot().panes.primary().navigation.thread_id.as_ref().map(|session| session.id.as_str()), Some("selected"));
-            assert_eq!(store.snapshot().panes.primary().navigation.draft_key, agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }));
-            assert_eq!(store.snapshot().input.drafts[&agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() })].text, "Unsent draft");
+            assert_eq!(store.snapshot().panes.primary().navigation.draft_key, agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() }));
+            assert_eq!(store.snapshot().input.drafts[&agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() })].text, "Unsent draft");
             if !cached {
                 while !root.join("history-read-held").exists() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                assert!(tokio::time::timeout(Duration::from_millis(50), &mut opening).await.is_err());
+                tokio::time::timeout(Duration::from_millis(500), &mut opening).await.expect("subscribe does not wait for import").unwrap();
+                assert_eq!(store.snapshot().sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(ProviderKind::Codex), id: "selected".into() }].history_read_state.as_ref().unwrap().kind, agent_protocol::session::HistoryReadKind::Loading);
             } else {
-                let thread = &store.snapshot().sessions.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }];
+                let thread = &store.snapshot().sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() }];
                 assert_eq!(item_text(&(thread.turns.as_ref().unwrap().last().unwrap().items.as_ref().unwrap()[0])), Some("History for Selected task"));
             }
             // List refresh shares the production transport but must not wait for history.
-            store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+            store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
             assert!(store.snapshot().lists.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("selected")));
             if !cached {
                 std::fs::remove_file(root.join("hold-history-reads")).unwrap();
                 std::fs::remove_file(root.join("history-read-held")).unwrap();
             }
-            opening.await.unwrap();
+            if cached { opening.await.unwrap(); }
+            let mut ready = store.subscribe();
+            ready.wait_for(|snapshot| snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(ProviderKind::Codex), id: "selected".into() }].turns.as_ref().is_some_and(|turns| !turns.is_empty())).await.unwrap();
             let current = store.snapshot();
-            let last = current.sessions.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }].turns.as_ref().unwrap().last().unwrap();
+            let last = current.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() }].turns.as_ref().unwrap().last().unwrap();
             assert_eq!(last.status.label(), "completed");
             assert_eq!(item_text(&(last.items.as_ref().unwrap()[0])), Some("History for Selected task"));
             assert_eq!(current.panes.primary().navigation.thread_id.as_ref().map(|session| session.id.as_str()), Some("selected"));
-            assert_eq!(current.input.drafts[&agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() })].text, "Unsent draft");
+            assert_eq!(current.input.drafts[&agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() })].text, "Unsent draft");
             assert!(current.panes.primary().error.is_none(), "{:?}", current.panes.primary().error);
             store.dispatch(Intent::ShowThreadList).await.unwrap();
             saved = Some(serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap()).unwrap());
@@ -1366,7 +1400,9 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
         .await
         .unwrap();
         store
-            .dispatch(Intent::NewChat { cwd: String::new() })
+            .dispatch(Intent::NewChat {
+                cwd: directory.path().to_str().unwrap().into(),
+            })
             .await
             .unwrap();
         let key = store
@@ -1386,7 +1422,7 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
         store
             .dispatch(Intent::Submit {
                 thread_id: None,
-                client_user_message_id: "duplicate-message".into(),
+                client_user_message_id: input_id("duplicate-message"),
                 alternate: false,
             })
             .await
@@ -1403,7 +1439,7 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
         loop {
             let snapshot = updates.borrow_and_update().clone();
             let thread = &snapshot.sessions.conversations[&id];
-            if thread.preparation.is_none()
+            if thread.preparations.is_empty()
                 && thread.turns.as_ref().is_some_and(|turns| {
                     turns.first().is_some_and(|turn| {
                         turn.status == agent_protocol::execution::TurnStatus::Completed
@@ -1414,6 +1450,33 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
             }
             updates.changed().await.unwrap();
         }
+        let management = fixture.local().await.unwrap();
+        let cwd = store.snapshot().sessions.conversations[&id]
+            .cwd
+            .clone()
+            .unwrap();
+        management
+            .peer
+            .request::<agent_protocol::project_import::ProjectImportResult>(
+                &agent_protocol::protocol::Call::ImportProjects(
+                    agent_protocol::project_import::ImportProjects { paths: vec![cwd] },
+                ),
+            )
+            .await
+            .unwrap();
+        let mut imported_updates = store.subscribe();
+        imported_updates
+            .wait_for(|snapshot| {
+                snapshot.sessions.conversations[&id]
+                    .turns
+                    .iter()
+                    .flatten()
+                    .flat_map(|turn| turn.items.iter().flatten())
+                    .any(|item| item_text(item) == Some("Older AI response must remain visible."))
+            })
+            .await
+            .unwrap();
+        management.close().await;
         let mut store = store;
         for restore in [false, true] {
             store.dispatch(Intent::ShowThreadList).await.unwrap();
@@ -1452,13 +1515,13 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
             assert!(
                 items
                     .iter()
-                    .any(|item| item.id.starts_with("fixture-final-")),
+                    .any(|item| item_text(item) == Some("シミュレータで完了しました。")),
                 "latest response missing after restore={restore}"
             );
             assert!(
                 items
                     .iter()
-                    .any(|item| item.id == "duplicate-history-old".into()),
+                    .any(|item| item_text(item) == Some("Older AI response must remain visible.")),
                 "older response missing after restore={restore}"
             );
             let rendered = agent_core::presentation::conversation::project_conversation(
@@ -1476,15 +1539,15 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
                     agent_core::presentation::conversation::ConversationRowContent::Response {
                         item,
                         ..
-                    } => Some(item.data.id.as_str()),
+                    } => Some(item.data.body.as_deref().unwrap_or_default()),
                     _ => None,
                 })
                 .collect();
             assert!(
-                responses.iter().any(|id| id.starts_with("fixture-final-")),
+                responses.contains(&"シミュレータで完了しました。"),
                 "latest response collapsed after restore={restore}"
             );
-            assert!(responses.contains(&"duplicate-history-old"));
+            assert!(responses.contains(&"Older AI response must remain visible."));
             assert!(snapshot.sessions.pending_submissions.is_empty());
             assert!(
                 snapshot.input.drafts[&agent_core::state::DraftKey::from(&id)]
@@ -1526,17 +1589,21 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
             Arc::new(Memory::default()), "isolated Host", false, None, None).await.unwrap();
         let local = fixture.local().await.unwrap();
         let previous: models::Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"history"},"historyCursor":null,
-            "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}],
-                "itemsSummary":true}]})).unwrap();
+            "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}]}]})).unwrap();
         let initial = Snapshot {
             sessions: agent_core::state::Sessions {
-                conversations: Arc::new(std::collections::BTreeMap::from([(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }, Arc::new(previous))])),
+                conversations: Arc::new(std::collections::BTreeMap::from([(agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "history".into() }, Arc::new(previous))])),
                 ..Default::default()
             },
             ..Default::default()
         };
         let store = Store::new((local.peer, local.events), initial, None);
-        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
+        let mut updates = store.subscribe();
+        updates.wait_for(|snapshot| {
+            !snapshot.operation_running(agent_core::state::operations::OperationKey::SessionList)
+                && snapshot.lists.replica.as_deref().is_some_and(agent_protocol::conversation::records::catalog_ready)
+        }).await.unwrap();
         let session = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "history".into()).unwrap();
         // The first open reads native history and imports it once.
         store.dispatch(Intent::ReadThread(op::ReadThread::new(session.clone()))).await.unwrap();
@@ -1549,44 +1616,35 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         assert!(timeline.len() > 1);
         assert!(timeline.iter().any(|entry| entry["cursor"].is_string()), "the import reads every older page");
         let imported_reads = read(directory.path()).len();
-        store.dispatch(Intent::ReadThread(op::ReadThread::new(session.clone()))).await.unwrap();
+        // T3 bounds a long agent-only turn to 75 items; older pages continue inside it.
+        store.dispatch(Intent::ReadThread(op::ReadThread::open(session.clone()))).await.unwrap();
         let snapshot = store.snapshot();
         let thread = &snapshot.sessions.conversations[&session];
-        let window = op::HISTORY_WINDOW_TURNS as usize;
-        assert_eq!(thread.turns.as_ref().unwrap().len(), window, "initial display is a bounded turn summary page");
+        assert_eq!(thread.turns.as_ref().unwrap().len(), 1);
         assert_eq!(thread.history_has_more, Some(true));
         let latest = thread.turns.as_ref().unwrap().last().unwrap();
-        assert_eq!(latest.items.as_ref().unwrap().len(), 1);
-        assert!(latest.items_summary);
-        assert_eq!(latest.items.as_ref().unwrap()[0].id, "item-11-619".into());
+        assert_eq!(latest.items.as_ref().unwrap().len(), 75);
+        assert_eq!(latest.items.as_ref().unwrap().last().unwrap().id, "item-11-619".into());
         let rendered = agent_core::presentation::conversation::project_conversation(agent_core::localization::UiLanguage::Japanese, &snapshot.panes.primary().navigation.draft_key, &snapshot.sessions.pending_submissions, thread.clone(), &None);
-        assert_eq!(rendered.turns.len(), window, "the rendered history must contain no empty turn placeholders");
+        assert_eq!(rendered.turns.len(), 1);
         for _ in 0..20 {
             let snapshot = store.snapshot();
             if snapshot.sessions.conversations[&session].history_has_more != Some(true) { break; }
             store.dispatch(Intent::ReadOlder { thread_id: session.clone() }).await.unwrap();
         }
-        let ids: Vec<_> = store.snapshot().sessions.conversations[&session].turns.as_ref().unwrap().iter().map(|turn| turn.id.clone()).collect();
-        for turn_id in ids {
-            store.dispatch(Intent::LoadTurnItems(op::LoadTurnItems { thread_id: session.clone(), turn_id: turn_id.clone() })).await.unwrap();
-            while store.snapshot().sessions.conversations[&session].turns.as_ref().unwrap().iter()
-                .any(|turn| turn.id == turn_id && turn.items_summary) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }
         assert_eq!(read(directory.path()).len(), imported_reads, "imported history is read from the transcript");
         for reopen in [false, true] {
             if reopen {
-                store.dispatch(Intent::ReadThread(op::ReadThread::open(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }))).await.unwrap();
+                store.dispatch(Intent::ReadThread(op::ReadThread::open(agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "history".into() }))).await.unwrap();
             }
             let snapshot = store.snapshot();
-            let thread = &snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }];
+            let thread = &snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "history".into() }];
             assert_eq!(thread.history_has_more, Some(false));
             let loaded = thread.turns.as_ref().unwrap();
             assert_eq!(loaded.len(), turns.len());
             for (loaded, expected) in loaded.iter().zip(&turns) {
                 assert_eq!(json!(loaded.id), expected["id"]);
-                assert!(!loaded.items_summary);
+
                 let actual = loaded.items.as_ref().unwrap();
                 let expected = expected["items"].as_array().unwrap();
                 assert_eq!(actual.len(), expected.len());
@@ -1608,7 +1666,7 @@ async fn generated_images_are_visible_on_open_reopen_and_older_pages_without_exp
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
         let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=";
-        let turns = (0..6).map(|index| json!({"id":format!("turn-{index}"),"status":"completed","items":[
+        let turns = (0..12).map(|index| json!({"id":format!("turn-{index}"),"status":"completed","items":[
             {"id":format!("user-{index}"),"type":"userMessage","content":[{"type":"text","text":"Generate images"}]},
             {"id":format!("command-{index}"),"type":"commandExecution","command":"generate","status":"completed","aggregatedOutput":"hidden output\n".repeat(1000)},
             {"id":format!("saved-{index}"),"type":"imageGeneration","status":"completed","savedPath":format!("/generated-{index}.png"),"result":data},
@@ -1623,20 +1681,16 @@ async fn generated_images_are_visible_on_open_reopen_and_older_pages_without_exp
         let fixture = HostFixture::start(directory.path(), AppServerConfig { program, ..Default::default() },
             Arc::new(Memory::default()), "isolated Host", false, None, None).await.unwrap();
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
+        let _catalog=conversations::Catalog::open(&local.peer).await;
         let session = SessionRef::new(ProviderKind::Codex, "images".into()).unwrap();
         for _ in 0..2 {
-            let (opened, _updates) = open_session(&local.peer, &json!(session), 5).await;
-            let mut response: models::ThreadResponse = serde_json::from_value(opened["response"].clone()).unwrap();
-            assert_eq!(response.thread.turns.as_ref().unwrap().len(), 5);
-            let cursor = response.thread.history_cursor.clone().unwrap();
-            local.peer.call(&agent_protocol::session::ReadHistory {
-                session: session.clone(), cursor, include_activity: false,
-            }).await.unwrap().prepend_to(&mut response.thread);
+            let mut opened=conversations::Conversation::open(&local.peer,&session).await.unwrap();
+            assert_eq!(opened.view().thread.turns.as_ref().unwrap().len(),10);
+            let response=opened.extend(&local.peer).await;
             let rendered = project_conversation(agent_core::localization::UiLanguage::Japanese, &Default::default(), &Default::default(), Arc::new(response.thread), &None);
-            assert_eq!(rendered.turns.len(), 6);
+            assert_eq!(rendered.turns.len(), 12);
             for (index, turn) in rendered.turns.iter().enumerate() {
-                assert!(!turn.source.items_summary, "imported turns hold no hidden work");
+
                 let images: Vec<_> = turn.rows.iter().filter_map(|row| match &row.content {
                     ConversationRowContent::Response { item, .. } if !item.data.image_sources.is_empty() => Some(item),
                     ConversationRowContent::ActivityHeader { activity } => {
@@ -1665,12 +1719,12 @@ async fn summary_history_rejects_repeated_cursors_and_oversized_pages() {
         let directory = tempfile::tempdir().unwrap();
         let valid = |id: &str| json!({"id":id,"status":"completed","itemsView":"full","items":[]});
         let cases = [
-            ("oversized", 5, json!({"data":(0..6).map(|id| valid(&id.to_string())).collect::<Vec<_>>(),"nextCursor":null}), "turn page exceeds requested size"),
-            ("not-full", 5, json!({"data":[{"id":"turn","itemsView":"summary","items":[]}],"nextCursor":null}), "turn summary is missing"),
-            ("missing-turn", 5, json!({"data":[valid("")],"nextCursor":null}), "turn summary is missing"),
-            ("missing-item", 5, json!({"data":[{"id":"turn","itemsView":"full","items":[{"id":"","type":"agentMessage","text":"answer"}]}],"nextCursor":null}), "turn summary is missing"),
+            ("oversized", json!({"data":(0..11).map(|id| valid(&id.to_string())).collect::<Vec<_>>(),"nextCursor":null}), "turn page exceeds requested size"),
+            ("not-full", json!({"data":[{"id":"turn","itemsView":"summary","items":[]}],"nextCursor":null}), "turn summary is missing"),
+            ("missing-turn", json!({"data":[valid("")],"nextCursor":null}), "turn summary is missing"),
+            ("missing-item", json!({"data":[{"id":"turn","itemsView":"full","items":[{"id":"","type":"agentMessage","text":"answer"}]}],"nextCursor":null}), "turn summary is missing"),
         ];
-        let mut threads: Vec<_> = cases.iter().map(|(id, _, response, _)| json!({
+        let mut threads: Vec<_> = cases.iter().map(|(id, response, _)| json!({
             "id":id,"cwd":directory.path(),"historyMode":"paginated","fixtureHistoryResponse":response,
             "turns":[{"id":"turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"saved answer"}]}]
         })).collect();
@@ -1680,26 +1734,18 @@ async fn summary_history_rejects_repeated_cursors_and_oversized_pages() {
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
-        for (id, limit, _, message) in cases {
-            let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
-                &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false, known_version: None,
-                    session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.into()).unwrap(), limit,
-                })
-            ).await;
-            let error = match result {
-                Err(agent_protocol::error::PeerError::Remote { error, .. }) => error,
-                _ => panic!("invalid summary was accepted: {id}"),
-            };
-            let failure: agent_protocol::error::RpcFailure = serde_json::from_str(&error).unwrap();
-            assert_eq!(failure.code, "session_open_failed");
-            assert_eq!(failure.message, message);
+        let _catalog=conversations::Catalog::open(&local.peer).await;
+        for (id, _, message) in cases {
+            let result=conversations::Conversation::open(&local.peer,&SessionRef::new(ProviderKind::Codex,id.into()).unwrap()).await;
+            let thread = result.unwrap().view().thread;
+            let failure = thread.history_read_state.unwrap();
+            assert_eq!(failure.kind, agent_protocol::session::HistoryReadKind::Unavailable, "invalid summary was accepted: {id}");
+            assert_eq!(failure.issues, [message]);
+            assert!(thread.turns.unwrap().is_empty());
         }
-        let error = local.peer.call(&agent_protocol::session::ReadHistory { include_activity: false,
-            session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "loop".into()).unwrap(),
-            cursor: "opaque-loop".into(),
-        }).await.unwrap_err();
-        assert!(error.to_string().contains("history cursor repeated"));
+        let failure=conversations::Conversation::open(&local.peer,&SessionRef::new(ProviderKind::Codex,"loop".into()).unwrap()).await.unwrap().view().thread.history_read_state.unwrap();
+        assert_eq!(failure.kind,agent_protocol::session::HistoryReadKind::Unavailable);
+        assert!(failure.issues[0].contains("history cursor repeated"));
         local.close().await;
         fixture.close().await.unwrap();
     }).await.expect("summary validation exceeded its deadline");
@@ -1722,26 +1768,18 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         }])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
-        let (opened, mut updates) = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
-            &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false, known_version: None,
-                session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "command-history".to_string()).unwrap(), limit: 5,
-            }),
-        ).await.unwrap();
-        let bytes = agent_protocol::protocol::encode(&opened).unwrap().len();
+        let _catalog=conversations::Catalog::open(&local.peer).await;
+        let opened=conversations::Conversation::open(&local.peer,&SessionRef::new(ProviderKind::Codex,"command-history".into()).unwrap()).await.unwrap();
+        let bytes=agent_protocol::protocol::encode(opened.replica.snapshot().unwrap()).unwrap().len();
         assert!(bytes < 100 * 1024, "collapsed command bodies delayed history: {bytes} bytes");
-        let turn = &opened.response.thread.turns.as_ref().unwrap()[0];
+        let view=opened.view();
+        let turn=&view.thread.turns.as_ref().unwrap()[0];
         let loaded = turn.items.as_ref().unwrap();
         // Imported history keeps the conversation's messages, not past commands.
         assert_eq!(loaded.len(), 2);
-        assert!(!turn.items_summary, "no details are hidden behind the messages");
+
         assert_eq!(item_text(&loaded[1]), Some("The build passed"));
-        local.peer.call(&agent_protocol::session::ReadTurnItems {
-            session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "command-history".into()).unwrap(), turn_id: "turn".into(),
-        }).await.unwrap();
-        let hydrated = next_change(&mut updates, "turnItems").await;
-        let loaded: Vec<Arc<models::Item>> = serde_json::from_value(hydrated["items"].clone()).unwrap();
-        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().all(|item|!item.is_deferred()));
         local.close().await;
         fixture.close().await.unwrap();
     }).await.expect("command history exceeded its deadline");
@@ -1751,96 +1789,148 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"workspace", "name":"Workspace", "roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
+        seed_projects(directory.path(), serde_json::from_value(json!([{"id":"workspace", "name":"Workspace", "roots":[{"path":directory.path()}]}])).unwrap())
+        .unwrap();
+        std::fs::write(directory.path().join("list-fixture.json"), json!([
+            {"id":"large","cwd":directory.path().join("large-history"),"historyMode":"paginated"},
+            {"id":"long","cwd":directory.path(),"historyMode":"paginated","fixtureHistory":"long"}
+        ]).to_string()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
-
-        let started = mobile.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path().join("large-history")})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
-        assert_eq!(started["thread"]["projectId"], json!({"Assigned":"workspace"}));
-        let thread = &started["thread"]["id"];
-        let listed = mobile
-            .peer
-            .call(&rpc::ListProjectSessions {
-                project_id: "workspace".into(),
-                limit: 20,
-                search_term: String::new(),
-            })
-            .await
-            .map(|output| serde_json::to_value(output).unwrap())
+        let mut catalog = conversations::Catalog::open(&mobile.peer).await;
+        catalog.wait_rows(2).await;
+        let id = SessionRef::new(ProviderKind::Codex, "large".into()).unwrap();
+        let page = catalog.page(Default::default());
+        let listed = &page.lists.project_threads["workspace"];
+        let listed = listed
+            .data
+            .iter()
+            .find(|thread| thread.id.as_ref() == Some(&id))
             .unwrap();
-        assert_eq!(listed["data"][0]["id"], *thread);
-        assert_eq!(listed["data"][0]["projectId"], json!({"Assigned":"workspace"}));
-        let start = std::time::Instant::now();
-        let preview = open_session(&mobile.peer, thread, 5).await.0["response"].clone();
-        let preview_bytes = agent_protocol::protocol::encode(serde_json::from_value::<models::ThreadResponse>(preview.clone()).unwrap()).unwrap().len();
-        assert_eq!(preview["thread"]["projectId"], json!({"Assigned":"workspace"}));
-        for field in ["id", "capabilities"] {
-            assert!(!started["thread"][field].is_null(), "missing {field}");
-            assert_eq!(started["thread"][field], listed["data"][0][field]);
-            assert_eq!(started["thread"][field], preview["thread"][field]);
-        }
-        println!("large history preview: {preview_bytes} bytes, {} ms", start.elapsed().as_millis());
-        // A byte budget is deterministic; machine speed and network scheduling are not.
-        assert!(preview_bytes < 16 * 1024, "collapsed output must not delay the conversation: {preview_bytes} bytes");
-        let turn = &preview["thread"]["turns"][0];
-        assert_eq!(body_json(&turn["items"][0])["userMessage"]["content"][0]["text"]["text"], "Read the whole output");
-        assert_eq!(body_json(&turn["items"][1])["assistantText"]["text"], "Large history is complete");
-        assert_eq!(turn["items"].as_array().unwrap().len(), 2);
-        assert_eq!(turn["itemsSummary"], false, "past commands are not imported");
-        let detail = mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":thread,"turnId":"large-turn","itemId":"large-command"})).unwrap()).await.unwrap();
-        let detail = serde_json::to_value(agent_transport::transfers::resolve_item(detail, Some(&mobile.session)).await.unwrap()).unwrap();
-        assert_eq!(body_json(&detail["item"])["commandExecution"]["output"], format!("{}END_OF_LARGE_OUTPUT", "output line\n".repeat(700000)));
-        assert_eq!(detail["item"]["id"], "large-command");
-        assert!(mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":thread,"turnId":"wrong-turn","itemId":"large-command"})).unwrap()).await.is_err());
-        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([
-            {"id":"fixture-long-history","fixtureHistory":"long","cwd":directory.path(),"historyMode":"paginated","updatedAt":1}
-        ])).unwrap()).unwrap();
-        mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"useStateDbOnly":true})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        let history_id = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "fixture-long-history".into()).unwrap();
-        let mut page: models::ThreadResponse = serde_json::from_value(open_session(&mobile.peer, &json!(history_id), 5).await.0["response"].clone()).unwrap();
-        let initial = page.thread.turns.as_ref().unwrap();
-        assert_eq!(initial.len(), 5, "initial history is a bounded summary page");
-        assert!(initial.iter().all(|turn| turn.items_summary));
-        for _ in 0..100 {
-            let Some(cursor) = page.thread.history_cursor.take() else { break; };
-            let older = mobile.peer.call(&agent_protocol::session::ReadHistory { include_activity: false, session: history_id.clone(), cursor }).await.unwrap();
-            page.thread.turns = Some(agent_protocol::session::prepend_history(&older.turns, page.thread.turns.as_deref().unwrap()));
-            page.thread.history_cursor = older.next_cursor;
-            page.thread.history_has_more = Some(page.thread.history_cursor.is_some());
-        }
-        assert_eq!(page.thread.history_has_more, Some(false));
-        let turns = page.thread.turns.as_ref().unwrap();
-        assert_eq!(turns.len(), 15);
-        let items: Vec<_> = turns.iter().flat_map(|turn| turn.items.as_ref().unwrap()).collect();
-        let ids: std::collections::HashSet<_> = items.iter().map(|item| &item.id).collect();
-        assert_eq!(ids.len(), items.len(), "no item is duplicated when expanding the window");
+        assert_eq!(listed.project_id.as_deref(), Some("workspace"));
+        let preview = conversations::Conversation::open(&mobile.peer, &id)
+            .await
+            .unwrap();
+        let preview_bytes = agent_protocol::protocol::encode(preview.replica.snapshot().unwrap())
+            .unwrap()
+            .len();
         assert!(
-            items.iter().all(|item| !matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution { .. })),
-            "imported history pages hold no past activity"
+            preview_bytes < 16 * 1024,
+            "past command output must not delay messages"
         );
+        let view = preview.view();
+        assert_eq!(view.thread.project_id.as_deref(), Some("workspace"));
+        assert_eq!(view.thread.capabilities, listed.capabilities);
+        let items = view.thread.turns.as_ref().unwrap()[0]
+            .items
+            .as_ref()
+            .unwrap();
+        assert_eq!(items.len(), 2, "past tool activity stays native");
+        assert_eq!(item_text(&items[0]), Some("Read the whole output"));
+        assert_eq!(item_text(&items[1]), Some("Large history is complete"));
 
-        let started = mobile.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
-        let image_thread = &started["thread"]["id"];
+        let history_id = SessionRef::new(ProviderKind::Codex, "long".into()).unwrap();
+        let mut history = conversations::Conversation::open(&mobile.peer, &history_id)
+            .await
+            .unwrap();
+        let first_page = history.view();
+        let turns = first_page.thread.turns.as_ref().unwrap();
+        // T3's threadHistoryPaging also caps a page at 500 items. This
+        // recording retains hundreds of intermediate messages, so that cap
+        // precedes the ten-user-turn limit; ordinary ten-turn windows are
+        // covered by a_cached_loading_window_resets_to_the_latest_ten_turns_after_import.
+        assert_eq!(
+            turns
+                .iter()
+                .flat_map(|turn| turn.items.iter().flatten())
+                .count(),
+            500
+        );
+        assert!(turns.len() <= 10);
+        assert_eq!(turns.last().unwrap().id.as_str(), "long-turn-14");
+        history.extend(&mobile.peer).await;
+        let history = history.view();
+        let turns = history.thread.turns.as_ref().unwrap();
+        assert_eq!(turns.len(), 15);
+        let items: Vec<_> = turns
+            .iter()
+            .flat_map(|turn| turn.items.iter().flatten())
+            .collect();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| &item.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            items.len()
+        );
+        assert!(items.iter().all(|item| !matches!(
+            item.body(),
+            agent_protocol::items::ItemBody::CommandExecution { .. }
+        )));
 
-        let (_, mut messages) = open_session(&mobile.peer, image_thread, 5).await;
-        mobile.peer.call(&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":image_thread,"input":[{"text":{"text":"[generated-images]"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        completed_turn(&mut messages).await;
-        let history = mobile.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { session: serde_json::from_value(image_thread.clone()).unwrap(), limit: 5, include_activity: true , known_version: None})).await.map(|output| serde_json::to_value(output).unwrap()).unwrap()["response"].clone();
-        let turn = &history["thread"]["turns"][0];
-        let images: Vec<_> = turn["items"].as_array().unwrap().iter().filter(|item| body_json(item)["imageGeneration"].is_object()).collect();
-        assert_eq!(images.len(), 2);
+        let started = conversations::created(
+            &mobile.peer,
+            conversations::create_request(
+                ProviderKind::Codex,
+                Some(directory.path().to_str().unwrap().into()),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+        let image_id = started.thread.id.unwrap();
+        let mut images = conversations::Conversation::open(&mobile.peer, &image_id)
+            .await
+            .unwrap();
+        conversations::submit(
+            &mobile.peer,
+            &rpc::Submission {
+                fresh_context: false,
+                thread_id: image_id,
+                client_user_message_id: next_submission_id().into(),
+                input: vec![rpc::Input::Text {
+                    text: "[generated-images]".into(),
+                }],
+                model: None,
+                effort: None,
+                service_tier: None,
+                follow_up: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = images.finished().await;
+        let items: Vec<_> = turn
+            .items
+            .iter()
+            .flatten()
+            .filter(|item| {
+                matches!(
+                    item.body(),
+                    agent_protocol::items::ItemBody::ImageGeneration { .. }
+                )
+            })
+            .collect();
+        assert_eq!(items.len(), 2);
         let original = std::fs::read(directory.path().join("fixture image.png")).unwrap();
-        for item in images {
-            assert_eq!(item["status"], "completed");
-            let full = mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":image_thread,"turnId":turn["id"],"itemId":item["id"]})).unwrap()).await.unwrap();
-            let full = serde_json::to_value(agent_transport::transfers::resolve_item(full, Some(&mobile.session)).await.unwrap()).unwrap();
-            assert!(STANDARD.decode(body_json(&full["item"])["imageGeneration"]["data"].as_str().unwrap()).unwrap() == original, "native image details must be lossless");
-            if item["body"]["deferred"].is_object() { assert!(body_json(item)["imageGeneration"]["data"].is_null(), "a truncated base64 value must never be rendered as an image"); }
-            else { assert!(STANDARD.decode(body_json(item)["imageGeneration"]["data"].as_str().unwrap()).unwrap() == original); }
+        for item in items {
+            let (full, _, _) = images
+                .hydrate(&mobile.peer, &mobile.session, &item.id)
+                .await;
+            let agent_protocol::items::ItemBody::ImageGeneration {
+                data: Some(data), ..
+            } = full.body()
+            else {
+                panic!("image body missing")
+            };
+            assert_eq!(STANDARD.decode(data).unwrap(), original);
         }
         mobile.close().await;
         fixture.close().await.unwrap();
-    }).await.expect("large history loop exceeded deadline");
+    })
+    .await
+    .expect("large history loop exceeded deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1872,7 +1962,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         external["status"] = json!({"type":"notLoaded"});
         external["path"] = json!(rollout);
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
-        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&projects).unwrap()).unwrap();
+        seed_projects(directory.path(), serde_json::from_value(json!(projects)).unwrap()).unwrap();
         let checkout = directory.path().join("worktree");
         std::fs::write(directory.path().join("bex-worktrees.json"), json!({"workspaceRoots":{checkout.to_str().unwrap():directory.path().join("project-5")}}).to_string()).unwrap();
         let program = host_fixture::fixture::Config { trace: true, stream_delay_ms: 5, ..Default::default() }
@@ -1880,168 +1970,86 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let fixture = HostFixture::start(directory.path(), AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated Host", false, None, None).await.unwrap();
         let mobile = fixture.local().await.unwrap();
 
-        let start = std::time::Instant::now();
-        let query = models::ListQuery {
-            limit: 5,
-            project_limit: 5,
-            ..Default::default()
-        };
-        let first = mobile
-            .peer
-            .call(&rpc::ListSessions::new(query.clone()))
-            .await
-            .unwrap();
-        let bytes = agent_protocol::protocol::encode(&first).unwrap().len();
-        println!(
-            "title list through iroh: {bytes} bytes, {} ms",
-            start.elapsed().as_millis()
-        );
-        assert!(bytes < 16 * 1024);
-        assert_eq!(first.data.len(), 30);
-        assert_eq!(first.project_pages.len(), 5);
-        assert!(first.project_pages.values().all(|page| page.limit == 5 && page.has_more));
+        use agent_core::state::{Event, Intent, reduce};
+        let query = models::ListQuery { limit:5, project_limit:5, ..Default::default() };
+        let mut catalog = conversations::Catalog::open(&mobile.peer).await;
+        catalog.wait_rows(threads.len()).await;
+        let mut initial = catalog.page(query.clone());
+        assert_eq!(initial.thread_list().unwrap().threads.len(), 5);
+        let projects = initial.lists.threads.as_ref().unwrap().projects.iter().map(|project|project.id.clone()).collect::<Vec<_>>();
+        for project_id in projects {
+            initial = reduce(&initial, "", Event::Intent(Intent::SetProjectExpanded { project_id, expanded: true })).0;
+        }
+        let first = initial.lists.threads.as_ref().unwrap();
+        let displayed = initial.thread_list().unwrap();
+        assert_eq!(displayed.threads.len() + displayed.projects.iter().map(|project| project.threads.len()).sum::<usize>(), 30);
+        // The shared catalog carries one small header per native row; bodies
+        // remain behind the conversation subscription/hydration boundary.
+        assert!(catalog.max_wire_bytes < threads.len() * 1024 + 16 * 1024);
+        assert!(catalog.replica.rows().values().all(|row| agent_protocol::protocol::encode(row).unwrap().len() < 1024));
         assert_eq!(first.projects.len(), 5);
-        assert!(first.has_more);
-        assert!(first.has_more_projects);
-        assert_eq!(
-            first
-                .data
-                .iter()
-                .filter(|thread| thread.project_id.is_none())
-                .map(|thread| thread.id.as_ref().unwrap().id.as_str())
-                .collect::<Vec<_>>(),
-            ["projectless", "chat-18", "chat-17", "chat-16", "chat-15"]
-        );
-        assert!(first.data.iter().all(|thread| {
-            thread.turns.is_none() && thread.preview.is_none()
-        }));
-        assert_eq!(
-            first
-                .projects
-                .iter()
-                .map(|project| project.id.as_str())
-                .collect::<Vec<_>>(),
-            ["project-5", "project-3", "project-7", "project-6", "project-4"]
-        );
-        let more = mobile
-            .peer
-            .call(&rpc::ListProjectSessions {
-                project_id: "project-5".into(),
-                limit: 5,
-                search_term: String::new(),
-            })
-            .await
-            .unwrap();
+        assert!(first.has_more && first.has_more_projects);
+        assert_eq!(first.data.iter().map(|thread| thread.id.as_ref().unwrap().id.as_str()).collect::<Vec<_>>(), ["projectless", "chat-18", "chat-17", "chat-16", "chat-15"]);
+        assert_eq!(first.projects.iter().map(|project| project.id.as_str()).collect::<Vec<_>>(), ["project-5", "project-3", "project-7", "project-6", "project-4"]);
+        assert!(first.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
+        let project_page = |project: &str, limit| {
+            let (all, _) = reduce(&initial, "", Event::Intent(Intent::ExpandProjects));
+            let (opened, _) = reduce(&all, "", Event::Intent(Intent::SetProjectExpanded { project_id:project.into(), expanded:true }));
+            let mut page = opened;
+            while page.lists.project_threads[project].limit < limit {
+                page = reduce(&page, "", Event::Intent(Intent::ExpandThreadList { project_id: Some(project.into()) })).0;
+            }
+            page.lists.project_threads[project].clone()
+        };
+        let more = project_page("project-5", 5);
         assert_eq!(more.data.len(), 5);
         assert_eq!(more.data[0].id.as_ref().unwrap().id, "worktree");
         assert_eq!(more.data[4].id.as_ref().unwrap().id, "p5-15");
         assert!(more.has_more);
-        assert!(more.data.iter().all(|thread| {
-            thread.project_id.as_deref() == Some("project-5") && thread.turns.is_none()
-        }));
-        let expanded = mobile
-            .peer
-            .call(&rpc::ListProjectSessions {
-                project_id: "project-5".into(),
-                limit: 15,
-                search_term: String::new(),
-            })
-            .await
-            .unwrap();
+        assert!(more.data.iter().all(|thread| thread.project_id.as_deref() == Some("project-5") && thread.turns.is_none()));
+        let expanded = project_page("project-5", 15);
         assert_eq!(expanded.data.len(), 15);
         assert_eq!(expanded.data[14].id.as_ref().unwrap().id, "p5-5");
         assert!(expanded.has_more);
-        let end = mobile
-            .peer
-            .call(&rpc::ListProjectSessions {
-                project_id: "project-5".into(),
-                limit: 25,
-                search_term: String::new(),
-            })
-            .await
-            .unwrap();
+        let end = project_page("project-5", 25);
         assert_eq!(end.data.len(), 19);
         assert!(!end.has_more);
-        let old = mobile
-            .peer
-            .call(&rpc::ListProjectSessions {
-                project_id: "project-1".into(),
-                limit: 5,
-                search_term: String::new(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(old.data.len(), 5);
+        let old = project_page("project-1", 5);
         assert_eq!(old.data[0].id.as_ref().unwrap().id, "p1-18");
         assert!(old.has_more);
-        let found = mobile
-            .peer
-            .call(&rpc::ListSessions::new(models::ListQuery {
-                limit: 5,
-                project_limit: 5,
-                search_term: "Project 01".into(),
-                ..Default::default()
-            }))
-            .await
-            .unwrap();
-        assert_eq!(found.data.len(), 5);
+        let found = mobile.peer.call(&agent_protocol::conversation::records::SearchList { term:"Project 01".into(),limit: Some(10_000) }).await.unwrap();
+        assert_eq!(found.data.len(),18);
         assert!(found.data.iter().all(|thread| thread.project_id.as_deref() == Some("project-1")));
-        assert_eq!(found.projects.len(), 1);
-        assert_eq!(found.projects[0].id, "project-1");
-        assert!(!found.has_more);
-        assert!(!found.has_more_projects);
-        let project_search = mobile
-            .peer
-            .call(&rpc::ListProjectSessions {
-                project_id: "project-1".into(),
-                limit: 5,
-                search_term: "conversation 18".into(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(project_search.data.len(), 1);
-        assert_eq!(
-            project_search.data[0].id.as_ref().unwrap().id,
-            "p1-18"
-        );
-        assert!(!project_search.has_more);
-        let body = open_session(&mobile.peer, &json!({"provider":"codex","id":"p5-1"}), 5).await.0["response"].clone();
+        assert_eq!(found.projects.len(),1);
+        let filtered = catalog.page(models::ListQuery { search_term:"Project 01".into(), ..query.clone() });
+        assert_eq!(filtered.lists.project_threads["project-1"].data.len(),5);
+        assert!(!filtered.lists.threads.as_ref().unwrap().has_more_projects);
+        let exact = mobile.peer.call(&agent_protocol::conversation::records::SearchList { term:"Project 01 conversation 18".into(),limit: Some(10_000) }).await.unwrap();
+        assert_eq!(exact.data.len(),1);
+        assert_eq!(exact.data[0].id.as_ref().unwrap().id,"p1-18");
+        assert!(!exact.has_more);
+        let body = open_conversation(&mobile.peer, &json!({"provider":"codex","id":"p5-1"})).await.0;
         assert_eq!(body["thread"]["projectId"], json!({"Assigned":"project-5"}));
         assert_eq!(body_json(&body["thread"]["turns"][0]["items"][0])["assistantText"]["text"], "History for Project 05 conversation 01");
         assert_eq!(body["thread"]["status"], "unknown");
-        let item = mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":{"provider":"codex","id":"p5-1"},"turnId":"turn-p5-1","itemId":"answer-p5-1"})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        assert_eq!(body_json(&item["item"])["assistantText"]["text"], "History for Project 05 conversation 01");
-        assert!(agent_protocol::protocol::json_boundary::call("host/thread/watch", json!({"watchId":1,"threadId":{"provider":"codex","id":"p5-1"},"path":rollout})).is_err(), "external rollout following is retired");
+        assert!(agent_protocol::protocol::json_boundary::call("host/thread/watch", json!({"watchId":1,"threadId":{"provider":"codex","id":"p5-1"},"path":rollout})).is_err());
         threads.extend([
             json!({"id":"older-child","parentThreadId":"worktree","cwd":directory.path().join("worktree"),"name":null,"agentNickname":"Curie","canAcceptDirectInput":false,"updatedAt":-1}),
             json!({"id":"older-grandchild","parentThreadId":"older-child","name":null,"agentRole":"reviewer","updatedAt":-2}),
             json!({"id":"hidden-child","parentThreadId":"p1-1","updatedAt":-3}),
         ]);
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
-        let nested = mobile
-            .peer
-            .call(&rpc::ListSessions::new(query))
-            .await
-            .unwrap();
-        assert_eq!(nested.data.len(), 30, "initial pages do not acquire descendants");
-        assert!(nested.has_more);
-        assert!(nested.data.iter().all(|thread| thread.parent_id.is_none()));
-        assert!(nested.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
-        let native_reads = || std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap().lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap()["method"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert!(!native_reads().iter().any(|method| method == "project/list"), "title listing must not discover external projects");
+        let native_reads = || std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap().lines().map(|line| serde_json::from_str::<Value>(line).unwrap()["method"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert!(!native_reads().iter().any(|method| method == "project/list"));
         let before = native_reads().len();
-        let agents = mobile.peer.call(&rpc::ListAgents {
-            thread_id: SessionRef::new(ProviderKind::Codex, "worktree".into()).unwrap()
-        }).await.unwrap();
-        assert_eq!(&native_reads()[before..], ["thread/list"], "fleet metadata must not read history");
+        let agents = mobile.peer.call(&rpc::ListAgents { thread_id:SessionRef::new(ProviderKind::Codex,"worktree".into()).unwrap() }).await.unwrap();
+        assert_eq!(&native_reads()[before..],["thread/list"],"fleet discovery must not read history");
         let child = agents.iter().find(|agent| agent.id.id == "older-child").unwrap();
-        assert_eq!(child.parent_id.id, "worktree");
-        assert_eq!(child.name.as_deref(), Some("Curie"));
-        let descendants: Vec<_> = agents.iter().map(|agent| agent.id.id.as_str()).collect();
-        assert_eq!(descendants, ["older-child", "older-grandchild"]);
-        let child_body = open_session(&mobile.peer, &json!({"provider":"codex","id":"older-child"}), 5).await.0;
-        assert_eq!(child_body["response"]["thread"]["canAcceptDirectInput"], false);
+        assert_eq!(child.parent_id.id,"worktree");
+        assert_eq!(child.name.as_deref(),Some("Curie"));
+        assert_eq!(agents.iter().map(|agent| agent.id.id.as_str()).collect::<Vec<_>>(),["older-child","older-grandchild"]);
+        let child_body = open_conversation(&mobile.peer,&json!({"provider":"codex","id":"older-child"})).await.0;
+        assert_eq!(child_body["thread"]["canAcceptDirectInput"],false);
         mobile.close().await;
         fixture.close().await.unwrap();
     }).await.expect("title list loop exceeded deadline");
@@ -2055,109 +2063,165 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         let workspace = root.join("project");
         std::fs::create_dir(&workspace).unwrap();
         let git = |args: &[&str]| {
-            let output = std::process::Command::new("git").current_dir(&workspace).args(args).output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let output = std::process::Command::new("git")
+                .current_dir(&workspace)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         };
         git(&["init", "--quiet"]);
         std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
         git(&["add", "tracked.txt"]);
-        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ]);
         std::fs::write(workspace.join(".env"), "FIXTURE_VALUE=isolated\n").unwrap();
-        let project_state = root.join("bex-projects.json");
-        std::fs::write(&project_state, serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}])).unwrap()).unwrap();
-        let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
-        let service = HostRpcService::new([host_daemon::providers::codex::Codex::new(Ok(server.clone())).into()], ProjectStore::new(root.join("bex-worktrees.json")));
-        let mut session = service.open_session();
-        async fn request(service: &HostRpcService, session: &mut host_daemon::HostSession, method: &str, params: Value) -> Value {
-            let reply = service.dispatch(session.id(), &agent_protocol::protocol::json_boundary::call(method, params).unwrap()).await.unwrap();
-            let response = agent_protocol::protocol::json_boundary::reply(method, &reply.initial).unwrap();
-            assert!(response.get("result").is_some() || response.get("error").is_some());
-            assert!(response.get("error").is_none(), "{response}");
-            response["result"].clone()
-        }
-        let initial = request(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":workspace})).await["response"].clone();
-        assert_eq!(initial["thread"]["cwd"], workspace.to_str().unwrap());
+        seed_projects(
+            &root,
+            serde_json::from_value(
+                json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let fixture = start_host(&root).await;
+        let local = fixture.local().await.unwrap();
+        let initial = completed_chat(&local.peer, Some(workspace.to_str().unwrap().into())).await;
+        assert_eq!(initial.cwd.as_deref(), workspace.to_str());
         let destination = root.join("worktree storage");
-        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":destination,"initSubmodules":false,"setupScript":null,"projectSetupScripts":{},"deleteUnchanged":false,"projectDeleteUnchanged":{}});
-        assert_eq!(request(&service, &mut session, "host/worktree/settings/update", settings.clone()).await, settings);
+        let settings = models::WorktreeSettings {
+            create_on_new_session: true,
+            copy_on_create: true,
+            copy_paths: vec![".env".into()],
+            worktree_directory: destination.to_str().unwrap().into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            local
+                .peer
+                .call(&op::UpdateWorktreeSettings {
+                    settings: settings.clone()
+                })
+                .await
+                .unwrap(),
+            settings
+        );
         let mut ids = Vec::new();
         let mut paths = Vec::new();
         for _ in 0..2 {
-            let started = request(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":workspace,"model":{"provider":"codex","id":"fixture-model"}})).await["response"].clone();
-            let thread = &started["thread"];
-            let cwd = std::path::PathBuf::from(thread["cwd"].as_str().unwrap());
+            let thread =
+                completed_chat(&local.peer, Some(workspace.to_str().unwrap().into())).await;
+            let cwd = PathBuf::from(thread.cwd.unwrap());
             assert_ne!(cwd, workspace);
             assert_project_directory(&cwd, &workspace, Some(&destination));
-            assert_eq!(std::fs::read(cwd.join(".env")).unwrap(), std::fs::read(workspace.join(".env")).unwrap());
-            assert_eq!(thread["projectId"], json!({"Assigned":"workspace"}));
-            ids.push(thread["id"].clone());
+            assert_eq!(
+                std::fs::read(cwd.join(".env")).unwrap(),
+                std::fs::read(workspace.join(".env")).unwrap()
+            );
+            assert_eq!(thread.project_id.as_deref(), Some("workspace"));
+            ids.push(thread.id.unwrap());
             paths.push(cwd);
         }
         assert_ne!(paths[0], paths[1]);
-        let before = std::process::Command::new("git").current_dir(&workspace).args(["worktree", "list", "--porcelain"]).output().unwrap().stdout;
+        let before = std::process::Command::new("git")
+            .current_dir(&workspace)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap()
+            .stdout;
         for id in &ids {
-            let read = request(&service, &mut session, "host/session/open", json!({"session":id,"limit":5})).await["response"].clone();
-            assert_eq!(read["thread"]["projectId"], json!({"Assigned":"workspace"}));
+            let read = conversations::Conversation::open(&local.peer, id)
+                .await
+                .unwrap()
+                .view();
+            assert_eq!(read.thread.project_id.as_deref(), Some("workspace"));
         }
         let mut chat_ids = Vec::new();
-        for params in [json!({"provider":"codex"}), json!({"provider":"codex","cwd":"  "}), json!({"provider":"codex","cwd":""})] {
-                let global = request(&service, &mut session, "host/session/create", params).await["response"].clone();
-                assert_eq!(global["thread"]["cwd"], root.join("bex-chats").to_str().unwrap());
-                assert_eq!(global["thread"]["projectId"], json!({"Unassigned":{}}));
-                chat_ids.push(global["thread"]["id"].clone());
+        for cwd in [None, Some("  ".into()), Some(String::new())] {
+            let thread = completed_chat(&local.peer, cwd).await;
+            assert_eq!(thread.cwd.as_deref(), root.join("bex-chats").to_str());
+            assert!(thread.project_id.is_none());
+            chat_ids.push(thread.id.unwrap());
         }
-        let restarted = HostRpcService::new([host_daemon::providers::codex::Codex::new(Ok(server.clone())).into()], ProjectStore::new(root.join("bex-worktrees.json")));
-        let mut restarted_session = restarted.open_session();
-        assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
-        for id in &chat_ids {
-            let read = request(&restarted, &mut restarted_session, "host/session/open", json!({"session":id,"limit":5})).await["response"].clone();
-            assert_eq!(read["thread"]["cwd"], root.join("bex-chats").to_str().unwrap());
-            assert_eq!(read["thread"]["projectId"], json!({"Unassigned":{}}));
-        }
-        let listed = request(
-            &restarted,
-            &mut restarted_session,
-            "host/session/list",
-            json!({"limit":30,"projectLimit":5}),
+        let memory = fixture.memory.clone();
+        local.close().await;
+        fixture.close().await.unwrap();
+        let fixture = HostFixture::start(
+            &root,
+            codex_fixture::config(&root),
+            memory,
+            "isolated Host",
+            false,
+            None,
+            None,
         )
-        .await;
-        assert!(
-            ids.iter().all(|id| {
-                listed["data"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|thread| thread["id"] == *id)
-            }),
-            "initial title lists include the recent project page"
+        .await
+        .unwrap();
+        let local = fixture.local().await.unwrap();
+        assert_eq!(
+            local.peer.call(&op::ReadWorktreeSettings {}).await.unwrap(),
+            settings
         );
         for id in &chat_ids {
-            let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("chat must remain in the list after restart");
-            assert_eq!(thread["projectId"], json!({"Unassigned":{}}));
-        }
-        let project_list = request(
-            &restarted,
-            &mut restarted_session,
-            "host/project/sessions",
-            json!({"projectId":"workspace","limit":10,"searchTerm":""}),
-        )
-        .await;
-        for id in &ids {
-            let thread = project_list["data"]
-                .as_array()
+            let thread = conversations::Conversation::open(&local.peer, id)
+                .await
                 .unwrap()
-                .iter()
-                .find(|thread| thread["id"] == *id)
-                .expect("worktree task must remain in its scoped project list after restart");
-            assert_eq!(thread["projectId"], json!({"Assigned":"workspace"}));
+                .view()
+                .thread;
+            assert_eq!(thread.cwd.as_deref(), root.join("bex-chats").to_str());
+            assert!(thread.project_id.is_none());
         }
-        let after = std::process::Command::new("git").current_dir(&workspace).args(["worktree", "list", "--porcelain"]).output().unwrap().stdout;
-        assert_eq!(before, after, "opening and listing must not create worktrees");
-        service.close_session(session.id());
-        restarted.close_session(restarted_session.id());
-        drop(session); drop(restarted_session); drop(service); drop(restarted);
-        server.shutdown().await.unwrap();
-    }).await.expect("worktree integration exceeded 40 seconds");
+        let catalog = conversations::Catalog::open(&local.peer).await;
+        let listed = catalog.page(models::ListQuery {
+            limit: 30,
+            ..Default::default()
+        });
+        let project = &listed.lists.project_threads["workspace"];
+        assert!(ids.iter().all(|id| {
+            project
+                .data
+                .iter()
+                .any(|thread| thread.id.as_ref() == Some(id))
+        }));
+        assert!(chat_ids.iter().all(|id| {
+            listed
+                .lists
+                .threads
+                .as_ref()
+                .unwrap()
+                .data
+                .iter()
+                .any(|thread| thread.id.as_ref() == Some(id) && thread.project_id.is_none())
+        }));
+        let after = std::process::Command::new("git")
+            .current_dir(&workspace)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(
+            before, after,
+            "opening and listing must not create worktrees"
+        );
+        local.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("worktree integration exceeded 40 seconds");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2222,22 +2286,22 @@ async fn file_edits_preserve_encoding_and_reject_stale_revisions() {
 async fn daemon_exposes_project_roots_and_structured_tool_results() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
+        seed_projects(directory.path(), serde_json::from_value(json!([{"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        let started = local.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let started = conversations::created(&local.peer,conversations::create_request(ProviderKind::Codex,Some(serde_json::from_value::<String>(json!(directory.path())).unwrap()),None)).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         let thread_id = &started["thread"]["id"];
 
-        let (_, mut events) = open_session(&local.peer, thread_id, 5).await;
-        local.peer.call(&serde_json::from_value::<rpc::Submission>(json!({"threadId":thread_id,"clientUserMessageId":"wire-fixture","input":[{"text":{"text":"[items]"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+        let (_, mut events) = open_conversation(&local.peer, thread_id).await;
+        conversations::submit(&local.peer,&serde_json::from_value::<rpc::Submission>(json!({"threadId":thread_id,"clientUserMessageId":next_submission_id(),"input":[{"text":{"text":"[items]"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         completed_turn(&mut events).await;
-        let list = local.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        let history = local.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { session: serde_json::from_value(thread_id.clone()).unwrap(), limit: 5, include_activity: true , known_version: None})).await.map(|output| serde_json::to_value(output).unwrap()).unwrap()["response"].clone();
-        assert_eq!(list["projects"][0]["roots"][0]["path"], directory.path().to_str().unwrap());
+        let catalog = conversations::Catalog::open(&local.peer).await;
+        let list = catalog.page(Default::default()).lists.threads.unwrap();
+        let history = open_conversation(&local.peer, thread_id).await.0;
+        assert_eq!(list.projects[0].roots[0].path, directory.path().to_str().unwrap());
         assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["body"]["inline"]["body"]["toolCall"]["result"].is_object()));
-        let reopened = local.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
-            session: serde_json::from_value(thread_id.clone()).unwrap(), limit: 5, include_activity: false, known_version: None,
-        })).await.unwrap().response.thread;
+        let reopened = conversations::Conversation::open(&local.peer, &serde_json::from_value(thread_id.clone()).unwrap()).await.unwrap().view().thread;
+        let tool_ids = reopened.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten()).filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::ToolCall { kind: agent_protocol::items::ToolKind::Mcp | agent_protocol::items::ToolKind::Dynamic, .. })).map(|item| item.id.clone()).collect::<std::collections::HashSet<_>>();
         let snapshot = agent_core::state::Snapshot::default();
         let rendered = agent_core::presentation::conversation::project_conversation(
             agent_core::localization::UiLanguage::Japanese,
@@ -2248,9 +2312,7 @@ async fn daemon_exposes_project_roots_and_structured_tool_results() {
         let tools: Vec<_> = rendered.turns[0].rows.iter().filter_map(|row| match &row.content {
             agent_core::presentation::conversation::ConversationRowContent::Activity { item, .. } => Some(item),
             _ => None,
-        }).filter(|item| {
-            item.data.id.starts_with("fixture-mcp-") || item.data.id.starts_with("fixture-dynamic-")
-        }).collect();
+        }).filter(|item| item.data.native_id.as_ref().is_some_and(|id| tool_ids.contains(id))).collect();
         assert_eq!(tools.len(), 2);
         for tool in tools {
             let blocks = tool.detail_blocks();
@@ -2290,13 +2352,15 @@ async fn failed_handshakes_do_not_stop_the_host() {
         assert_eq!(
             local
                 .peer
-                .request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                    rpc::ListSessions::new(Default::default())
-                ))
+                .call(&agent_protocol::conversation::records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None
+                })
                 .await
-                .map(|output| serde_json::to_value(output).unwrap())
-                .unwrap()["data"],
-            json!([])
+                .map(|output| conversations::list_ids(output.initial))
+                .unwrap(),
+            Vec::<SessionRef>::new()
         );
         stranger.close().await;
         local.close().await;
@@ -2317,27 +2381,26 @@ async fn upstream_exit_keeps_host_management_connected() {
         let local = fixture.local().await.unwrap();
         let store = Store::new((local.peer, local.events), Snapshot::default(), None);
         store
-            .dispatch(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            )))
+            .dispatch(Intent::ListSessions(Default::default()))
             .await
             .unwrap();
         assert!(store.snapshot().connection.connected);
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
-        assert!(
-            store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(
-                    Default::default()
-                )))
-                .await
-                .is_err()
-        );
-        assert!(
-            store
-                .snapshot()
-                .operation_error(op::OperationKey::SessionList)
-                .is_some()
-        );
+        store
+            .dispatch(Intent::ListSessions(Default::default()))
+            .await
+            .unwrap();
+        let mut updates = store.subscribe();
+        updates
+            .wait_for(|snapshot| {
+                snapshot.lists.threads.as_ref().is_some_and(|list| {
+                    list.provider_errors
+                        .as_ref()
+                        .is_some_and(|errors| errors.contains_key("codex"))
+                })
+            })
+            .await
+            .unwrap();
         let management = fixture
             .local()
             .await
@@ -2439,17 +2502,17 @@ async fn passive_approval_after(delay: Duration) {
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
         let sender = fixture.local().await.unwrap();
-        let started = sender.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::CreateSession(serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap())).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let started = conversations::created(&sender.peer,conversations::create_request(ProviderKind::Codex,Some(serde_json::from_value::<String>(json!(directory.path())).unwrap()),None)).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
 
         let id = &started["thread"]["id"];
-        let (_, mut sender_events) = open_session(&sender.peer, id, 5).await;
-        sender.peer.call(&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"[approval]"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        let original = next_change(&mut sender_events, "request").await["request"].clone();
+        let (_, mut sender_events) = open_conversation(&sender.peer, id).await;
+        conversations::submit(&sender.peer,&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"[approval]"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+        let original = next_request(&mut sender_events).await;
         sender.peer.close().await;
         let passive = fixture.local().await.unwrap();
 
-        let (opened, mut events) = open_session(&passive.peer, id, 5).await;
-        let request = opened["response"]["thread"]["requests"]
+        let (opened, mut events) = open_conversation(&passive.peer, id).await;
+        let request = opened["thread"]["requests"]
             .as_object()
             .unwrap()
             .values()
@@ -2457,7 +2520,10 @@ async fn passive_approval_after(delay: Duration) {
             .unwrap();
         assert_eq!(request["id"], original["id"]);
         tokio::time::sleep(delay).await;
-        passive.peer.request::<models::Empty>(&agent_protocol::protocol::Call::AnswerSession(serde_json::from_value::<rpc::SessionAnswer>(json!({"requestId":request["id"],"answer":{"approval":{"choiceId":request["body"]["approval"]["choices"][0]["id"]}}})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+        conversations::command(&passive.peer,&serde_json::from_value(id.clone()).unwrap(), uuid::Uuid::new_v4(),agent_protocol::conversation::Command::Answer {
+            id:serde_json::from_value(request["id"].clone()).unwrap(),
+            answer:agent_protocol::requests::Answer::Approval {choice_id:request["body"]["approval"]["choices"][0]["id"].as_str().unwrap().into()},
+        }).await.unwrap();
         assert_eq!(completed_turn(&mut events).await["status"], "completed");
         passive.close().await;
         sender.close().await;
@@ -2485,13 +2551,15 @@ async fn unpaired_connections_cannot_exhaust_authorized_session_slots() {
         assert_eq!(
             local
                 .peer
-                .request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(
-                    rpc::ListSessions::new(Default::default())
-                ))
+                .call(&agent_protocol::conversation::records::SubscribeList {
+                    refresh: false,
+                    subscription: uuid::Uuid::new_v4(),
+                    cached: None
+                })
                 .await
-                .map(|output| serde_json::to_value(output).unwrap())
-                .unwrap()["data"],
-            json!([])
+                .map(|output| conversations::list_ids(output.initial))
+                .unwrap(),
+            Vec::<SessionRef>::new()
         );
         for (endpoint, session) in strangers {
             if let Some(session) = session {
@@ -2555,7 +2623,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         );
         let service = HostRpcService::new(
             [host_daemon::providers::codex::Codex::new(Ok(server.clone())).into()],
-            ProjectStore::new(root.join("bex-worktrees.json")),
+            root.join("bex-worktrees.json"),
         );
         let runtime = Arc::new(
             HostRuntime::new(
@@ -2667,7 +2735,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
             mobile
                 .dispatch(Intent::Submit {
                     thread_id: previous_id,
-                    client_user_message_id: format!("shared-{index}").into(),
+                    client_user_message_id: input_id(&format!("shared-{index}")),
                     alternate: false,
                 })
                 .await
@@ -2847,7 +2915,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 std::os::unix::fs::symlink(&project, &configured_project).unwrap();
                 #[cfg(not(unix))]
                 let configured_project = project.clone();
-                std::fs::write(root.join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
+                seed_projects(&root, serde_json::from_value(json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
                 let program = host_fixture::fixture::Config { trace: true, deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
                     .install(Path::new(env!("CARGO_BIN_EXE_agent-codex-fixture")), &root).unwrap();
@@ -2867,7 +2935,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 }
                 let key = store.snapshot().panes.primary().navigation.draft_key.clone();
                 store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] list automatically".into() }).await.unwrap();
-                store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "sidebar-message".into(), alternate: false }).await.unwrap();
+                store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: input_id("sidebar-message"), alternate: false }).await.unwrap();
                 let id = store.snapshot().panes.primary().navigation.thread_id.clone().unwrap();
                 let mut updates = store.subscribe();
                 let reflected = tokio::time::timeout(Duration::from_secs(3), async {
@@ -2932,7 +3000,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         store.dispatch(Intent::NewChat { cwd: project.to_str().unwrap().into() }).await.unwrap();
         let key = store.snapshot().panes.primary().navigation.draft_key.clone();
         store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] [delayed-input] keep running".into() }).await.unwrap();
-        store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "managed".into(), alternate: false }).await.unwrap();
+        store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: input_id("managed"), alternate: false }).await.unwrap();
         let id = store.snapshot().panes.primary().navigation.thread_id.clone().unwrap();
         let mut updates = store.subscribe();
         let turn_id = loop {
@@ -2989,27 +3057,28 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         assert_eq!(store.snapshot().files.workspace.worktrees.as_ref().unwrap().len(), 1);
         assert!(store.snapshot().panes.primary().error.is_none());
         assert!(String::from_utf8(git(&["branch", "--list", "bex/*"])).unwrap().contains("bex/session-"));
-        let listed = local.peer.call(&rpc::ListSessions::new(Default::default())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        assert!(listed["data"].as_array().unwrap().iter().any(|thread| thread["id"] == json!(id)), "removal must preserve conversation history");
+        let catalog=conversations::Catalog::open(&local.peer).await;
+        assert!(catalog.replica.rows().contains_key(&agent_protocol::sync::Key::Thread(id.clone())), "removal must preserve conversation history");
         let review = local.peer.call(&rpc::ReviewWorkspace { cwd: path.clone(), include_options: false, base_ref: None }).await.unwrap();
         assert!(review.files.is_empty());
         assert!(!Path::new(&path).exists(), "reading history must not recreate the worktree");
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "advance main"]);
-        let receipt = local.peer.call(&rpc::Submission {
+        let mut events=conversations::Conversation::open(&local.peer,&id).await.unwrap();
+        conversations::submit(&local.peer,&rpc::Submission {
                 fresh_context: false,
             thread_id: id.clone(),
-            client_user_message_id: "after-removal".into(),
+            client_user_message_id: input_id("after-removal"),
             input: vec![rpc::Input::Text { text: "[success] continue after removal".into() }],
             model: None,
             effort: None,
             service_tier: None,
             follow_up: Default::default(),
         }).await.unwrap();
-        assert!(receipt.turn_id.is_some());
+        events.input_turn(&input_id("after-removal"),true).await;
         assert!(Path::new(&path).is_dir(), "sending must recreate the checkout");
         assert_eq!(git(&["-C", &path, "rev-parse", "HEAD"]), git(&["rev-parse", "main"]));
-        let (opened, _) = open_session(&local.peer, &json!(id), 5).await;
-        assert_eq!(opened["response"]["thread"]["cwd"], path);
+        let (opened, _) = open_conversation(&local.peer, &json!(id)).await;
+        assert_eq!(opened["thread"]["cwd"], path);
         assert!(opened.to_string().contains("[success] continue after removal"));
         local.close().await;
         store.close().await.unwrap();
@@ -3092,30 +3161,25 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
             .unwrap();
         let mut checkouts = Vec::new();
         for name in ["running", "terminal", "dirty", "clean"] {
-            let response = local
-                .peer
-                .call(&rpc::CreateSession {
-                    initial_input: None,
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                    cwd: Some(project.to_str().unwrap().into()),
-                    model: None,
-                })
-                .await
-                .unwrap();
-            let id = response.response.thread.id.unwrap();
-            let path = PathBuf::from(response.response.thread.cwd.unwrap());
+            let response =
+                completed_chat(&local.peer, Some(project.to_str().unwrap().into())).await;
+            let id = response.id.unwrap();
+            let path = PathBuf::from(response.cwd.unwrap());
             git(&path, &["commit", "--allow-empty", "-m", name]);
             let branch = git(&path, &["branch", "--show-current"]);
             git(&project, &["merge", "--ff-only", &branch]);
             checkouts.push((id, path, branch));
         }
         let (active, active_path, active_branch) = &checkouts[0];
-        let receipt = local
-            .peer
-            .call(&rpc::Submission {
+        let mut events = conversations::Conversation::open(&local.peer, active)
+            .await
+            .unwrap();
+        conversations::submit(
+            &local.peer,
+            &rpc::Submission {
                 fresh_context: false,
                 thread_id: active.clone(),
-                client_user_message_id: "cleanup-running".into(),
+                client_user_message_id: input_id("cleanup-running"),
                 input: vec![rpc::Input::Text {
                     text: "[request] keep running until interrupted".into(),
                 }],
@@ -3123,22 +3187,17 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
                 effort: None,
                 service_tier: None,
                 follow_up: Default::default(),
-            })
-            .await
-            .unwrap();
-        let (opened, mut events) = open_session(&local.peer, &json!(active), 5).await;
-        assert_eq!(opened["response"]["thread"]["status"], "running");
-        let listed = local
-            .peer
-            .call(&rpc::ListSessions::new(Default::default()))
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
+        events.input_turn(&input_id("cleanup-running"), false).await;
+        let catalog = conversations::Catalog::open(&local.peer).await;
         assert!(
-            !listed
-                .data
-                .iter()
-                .any(|thread| thread.id.as_ref() == Some(active)),
-            "the active first turn must be absent from the history list in this regression"
+            catalog
+                .replica
+                .rows()
+                .contains_key(&agent_protocol::sync::Key::Thread(active.clone()))
         );
         let terminal_path = &checkouts[1].1;
         local
@@ -3185,14 +3244,14 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
         std::fs::write(active_path.join("new-work.txt"), "new work after merge").unwrap();
         git(active_path, &["add", "new-work.txt"]);
         git(active_path, &["commit", "-m", "new work after merge"]);
-        local
-            .peer
-            .call(&rpc::Interrupt {
-                thread_id: active.clone(),
-                turn_id: receipt.turn_id.unwrap(),
-            })
-            .await
-            .unwrap();
+        conversations::command(
+            &local.peer,
+            active,
+            uuid::Uuid::new_v4(),
+            agent_protocol::conversation::Command::Interrupt { turn: None },
+        )
+        .await
+        .unwrap();
         assert_eq!(completed_turn(&mut events).await["status"], "interrupted");
         local
             .peer
@@ -3232,13 +3291,13 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
         );
         removed(active_path).await;
         for (id, path, branch) in &checkouts {
-            let (opened, _) = open_session(&local.peer, &json!(id), 5).await;
+            let (opened, _) = open_conversation(&local.peer, &json!(id)).await;
             assert_eq!(
-                opened["response"]["thread"]["id"],
+                opened["thread"]["id"],
                 json!(id),
                 "cleanup preserves conversations"
             );
-            assert_eq!(opened["response"]["thread"]["cwd"], path.to_str().unwrap());
+            assert_eq!(opened["thread"]["cwd"], path.to_str().unwrap());
             assert!(
                 !path.exists(),
                 "reading retained history must not recreate checkouts"
@@ -3299,7 +3358,7 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
         store
             .dispatch(Intent::Submit {
                 thread_id: None,
-                client_user_message_id: "visualize".into(),
+                client_user_message_id: input_id("visualize"),
                 alternate: false,
             })
             .await
@@ -3417,10 +3476,18 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
         loop {
             let snapshot = updates.borrow_and_update().clone();
             let key = agent_core::state::operations::OperationKey::ListDecorations {
-                scope: rpc::ListDecorationScope::Root { part: None },
+                scope: rpc::ListDecorationScope::Root,
             };
             assert!(snapshot.operation_error(key.clone()).is_none());
-            if !snapshot.operation_running(key) {
+            if !snapshot.operation_running(key)
+                && !snapshot
+                    .operation_running(agent_core::state::operations::OperationKey::SessionList)
+                && snapshot
+                    .lists
+                    .replica
+                    .as_deref()
+                    .is_some_and(agent_protocol::conversation::records::catalog_ready)
+            {
                 return;
             }
             updates.changed().await.unwrap();
@@ -3473,16 +3540,9 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
         let local = fixture.local().await.unwrap();
         let mut ids = Vec::new();
         for cwd in [&checkout, &checkout.join("nested"), &repo, &root] {
-            let reply = local
-                .peer
-                .call(
-                    &serde_json::from_value::<op::CreateSession>(
-                        json!({"provider":"codex","cwd":cwd}),
-                    )
-                    .unwrap(),
-                )
+            let reply = conversations::created(&local.peer,conversations::create_request(ProviderKind::Codex,Some(serde_json::from_value::<String>(json!(cwd)).unwrap()),None))
                 .await
-                .map(|output| serde_json::to_value(output.response).unwrap())
+                .map(|output| serde_json::to_value(output).unwrap())
                 .unwrap();
             ids.push(
                 serde_json::from_value::<agent_protocol::session::SessionRef>(
@@ -3542,9 +3602,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 _ => {}
             }
             store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(
-                    Default::default(),
-                )))
+                .dispatch(Intent::ListSessions(Default::default()))
                 .await
                 .unwrap();
             wait_decorations(&store).await;
@@ -3562,9 +3620,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
         }
         git(&repo, &["merge", "--no-ff", "-m", "merge task", "task"]);
         store
-            .dispatch(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            )))
+            .dispatch(Intent::ListSessions(Default::default()))
             .await
             .unwrap();
         wait_decorations(&store).await;
@@ -3581,15 +3637,13 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             Some(false)
         );
         std::fs::remove_dir(checkout.join("nested")).unwrap();
-        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
         wait_decorations(&store).await;
         assert_eq!(store.snapshot().thread_list().unwrap().threads.iter().find(|row| row.id == ids[1]).unwrap().has_changes, None);
         std::fs::create_dir(checkout.join("nested")).unwrap();
         git(&checkout, &["checkout", "--detach"]);
         store
-            .dispatch(Intent::ListSessions(op::ListSessions::new(
-                Default::default(),
-            )))
+            .dispatch(Intent::ListSessions(Default::default()))
             .await
             .unwrap();
         wait_decorations(&store).await;
@@ -3624,7 +3678,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 "deleted-branch" => { git(&repo, &["branch", "-d", "task"]); }
                 _ => {}
             }
-            store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+            store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
             wait_decorations(&store).await;
             let snapshot = store.snapshot();
             let list = snapshot.thread_list().unwrap();
@@ -3648,40 +3702,15 @@ async fn session_open_delivers_a_snapshot_before_updates_and_reopens_current_sta
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
         let client = fixture.local().await.unwrap();
-        let created = client.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let created = conversations::created(&client.peer,conversations::create_request(ProviderKind::Codex,Some(serde_json::from_value::<String>(json!(directory.path())).unwrap()),None)).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         let id = &created["thread"]["id"];
-        let (opened, mut events) = client
-            .peer
-            .request_stream::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false, known_version: None,
-                    session: serde_json::from_value(id.clone()).unwrap(),
-                    limit: 5,
-                }))
-            .await
-            .unwrap();
-        assert_eq!(json!(opened.response.thread.id), *id);
-        client.peer.call(&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"session update fixture"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        let mut thread = opened.response.thread;
-        loop {
-            let message = events
-                .read::<agent_protocol::session::SessionChange>()
-                .await
-                .unwrap()
-                .expect("subscription ended before completion");
-            // Applying in receive order and comparing with native history below
-            // verifies the stream's snapshot/delta ordering without global counters.
-            thread = message.apply(&thread).unwrap();
-            if matches!(
-                message,
-                agent_protocol::session::SessionChange::Turn {
-                    completed: true,
-                    ..
-                }
-            ) {
-                break;
-            }
-        }
-        let reopened: agent_protocol::session::OpenedSession = client.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(serde_json::from_value::<agent_protocol::session::OpenSession>(json!({"session":id,"limit":5,"includeActivity":true})).unwrap())).await.unwrap();
-        assert_eq!(reopened.response.thread.turns, thread.turns);
+        let session = serde_json::from_value(id.clone()).unwrap();
+        let mut events = conversations::Conversation::open(&client.peer, &session).await.unwrap();
+        assert_eq!(json!(events.view().thread.id), *id);
+        conversations::submit(&client.peer, &serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"session update fixture"}}]})).unwrap()).await.unwrap();
+        events.finished().await;
+        let reopened = conversations::Conversation::open(&client.peer, &session).await.unwrap();
+        assert_eq!(reopened.view().thread.turns, events.view().thread.turns);
         drop(events);
         client.close().await;
         fixture.close().await.unwrap();
@@ -3696,22 +3725,20 @@ async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
     let fixture = start_host(directory.path()).await;
     let mobile = fixture.local().await.unwrap();
 
-    let started = mobile
-        .peer
-        .request::<agent_protocol::session::OpenedSession>(
-            &agent_protocol::protocol::Call::CreateSession(
-                serde_json::from_value::<op::CreateSession>(
-                    json!({"provider":"codex","cwd":directory.path()}),
-                )
-                .unwrap(),
-            ),
-        )
-        .await
-        .map(|output| serde_json::to_value(output.response).unwrap())
-        .unwrap();
+    let started = conversations::created(
+        &mobile.peer,
+        conversations::create_request(
+            ProviderKind::Codex,
+            Some(serde_json::from_value::<String>(json!(directory.path())).unwrap()),
+            None,
+        ),
+    )
+    .await
+    .map(|output| serde_json::to_value(output).unwrap())
+    .unwrap();
     let id = &started["thread"]["id"];
-    let (_, mut events) = open_session(&mobile.peer, id, 5).await;
-    mobile.peer.call(&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"[generated-images] [gallery] Browse all generated images"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+    let (_, mut events) = open_conversation(&mobile.peer, id).await;
+    conversations::submit(&mobile.peer,&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"[generated-images] [gallery] Browse all generated images"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
     completed_turn(&mut events).await;
     // Native history the turn added outside its live stream arrives when the
     // project is imported again.
@@ -3756,26 +3783,22 @@ async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without
     tokio::time::timeout(Duration::from_secs(120), async {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("oversized-history")).unwrap();
+        std::fs::write(directory.path().join("list-fixture.json"), json!([{
+            "id":"oversized", "cwd":directory.path().join("oversized-history"), "historyMode":"paginated"
+        }]).to_string()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
-        let started = mobile
-            .peer
-            .call(
-                &serde_json::from_value::<op::CreateSession>(
-                    json!({"provider":"codex","cwd":directory.path().join("oversized-history")}),
-                )
-                .unwrap(),
-            )
-            .await
-            .map(|output| serde_json::to_value(output.response).unwrap())
-            .unwrap();
-        let thread = &started["thread"]["id"];
-        let thread_id: agent_protocol::session::SessionRef =
-            serde_json::from_value(thread.clone()).unwrap();
-        for _ in 0..2 {
-            let opened = mobile.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { session: thread_id.clone(), limit: 5, include_activity: true , known_version: None})).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-            assert!(agent_protocol::protocol::encode(&opened).unwrap().len() < 16 * 1024);
-            let turn = &opened["response"]["thread"]["turns"][0];
+        let mut catalog = conversations::Catalog::open(&mobile.peer).await;
+        catalog.wait_rows(1).await;
+        let thread_id = SessionRef::new(ProviderKind::Codex, "oversized".into()).unwrap();
+        let mut conversation = conversations::Conversation::open(&mobile.peer, &thread_id).await.unwrap();
+        for read in 0..2 {
+            if read > 0 {
+                conversation = conversations::Conversation::open(&mobile.peer, &thread_id).await.unwrap();
+            }
+            let opened = serde_json::to_value(conversation.view()).unwrap();
+            assert!(agent_protocol::protocol::encode(conversation.replica.snapshot().unwrap()).unwrap().len() < 16 * 1024);
+            let turn = &opened["thread"]["turns"][0];
             // An import copies messages and images; past tool activity stays native.
             let deferred = ["oversized-text", "oversized-image"];
             assert_eq!(
@@ -3790,33 +3813,17 @@ async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without
         for (id, kind, field, byte) in [
             ("oversized-text", "assistantText", "text", b'x'),
             ("oversized-image", "imageGeneration", "data", b'A'),
-            ("oversized-tool", "commandExecution", "output", b'z'),
         ] {
-            let reply = mobile
-                .peer
-                .call(
-                    &serde_json::from_value::<rpc::ReadItem>(
-                        json!({"threadId":thread,"turnId":"oversized-turn","itemId":id}),
-                    )
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert!(reply.transfer.as_ref().unwrap().size > 16 * 1024 * 1024);
-            assert!(serde_json::to_vec(&reply).unwrap().len() < 16 * 1024);
-            let item = serde_json::to_value(
-                agent_transport::transfers::resolve_item(reply, Some(&mobile.session))
-                    .await
-                    .unwrap()
-                    .item,
-            )
-            .unwrap();
+            let (item, wire_bytes, transfer_size) = conversation.hydrate(&mobile.peer, &mobile.session, &id.into()).await;
+            assert!(transfer_size.unwrap() > 16 * 1024 * 1024);
+            assert!(wire_bytes < 16 * 1024);
+            let item = serde_json::to_value(item).unwrap();
             let body = body_json(&item)[kind][field].as_str().unwrap();
             assert_eq!(body.len(), 17 * 1024 * 1024);
             assert!(body.bytes().all(|value| value == byte));
         }
-        // Exercise the shared Store path used by all native clients: visible
-        // messages/images load automatically, while tool details are requested.
+        // Visible messages and images hydrate through the shared Store path
+        // used by all native clients.
         use agent_core::state::Intent;
         use agent_core::store::Store;
         let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
@@ -3830,7 +3837,6 @@ async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without
             .dispatch(Intent::ReadThread(op::ReadThread::open(thread_id.clone())))
             .await
             .unwrap();
-        store.dispatch(Intent::LoadTurnItems(op::LoadTurnItems { thread_id: thread_id.clone(), turn_id: "oversized-turn".into() })).await.unwrap();
         loop {
             let snapshot = updates.borrow_and_update().clone();
             assert!(snapshot.panes.primary().error.is_none(), "{:?}", snapshot.panes.primary().error);
@@ -3923,20 +3929,21 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
         let project_id = store.snapshot().thread_list().unwrap().projects[0]
             .id
             .clone();
-        let created = peer
-            .call(&op::CreateSession {
-                initial_input: None,
-                provider: agent_protocol::session::ProviderKind::Codex,
-                cwd: Some(folder.to_str().unwrap().into()),
-                model: None,
-            })
-            .await
-            .unwrap();
+        let created = conversations::created(
+            peer,
+            conversations::create_request(
+                agent_protocol::session::ProviderKind::Codex,
+                Some(folder.to_str().unwrap().into()),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            created.response.thread.project_id.as_deref(),
+            created.thread.project_id.as_deref(),
             Some(project_id.as_str())
         );
-        assert!(root.join("bex-projects.json").exists());
+        assert!(root.join("bex-conversations.sqlite").is_file());
         assert!(!root.join(".codex-global-state.json").exists());
         store.close().await.unwrap();
         local.endpoint.close().await;
@@ -3955,11 +3962,8 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
         .await
         .unwrap();
         let client = reopened.local().await.unwrap();
-        let list = client
-            .peer
-            .call(&op::ListSessions::new(Default::default()))
-            .await
-            .unwrap();
+        let catalog = conversations::Catalog::open(&client.peer).await;
+        let list = catalog.page(Default::default()).lists.threads.unwrap();
         assert_eq!(list.projects.len(), 1);
         assert_eq!(list.projects[0].name, "new-project");
         client.close().await;
@@ -4020,24 +4024,19 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
         let first = fixture.local().await.unwrap();
-        let thread = first
-            .peer
-            .call(&op::CreateSession {
-                initial_input: None,
-                provider: agent_protocol::session::ProviderKind::Codex,
-                cwd: None,
-                model: None,
-            })
-            .await
-            .unwrap()
-            .response
-            .thread
-            .id
-            .unwrap();
+        let thread = conversations::created(
+            &first.peer,
+            conversations::create_request(agent_protocol::session::ProviderKind::Codex, None, None),
+        )
+        .await
+        .unwrap()
+        .thread
+        .id
+        .unwrap();
         let input = rpc::Submission {
             fresh_context: false,
             thread_id: thread.clone(),
-            client_user_message_id: "first-input".into(),
+            client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
             input: vec![rpc::Input::Text {
                 text: "[delayed-input] wait for another client".into(),
             }],
@@ -4046,100 +4045,76 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
             service_tier: None,
             follow_up: rpc::FollowUp::Queue,
         };
-        let (started, duplicate) = tokio::join!(first.peer.call(&input), first.peer.call(&input));
-        let started = started.unwrap();
-        assert_eq!(
-            duplicate.unwrap(),
-            started,
-            "concurrent identical input intents must share one provider submission"
+        let (started, duplicate) = tokio::join!(
+            conversations::submit(&first.peer, &input),
+            conversations::submit(&first.peer, &input),
         );
-        assert!(started.turn_id.is_some());
+        let started = started.unwrap();
+        let duplicate = duplicate.unwrap();
+        assert_eq!(
+            (&duplicate.outcome, duplicate.cursor),
+            (&started.outcome, started.cursor),
+            "one durable receipt per input"
+        );
         first.peer.close().await;
         let second = fixture.local().await.unwrap();
+        let replay = conversations::submit(&second.peer, &input).await.unwrap();
         assert_eq!(
-            second.peer.call(&input).await.unwrap(),
-            started,
-            "a repeated ID must replay its receipt without another provider input"
+            (&replay.outcome, replay.cursor),
+            (&started.outcome, started.cursor)
         );
-        let steered = second
-            .peer
-            .call(&rpc::Submission {
-                client_user_message_id: "second-input".into(),
-                input: vec![rpc::Input::Text {
-                    text: "additional input".into(),
-                }],
-                follow_up: rpc::FollowUp::Steer,
-                ..input
-            })
+        let mut events = conversations::Conversation::open(&second.peer, &thread)
             .await
             .unwrap();
-        assert_eq!(
-            steered.turn_id, started.turn_id,
-            "the Host must steer its live turn without client execution state"
-        );
-        let (opened, mut events) = open_session(&second.peer, &json!(thread), 5).await;
-        let deliveries = &opened["response"]["thread"]["submissions"];
-        assert_eq!(
-            deliveries["first-input"]["accepted"]["turnId"],
-            json!(started.turn_id)
-        );
-        assert_eq!(
-            deliveries["second-input"]["accepted"]["turnId"],
-            json!(started.turn_id)
-        );
+        let first_turn = events
+            .input_turn(&input.client_user_message_id, false)
+            .await;
+        let follow_up = rpc::Submission {
+            client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+            input: vec![rpc::Input::Text {
+                text: "additional input".into(),
+            }],
+            follow_up: rpc::FollowUp::Steer,
+            ..input.clone()
+        };
+        conversations::submit(&second.peer, &follow_up)
+            .await
+            .unwrap();
+        let steered = events
+            .input_turn(&follow_up.client_user_message_id, false)
+            .await;
+        assert_eq!(steered.id, first_turn.id, "steer joins the live turn");
         std::fs::write(directory.path().join("release-inputs"), "").unwrap();
-        // The fixture releases the first turn and its steered input in
-        // independent tasks. Observe both echoes before checking native history;
-        // the final-turn event is not a barrier for the other task's echo.
-        let mut echoed = std::collections::HashSet::new();
-        let mut finished = false;
-        while !finished
-            || !["first-input", "second-input"]
-                .iter()
-                .all(|id| echoed.contains(*id))
+        events.input_turn(&input.client_user_message_id, true).await;
+        // Final-turn completion and the native steer echo use separate tasks.
+        while !events
+            .view()
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .flat_map(|turn| turn.items.iter().flatten())
+            .any(|item| item_text(item) == Some("Additional input recorded"))
         {
-            use agent_protocol::session::SessionChange;
-            let change: SessionChange = events.read().await.unwrap().expect("subscription closed");
-            let items = match change {
-                SessionChange::Turn { turn, completed } => {
-                    finished |= completed;
-                    turn.items.unwrap_or_default()
-                }
-                SessionChange::Item { item, .. } => vec![item],
-                _ => Vec::new(),
-            };
-            for item in items {
-                if matches!(
-                    item.body(),
-                    agent_protocol::items::ItemBody::UserMessage { .. }
-                ) && let Some(id) = &item.client_input_id
-                {
-                    echoed.insert(id.clone());
-                }
-            }
+            events.next().await;
         }
-        let reopened = second
-            .peer
-            .request::<agent_protocol::session::OpenedSession>(
-                &agent_protocol::protocol::Call::OpenSession(
-                    agent_protocol::session::OpenSession {
-                        session: thread.clone(),
-                        limit: 5,
-                        include_activity: true,
-                        known_version: None,
-                    },
-                ),
-            )
+
+        let reopened = conversations::Conversation::open(&second.peer, &thread)
             .await
-            .map(|output| serde_json::to_value(output).unwrap())
             .unwrap();
-        let turns = reopened["response"]["thread"]["turns"].as_array().unwrap();
-        for id in ["first-input", "second-input"] {
+        let history = reopened.view();
+        for id in [
+            &input.client_user_message_id,
+            &follow_up.client_user_message_id,
+        ] {
             assert_eq!(
-                turns
+                history
+                    .thread
+                    .turns
                     .iter()
-                    .flat_map(|turn| turn["items"].as_array().unwrap())
-                    .filter(|item| item["clientInputId"] == id)
+                    .flatten()
+                    .flat_map(|turn| turn.items.iter().flatten())
+                    .filter(|item| item.client_input_id.as_ref() == Some(id))
                     .count(),
                 1
             );
@@ -4219,7 +4194,14 @@ async fn permission_settings_edit_native_codex_defaults_and_detect_external_chan
 fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
     match item.body() {
         agent_protocol::items::ItemBody::AssistantText { text, .. } => Some(text),
-        agent_protocol::items::ItemBody::UserMessage { text, .. } => text.as_deref(),
+        agent_protocol::items::ItemBody::UserMessage { text, content } => {
+            text.as_deref().or_else(|| {
+                content.iter().find_map(|part| match part {
+                    agent_protocol::items::MessagePart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+            })
+        }
         agent_protocol::items::ItemBody::Reasoning { content, .. } => {
             content.first().map(String::as_str)
         }
@@ -4261,28 +4243,22 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
+        let mut catalog = conversations::Catalog::open(&local.peer).await;
+        catalog.wait_rows(cases.len()).await;
         for ((_, id, _, succeeds, _), native) in cases.iter().zip(&threads) {
-            let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
-                &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false, known_version: None,
-                    session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.to_string()).unwrap(), limit:5,
-                })
-            ).await;
+            let result = conversations::Conversation::open(&local.peer, &SessionRef::new(ProviderKind::Codex, id.to_string()).unwrap()).await;
             if *succeeds {
-                let (opened, _updates) = result.unwrap();
-                let thread = opened.response.thread;
+                let thread = result.unwrap().view().thread;
                 assert!(thread.turns.unwrap().is_empty());
                 let state = thread.history_read_state.unwrap();
                 assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Complete);
                 assert!(state.issues.is_empty());
             } else {
-                let error = match result {
-                    Err(agent_protocol::error::PeerError::Remote { error, .. }) => error,
-                    _ => panic!("native history failure was replaced with a successful empty snapshot: {id}"),
-                };
-                let failure: agent_protocol::error::RpcFailure = serde_json::from_str(&error).unwrap();
-                assert_eq!(failure.code, "session_open_failed");
-                assert_eq!(failure.message, native["fixtureHistoryError"]["message"]);
+                let thread = result.unwrap().view().thread;
+                let failure = thread.history_read_state.unwrap();
+                assert_eq!(failure.kind, agent_protocol::session::HistoryReadKind::Unavailable, "native history failure was replaced with empty history: {id}");
+                assert_eq!(failure.issues[0],native["fixtureHistoryError"]["message"]);
+                assert!(thread.turns.unwrap().is_empty());
             }
         }
         local.close().await;

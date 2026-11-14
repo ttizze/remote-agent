@@ -1,22 +1,18 @@
+//! The detached updater reads a progress report. Continuations themselves live
+//! in the conversation database and use the durable job receipt exactly once.
 use super::*;
 use agent_local_host::update::{ContinuationDelivery, InterruptedTask, RECOVERY_FILE, Recovery};
+use agent_protocol::conversation::Outcome;
+
+fn read_report(path: &std::path::Path) -> anyhow::Result<Option<Recovery>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
 
 impl HostRpcService {
-    async fn restart_snapshot(
-        &self,
-        session: &agent_protocol::session::SessionRef,
-    ) -> Result<ThreadResponse, Failure> {
-        let response = self
-            .inner
-            .providers
-            .get(session.provider)?
-            .open(&session.id, 1, true)
-            .await?;
-        op::validate_thread(&response, Some(session))
-            .map_err(|error| Failure::new("invalid_session", error))?;
-        Ok(response)
-    }
-
     pub(crate) async fn prepare_update(&self) -> anyhow::Result<()> {
         let _workspace = self.inner.worktree_access.write().await;
         anyhow::ensure!(
@@ -35,7 +31,7 @@ impl HostRpcService {
             .get()
             .ok_or_else(|| anyhow::anyhow!("Host state directory unavailable"))?;
         let activity = self
-            .read_task_activity(true)
+            .update_task_snapshot()
             .await
             .map_err(anyhow::Error::msg)?;
         let mut tasks = Vec::new();
@@ -43,157 +39,769 @@ impl HostRpcService {
             if status != agent_protocol::models::SessionStatus::Running {
                 continue;
             }
-            let row = self
+            tokio::time::timeout(
+                SESSION_LIST_TIMEOUT,
+                super::super::runtime::Runtime::await_import(self, &session),
+            )
+            .await
+            .map_err(|_| anyhow::Error::msg(super::activity::incomplete()))?
+            .map_err(anyhow::Error::msg)?;
+            let state = self
                 .inner
-                .conversations
-                .get(&session)
-                .map_err(anyhow::Error::msg)?;
-            let active = row.as_ref().map_or(&session, |row| &row.active);
-            let response = self
-                .restart_snapshot(active)
-                .await
-                .map_err(anyhow::Error::msg)?;
-            let options = self
-                .inner
-                .model_selections
-                .resolve(
-                    active,
-                    response.model.as_ref(),
-                    response.effort.as_deref(),
-                    response.service_tier.as_deref(),
-                )
+                .conversation
+                .storage
+                .state(&session)
                 .map_err(anyhow::Error::msg)?;
             tasks.push(InterruptedTask {
-                native_session: active.clone(),
-                cwd: response.thread.cwd,
-                last_turn: response.thread.turns.as_ref().and_then(|turns| turns.last()).map(|turn| turn.id.clone()),
+                native_session: self
+                    .inner
+                    .conversation
+                    .storage
+                    .active_source(&session)
+                    .map_err(anyhow::Error::msg)?
+                    .unwrap_or_else(|| session.clone()),
+                cwd: state.thread.workspace.cwd().map(str::to_owned),
                 submission: op::Submission {
-                fresh_context: false,
+                    fresh_context: false,
                     thread_id: session,
                     client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
-                    input: vec![op::Input::Text { text: "Bexの更新に伴う再起動で作業が中断されました。この同じ会話の履歴から進捗と未完了の作業を確認し、中断したところから続けてください。元の依頼を最初からやり直したり、代わりの会話を作成したりしないでください。".into() }],
-                    model: options.model,
-                    effort: options.effort,
-                    service_tier: options.service_tier,
+                    input: vec![op::Input::Text {
+                        text: super::super::runtime::recovery::CONTINUE.into(),
+                    }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
                     follow_up: Default::default(),
                 },
+                last_turn: state
+                    .turns
+                    .values()
+                    .filter(|turn| {
+                        turn.state != agent_protocol::conversation::TurnState::RolledBack
+                    })
+                    .max_by_key(|turn| turn.ordinal)
+                    .map(|turn| turn.id.clone()),
                 delivery: ContinuationDelivery::Pending,
             });
         }
+        let mut report_committed = self.inner.conversation.update_report.lock().await;
+        let storage = &self.inner.conversation.storage;
+        storage.set_updating(true).map_err(anyhow::Error::msg)?;
+        // The report lock hides this transaction's admission marker until the
+        // replacement is durable. Failed preparation keeps the prior report live.
+        let reset_storage = scopeguard::guard(storage, |storage| {
+            if let Err(error) = storage.set_updating(false) {
+                tracing::error!(target: "agent", operation="host.update.rollback", %error);
+            }
+        });
         agent_local_host::save_private_json(&directory.join(RECOVERY_FILE), &Recovery { tasks })?;
+        *report_committed = true;
+        let _ = scopeguard::ScopeGuard::into_inner(reset_storage);
         let _ = scopeguard::ScopeGuard::into_inner(reset);
+        Ok(())
+    }
+
+    pub(in crate::host_rpc) async fn continuation_scheduled(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+        source: &agent_protocol::ids::TurnId,
+        job: uuid::Uuid,
+        outcome: Outcome,
+    ) -> Result<(), String> {
+        let Some((directory, _)) = self.inner.history_scope.get() else {
+            return Ok(());
+        };
+        let _report = self.inner.conversation.update_report.lock().await;
+        if *_report {
+            return Ok(());
+        }
+        let path = directory.join(RECOVERY_FILE);
+        let Some(mut report) = read_report(&path).map_err(|error| error.to_string())? else {
+            return Ok(());
+        };
+        let mut changed = false;
+        for task in &mut report.tasks {
+            if task.submission.thread_id != *target || task.last_turn.as_ref() != Some(source) {
+                continue;
+            }
+            changed = true;
+            task.submission.client_user_message_id = job.to_string().into();
+            match &outcome {
+                Outcome::Ignored => task.delivery = ContinuationDelivery::Completed,
+                Outcome::DeliveryUnknown => {
+                    task.delivery =
+                        ContinuationDelivery::Failed("継続の配送結果を確認できません。".into())
+                }
+                Outcome::Rejected(reason) => {
+                    task.delivery = ContinuationDelivery::Failed(reason.clone())
+                }
+                Outcome::Accepted => {}
+            }
+        }
+        if changed {
+            agent_local_host::save_private_json(&path, &report)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::host_rpc) async fn update_recovery_committed(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+    ) -> Result<(), String> {
+        let Some((directory, _)) = self.inner.history_scope.get() else {
+            return Ok(());
+        };
+        let _report = self.inner.conversation.update_report.lock().await;
+        if *_report {
+            return Ok(());
+        }
+        let path = directory.join(RECOVERY_FILE);
+        let Some(mut report) = read_report(&path).map_err(|error| error.to_string())? else {
+            return Ok(());
+        };
+        let pending = self.inner.conversation.storage.continuations(target)?;
+        let mut changed = false;
+        for task in &mut report.tasks {
+            if task.submission.thread_id == *target
+                && matches!(task.delivery, ContinuationDelivery::Pending)
+                && !task
+                    .last_turn
+                    .as_ref()
+                    .is_some_and(|turn| pending.contains(turn))
+            {
+                let input = &task.submission.client_user_message_id;
+                if self
+                    .inner
+                    .conversation
+                    .storage
+                    .item(target, &input.to_string().into())?
+                    .is_none()
+                    && self
+                        .inner
+                        .conversation
+                        .storage
+                        .input(target, input)?
+                        .is_none()
+                {
+                    task.delivery = ContinuationDelivery::Completed;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            agent_local_host::save_private_json(&path, &report)
+                .map_err(|error| error.to_string())?;
+        }
         Ok(())
     }
 
     pub async fn resume_after_update(&self, directory: &std::path::Path) -> anyhow::Result<()> {
         let path = directory.join(RECOVERY_FILE);
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        let mut recovery: Recovery = serde_json::from_slice(&bytes)?;
-        let connection = scopeguard::guard(self.open_session(), |connection| {
-            self.close_session(connection.id())
-        });
-        for index in 0..recovery.tasks.len() {
-            if recovery.tasks[index].delivery != ContinuationDelivery::Pending {
-                continue;
-            }
-            let response = self
-                .restart_snapshot(&recovery.tasks[index].native_session)
-                .await;
-            match response {
-                Ok(response)
-                    if response
-                        .thread
-                        .turns
-                        .as_ref()
-                        .and_then(|turns| turns.last())
-                        .is_some_and(|turn| {
-                            Some(&turn.id) == recovery.tasks[index].last_turn.as_ref()
-                                && turn.status == agent_protocol::execution::TurnStatus::Completed
-                        }) =>
-                {
-                    recovery.tasks[index].delivery = ContinuationDelivery::Completed;
-                    agent_local_host::save_private_json(&path, &recovery)?;
-                    continue;
-                }
-                Err(error) => {
-                    recovery.tasks[index].delivery =
-                        ContinuationDelivery::Failed(error.to_string());
-                    agent_local_host::save_private_json(&path, &recovery)?;
-                    continue;
-                }
-                _ => {}
-            }
-            recovery.tasks[index].delivery = ContinuationDelivery::Sending;
-            agent_local_host::save_private_json(&path, &recovery)?;
-            let input = recovery.tasks[index].submission.clone();
-            let result = self.dispatch(connection.id(), &Call::Submit(input)).await;
-            let receipt = result.and_then(|reply| {
-                match agent_protocol::protocol::decode::<Response<op::SubmissionReceipt>>(
-                    &reply.initial,
-                )
-                .map_err(|e| e.to_string())?
-                {
-                    Response::Success { result } => result
-                        .turn_id
-                        .ok_or_else(|| "継続した応答を確認できません。".into()),
-                    Response::Failure { error } => Err(error.message),
-                }
-            });
-            recovery.tasks[index].delivery = match receipt {
-                Ok(turn) => ContinuationDelivery::Accepted(turn),
-                Err(error) => ContinuationDelivery::Failed(error),
-            };
-            agent_local_host::save_private_json(&path, &recovery)?;
+        if !path.try_exists()? {
+            return Ok(());
         }
-        Ok(())
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let pending = {
+                let _report = self.inner.conversation.update_report.lock().await;
+                if *_report {
+                    return Ok(());
+                }
+                let Some(mut report) = read_report(&path)? else {
+                    return Ok(());
+                };
+                let previous = serde_json::to_vec(&report)?;
+                let mut pending = false;
+                for task in &mut report.tasks {
+                    if task.delivery == ContinuationDelivery::Sending {
+                        task.delivery = ContinuationDelivery::Failed(
+                            "継続の配送結果を確認できません。会話を開いて確認してください。".into(),
+                        );
+                    }
+                    if !matches!(task.delivery, ContinuationDelivery::Pending) {
+                        continue;
+                    }
+                    let target = &task.submission.thread_id;
+                    if let Some(item) = self
+                        .inner
+                        .conversation
+                        .storage
+                        .item(
+                            target,
+                            &task.submission.client_user_message_id.to_string().into(),
+                        )
+                        .map_err(anyhow::Error::msg)?
+                    {
+                        task.delivery = ContinuationDelivery::Accepted(item.turn);
+                    } else {
+                        let completed = task
+                            .last_turn
+                            .as_ref()
+                            .map(|turn| self.inner.conversation.storage.turn(target, turn))
+                            .transpose()
+                            .map_err(anyhow::Error::msg)?
+                            .flatten()
+                            .is_some_and(|turn| {
+                                turn.state == agent_protocol::conversation::TurnState::Completed
+                            });
+                        if completed {
+                            task.delivery = ContinuationDelivery::Completed;
+                        } else {
+                            let input = self
+                                .inner
+                                .conversation
+                                .storage
+                                .input(target, &task.submission.client_user_message_id)
+                                .map_err(anyhow::Error::msg)?;
+                            match input {
+                                Some(input) => match &input.state {
+                                    agent_protocol::conversation::InputState::Failed { error, .. } => task.delivery = ContinuationDelivery::Failed(error.as_ref().map_or_else(|| "準備を停止しました。".into(), |error| error.message.clone())),
+                                    agent_protocol::conversation::InputState::Unknown { .. } => task.delivery = ContinuationDelivery::Failed("継続の配送結果を確認できません。会話を開いて確認してください。".into()),
+                                    _ => pending = true,
+                                },
+                                None => pending = true,
+                            }
+                        }
+                    }
+                }
+                if serde_json::to_vec(&report)? != previous {
+                    agent_local_host::save_private_json(&path, &report)?;
+                }
+                pending
+            };
+            if !pending {
+                return Ok(());
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "中断した会話の継続を確認できませんでした。"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_protocol::{
+        conversation::{Action, Command, Context, Event, InputContent, OperationId},
+        models::{Thread, ThreadResponse, Turn, TurnStatus},
+        session::{ProviderKind, SessionRef},
+    };
 
     #[tokio::test]
-    async fn failed_preparation_does_not_leave_the_host_frozen() {
+    async fn update_without_an_installed_codex_records_no_interrupted_tasks() {
         let directory = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
-            [],
-            ProjectStore::new(directory.path().join("worktrees.json")),
-        );
-        assert!(service.prepare_update().await.is_err());
+        let codex = crate::providers::codex::Codex::new(Err("not installed".into()));
+        let service = HostRpcService::new([codex.into()], directory.path().join("projects.json"));
         service.set_history_scope(directory.path().to_owned(), true);
         service.prepare_update().await.unwrap();
         let saved: Recovery =
             serde_json::from_slice(&std::fs::read(directory.path().join(RECOVERY_FILE)).unwrap())
                 .unwrap();
         assert!(saved.tasks.is_empty());
-        let broken = HostRpcService::new(
-            [Backend::unavailable(ProviderKind::Codex, "not installed")],
-            ProjectStore::new(directory.path().join("broken.json")),
-        );
-        broken.set_history_scope(directory.path().to_owned(), true);
-        broken.prepare_update().await.unwrap();
     }
 
     #[tokio::test]
-    async fn restart_snapshot_skips_codex_that_never_started() {
+    async fn an_uncertain_update_continuation_is_reported_without_resending() {
         let directory = tempfile::tempdir().unwrap();
-        // Codex retains an adapter after a failed spawn so its CLI can still
-        // be installed/updated. It has no process, unlike a broken live read.
-        let missing = HostRpcService::new(
-            [crate::providers::codex::Codex::new(Err("Codex is not installed".into())).into()],
-            ProjectStore::new(directory.path().join("missing-codex.json")),
+        let service = HostRpcService::new([], directory.path().join("bex-worktrees.json"));
+        let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+        let path = directory.path().join(RECOVERY_FILE);
+        agent_local_host::save_private_json(
+            &path,
+            &Recovery {
+                tasks: vec![InterruptedTask {
+                    native_session: SessionRef::new(ProviderKind::Codex, "native".into()).unwrap(),
+                    cwd: None,
+                    submission: op::Submission {
+                        fresh_context: false,
+                        thread_id: target.clone(),
+                        client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+                        input: vec![],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
+                    last_turn: None,
+                    delivery: ContinuationDelivery::Sending,
+                }],
+            },
+        )
+        .unwrap();
+        service.resume_after_update(directory.path()).await.unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        let report: Recovery = serde_json::from_slice(&saved).unwrap();
+        assert!(
+            matches!(&report.tasks[0].delivery, ContinuationDelivery::Failed(message)
+            if message == "継続の配送結果を確認できません。会話を開いて確認してください。")
         );
-        missing.set_history_scope(directory.path().to_owned(), true);
-        assert!(missing.read_task_activity(false).await.is_err());
-        missing.prepare_update().await.unwrap();
-        let saved: Recovery =
-            serde_json::from_slice(&std::fs::read(directory.path().join(RECOVERY_FILE)).unwrap())
+        assert!(
+            service
+                .inner
+                .conversation
+                .storage
+                .lookup(&target)
+                .unwrap()
+                .is_none()
+        );
+        service.resume_after_update(directory.path()).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+    }
+
+    #[tokio::test]
+    async fn update_handover_continues_running_work_once_and_settles_stopped_or_retrying_work() {
+        for mode in ["stopped", "retrying", "running"] {
+            use crate::host_rpc::runtime::{Runtime, native_fixture::NativeAgent};
+            use agent_protocol::conversation::{Observation, TurnState};
+            let directory = tempfile::tempdir().unwrap();
+            let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
+            let service =
+                HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+            service.set_history_scope(directory.path().into(), true);
+            let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+            let native = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+            let storage = &service.inner.conversation.storage;
+            storage
+                .import(
+                    &target,
+                    &ThreadResponse {
+                        thread: Thread {
+                            id: Some(target.clone()),
+                            active_provider: Some(ProviderKind::Codex),
+                            cwd: Some(directory.path().to_str().unwrap().into()),
+                            turns: Some(vec![]),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    Some(&native),
+                    100,
+                )
                 .unwrap();
-        assert!(saved.tasks.is_empty());
+            let context = Context {
+                rewind_context_start: None,
+                preparation: None,
+                rewind_binding: None,
+                imported_turns: &[],
+                now: 100,
+                seed: uuid::Uuid::new_v4(),
+                steers: true,
+                steer_ready: true,
+                external_busy: false,
+            };
+            let input = uuid::Uuid::new_v4();
+            let admitted = storage
+                .decide(
+                    &target,
+                    Event::Command {
+                        id: OperationId::Client(input),
+                        receipt: None,
+                        command: Command::Submit {
+                            id: input.to_string().into(),
+                            content: InputContent {
+                                fresh_context: false,
+                                parts: vec![op::Input::Text {
+                                    text: "work".into(),
+                                }],
+                                model: None,
+                                effort: None,
+                                service_tier: None,
+                                follow_up: Default::default(),
+                            },
+                        },
+                    },
+                    context,
+                    None,
+                )
+                .unwrap();
+            let Action::Deliver {
+                id,
+                action,
+                attempt,
+                ..
+            } = &admitted.step.actions[0]
+            else {
+                panic!("delivery")
+            };
+            storage
+                .decide(
+                    &target,
+                    Event::Delivered {
+                        id: id.clone(),
+                        action: *action,
+                        native_turn: Some("native-turn".into()),
+                    },
+                    context,
+                    None,
+                )
+                .unwrap();
+            if mode == "retrying" {
+                storage
+                    .decide(
+                        &target,
+                        Event::Provider {
+                            attempt: attempt.id,
+                            native_turn: None,
+                            native_items: vec![],
+                            observation: Observation::Failed(Some(
+                                agent_protocol::execution::ExecutionError {
+                                    message: "overloaded".into(),
+                                    provider_code: Some("serverOverloaded".into()),
+                                    ..Default::default()
+                                },
+                            )),
+                        },
+                        context,
+                        None,
+                    )
+                    .unwrap();
+            } else if mode == "stopped" {
+                storage
+                    .decide(
+                        &target,
+                        Event::Command {
+                            id: OperationId::Client(uuid::Uuid::new_v4()),
+                            receipt: None,
+                            command: Command::Interrupt {
+                                turn: Some(attempt.turn.clone()),
+                            },
+                        },
+                        context,
+                        None,
+                    )
+                    .unwrap();
+            }
+            agent.records.lock().unwrap().insert(
+                native.id.clone(),
+                ThreadResponse {
+                    thread: Thread {
+                        id: Some(native.clone()),
+                        cwd: Some(directory.path().to_str().unwrap().into()),
+                        status: agent_protocol::models::SessionStatus::Idle,
+                        turns: Some(vec![]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            );
+            let turn = attempt.turn.clone();
+            service.prepare_update().await.unwrap();
+            let operation = uuid::Uuid::new_v4();
+            let rejected = Runtime::change(
+                &service,
+                &agent_protocol::conversation::records::Change {
+                    session: target.clone(),
+                    operation,
+                    command: Command::Submit {
+                        id: operation.to_string().into(),
+                        content: InputContent {
+                            fresh_context: false,
+                            parts: vec![op::Input::Text {
+                                text: "must not start during update".into(),
+                            }],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: Default::default(),
+                        },
+                    },
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(rejected.code, "host_updating");
+            assert!(storage.receipts(&target, &[operation]).unwrap().is_empty());
+            drop(service);
+            let service = HostRpcService::new(
+                [agent.restarted().backend()],
+                directory.path().join("projects.json"),
+            );
+            service.set_history_scope(directory.path().into(), true);
+            let _connection = service.open_session();
+            let storage = &service.inner.conversation.storage;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                service.resume_after_update(directory.path()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let report: Recovery = serde_json::from_slice(
+                &std::fs::read(directory.path().join(RECOVERY_FILE)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(report.tasks.len(), 1);
+            if mode == "running" {
+                assert!(matches!(
+                    report.tasks[0].delivery,
+                    ContinuationDelivery::Accepted(_)
+                ));
+                service.resume_after_update(directory.path()).await.unwrap();
+                assert_eq!(
+                    agent.inputs.lock().unwrap().len(),
+                    1,
+                    "the durable continuation runs once"
+                );
+            } else {
+                assert_eq!(report.tasks[0].delivery, ContinuationDelivery::Completed);
+                assert!(agent.inputs.lock().unwrap().is_empty());
+            }
+            assert!(storage.continuations(&target).unwrap().is_empty());
+            if mode == "stopped" {
+                assert_eq!(
+                    storage.state(&target).unwrap().turns[&turn].state,
+                    TurnState::Interrupted
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupted_original_turn_does_not_confirm_a_pending_update_continuation() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new([], directory.path().join("projects.json"));
+        let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+        let native = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        let storage = &service.inner.conversation.storage;
+        storage
+            .import(
+                &target,
+                &ThreadResponse {
+                    thread: Thread {
+                        id: Some(target.clone()),
+                        active_provider: Some(ProviderKind::Codex),
+                        cwd: Some("/project".into()),
+                        turns: Some(vec![std::sync::Arc::new(Turn {
+                            id: "original".into(),
+                            status: TurnStatus::Interrupted,
+                            ..Default::default()
+                        })]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Some(&native),
+                100,
+            )
+            .unwrap();
+        let input = uuid::Uuid::new_v4();
+        let path = directory.path().join(RECOVERY_FILE);
+        agent_local_host::save_private_json(
+            &path,
+            &Recovery {
+                tasks: vec![InterruptedTask {
+                    native_session: target.clone(),
+                    cwd: None,
+                    submission: op::Submission {
+                        fresh_context: false,
+                        thread_id: target.clone(),
+                        client_user_message_id: input.to_string().into(),
+                        input: vec![],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
+                    last_turn: Some("original".into()),
+                    delivery: ContinuationDelivery::Pending,
+                }],
+            },
+        )
+        .unwrap();
+        let mut resumed = Box::pin(service.resume_after_update(directory.path()));
+        assert!(futures_util::poll!(&mut resumed).is_pending());
+        let read = || serde_json::from_slice::<Recovery>(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(matches!(
+            read().tasks[0].delivery,
+            ContinuationDelivery::Pending
+        ));
+        let context = Context {
+            rewind_context_start: None,
+            preparation: None,
+            rewind_binding: None,
+            imported_turns: &[],
+            now: 200,
+            seed: uuid::Uuid::new_v4(),
+            steers: true,
+            steer_ready: true,
+            external_busy: false,
+        };
+        let admitted = storage
+            .decide(
+                &target,
+                Event::Command {
+                    id: OperationId::Client(input),
+                    receipt: None,
+                    command: Command::Submit {
+                        id: input.to_string().into(),
+                        content: InputContent {
+                            fresh_context: false,
+                            parts: vec![op::Input::Text {
+                                text: "Continue".into(),
+                            }],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: Default::default(),
+                        },
+                    },
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        let Action::Deliver {
+            id,
+            action,
+            attempt,
+            ..
+        } = &admitted.step.actions[0]
+        else {
+            panic!("continuation delivery")
+        };
+        storage
+            .decide(
+                &target,
+                Event::Delivered {
+                    id: id.clone(),
+                    action: *action,
+                    native_turn: Some("continued".into()),
+                },
+                context,
+                None,
+            )
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(50)).await;
+        resumed.await.unwrap();
+        assert!(
+            matches!(&read().tasks[0].delivery,ContinuationDelivery::Accepted(turn) if turn==&attempt.turn)
+        );
+        service.resume_after_update(directory.path()).await.unwrap();
+        assert_eq!(
+            storage
+                .history(&target, 0)
+                .unwrap()
+                .thread
+                .turns
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_new_update_serializes_its_report_and_only_a_committed_update_stops_the_prior_reader()
+    {
+        for failed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let service = HostRpcService::new([], directory.path().join("projects.json"));
+            service.set_history_scope(directory.path().into(), true);
+            let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+            service
+                .inner
+                .conversation
+                .storage
+                .create(
+                    &target,
+                    &agent_protocol::conversation::records::Header {
+                        state: agent_protocol::conversation::Thread {
+                            context_start: 0,
+                            name: "prior update".into(),
+                            workspace: agent_protocol::conversation::Workspace::Missing,
+                            provider: ProviderKind::Codex,
+                            queue_held: false,
+                        },
+                        details: Default::default(),
+                    },
+                )
+                .unwrap();
+            if failed {
+                rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap().execute_batch("CREATE TRIGGER reject_new_update BEFORE UPDATE OF updating ON store WHEN NEW.updating=1 BEGIN SELECT RAISE(ABORT,'update storage unavailable'); END;").unwrap();
+            }
+            let path = directory.path().join(RECOVERY_FILE);
+            agent_local_host::save_private_json(
+                &path,
+                &Recovery {
+                    tasks: vec![InterruptedTask {
+                        native_session: target.clone(),
+                        cwd: None,
+                        submission: op::Submission {
+                            fresh_context: false,
+                            thread_id: target.clone(),
+                            client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+                            input: vec![],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: Default::default(),
+                        },
+                        last_turn: None,
+                        delivery: ContinuationDelivery::Pending,
+                    }],
+                },
+            )
+            .unwrap();
+            let previous = std::fs::read(&path).unwrap();
+            let report = service.inner.conversation.update_report.lock().await;
+            let mut resumed = Box::pin(service.resume_after_update(directory.path()));
+            assert!(futures_util::poll!(&mut resumed).is_pending());
+            let mut preparing = Box::pin(service.prepare_update());
+            assert!(futures_util::poll!(&mut preparing).is_pending());
+            assert_eq!(std::fs::read(&path).unwrap(), previous);
+            drop(report);
+            // Preparation is admitted but hasn't replaced the old report yet.
+            assert!(futures_util::poll!(&mut resumed).is_pending());
+            let prepared = preparing.await;
+            if failed {
+                assert!(prepared.is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), previous);
+                assert!(
+                    !service
+                        .inner
+                        .updating
+                        .load(std::sync::atomic::Ordering::Acquire)
+                );
+                service.update_recovery_committed(&target).await.unwrap();
+                tokio::time::advance(std::time::Duration::from_millis(50)).await;
+                resumed.await.unwrap();
+                let report: Recovery =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(report.tasks.len(), 1);
+                assert!(matches!(
+                    report.tasks[0].delivery,
+                    ContinuationDelivery::Completed
+                ));
+            } else {
+                prepared.unwrap();
+                tokio::time::advance(std::time::Duration::from_millis(50)).await;
+                resumed.await.unwrap();
+                let report: Recovery =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert!(report.tasks.is_empty());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn a_report_write_failure_rolls_back_both_update_gates_and_preserves_existing_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let reports = directory.path().join("reports");
+        let path = reports.join(RECOVERY_FILE);
+        std::fs::create_dir_all(&path).unwrap();
+        let marker = path.join("keep");
+        std::fs::write(&marker, b"existing contents").unwrap();
+        let service = HostRpcService::new([], directory.path().join("projects.json"));
+        service.set_history_scope(reports, true);
+        assert!(service.prepare_update().await.is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"existing contents");
+        assert!(
+            !service
+                .inner
+                .updating
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(!service.inner.conversation.storage.updating().unwrap());
     }
 }

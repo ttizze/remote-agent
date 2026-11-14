@@ -27,6 +27,61 @@ mod tests {
     use agent_protocol::editors::EditorId;
 
     #[test]
+    fn welcome_and_folderless_new_chat_restore_independent_user_work() {
+        use crate::state::{Attachment, DraftKey};
+        use agent_protocol::composer::{Invocation, InvocationKind};
+        let mut snapshot = Snapshot::default();
+        let draft = |name: &str| {
+            Arc::new(Draft {
+                text: name.into(),
+                attachments: vec![Attachment {
+                    path: format!("/{name}.png"),
+                    name: format!("{name}.png"),
+                    is_image: true,
+                }],
+                invocations: vec![Invocation {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    kind: InvocationKind::Skill,
+                    name: name.into(),
+                    path: format!("/{name}/SKILL.md"),
+                }],
+                ..Default::default()
+            })
+        };
+        let first = draft("welcome");
+        let second = draft("new-chat");
+        use crate::state::{Event, Intent, reduce};
+        let apply = |snapshot: &Snapshot, intent| reduce(snapshot, "", Event::Intent(intent)).0;
+        snapshot = apply(
+            &snapshot,
+            Intent::SetDraft {
+                thread_id: DraftKey::default(),
+                draft: (*first).clone(),
+            },
+        );
+        snapshot = apply(&snapshot, Intent::NewChat { cwd: String::new() });
+        let new = snapshot.panes.primary().navigation.draft_key.clone();
+        snapshot = apply(
+            &snapshot,
+            Intent::SetDraft {
+                thread_id: new,
+                draft: (*second).clone(),
+            },
+        );
+        snapshot = apply(&snapshot, Intent::ShowThreadList);
+        let restored = decode(&encode(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.input.drafts.len(), 2);
+        let welcome = DraftKey::from(&restored.input.new_drafts[crate::state::WELCOME_DRAFT_SLOT]);
+        assert_eq!(restored.input.drafts[&welcome], first);
+        let id = &restored.input.new_drafts["0:"];
+        assert_eq!(restored.input.drafts[&DraftKey::from(id)], second);
+        assert_eq!(restored.panes.primary().navigation.draft_key, welcome);
+        let again = decode(&encode(&restored).unwrap()).unwrap();
+        assert_eq!(again.input.drafts, restored.input.drafts);
+        assert_eq!(again.input.new_drafts, restored.input.new_drafts);
+    }
+
+    #[test]
     fn host_state_excludes_device_model_preferences() {
         let mut snapshot = Snapshot::default();
         snapshot.catalog.model_preferences.provider =
@@ -84,6 +139,9 @@ mod tests {
 #[derive(Serialize, Deserialize)]
 pub struct PersistedState {
     #[serde(default)]
+    input_recoveries:
+        Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<crate::state::InputRecovery>>>,
+    #[serde(default)]
     connection_disabled: bool,
     #[serde(default)]
     project_preferences: Arc<BTreeMap<String, BTreeMap<String, crate::state::ProjectPreferences>>>,
@@ -93,6 +151,7 @@ pub struct PersistedState {
     drafts: Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
     #[serde(default)]
     stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
+    new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
     pending_submissions: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     navigation: Arc<Navigation>,
@@ -100,12 +159,14 @@ pub struct PersistedState {
 
 impl Same for PersistedState {
     fn same(&self, other: &Self) -> bool {
-        self.connection_disabled == other.connection_disabled
+        self.input_recoveries.same(&other.input_recoveries)
+            && self.connection_disabled == other.connection_disabled
             && self.project_preferences.same(&other.project_preferences)
             && self.storage_scope == other.storage_scope
             && self.archived_scopes.same(&other.archived_scopes)
             && self.drafts.same(&other.drafts)
             && self.stashes.same(&other.stashes)
+            && self.new_drafts.same(&other.new_drafts)
             && self.pending_submissions.same(&other.pending_submissions)
             && self.file_drafts.same(&other.file_drafts)
             && self.navigation.same(&other.navigation)
@@ -115,12 +176,14 @@ impl Same for PersistedState {
 impl PersistedState {
     pub fn capture(snapshot: &Snapshot) -> Self {
         Self {
+            input_recoveries: snapshot.input.input_recoveries.clone(),
             connection_disabled: snapshot.connection.connection_disabled,
             project_preferences: snapshot.lists.project_preferences.clone(),
             storage_scope: snapshot.connection.storage_scope.clone(),
             archived_scopes: snapshot.lists.archived_scopes.clone(),
             drafts: snapshot.input.drafts.clone(),
             stashes: snapshot.input.stashes.clone(),
+            new_drafts: snapshot.input.new_drafts.clone(),
             pending_submissions: snapshot.sessions.pending_submissions.clone(),
             file_drafts: snapshot.files.file_drafts.clone(),
             navigation: snapshot.panes.primary().navigation.clone(),
@@ -153,8 +216,10 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
             ..Default::default()
         },
         input: crate::state::Input {
+            input_recoveries: saved.input_recoveries,
             drafts: saved.drafts,
             stashes: saved.stashes,
+            new_drafts: saved.new_drafts,
             ..Default::default()
         },
         sessions: crate::state::Sessions {

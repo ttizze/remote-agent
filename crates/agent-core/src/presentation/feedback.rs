@@ -42,7 +42,7 @@ impl Snapshot {
                     thread
                         .capabilities
                         .is_some_and(|capabilities| capabilities.feedback)
-                        && thread.preparation.is_none()
+                        && thread.preparations.is_empty()
                         && thread.turns.as_ref().is_some_and(|turns| !turns.is_empty())
                 })
     }
@@ -136,7 +136,7 @@ mod tests {
                 .get_mut(&session)
                 .unwrap(),
         )
-        .preparation = Some(agent_protocol::session::SessionPreparation {
+        .preparations = vec![agent_protocol::session::SessionPreparation {
             submission: agent_protocol::operations::Submission {
                 fresh_context: false,
                 thread_id: session.clone(),
@@ -149,7 +149,7 @@ mod tests {
             },
             status: agent_protocol::session::PreparationStatus::Preparing,
             stage: agent_protocol::session::PreparationStage::Provider,
-        });
+        }];
         assert!(!preparing.feedback_available(session));
     }
 }

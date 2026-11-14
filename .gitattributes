@@ -1,2 +1,5 @@
 # The Windows desktop embeds this script and sends it to a Linux shell.
 crates/agent-local-host/src/wsl-bootstrap.sh text eol=lf
+
+# Provider recordings are verified against their original byte digests.
+crates/host-daemon/src/providers/fixtures/**/*.ndjson -text

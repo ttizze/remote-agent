@@ -44,16 +44,15 @@ internal fun ThreadDetailFixture(
             { id ->
                 current?.let { before ->
                     before.toggleActivity(id, expansion)?.let { change ->
-                        expansion = change.expansion
+                        expansion = change
                         current =
                             ConversationRows.project(
                                 before.source(),
                                 before.scope(),
-                                change.expansion,
+                                change,
                                 fixtureRowPolicy,
                                 before,
                             )
-                        change.loadItems?.let { perform(dev.remoteagent.core.Intent.LoadTurnItems(it)) {} }
                     }
                 }
             },

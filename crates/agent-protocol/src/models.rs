@@ -91,11 +91,14 @@ fn project_membership<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
-    /// Host list revision; newer notices survive an older in-flight read.
-    #[serde(default)]
-    pub list_revision: u64,
     pub history_read_state: Option<crate::session::HistoryReadState>,
     pub capabilities: Option<crate::session::Capabilities>,
+    /// Effective Host admission, distinct from the provider's static capability.
+    #[serde(default)]
+    pub steerable: bool,
+    /// Promoting a queued input skips the current compaction instead of steering it.
+    #[serde(default)]
+    pub skips_compaction: bool,
     #[serde(default)]
     pub requests: BTreeMap<crate::ids::RequestId, Arc<crate::requests::Request>>,
     #[serde(default)]
@@ -103,7 +106,8 @@ pub struct Thread {
     /// Input waiting in the Host's queue for the running turn, in order.
     #[serde(default)]
     pub queue: crate::operations::InputQueue,
-    pub preparation: Option<crate::session::SessionPreparation>,
+    #[serde(default)]
+    pub preparations: Vec<crate::session::SessionPreparation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_setup: Option<crate::workspace::WorkspaceSetup>,
     pub id: Option<crate::session::SessionRef>,
@@ -130,8 +134,6 @@ pub struct Thread {
     pub history_limit: Option<u64>,
     pub list_stale: Option<bool>,
     pub agent_id: Option<String>,
-    /// Host transcript version of these turns; absent for native reads.
-    pub transcript_version: Option<u64>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,8 +147,6 @@ pub struct Turn {
     #[serde(default)]
     pub status: TurnStatus,
     pub items: Option<Vec<Arc<Item>>>,
-    #[serde(default)]
-    pub items_summary: bool,
     pub started_at: Option<f64>,
     pub duration_ms: Option<u64>,
     pub error: Option<ExecutionError>,
@@ -187,9 +187,11 @@ impl Thread {
     /// The turn a stop request targets. The Host routes a preparing task's
     /// submission ID to its preparation, so the same stop control covers both.
     pub fn active_turn_id(&self) -> Option<crate::ids::TurnId> {
-        if let Some(preparation) = self.preparation.as_ref().filter(|preparation| {
-            preparation.status == crate::session::PreparationStatus::Preparing
-        }) {
+        if let Some(preparation) = self
+            .preparations
+            .iter()
+            .find(|preparation| preparation.status == crate::session::PreparationStatus::Preparing)
+        {
             return Some(
                 preparation
                     .submission
@@ -198,15 +200,26 @@ impl Thread {
                     .into(),
             );
         }
-        let turns = self.turns.as_ref()?;
+        let turns = self.turns.as_deref().unwrap_or_default();
         turns
             .iter()
             .rev()
             .find(|turn| turn.status == TurnStatus::Running)
-            // As T3 Code, Stop also ends the background work an answered
-            // turn left running.
-            .or_else(|| turns.last().filter(|_| !self.background.is_empty()))
             .map(|turn| turn.id.clone())
+            // A foreground input being delivered takes priority over the
+            // background work an older answered turn left running.
+            .or_else(|| {
+                self.preparations
+                    .iter()
+                    .find(|input| input.status == crate::session::PreparationStatus::Sending)
+                    .map(|input| input.submission.client_user_message_id.to_string().into())
+            })
+            .or_else(|| {
+                turns
+                    .last()
+                    .filter(|_| !self.background.is_empty())
+                    .map(|turn| turn.id.clone())
+            })
     }
 }
 
@@ -310,25 +323,14 @@ pub struct ThreadResponse {
     pub effort: Option<String>,
     pub service_tier: Option<String>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListPage {
-    pub limit: u32,
-    pub has_more: bool,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadList {
-    /// Revision captured before the Host starts reading native metadata.
-    #[serde(default)]
-    pub revision: u64,
     pub limit: u32,
     pub data: Vec<Thread>,
     pub projects: Vec<Project>,
     pub has_more: bool,
     pub has_more_projects: bool,
-    /// Project pages included in this response, with their own lookahead result.
-    pub project_pages: BTreeMap<String, ListPage>,
     #[serde(default)]
     pub provider_errors: Option<Map<String, Value>>,
 }
@@ -344,8 +346,6 @@ pub struct AgentObservation {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
-    #[serde(default)]
-    pub list_revision: u64,
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,
@@ -405,21 +405,12 @@ pub struct ServiceTier {
 pub struct ReasoningEffort {
     pub reasoning_effort: String,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum ListPart {
-    Projects,
-    Chats,
-}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ListQuery {
-    pub part: Option<ListPart>,
     pub limit: u32,
     pub project_limit: u32,
     pub search_term: String,
-    /// None requests the first five recent project pages; an explicit map reads
-    /// only those projects, leaving closed pages and root pagination untouched.
-    pub project_limits: Option<std::collections::HashMap<String, u32>>,
 }
 impl Default for ListQuery {
     fn default() -> Self {
@@ -427,8 +418,6 @@ impl Default for ListQuery {
             limit: 5,
             project_limit: 5,
             search_term: String::new(),
-            project_limits: None,
-            part: None,
         }
     }
 }
@@ -564,6 +553,7 @@ mod tests {
             format!("command-{id}").into(),
             ItemStatus::Completed,
             ItemBody::CommandExecution {
+                output_omitted: false,
                 command: "cargo test".into(),
                 cwd: None,
                 output: "x".repeat(output),
@@ -783,7 +773,7 @@ mod tests {
         use crate::session::{PreparationStatus, ProviderKind, SessionPreparation, SessionRef};
         let id = SessionRef::new(ProviderKind::Codex, "task".into()).unwrap();
         let mut thread = Thread {
-            preparation: Some(SessionPreparation {
+            preparations: vec![SessionPreparation {
                 submission: crate::operations::Submission {
                     fresh_context: false,
                     thread_id: id,
@@ -796,7 +786,7 @@ mod tests {
                 },
                 status: PreparationStatus::Preparing,
                 stage: crate::session::PreparationStage::Workspace,
-            }),
+            }],
             ..Default::default()
         };
         assert_eq!(thread.active_turn_id(), Some("input".into()));
@@ -810,11 +800,32 @@ mod tests {
             PreparationStatus::Interrupted,
             PreparationStatus::Unknown,
         ] {
-            thread.preparation.as_mut().unwrap().status = status;
+            thread.preparations.first_mut().unwrap().status = status;
             assert_eq!(thread.active_turn_id(), Some("native".into()));
         }
         thread.turns = None;
         assert_eq!(thread.active_turn_id(), None);
+        thread.preparations[0].status = PreparationStatus::Sending;
+        assert_eq!(
+            thread.active_turn_id(),
+            Some("input".into()),
+            "Stop remains available until delivery confirmation creates the public turn"
+        );
+        thread.turns = Some(vec![Arc::new(Turn {
+            id: "older".into(),
+            status: TurnStatus::Completed,
+            ..Default::default()
+        })]);
+        thread.background.push(crate::execution::BackgroundTask {
+            id: "background".into(),
+            kind: crate::execution::BackgroundTaskKind::Command,
+            description: None,
+        });
+        assert_eq!(
+            thread.active_turn_id(),
+            Some("input".into()),
+            "an unacknowledged foreground input takes priority over older background work"
+        );
     }
 
     #[test]

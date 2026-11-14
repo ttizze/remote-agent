@@ -396,6 +396,64 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
     let saver = crate::plans::Saver::new();
     let chips = computed(move || crate::file_actions::Chips::read(connection));
     let opened = signal(HashSet::<String>::new());
+    effect(move || {
+        let desired: HashSet<_> = timeline.rows.with(|rows| {
+            opened.with(|opened| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let item = row.detail.as_ref()?;
+                        (opened.contains(&item.source.data.id)
+                            && item.source.data.kind == "command")
+                            .then(|| item.source.data.native_id.clone())
+                            .flatten()
+                    })
+                    .collect()
+            })
+        });
+        let (thread_id, current) = connection.publication.with(|p| {
+            (
+                p.context.navigation().thread_id,
+                p.pane().output_items.clone(),
+            )
+        });
+        if let Some(thread_id) = thread_id {
+            for item_id in current.iter().filter(|id| !desired.contains(*id)) {
+                connection.dispatch(Intent::WatchCommandOutput {
+                    thread_id: thread_id.clone(),
+                    item_id: item_id.clone(),
+                    watching: false,
+                });
+            }
+            for item_id in desired.iter().filter(|id| !current.contains(*id)) {
+                connection.dispatch(Intent::WatchCommandOutput {
+                    thread_id: thread_id.clone(),
+                    item_id: item_id.clone(),
+                    watching: true,
+                });
+            }
+        }
+    });
+    let cleanup_host = connection.host.get_untracked();
+    let cleanup_client = connection.client.with(|client| client.clone());
+    let cleanup_pane = connection.publication.with_untracked(|p| p.pane_id());
+    cleanup(move || {
+        if let Some(snapshot) = cleanup_client.snapshot(&cleanup_host)
+            && let Some(pane) = snapshot.panes.get(&cleanup_pane)
+            && let Some(thread_id) = &pane.navigation.thread_id
+        {
+            for item_id in pane.output_items.iter() {
+                cleanup_client.dispatch(
+                    &cleanup_host,
+                    connection.pane,
+                    Intent::WatchCommandOutput {
+                        thread_id: thread_id.clone(),
+                        item_id: item_id.clone(),
+                        watching: false,
+                    },
+                );
+            }
+        }
+    });
     let agents = stored(HashSet::new());
     effect(move || {
         scope.get();
@@ -686,7 +744,7 @@ fn handle_row(
         }
         "setupTerminal" | "workLocally" | "cancelSetup" => {
             if let Some(setup) = row.preparation {
-                setup_action(surroundings.workspace, connection, action, setup);
+                setup_action(surroundings.workspace, connection, action, *setup);
             }
         }
         "copyError" => {
@@ -704,11 +762,6 @@ fn handle_row(
                 all.insert(row.id);
             }
         }),
-        "retryWork" => {
-            if let Some(load) = row.activity.and_then(|activity| activity.load_items) {
-                connection.dispatch(Intent::LoadTurnItems(load));
-            }
-        }
         "retryItem" => {
             if let Some(item) = row.detail {
                 request_item(connection, item);
@@ -765,9 +818,7 @@ fn handle_row(
         "fold" => {
             if let Some(activity) = row.activity {
                 let opening = !matches!(row.shape, Shape::Fold { open: true });
-                if let Some(load) = timeline.set_activity(activity, opening) {
-                    connection.dispatch(Intent::LoadTurnItems(load));
-                }
+                timeline.set_activity(activity, opening);
             }
         }
         "group" => timeline.toggle_group(row.id),
@@ -998,16 +1049,6 @@ fn operation_display(
                 }
             }
         }
-        if matches!(row.shape, Shape::Fold { open: true })
-            && let Some(load) = row
-                .activity
-                .as_ref()
-                .and_then(|activity| activity.load_items.as_ref())
-            && let Some(error) = p.context.turn_items_error(load.turn_id.clone())
-        {
-            notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
-            retry = Some("retryWork");
-        }
         if let Some(item) = &row.detail
             && opened.with(|all| all.contains(&item.source.data.id))
             && let (Some(thread_id), Some(item_id)) = (
@@ -1015,14 +1056,12 @@ fn operation_display(
                 item.source.data.native_id.clone(),
             )
         {
-            let key = op::OperationKey::Item {
-                item: op::ReadItem {
-                    thread_id,
-                    turn_id: item.turn.clone(),
-                    item_id,
-                },
-            };
-            if let Some(error) = p.snapshot.operation_error(key) {
+            let detail = p.context.item_detail(op::ReadItem {
+                thread_id,
+                turn_id: item.turn.clone(),
+                item_id,
+            });
+            if let Some(error) = detail.error {
                 notices.push(crate::rich_text::plain(error.to_string(), Some(0xff8e86)));
                 retry = Some("retryItem");
             }
@@ -1159,6 +1198,7 @@ mod tests {
         .unwrap();
         let retry = agent_protocol::operations::RetryPreparation {
             thread_id: thread_id.clone(),
+            input_id: "setup-input".into(),
             work_locally: false,
         };
         let mut row = Row::new(
@@ -1168,7 +1208,7 @@ mod tests {
             "ワークツリーを準備しています",
         );
         row.retry = Some(retry.clone());
-        row.preparation = Some(PreparationPresentation {
+        row.preparation = Some(Box::new(PreparationPresentation {
             text: row.body.to_string(),
             in_progress: true,
             shimmer: true,
@@ -1199,7 +1239,7 @@ mod tests {
             }),
             work_locally: Some(retry),
             error: Some("Setup failure remains visible".into()),
-        });
+        }));
         let closed = project_row(&row, false, "target", "/repo", None, true, None);
         let actions: Vec<_> = closed["buttons"]
             .as_array()

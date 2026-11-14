@@ -45,13 +45,8 @@ pub(super) struct Observation {
 }
 
 impl Roster {
-    /// Only an answered conversation waits; while a turn runs, it works.
-    fn waiting(&self) -> Vec<BackgroundTask> {
-        if self.running {
-            Vec::new()
-        } else {
-            self.work.iter().map(|work| work.task.clone()).collect()
-        }
+    fn tasks(&self) -> Vec<BackgroundTask> {
+        self.work.iter().map(|work| work.task.clone()).collect()
     }
 
     fn track(&mut self, item: &Item, native: &Value) {
@@ -148,7 +143,7 @@ impl Rosters {
         } else {
             std::mem::take(&mut roster.pending)
         };
-        let waiting = roster.waiting();
+        let waiting = roster.tasks();
         let roster = (waiting != roster.published).then(|| {
             roster.published = waiting.clone();
             AgentChange::Session {
@@ -204,6 +199,7 @@ mod tests {
 
     fn command() -> ItemBody {
         ItemBody::CommandExecution {
+            output_omitted: false,
             command: "npm run dev".into(),
             cwd: None,
             output: String::new(),
@@ -241,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_turn_waits_on_the_commands_and_subagents_it_left_running() {
+    fn running_work_remains_owned_across_foreground_changes_until_it_ends() {
         let rosters = Rosters::default();
         assert_eq!(
             roster(rosters.observe(&turn(TurnStatus::Running), &Value::Null)),
@@ -250,8 +246,8 @@ mod tests {
         let started = json!({"item":{"processId":"process-1"}});
         assert_eq!(
             roster(rosters.observe(&item("server", ItemStatus::Running, command()), &started)),
-            None,
-            "a running turn is working, not waiting"
+            Some(vec![("npm run dev".into(), BackgroundTaskKind::Command)]),
+            "the Host needs the roster while foreground work continues"
         );
         rosters.observe(
             &item(
@@ -272,16 +268,20 @@ mod tests {
             &Value::Null,
         );
         rosters.observe(&item("done", ItemStatus::Running, command()), &Value::Null);
-        rosters.observe(
-            &item("done", ItemStatus::Completed, command()),
-            &Value::Null,
-        );
         assert_eq!(
-            roster(rosters.observe(&turn(TurnStatus::Completed), &Value::Null)),
+            roster(rosters.observe(
+                &item("done", ItemStatus::Completed, command()),
+                &Value::Null
+            )),
             Some(vec![
                 ("npm run dev".into(), BackgroundTaskKind::Command),
                 ("Review the change".into(), BackgroundTaskKind::Subagent),
             ])
+        );
+        assert_eq!(
+            roster(rosters.observe(&turn(TurnStatus::Completed), &Value::Null)),
+            None,
+            "completing the foreground does not recreate its existing tasks"
         );
         assert_eq!(rosters.stop(&session()), ["process-1"]);
         assert_eq!(
@@ -306,6 +306,7 @@ mod tests {
                 "server",
                 ItemStatus::Completed,
                 ItemBody::CommandExecution {
+                    output_omitted: false,
                     command: "npm run dev".into(),
                     cwd: None,
                     output: "ready\n".into(),

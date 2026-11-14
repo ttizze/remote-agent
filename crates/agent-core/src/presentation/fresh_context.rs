@@ -19,7 +19,7 @@ impl Snapshot {
                 .conversations
                 .get(&session)
                 .is_some_and(|thread| {
-                    thread.preparation.is_none()
+                    thread.preparations.is_empty()
                         && thread.requests.is_empty()
                         && thread.can_accept_direct_input != Some(false)
                         && (thread.parent_id.is_none()

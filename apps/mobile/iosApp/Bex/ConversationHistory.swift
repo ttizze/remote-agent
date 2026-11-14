@@ -180,6 +180,11 @@ extension ThreadScreen {
     @ViewBuilder
     func activityItem(_ item: ConversationItem, turnId: String, rowId: String) -> some View {
         let values = model.activityDecorations[rowId] ?? []
+        let request = conversation?.id.map { ReadItem(
+            threadId: $0,
+            turnId: turnId,
+            itemId: item.data.nativeId ?? item.data.id
+        ) }
         if !values.isEmpty {
             ThreadDecoratedActivity(
                 values: values,
@@ -203,20 +208,24 @@ extension ThreadScreen {
                 media: mediaAccess,
                 selection: selectionActions,
                 isExpanded: expandedItemIds.contains(item.data.id),
+                detail: request.map { model.conversationContext.itemDetail(item: $0) } ?? ItemDetail(
+                    loading: false,
+                    error: nil
+                ),
                 toggleExpanded: {
                     scroll.following = false
-                    if expandedItemIds.contains(item.data.id) {
-                        expandedItemIds.remove(item.data.id)
-                    } else {
-                        expandedItemIds.insert(item.data.id)
-                    }
+                    expandedItemIds.formSymmetricDifference([item.data.id])
                 },
                 loadDetails: {
-                    guard let threadId = conversation?.id else { return nil }
+                    guard let request else { return nil }
                     return await model.readItemDetails(
-                        threadId: threadId, turnId: turnId,
-                        itemId: item.data.nativeId ?? item.data.id
+                        threadId: request.threadId, turnId: request.turnId, itemId: request.itemId
                     )
+                },
+                watchOutput: { watching in
+                    guard item.data.kind == "command", let request,
+                          let itemId = item.data.nativeId else { return }
+                    model.perform(.watchCommandOutput(threadId: request.threadId, itemId: itemId, watching: watching))
                 }
             ).equatable()
         }

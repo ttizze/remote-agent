@@ -62,7 +62,7 @@ async fn terminal(owner: &Clones, id: &str) -> ProjectCloneState {
 async fn clone_survives_requester_drop_registers_once_and_can_be_dismissed() {
     let directory = tempfile::tempdir().unwrap();
     let source = repository(directory.path());
-    let projects = ProjectStore::new(directory.path().join("worktrees.json"));
+    let projects = ProjectStore::fixture(directory.path().join("worktrees.json"));
     let owner = Clones::new(projects.clone());
     let request = clone_request(&source, &directory.path().join("checkout"));
     let started = owner.start(request.clone()).await.unwrap();
@@ -98,7 +98,9 @@ async fn clone_survives_requester_drop_registers_once_and_can_be_dismissed() {
 async fn failed_clone_retries_without_replacing_existing_paths_or_duplicating_jobs() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("source");
-    let owner = Clones::new(ProjectStore::new(directory.path().join("worktrees.json")));
+    let owner = Clones::new(ProjectStore::fixture(
+        directory.path().join("worktrees.json"),
+    ));
     let request = clone_request(&source, &directory.path().join("checkout"));
     owner.start(request.clone()).await.unwrap();
     let failed = terminal(&owner, &request.id).await;
@@ -126,7 +128,7 @@ async fn failed_clone_retries_without_replacing_existing_paths_or_duplicating_jo
 async fn cancellation_releases_the_process_and_restart_preserves_retry_state() {
     let directory = tempfile::tempdir().unwrap();
     let source = repository(directory.path());
-    let projects = ProjectStore::new(directory.path().join("worktrees.json"));
+    let projects = ProjectStore::fixture(directory.path().join("worktrees.json"));
     let owner = Clones::new(projects.clone());
     let request = clone_request(&source, &directory.path().join("checkout"));
     owner.start(request.clone()).await.unwrap();
@@ -174,7 +176,9 @@ async fn cancellation_releases_the_process_and_restart_preserves_retry_state() {
 #[tokio::test]
 async fn corrupt_ledger_and_unowned_staging_are_not_discarded() {
     let directory = tempfile::tempdir().unwrap();
-    let owner = Clones::new(ProjectStore::new(directory.path().join("worktrees.json")));
+    let owner = Clones::new(ProjectStore::fixture(
+        directory.path().join("worktrees.json"),
+    ));
     tokio::fs::write(owner.path(), b"invalid").await.unwrap();
     assert!(owner.read().await.is_err());
     assert_eq!(tokio::fs::read(owner.path()).await.unwrap(), b"invalid");
@@ -204,11 +208,12 @@ async fn corrupt_ledger_and_unowned_staging_are_not_discarded() {
 async fn retry_after_registration_failure_keeps_the_acquired_checkout() {
     let directory = tempfile::tempdir().unwrap();
     let source = repository(directory.path());
-    let projects = ProjectStore::new(directory.path().join("worktrees.json"));
+    let projects = ProjectStore::fixture(directory.path().join("worktrees.json"));
     let owner = Clones::new(projects.clone());
     let request = clone_request(&source, &directory.path().join("checkout"));
-    let registrations = directory.path().join("bex-projects.json");
-    tokio::fs::write(&registrations, b"invalid").await.unwrap();
+    let registrations =
+        rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
+    registrations.execute_batch("CREATE TRIGGER refuse_project BEFORE INSERT ON projects BEGIN SELECT RAISE(ABORT, 'registration unavailable'); END;").unwrap();
     owner.start(request.clone()).await.unwrap();
     assert_eq!(
         terminal(&owner, &request.id).await.phase,
@@ -218,7 +223,9 @@ async fn retry_after_registration_failure_keeps_the_acquired_checkout() {
     tokio::fs::write(&file, b"preserved local edits")
         .await
         .unwrap();
-    tokio::fs::write(&registrations, b"[]").await.unwrap();
+    registrations
+        .execute_batch("DROP TRIGGER refuse_project;")
+        .unwrap();
     // Reopen the Host's ledger as well as retrying registration.
     owner.shutdown().await;
     let reopened = Clones::new(projects.clone());

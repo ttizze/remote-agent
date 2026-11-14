@@ -276,13 +276,29 @@ impl Panels {
     }
     /// A new draft keeps the panel visible without inheriting another
     /// conversation's tools. Returning to a visited draft keeps its own choice.
-    pub fn inherit_visibility(self: Arc<Self>, before: PanelScope, after: PanelScope) -> Arc<Self> {
-        if before == after
-            || before.host != after.host
-            || before.storage != after.storage
-            || !matches!(after.draft, DraftKey::Local { .. })
-            || self.threads.contains_key(&after)
-        {
+    pub fn inherit_visibility(
+        self: Arc<Self>,
+        before: PanelScope,
+        after: PanelScope,
+        new_draft: bool,
+        welcome: bool,
+    ) -> Arc<Self> {
+        if before == after || before.host != after.host || before.storage != after.storage {
+            return self;
+        }
+        // The welcome placeholder's first edit moves its tools to the new draft.
+        if welcome {
+            let mut next = self.as_ref().clone();
+            if let Some(source) = next.threads.remove(&before) {
+                let target = next.threads.entry(after).or_default();
+                target.surfaces.extend(source.surfaces);
+                target.active = source.active.or(target.active);
+                target.open |= source.open;
+                target.maximized |= source.maximized;
+            }
+            return Arc::new(next);
+        }
+        if !new_draft || self.threads.contains_key(&after) {
             return self;
         }
         let open = self.get(before).open;
@@ -296,15 +312,6 @@ impl Panels {
         );
         Arc::new(next)
     }
-    pub fn rekey(self: Arc<Self>, before: PanelScope, after: PanelScope) -> Arc<Self> {
-        if before == after || !self.threads.contains_key(&before) {
-            return self;
-        }
-        let mut next = self.as_ref().clone();
-        let panel = next.threads.remove(&before).unwrap();
-        next.threads.insert(after, panel);
-        Arc::new(next)
-    }
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
@@ -315,12 +322,6 @@ impl Snapshot {
             storage: self.connection.storage_scope.clone(),
             draft,
         }
-    }
-    pub fn submitted_session(
-        &self,
-        draft: crate::state::DraftKey,
-    ) -> Option<crate::session::SessionRef> {
-        self.sessions.draft_sessions.get(&draft).cloned()
     }
 }
 
@@ -401,7 +402,7 @@ mod tests {
         let terminal = open(&mut panels, original.clone(), PanelKind::Terminal, None);
         panels = panels.clone().set_maximized(original.clone(), true);
         let previous = panels.get(original.clone());
-        panels = panels.inherit_visibility(original.clone(), draft.clone());
+        panels = panels.inherit_visibility(original.clone(), draft.clone(), true, false);
         assert_eq!(
             panels.get(draft.clone()),
             PanelState {
@@ -412,22 +413,22 @@ mod tests {
         assert_eq!(panels.get(original.clone()), previous);
         assert_eq!(panels.scope(terminal), Some(original.clone()));
         panels = panels.set_open(draft.clone(), false);
-        panels = panels.inherit_visibility(original.clone(), draft.clone());
+        panels = panels.inherit_visibility(original.clone(), draft.clone(), true, false);
         assert!(!panels.get(draft.clone()).open);
 
         let another = scope("another");
-        panels = panels.inherit_visibility(draft.clone(), another.clone());
-        panels = panels.inherit_visibility(original.clone(), another.clone());
+        panels = panels.inherit_visibility(draft.clone(), another.clone(), true, false);
+        panels = panels.inherit_visibility(original.clone(), another.clone(), true, false);
         assert!(
             !panels.get(another).open,
             "a visited closed draft stays closed"
         );
-        panels = panels.inherit_visibility(original.clone(), original.clone());
+        panels = panels.inherit_visibility(original.clone(), original.clone(), true, false);
         assert_eq!(panels.get(original.clone()), previous);
 
         for destination in [
             scope(crate::session::SessionRef {
-                provider: crate::session::ProviderKind::Codex,
+                provider: Some(crate::session::ProviderKind::Codex),
                 id: "existing".into(),
             }),
             PanelScope {
@@ -439,7 +440,12 @@ mod tests {
                 ..scope("new-storage")
             },
         ] {
-            panels = panels.inherit_visibility(original.clone(), destination.clone());
+            panels = panels.inherit_visibility(
+                original.clone(),
+                destination.clone(),
+                matches!(destination.draft, DraftKey::Local { .. }),
+                false,
+            );
             assert_eq!(panels.get(destination), PanelState::default());
         }
     }
@@ -611,12 +617,11 @@ mod tests {
         assert_eq!(panels.get(key.clone()).kind(), PanelKind::Home);
     }
     #[test]
-    fn files_deduplicate_by_path_and_submission_moves_the_entire_panel() {
+    fn files_deduplicate_by_path_with_a_stable_conversation_address() {
         let mut panels = Panels::new();
-        let draft = scope("local");
-        let session = scope(crate::session::SessionRef {
-            provider: crate::session::ProviderKind::Codex,
-            id: "session".into(),
+        let draft = scope(crate::session::SessionRef {
+            provider: None,
+            id: uuid::Uuid::new_v4().to_string(),
         });
         let file = open(
             &mut panels,
@@ -642,9 +647,7 @@ mod tests {
             ),
             file
         );
-        panels = panels.clone().rekey(draft.clone(), session.clone());
-        assert!(panels.get(draft.clone()).surfaces.is_empty());
-        assert_eq!(panels.get(session.clone()).surfaces.len(), 2);
-        assert_eq!(panels.scope(file), Some(session.clone()));
+        assert_eq!(panels.get(draft.clone()).surfaces.len(), 2);
+        assert_eq!(panels.scope(file), Some(draft));
     }
 }

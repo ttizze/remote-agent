@@ -87,59 +87,74 @@ impl Message {
         turn.items
             .iter()
             .flatten()
-            .filter_map(move |item| {
-                let (role, text) = match item.body() {
-                    ItemBody::UserMessage { text, content } => (
-                        Role::User,
-                        text.clone().unwrap_or_else(|| {
-                            content
-                                .iter()
-                                .filter_map(|part| match part {
-                                    MessagePart::Text { text } => Some(text.as_str()),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        }),
-                    ),
-                    ItemBody::AssistantText { text, .. } => (Role::Assistant, text.clone()),
-                    ItemBody::CommandExecution {
-                        command,
-                        output,
-                        exit_code,
-                        ..
-                    } => (
-                        Role::Assistant,
-                        format!("Command: {command}\nExit code: {exit_code:?}\n{output}"),
-                    ),
-                    ItemBody::FileChange { changes, .. } => (
-                        Role::Assistant,
-                        format!(
-                            "File changes: {}",
-                            changes
-                                .iter()
-                                .map(|change| change.path.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    ),
-                    ItemBody::Plan { text } => (Role::Assistant, text.clone()),
-                    _ => return None,
-                };
-                (!text.is_empty()).then(|| Self {
-                    role,
-                    text,
-                    source: format!(
-                        "turn={}, item={}, status={:?}",
-                        turn.id, item.id, turn.status
-                    ),
-                })
-            })
+            .filter(|item| !item.is_deferred())
+            .filter_map(move |item| Self::from_item(turn, item))
+            .filter(|message| !message.text.is_empty())
             .chain(turn.error.iter().map(move |error| Self {
                 role: Role::Assistant,
                 text: format!("Previous turn failed: {}", error.message),
                 source: format!("turn={}, status={:?}", turn.id, turn.status),
             }))
+    }
+
+    pub fn from_item(turn: &Turn, item: &crate::models::Item) -> Option<Self> {
+        let (role, text) = match item.body() {
+            ItemBody::UserMessage { text, content } => {
+                let mut parts = vec![text.clone().unwrap_or_else(|| {
+                    content
+                        .iter()
+                        .filter_map(|part| match part {
+                            MessagePart::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })];
+                parts.extend(content.iter().filter_map(|part| match part {
+                    MessagePart::Context { context } => Some(context.provider_text()),
+                    _ => None,
+                }));
+                (
+                    Role::User,
+                    parts
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
+            ItemBody::AssistantText { text, .. } => (Role::Assistant, text.clone()),
+            ItemBody::CommandExecution {
+                command,
+                output,
+                exit_code,
+                ..
+            } => (
+                Role::Assistant,
+                format!("Command: {command}\nExit code: {exit_code:?}\n{output}"),
+            ),
+            ItemBody::FileChange { changes, .. } => (
+                Role::Assistant,
+                format!(
+                    "File changes: {}",
+                    changes
+                        .iter()
+                        .map(|change| change.path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ),
+            ItemBody::Plan { text } => (Role::Assistant, text.clone()),
+            _ => return None,
+        };
+        Some(Self {
+            role,
+            text,
+            source: format!(
+                "turn={}, item={}, status={:?}",
+                turn.id, item.id, turn.status
+            ),
+        })
     }
 
     fn render(&self) -> String {
@@ -308,6 +323,43 @@ pub fn select(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_handoff_preserves_structured_context_beside_either_user_text_format() {
+        let context = crate::context::MessageContext {
+            id: "terminal".into(),
+            label: "Build".into(),
+            content: crate::context::ContextContent::Terminal {
+                terminal_id: "build".into(),
+                terminal_label: "Build".into(),
+                line_start: 1,
+                line_end: 2,
+                text: "output to preserve".into(),
+            },
+        };
+        for text in [None, Some("question".into())] {
+            let item = crate::items::Item::new(
+                "input".into(),
+                crate::execution::ItemStatus::Completed,
+                ItemBody::UserMessage {
+                    text,
+                    content: vec![
+                        MessagePart::Text {
+                            text: "question".into(),
+                        },
+                        MessagePart::Context {
+                            context: Box::new(context.clone()),
+                        },
+                    ],
+                },
+            );
+            let message = Message::from_item(&Turn::default(), &item).unwrap();
+            assert_eq!(
+                message.text,
+                format!("question\n{}", context.provider_text())
+            );
+        }
+    }
 
     fn serialized_cost(context: &Context) -> usize {
         let native = serde_json::to_vec(&context.native_items()).unwrap().len();
@@ -578,12 +630,14 @@ mod tests {
         use std::sync::Arc;
         let bodies = [
             ItemBody::CommandExecution {
+                output_omitted: false,
                 command: "printf '🦀'".into(),
                 cwd: Some("ignored workspace".into()),
                 output: "stdout\nstderr".into(),
                 exit_code: Some(17),
             },
             ItemBody::CommandExecution {
+                output_omitted: false,
                 command: String::new(),
                 cwd: None,
                 output: String::new(),

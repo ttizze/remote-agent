@@ -206,7 +206,7 @@ impl Snapshot {
                 entries.insert(row.key.clone(), (owner.clone(), None, row));
             } else {
                 for receiver in receivers {
-                    if receiver.provider != provider {
+                    if receiver.provider != Some(provider) {
                         continue;
                     }
                     let key = session_key(receiver);
@@ -294,12 +294,14 @@ impl Snapshot {
             .iter()
             .flat_map(|(owner, thread)| {
                 thread.turns.iter().flatten().flat_map(move |turn| {
-                    turn.items.iter().flatten().map(move |item| {
-                        (
+                    turn.items.iter().flatten().filter_map(move |item| {
+                        Some((
                             owner,
                             item.as_ref(),
-                            turn.provider.unwrap_or(owner.provider),
-                        )
+                            turn.provider
+                                .or(thread.active_provider)
+                                .or(owner.provider)?,
+                        ))
                     })
                 })
             })
@@ -547,7 +549,7 @@ mod tests {
 
     fn session(id: &str) -> SessionRef {
         SessionRef {
-            provider: ProviderKind::Codex,
+            provider: Some(ProviderKind::Codex),
             id: id.into(),
         }
     }
@@ -565,7 +567,7 @@ mod tests {
         snapshot.lists.threads = Some(Arc::new(
             serde_json::from_value(serde_json::json!({
             "data":data.into_iter().filter(|thread| thread.parent_id.is_none()).collect::<Vec<_>>(),
-            "projects":[],  "hasMore":false,"hasMoreProjects":false,"projectPages":{},"limit":5, }))
+            "projects":[],  "hasMore":false,"hasMoreProjects":false,"limit":5, }))
             .unwrap(),
         ));
         snapshot
@@ -816,7 +818,7 @@ mod tests {
                     ItemStatus::Completed,
                     "spawnAgent",
                     vec![SessionRef {
-                        provider: ProviderKind::Claude,
+                        provider: Some(ProviderKind::Claude),
                         id: "child".into(),
                     }],
                     vec![],
@@ -834,7 +836,7 @@ mod tests {
     #[test]
     fn claude_activity_updates_the_same_row_without_a_native_child_session() {
         let owner = SessionRef {
-            provider: ProviderKind::Claude,
+            provider: Some(ProviderKind::Claude),
             id: "root".into(),
         };
         let mut state = snapshot(serde_json::json!([]));

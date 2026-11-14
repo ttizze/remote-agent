@@ -32,134 +32,28 @@ fn presentation(snapshot: &Snapshot) -> Arc<ComposerPresentation> {
 }
 
 #[test]
-fn resume_continues_the_same_interrupted_conversation_without_replacing_a_draft() {
+fn a_new_claude_conversation_with_no_explicit_model_uses_its_catalog_default() {
     let mut snapshot = snapshot();
-    let thread = Arc::make_mut(
+    Arc::make_mut(
         Arc::make_mut(&mut snapshot.sessions.conversations)
             .get_mut(&session())
             .unwrap(),
+    )
+    .active_provider = Some(ProviderKind::Claude);
+    snapshot.catalog.models = Arc::new(vec![
+        serde_json::from_value(serde_json::json!({
+            "id":"default","model":{"provider":"claude","id":"default"},
+            "displayName":"Claude","isDefault":true
+        }))
+        .unwrap(),
+    ]);
+    assert_eq!(
+        presentation(&snapshot).controls.selected_model,
+        Some(ModelRef {
+            provider: ProviderKind::Claude,
+            id: "default".into()
+        })
     );
-    thread.turns = Some(vec![Arc::new(Turn {
-        id: "interrupted".into(),
-        status: TurnStatus::Interrupted,
-        ..Default::default()
-    })]);
-    let composer = presentation(&snapshot);
-    assert!(composer.can_resume());
-    let intents = composer.resume_intents("continuation".into());
-    assert!(
-        matches!(&intents[..], [crate::state::Intent::EditComposer {thread_id,text,..},crate::state::Intent::Submit {thread_id:Some(target),client_user_message_id,alternate:false}]
-        if thread_id == &session().into() && target == &session() && text == "Continue where you left off." && client_user_message_id.as_str() == "continuation")
-    );
-    crate::state::set_draft_text(&mut snapshot, session().into(), "Keep this draft".into());
-    assert!(!presentation(&snapshot).can_resume());
-    assert!(
-        presentation(&snapshot)
-            .resume_intents("unused".into())
-            .is_empty()
-    );
-}
-
-#[test]
-fn resume_releases_held_input_in_order_instead_of_submitting_an_extra_message() {
-    let mut snapshot = snapshot();
-    let thread = Arc::make_mut(
-        Arc::make_mut(&mut snapshot.sessions.conversations)
-            .get_mut(&session())
-            .unwrap(),
-    );
-    thread.queue.held = true;
-    thread
-        .queue
-        .inputs
-        .push(agent_protocol::operations::Submission {
-            fresh_context: false,
-            thread_id: session(),
-            client_user_message_id: "waiting".into(),
-            input: vec![],
-            model: None,
-            effort: None,
-            service_tier: None,
-            follow_up: FollowUp::Queue,
-        });
-    let composer = presentation(&snapshot);
-    assert!(composer.can_resume());
-    assert!(
-        matches!(&composer.resume_intents("unused".into())[..],[crate::state::Intent::Queue {thread_id,action:crate::state::follow_up::QueueAction::Resume}] if thread_id == &session())
-    );
-    snapshot.connection.connected = false;
-    assert!(
-        presentation(&snapshot)
-            .resume_intents("unused".into())
-            .is_empty()
-    );
-}
-
-#[test]
-fn resume_only_releases_held_messages_and_never_starts_an_empty_completed_conversation() {
-    for (interrupted, held, queued, expected) in [
-        (false, false, false, "none"),
-        (false, true, false, "none"),
-        (false, false, true, "none"),
-        (false, true, true, "queue"),
-        (true, false, false, "continue"),
-        (true, true, false, "continue"),
-        (true, false, true, "continue"),
-        (true, true, true, "queue"),
-    ] {
-        let mut snapshot = snapshot();
-        let thread = Arc::make_mut(
-            Arc::make_mut(&mut snapshot.sessions.conversations)
-                .get_mut(&session())
-                .unwrap(),
-        );
-        thread.turns = Some(vec![Arc::new(Turn {
-            id: "latest".into(),
-            status: if interrupted {
-                TurnStatus::Interrupted
-            } else {
-                TurnStatus::Completed
-            },
-            ..Default::default()
-        })]);
-        thread.queue.held = held;
-        if queued {
-            thread
-                .queue
-                .inputs
-                .push(agent_protocol::operations::Submission {
-                    fresh_context: false,
-                    thread_id: session(),
-                    client_user_message_id: "waiting".into(),
-                    input: vec![],
-                    model: None,
-                    effort: None,
-                    service_tier: None,
-                    follow_up: FollowUp::Queue,
-                });
-        }
-        let composer = presentation(&snapshot);
-        let intents = composer.resume_intents("continuation".into());
-        assert_eq!(
-            composer.can_resume(),
-            expected != "none",
-            "{interrupted} {held} {queued}"
-        );
-        match expected {
-            "none" => assert!(intents.is_empty()),
-            "queue" => assert!(matches!(
-                &intents[..],
-                [crate::state::Intent::Queue {
-                    action: crate::state::follow_up::QueueAction::Resume,
-                    ..
-                }]
-            )),
-            "continue" => assert!(
-                matches!(&intents[..], [crate::state::Intent::EditComposer {text, ..}, crate::state::Intent::Submit {..}] if text == "Continue where you left off.")
-            ),
-            _ => unreachable!(),
-        }
-    }
 }
 
 #[test]
@@ -463,6 +357,7 @@ fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
             session(),
             Arc::new(Thread {
                 id: Some(session()),
+                steerable: running && steer,
                 capabilities: Some(crate::session::Capabilities {
                     steer,
                     ..Default::default()
@@ -582,4 +477,45 @@ fn an_interrupted_turn_or_a_usage_limit_can_be_resumed() {
         assert_eq!(super::resumable(&thread), expected, "{status:?}");
     }
     assert!(!super::resumable(&Thread::default()));
+}
+
+#[test]
+fn steering_uses_host_admission_instead_of_the_displayed_running_status() {
+    let mut snapshot = snapshot();
+    snapshot.input.composer_preferences.follow_up = FollowUp::Steer;
+    for (name, capability, allowed, skips_compaction) in [
+        ("stopping or retrying", true, false, false),
+        ("compaction", false, false, true),
+        ("ordinary turn", true, true, false),
+    ] {
+        Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+            session(),
+            Arc::new(Thread {
+                id: Some(session()),
+                steerable: allowed,
+                skips_compaction,
+                capabilities: Some(agent_protocol::session::Capabilities {
+                    steer: capability,
+                    ..Default::default()
+                }),
+                turns: Some(vec![Arc::new(Turn {
+                    id: "turn".into(),
+                    status: TurnStatus::Running,
+                    ..Default::default()
+                })]),
+                ..Default::default()
+            }),
+        );
+        let controls = &presentation(&snapshot).controls.follow_up;
+        assert_eq!(controls.can_steer, allowed || skips_compaction, "{name}");
+        assert_eq!(
+            controls.default_action,
+            if allowed {
+                FollowUp::Steer
+            } else {
+                FollowUp::Queue
+            },
+            "{name}"
+        );
+    }
 }

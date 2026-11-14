@@ -287,6 +287,7 @@ mod tests {
             .unwrap()
             .1
             .clone();
+        assert!(index.picker.wait_for_watcher(Duration::from_secs(10)));
         fs::write(root.path().join("needle.txt"), "content").unwrap();
         wait_for_search_paths(&indexes, &request, &["needle.txt"]).await;
         fs::remove_file(root.path().join("needle.txt")).unwrap();

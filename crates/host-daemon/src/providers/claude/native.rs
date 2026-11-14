@@ -233,11 +233,9 @@ pub(super) fn tool_result_item(
         client_input_id: None,
         status: if failed {
             ItemStatus::Failed
-        } else if metadata["backgroundTaskId"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty())
-            || metadata["status"] == "async_launched"
-        {
+        // Bash results acknowledge the completed launch; its work is tracked
+        // by the background roster. Agent async acknowledgements remain open.
+        } else if metadata["status"] == "async_launched" {
             ItemStatus::Running
         } else {
             ItemStatus::Completed
@@ -424,6 +422,7 @@ pub(super) fn content_item(
             let string = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
             match block["name"].as_str() {
                 Some("Bash") => ItemBody::CommandExecution {
+                    output_omitted: false,
                     command: string("command"),
                     cwd: cwd.map(str::to_owned),
                     output: String::new(),
@@ -568,6 +567,7 @@ pub(super) fn tool_result_body(body: &ItemBody, content: &Value, metadata: &Valu
             exit_code,
             ..
         } => ItemBody::CommandExecution {
+            output_omitted: false,
             command: command.clone(),
             cwd: cwd.clone(),
             output: output(),
@@ -786,7 +786,7 @@ mod tests {
                 json!({"backgroundTaskId":if background {"task"} else {""}})
             };
             let launched = tool_result_item(call.id.clone(), call.body(), &json!("launched"), &metadata, failed_launch);
-            prop_assert_eq!(launched.status, if failed_launch {ItemStatus::Failed} else if background {ItemStatus::Running} else {ItemStatus::Completed});
+            prop_assert_eq!(launched.status, if failed_launch {ItemStatus::Failed} else if background && tool_kind != 0 {ItemStatus::Running} else {ItemStatus::Completed});
             let output = if output_available {"/work/result.output"} else {""};
             let prompt = json!(format!("<task-notification>\n<task-id>task</task-id><tool-use-id>work</tool-use-id><output-file>{output}</output-file>\n<status>{status}</status><summary>{summary}</summary>\n</task-notification>"));
             let live = task_outcome(Some("work"), Some(status), Some(summary), Some(output)).unwrap();

@@ -97,7 +97,7 @@ impl Shape {
 
 #[derive(Clone, PartialEq)]
 struct Row {
-    preparation: Option<agent_core::presentation::conversation::PreparationPresentation>,
+    preparation: Option<Box<agent_core::presentation::conversation::PreparationPresentation>>,
     id: String,
     body: SharedString,
     kind: Kind,
@@ -510,11 +510,7 @@ pub(crate) struct Timeline {
 }
 
 impl Timeline {
-    fn set_activity(
-        self,
-        activity: ActivityPresentation,
-        opening: bool,
-    ) -> Option<op::LoadTurnItems> {
+    fn set_activity(self, activity: ActivityPresentation, opening: bool) {
         self.expanded.update(|all| {
             if opening {
                 all.insert(activity.id.clone(), activity.status);
@@ -522,7 +518,6 @@ impl Timeline {
                 all.remove(&activity.id);
             }
         });
-        opening.then_some(activity.load_items).flatten()
     }
 
     fn toggle_group(self, id: String) {
