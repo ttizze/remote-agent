@@ -67,7 +67,8 @@
       "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_2_data_url",
       "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_3_inclusive_limit",
       "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_4_oversize",
-      "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_5_invalid"
+      "host_rpc::runtime::t3_contract::generated_image_bytes_are_bounded_files_instead_of_database_payloads::case_5_invalid",
+      "host_rpc::runtime::t3_contract::late_images_keep_their_original_turn_while_a_continued_turn_is_running"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",

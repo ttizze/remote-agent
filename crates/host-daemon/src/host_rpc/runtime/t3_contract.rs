@@ -635,19 +635,14 @@ async fn generated_images_keep_t3_tool_results_and_markdown_embeds() {
     .await;
     let current = settled(&service, &session, 1).await;
     // CodexAdapterV2.ts4143-4190 and6531-6564; generatedImageMarkdown.ts16.
-    let tool = current
-        .projection
-        .turn_items
-        .iter()
-        .find_map(|item| match &item.body {
-            model::TurnItemBody::DynamicTool {
-                tool_name: Some(name),
-                output: Some(output),
-                ..
-            } if name == "image_gen.imagegen" => Some(output),
-            _ => None,
-        })
-        .expect("image generation tool result");
+    let tool = stored_image_tool(&service, &session, &current);
+    let model::TurnItemBody::DynamicTool {
+        output: Some(ref tool),
+        ..
+    } = tool.body
+    else {
+        panic!("stored image result")
+    };
     assert_eq!(tool["savedPath"], image.to_str().unwrap());
     let embed = format!("![](<{}>)", image.to_str().unwrap());
     let (text, attachments) = current
@@ -664,6 +659,32 @@ async fn generated_images_keep_t3_tool_results_and_markdown_embeds() {
     assert_eq!(text, &embed);
     assert!(attachments.is_empty());
     assert!(agent.inputs.lock().unwrap().is_empty());
+}
+
+fn stored_image_tool(
+    service: &HostRpcService,
+    session: &SessionRef,
+    current: &model::projection::ThreadSnapshot,
+) -> model::TurnItem {
+    let wire = current.projection.turn_items.iter().find(|item| matches!(&item.body, model::TurnItemBody::DynamicTool {tool_name: Some(name), ..} if name=="image_gen.imagegen")).expect("image generation metadata");
+    assert!(
+        matches!(
+            &wire.body,
+            model::TurnItemBody::DynamicTool {
+                output: None,
+                output_omitted: Some(_),
+                ..
+            }
+        ),
+        "snapshots keep tool outputs deferred"
+    );
+    service
+        .inner
+        .conversation
+        .storage
+        .thread_item(session, &wire.id)
+        .unwrap()
+        .unwrap()
 }
 
 async fn complete_image_turn(service: &HostRpcService, native: &SessionRef, execution: Uuid) {
@@ -888,6 +909,76 @@ async fn late_generated_images_finish_the_same_answer_after_foreground_completio
     assert!(agent.inputs.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn late_images_keep_their_original_turn_while_a_continued_turn_is_running() {
+    use agent_protocol::execution::{ItemStatus, TurnStatus};
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let (session, native, execution) =
+        running(&service, &agent, directory.path().to_str().unwrap()).await;
+    observe(
+        &service,
+        &native,
+        execution,
+        generated_image("late-image", ItemStatus::Running, None, None),
+    )
+    .await;
+    let before = snapshot(&service, &session);
+    let original = before.projection.turn_items.iter().find(|item| matches!(&item.body,model::TurnItemBody::DynamicTool {tool_name:Some(name),..} if name=="image_gen.imagegen")).unwrap().provider_turn_id.clone();
+    observe(
+        &service,
+        &native,
+        execution,
+        SessionChange::Turn {
+            turn: agent_protocol::models::Turn {
+                id: "continued-turn".into(),
+                status: TurnStatus::Running,
+                ..Default::default()
+            },
+            completed: false,
+        },
+    )
+    .await;
+    complete_image_turn(&service, &native, execution).await;
+    assert_eq!(
+        snapshot(&service, &session).projection.runs[0].status,
+        model::RunStatus::Running
+    );
+    observe(
+        &service,
+        &native,
+        execution,
+        generated_image(
+            "late-image",
+            ItemStatus::Completed,
+            Some("/original.png".into()),
+            None,
+        ),
+    )
+    .await;
+    let current = snapshot(&service, &session);
+    assert_eq!(current.projection.runs[0].status, model::RunStatus::Running);
+    let answer=current.projection.turn_items.iter().find(|item| matches!(&item.body,model::TurnItemBody::AssistantMessage {text,..} if text=="![](</original.png>)")).expect("original turn image answer");
+    assert_eq!(answer.provider_turn_id, original);
+    observe(
+        &service,
+        &native,
+        execution,
+        SessionChange::Turn {
+            turn: agent_protocol::models::Turn {
+                id: "continued-turn".into(),
+                status: TurnStatus::Completed,
+                ..Default::default()
+            },
+            completed: true,
+        },
+    )
+    .await;
+    settled(&service, &session, 1).await;
+    assert!(agent.inputs.lock().unwrap().is_empty());
+}
+
 #[rstest::rstest]
 #[case::inline("inline", true)]
 #[case::data_url("data_url", true)]
@@ -937,23 +1028,15 @@ async fn generated_image_bytes_are_bounded_files_instead_of_database_payloads(
     .await;
     complete_image_turn(&service, &native, execution).await;
     let current = settled(&service, &session, 1).await;
-    let (status, output) = current
-        .projection
-        .turn_items
-        .iter()
-        .find_map(|item| {
-            if let model::TurnItemBody::DynamicTool {
-                tool_name: Some(name),
-                output: Some(output),
-                ..
-            } = &item.body
-            {
-                (name == "image_gen.imagegen").then_some((item.status, output))
-            } else {
-                None
-            }
-        })
-        .unwrap();
+    let stored = stored_image_tool(&service, &session, &current);
+    let status = stored.status;
+    let model::TurnItemBody::DynamicTool {
+        output: Some(ref output),
+        ..
+    } = stored.body
+    else {
+        panic!("stored image result")
+    };
     if success {
         assert_eq!(status, model::TurnItemStatus::Completed);
         let path = output["savedPath"].as_str().unwrap();
@@ -969,6 +1052,10 @@ async fn generated_image_bytes_are_bounded_files_instead_of_database_payloads(
             .unwrap()
             .contains(&data),
         "raw image data must not enter the event projection"
+    );
+    assert!(
+        !serde_json::to_string(&stored).unwrap().contains(&data),
+        "raw image data must not enter the stored item"
     );
     assert!(agent.inputs.lock().unwrap().is_empty());
 }
