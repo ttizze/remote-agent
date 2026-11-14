@@ -336,9 +336,9 @@ fn failure_view(failure: &model::ProviderFailure) -> display::ExecutionError {
     }
 }
 
-pub(crate) fn attachment_parts(
+pub(crate) fn attachments(
     attachments: &[serde_json::Value],
-) -> Result<Vec<items::MessagePart>, String> {
+) -> Result<Vec<crate::state::Attachment>, String> {
     attachments
         .iter()
         .map(|attachment| {
@@ -365,18 +365,33 @@ pub(crate) fn attachment_parts(
                 "{}{id}.{extension}",
                 agent_protocol::paths::ATTACHMENT_SCHEME
             );
-            Ok(
-                if attachment.get("type").and_then(serde_json::Value::as_str) == Some("image") {
-                    items::MessagePart::Image { source }
-                } else {
-                    items::MessagePart::Attachment {
-                        name: name.into(),
-                        path: source,
-                    }
-                },
-            )
+            Ok(crate::state::Attachment {
+                name: name.into(),
+                path: source,
+                is_image: image,
+            })
         })
         .collect()
+}
+
+pub(crate) fn attachment_parts(
+    values: &[serde_json::Value],
+) -> Result<Vec<items::MessagePart>, String> {
+    Ok(attachments(values)?
+        .into_iter()
+        .map(|attachment| {
+            if attachment.is_image {
+                items::MessagePart::Image {
+                    source: attachment.path,
+                }
+            } else {
+                items::MessagePart::Attachment {
+                    name: attachment.name,
+                    path: attachment.path,
+                }
+            }
+        })
+        .collect())
 }
 
 pub(crate) fn context_parts(

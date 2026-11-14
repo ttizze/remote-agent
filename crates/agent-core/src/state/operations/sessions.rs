@@ -514,52 +514,42 @@ impl Operation for ForkSession {
 
 pub use agent_protocol::operations::RewindSession;
 
-/// What the user sent in `turn`: its text and the files that can be attached again.
+/// The canonical input retains attachment names that image display parts omit.
 fn sent_input(
-    turns: &[Arc<crate::models::Turn>],
+    projection: &agent_protocol::orchestration::projection::ThreadProjection,
     turn: &agent_protocol::ids::TurnId,
-) -> Option<(String, Vec<Attachment>)> {
-    use agent_protocol::items::{ItemBody, MessagePart};
-    let turn = turns.iter().find(|candidate| candidate.id == *turn)?;
-    let (text, content) = turn
-        .items
+) -> Result<Option<(String, Vec<Attachment>)>, String> {
+    use agent_protocol::{items::MessagePart, orchestration::TurnItemBody};
+    let Some((text, images, context)) = projection
+        .turn_items
         .iter()
-        .flatten()
-        .find_map(|item| match item.body() {
-            ItemBody::UserMessage { text, content } => Some((text, content)),
+        .filter(|item| item.run_id.as_deref() == Some(turn.as_str()))
+        .find_map(|item| match &item.body {
+            TurnItemBody::UserMessage {
+                text,
+                attachments,
+                context,
+                ..
+            } => Some((text, attachments, context)),
             _ => None,
-        })?;
-    let mut texts = Vec::new();
-    let mut attachments = Vec::new();
-    for part in content {
-        match part {
-            MessagePart::Text { text } => texts.push(text.as_str()),
-            MessagePart::Image { source }
-                if agent_protocol::paths::is_absolute_host_path(source)
-                    || agent_protocol::paths::attachment_file_name(source).is_some() =>
-            {
-                attachments.push(Attachment {
-                    name: file_name(source),
-                    path: source.clone(),
-                    is_image: true,
-                });
-            }
-            MessagePart::Attachment { name, path } => attachments.push(Attachment {
-                name: name.clone(),
-                path: path.clone(),
-                is_image: false,
+        })
+    else {
+        return Ok(None);
+    };
+    let mut attachments = crate::orchestration::attachments(images)?;
+    attachments.extend(
+        crate::orchestration::context_parts(context.as_ref())?
+            .into_iter()
+            .filter_map(|part| match part {
+                MessagePart::Attachment { name, path } => Some(Attachment {
+                    name,
+                    path,
+                    is_image: false,
+                }),
+                _ => None,
             }),
-            MessagePart::Image { .. } | MessagePart::Invocation { .. } => {}
-        }
-    }
-    Some((
-        text.clone().unwrap_or_else(|| texts.join("\n")),
-        attachments,
-    ))
-}
-
-pub(super) fn file_name(path: &str) -> String {
-    path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()
+    );
+    Ok(Some((text.clone(), attachments)))
 }
 
 impl Operation for RewindSession {
@@ -571,16 +561,15 @@ impl Operation for RewindSession {
     type Input = (String, Option<(String, Vec<Attachment>)>);
     type Output = (Self::Input, u64);
     fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
-        let turns = snapshot
+        let original = snapshot
             .sessions
-            .conversations
+            .projections
             .get(&self.thread_id)
-            .and_then(|thread| thread.turns.as_deref())
-            .unwrap_or_default();
-        Ok((
-            snapshot.connection.storage_scope.clone(),
-            sent_input(turns, &self.turn_id),
-        ))
+            .map(|snapshot| sent_input(&snapshot.projection, &self.turn_id))
+            .transpose()
+            .map_err(PeerError::InvalidMessage)?
+            .flatten();
+        Ok((snapshot.connection.storage_scope.clone(), original))
     }
     async fn run(
         &self,
