@@ -307,6 +307,7 @@ fn decide(
                         .into(),
                     model_selection: selected,
                     workspace_preparation: None,
+                    fork_origin: None,
                 },
                 if options.follow_up == op::FollowUp::Steer {
                     model::Admission::Steer

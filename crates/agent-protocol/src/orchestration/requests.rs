@@ -264,6 +264,7 @@ fn message_response(
             model_selection: state.thread.model_selection.clone(),
             driver: driver.into(),
             workspace_preparation: None,
+            fork_origin: None,
         },
         Admission::Steer,
         context,

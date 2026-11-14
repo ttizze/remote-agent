@@ -28,7 +28,8 @@
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_11",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_12",
       "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_13",
-      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_14"
+      "host_rpc::runtime::t3_contract::obsolete_storage_is_absent::case_14",
+      "host_rpc::runtime::t3_contract::a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_restart"
     ]
   },
   "guards": {
@@ -181,7 +182,11 @@
       "orchestration::wire::tests::command_error_detection_matches_t3s_cross_platform_cases",
       "orchestration::wire::tests::command_output_is_on_demand_and_explicit_exit_codes_override_text_heuristics",
       "orchestration::wire::tests::dynamic_results_keep_metadata_without_transporting_tool_payloads",
-      "orchestration::wire::tests::failed_diffs_are_bounded_utf8_and_successful_diffs_do_not_enter_the_stream"
+      "orchestration::wire::tests::failed_diffs_are_bounded_utf8_and_successful_diffs_do_not_enter_the_stream",
+      "orchestration::tests::fork_tests::only_finished_source_runs_can_be_forked",
+      "orchestration::tests::fork_tests::an_invalid_source_cannot_create_a_fork",
+      "orchestration::tests::fork_tests::a_strong_native_source_needs_no_portable_context_warning",
+      "orchestration::tests::fork_tests::a_fork_starts_its_own_lifecycle_and_keeps_the_source_provenance"
     ],
     "host-daemon": [
       "host_rpc::routing::credit::tests::streams_share_connection_credit_and_release_it_only_when_the_frame_is_dropped",

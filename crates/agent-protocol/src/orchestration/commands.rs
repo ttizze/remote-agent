@@ -18,6 +18,8 @@ pub struct Input {
     pub model_selection: ModelSelection,
     pub driver: String,
     pub workspace_preparation: Option<WorkspacePreparation>,
+    /// Fork provenance resolved by the Host from the selected source run.
+    pub fork_origin: Option<ProviderThreadFork>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -527,6 +529,7 @@ pub fn promote_queued(
         model_selection: run.model_selection.clone(),
         driver: provider_thread.driver.clone(),
         workspace_preparation: None,
+        fork_origin: None,
     };
     if input.text.trim().eq_ignore_ascii_case("/compact") && input.attachments.is_empty() {
         return Err("context compaction must run as a separate turn".into());

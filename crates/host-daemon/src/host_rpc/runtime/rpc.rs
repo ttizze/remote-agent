@@ -422,6 +422,7 @@ impl Runtime {
                             model_selection: selected,
                             driver: request.provider.driver().into(),
                             workspace_preparation: preparation.clone(),
+                            fork_origin: None,
                         },
                         model::Admission::Queue,
                         model::Context {

@@ -221,6 +221,7 @@ fn input(seed: u128) -> Input {
         model_selection: model(),
         driver: "codex".into(),
         workspace_preparation: None,
+        fork_origin: None,
     }
 }
 
@@ -1576,5 +1577,148 @@ fn callbacks_require_the_exact_attached_session_and_a_live_provider_process() {
             .changes
             .is_empty()
         );
+    }
+}
+
+mod fork_tests {
+    use super::*;
+    fn fork_source_fixture() -> (Thread, Run, ContextSourcePoint) {
+        let state = accepted(&initial(), 1, Admission::Queue);
+        let run = state.runs.into_values().next().unwrap();
+        let mut thread = state.thread;
+        thread.title = "Source".into();
+        let point = ContextSourcePoint {
+            thread_id: thread.id.clone(),
+            run_id: Some(run.id.clone()),
+            checkpoint_id: None,
+            turn_item_id: None,
+            provider_thread_ref: None,
+            provider_turn_ref: None,
+        };
+        (thread, run, point)
+    }
+    // ThreadForkService.ts36-45: waiting is provider-finished/checkpoint pending.
+    #[test]
+    fn only_finished_source_runs_can_be_forked() {
+        for (status, allowed) in [
+            (RunStatus::Preparing, false),
+            (RunStatus::Queued, false),
+            (RunStatus::Starting, false),
+            (RunStatus::Running, false),
+            (RunStatus::RolledBack, false),
+            (RunStatus::Waiting, true),
+            (RunStatus::Completed, true),
+            (RunStatus::Failed, true),
+            (RunStatus::Interrupted, true),
+            (RunStatus::Cancelled, true),
+        ] {
+            let (thread, mut run, point) = fork_source_fixture();
+            run.status = status;
+            let fork = fork_thread(&thread, &run, point.clone(), "target", "transfer", NOW);
+            assert_eq!(fork.is_ok(), allowed);
+            if let Ok((target, transfer)) = fork {
+                assert_eq!(target.lineage.parent_thread_id.as_ref(), Some(&thread.id));
+                assert_eq!(
+                    target.lineage.relationship_to_parent.as_deref(),
+                    Some("fork")
+                );
+                assert_eq!(transfer.source_point, point);
+                assert_eq!(transfer.status, TransferStatus::Pending);
+                assert!(target.active_provider_thread_id.is_none());
+                assert!(transfer.target_run_id.is_none());
+                assert!(
+                    transfer.error.is_some(),
+                    "portable context is required without a strong native source"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_invalid_source_cannot_create_a_fork() {
+        for change in [
+            "same-thread",
+            "foreign-run",
+            "foreign-point",
+            "wrong-run",
+            "deleted",
+        ] {
+            let (mut thread, mut run, mut point) = fork_source_fixture();
+            run.status = RunStatus::Completed;
+            let target = if change == "same-thread" {
+                thread.id.clone()
+            } else {
+                "target".into()
+            };
+            match change {
+                "foreign-run" => run.thread_id = "other".into(),
+                "foreign-point" => point.thread_id = "other".into(),
+                "wrong-run" => point.run_id = Some("other".into()),
+                "deleted" => thread.deleted_at = Some(NOW.into()),
+                _ => {}
+            }
+            assert!(fork_thread(&thread, &run, point, &target, "transfer", NOW).is_err());
+        }
+    }
+
+    #[test]
+    fn a_strong_native_source_needs_no_portable_context_warning() {
+        for strength in [NativeRefStrength::Strong, NativeRefStrength::Weak] {
+            let (thread, mut run, mut point) = fork_source_fixture();
+            run.status = RunStatus::Completed;
+            point.provider_thread_ref = Some(ProviderRef {
+                driver: "codex".into(),
+                native_id: Some("native".into()),
+                strength,
+                fingerprint: None,
+                ordinal: None,
+            });
+            let (_, transfer) =
+                fork_thread(&thread, &run, point, "target", "transfer", NOW).unwrap();
+            assert_eq!(
+                transfer.error.is_none(),
+                strength == NativeRefStrength::Strong
+            );
+        }
+    }
+
+    #[test]
+    fn a_fork_starts_its_own_lifecycle_and_keeps_the_source_provenance() {
+        let (mut source, mut run, point) = fork_source_fixture();
+        run.status = RunStatus::Completed;
+        source.created_by = Actor::System;
+        source.creation_source = CreationSource::Provider;
+        source.active_provider_thread_id = Some("parent-native-thread".into());
+        source.created_at = "2026-10-01T00:00:00.000Z".into();
+        source.updated_at = source.created_at.clone();
+        source.archived_at = Some(source.created_at.clone());
+        source.settled_override = Some("settled".into());
+        source.settled_at = Some(source.created_at.clone());
+        source.last_visited_at = Some(source.created_at.clone());
+        let (target, transfer) =
+            fork_thread(&source, &run, point, "target", "transfer", NOW).unwrap();
+        assert_eq!(target.id, "target");
+        assert_eq!(target.title, "Source fork");
+        assert_eq!(target.created_by, Actor::User);
+        assert_eq!(target.creation_source, CreationSource::Mobile);
+        assert_eq!(target.created_at, NOW);
+        assert_eq!(target.updated_at, NOW);
+        assert!(target.archived_at.is_none());
+        assert!(target.settled_override.is_none());
+        assert!(target.settled_at.is_none());
+        assert!(target.last_visited_at.is_none());
+        assert!(target.active_provider_thread_id.is_none());
+        assert!(target.deleted_at.is_none());
+        assert_eq!(
+            target.forked_from,
+            Some(ThreadForkSource::Run {
+                thread_id: source.id.clone(),
+                run_id: run.id.clone()
+            })
+        );
+        assert_eq!(target.model_selection, source.model_selection);
+        assert_eq!(target.worktree_path, source.worktree_path);
+        assert_eq!(transfer.target_thread_id, target.id);
+        assert_eq!(transfer.source_thread_id, source.id);
     }
 }

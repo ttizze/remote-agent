@@ -277,6 +277,25 @@ async fn a_fork_keeps_the_selected_prefix_and_independent_native_resources() {
     assert!(ack.error.is_none());
     let continued = settled(&service, &target, 1).await;
     assert_eq!(continued.projection.runs[0].ordinal, 1);
+    // Orchestrator.ts8300-8327 binds native fork provenance at dispatch.
+    let provider_thread = continued
+        .projection
+        .provider_threads
+        .iter()
+        .find(|thread| Some(&thread.id) == continued.projection.runs[0].provider_thread_id.as_ref())
+        .unwrap();
+    let origin = provider_thread
+        .forked_from
+        .as_ref()
+        .expect("native fork provenance");
+    assert_eq!(
+        Some(&origin.provider_thread_id),
+        first.projection.runs[0].provider_thread_id.as_ref()
+    );
+    assert_eq!(
+        origin.provider_turn_id,
+        first.projection.attempts[0].provider_turn_id
+    );
     assert!(
         continued
             .projection
@@ -991,4 +1010,145 @@ async fn importing_a_discovered_project_lists_its_existing_native_conversations(
     .expect("project scan publishes its native conversations");
     assert!(snapshot(&service, &native).projection.runs.is_empty());
     assert!(agent.inputs.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let projects = directory.path().join("projects.json");
+    let service = HostRpcService::new([agent.backend()], projects.clone());
+    let source = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("prefix-to-preserve"),
+    )
+    .await;
+    let first = settled(&service, &source, 1).await;
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let connection = service.open_session();
+    let _: SessionRef = call(
+        &service,
+        connection.id(),
+        Call::ForkConversation(records::Fork {
+            source,
+            target: target.clone(),
+            through: first.projection.runs[0].id.clone().into(),
+        }),
+    )
+    .await
+    .unwrap();
+    // All native creation is unavailable, including a portable-fork fallback.
+    // A restarted adapter restores it without changing persisted native history.
+    agent.create_gate.close();
+    let ack: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: target.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::Submit {
+                id: Uuid::new_v4().to_string().into(),
+                content: input(ProviderKind::Codex, "failed-before-write"),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(ack.error.is_none());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if snapshot(&service, &target)
+                .projection
+                .runs
+                .iter()
+                .any(|run| run.status == model::RunStatus::Failed)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("native creation failure settles the first run");
+    assert_eq!(agent.inputs.lock().unwrap().len(), 1);
+    let owner = Arc::downgrade(&service.inner);
+    drop(connection);
+    drop(service);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while owner.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let restarted = agent.restarted();
+    let service = HostRpcService::new([restarted.backend()], projects);
+    let connection = service.open_session();
+    let ack: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: target.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::Submit {
+                id: Uuid::new_v4().to_string().into(),
+                content: input(ProviderKind::Codex, "retry-with-context"),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(ack.error.is_none());
+    let admitted = snapshot(&service, &target);
+    let next = admitted
+        .projection
+        .runs
+        .iter()
+        .max_by_key(|run| run.ordinal)
+        .unwrap();
+    assert!(
+        admitted
+            .projection
+            .context_transfers
+            .iter()
+            .any(|transfer| transfer.target_run_id.as_ref() == Some(&next.id)),
+        "the failed run cannot retain the unconsumed fork source"
+    );
+    let current = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let current = snapshot(&service, &target);
+            if current
+                .projection
+                .runs
+                .iter()
+                .any(|run| run.status == model::RunStatus::Completed)
+            {
+                break current;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second input completes with the preserved fork prefix");
+    let completed = current
+        .projection
+        .runs
+        .iter()
+        .find(|run| run.status == model::RunStatus::Completed)
+        .unwrap();
+    assert!(current.projection.context_transfers.iter().any(|transfer| {
+        transfer.target_run_id.as_ref() == Some(&completed.id)
+            && transfer.status == model::TransferStatus::Consumed
+    }));
+    let inputs = restarted.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 2);
+    let records = restarted.records.lock().unwrap();
+    let native = records.get(&inputs[1].thread_id.id).unwrap();
+    assert_eq!(
+        native.thread.turns.as_ref().unwrap().len(),
+        2,
+        "the retry retains the source turn before its new input"
+    );
+    assert_ne!(inputs[0].thread_id, inputs[1].thread_id);
 }

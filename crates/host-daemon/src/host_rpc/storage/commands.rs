@@ -239,6 +239,7 @@ mod tests {
                     model_selection: state.thread.model_selection.clone(),
                     driver: "codex".into(),
                     workspace_preparation: None,
+                    fork_origin: None,
                 },
                 model::Admission::Queue,
                 model::Context {
