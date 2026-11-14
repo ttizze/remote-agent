@@ -855,9 +855,19 @@ async fn another_pane_keeps_a_shared_conversation_subscribed_after_primary_navig
         agent_protocol::models::SessionStatus::Running,
         agent_protocol::models::SessionStatus::Idle,
     ] {
+        let mut snapshot = store.snapshot().sessions.projections[&id].as_ref().clone();
+        snapshot.snapshot_sequence += 1;
+        snapshot.projection.runs.last_mut().unwrap().status = match status {
+            agent_protocol::models::SessionStatus::Running => {
+                agent_protocol::orchestration::RunStatus::Running
+            }
+            _ => agent_protocol::orchestration::RunStatus::Completed,
+        };
         writer
-            .notify(json!({"method":"fixture/session/change", "session":id,
-            "change":agent_protocol::session::SessionChange::Status { status }}))
+            .send_stream(
+                store.snapshot().sessions.subscriptions[&id],
+                ThreadStreamItem::Snapshot(snapshot),
+            )
             .await
             .unwrap();
         wait_for(&store, |snapshot| {

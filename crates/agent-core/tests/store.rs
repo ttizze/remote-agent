@@ -1315,8 +1315,8 @@ async fn invalid_typed_reply_does_not_block_later_wire_events() {
     let (store, mut reader, writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
-        writer
-            .reply(&request, json!({"result":{"thread":{"cwd":"/fixture"}}}))
+        request
+            .reply_unchecked(json!({"thread":{"cwd":"/fixture"}}))
             .await
             .unwrap();
         let request = read(&mut reader).await;
@@ -3029,7 +3029,7 @@ async fn creating_a_chat_updates_matching_search_results_without_reading_the_lis
 
 #[tokio::test]
 async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_window() {
-    let initial: Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"historyLimit":10,"historyHasMore":true,"turns":[{"id":"latest","items":[],"status":"unknown"}]})).unwrap();
+    let initial: Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"historyLimit":10,"historyHasMore":true,"turns":[{"id":"latest","items":[{"id":"latest-message","status":"completed","body":{"inline":{"body":{"assistantText":{"text":"latest","phase":"final"}}}}}],"status":"completed"}]})).unwrap();
     let (store, mut reader, writer) = setup(Snapshot {
         panes: agent_core::state::PaneStates::with_primary(Arc::new(
             agent_core::state::PaneState {
@@ -3060,11 +3060,12 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
             let request = read(&mut reader).await;
             assert_eq!(request["method"], "host/conversation/extend");
             assert_eq!(request["params"]["session"]["id"], "thread");
-            assert!(request["params"]["subscription"].is_string());
+            assert!(request["params"]["cursor"].is_string());
+            assert!(request["params"].get("subscription").is_none());
             let response = if failed {
                 json!({"error":{"code":"request_failed","message":"temporary history failure"}})
             } else {
-                json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"historyLimit":10,"historyHasMore":false,"turns":[{"id":"old","items":[],"status":"unknown"},{"id":"missing","items":[{"id":"question","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":"comparison"}}]}}}}}],"status":"unknown"},{"id":"latest","items":[],"status":"unknown"}]}}})
+                json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"historyLimit":10,"historyHasMore":false,"turns":[{"id":"old","items":[{"id":"old-message","status":"completed","body":{"inline":{"body":{"assistantText":{"text":"old","phase":"final"}}}}}],"status":"completed"},{"id":"missing","items":[{"id":"question","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":"comparison"}}]}}}}}],"status":"unknown"},{"id":"latest","items":[{"id":"latest-message","status":"completed","body":{"inline":{"body":{"assistantText":{"text":"latest","phase":"final"}}}}}],"status":"completed"}]}}})
             };
             writer.reply(&request, response).await.unwrap();
         }
@@ -3147,7 +3148,8 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
         for (limit, complete) in [(20, false), (30, true)] {
             let request = read(&mut reader).await;
             assert_eq!(request["method"], "host/conversation/extend");
-            assert!(request["params"]["subscription"].is_string());
+            assert!(request["params"]["cursor"].is_string());
+            assert!(request["params"].get("subscription").is_none());
             let items = if complete {
                 json!([{"id":"first-old","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"head","phase":"unknown"}}}}},{"id":"last-old","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"tail","phase":"unknown"}}}}}])
             } else {
@@ -3496,7 +3498,15 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             .map(|file| (file.name.as_str(), file.path.as_str(), file.is_image))
             .collect::<Vec<_>>(),
         [
-            ("shot.png", image, true),
+            (
+                "shot.png",
+                format!(
+                    "bex-attachment://fixture-{}-png.png",
+                    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, image.as_bytes())
+                )
+                .as_str(),
+                true
+            ),
             ("notes.md", "/fixture/notes.md", false)
         ]
     );

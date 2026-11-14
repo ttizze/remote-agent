@@ -111,12 +111,11 @@ fn shared_operation_failures_remain_visible_after_navigation() {
 async fn a_terminal_failure_does_not_discard_the_composer_catalog_load() {
     let mut snapshot = Snapshot::default();
     snapshot.connection.connected = true;
-    Arc::make_mut(snapshot.panes.primary_mut()).navigation =
-        Arc::new(crate::state::Navigation {
-            cwd: "/fixture".into(),
-            draft_key: "new:/fixture".into(),
-            ..Default::default()
-        });
+    Arc::make_mut(snapshot.panes.primary_mut()).navigation = Arc::new(crate::state::Navigation {
+        cwd: "/fixture".into(),
+        draft_key: "new:/fixture".into(),
+        ..Default::default()
+    });
     let scheduled = Scheduled::new(
         Effect::execute(op::StartTerminal {
             command: None,
@@ -139,12 +138,11 @@ async fn a_terminal_failure_does_not_discard_the_composer_catalog_load() {
         }
         updates.borrow().clone()
     });
-    let request =
-        tokio::time::timeout(std::time::Duration::from_secs(2), reader.read_request())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), reader.read_request())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(request["method"], "host/composer/catalog");
     assert_eq!(request["params"]["cwd"], "/fixture");
     writer
@@ -213,8 +211,7 @@ fn workspace_reads_keep_independent_statuses_and_retire_only_their_owner() {
 }
 
 fn queued(scheduling: op::Scheduling) -> Scheduled {
-    let mut effect =
-        Effect::execute(crate::state::list_sync::SubscribeCatalog { refresh: false });
+    let mut effect = Effect::execute(crate::state::list_sync::SubscribeCatalog { refresh: false });
     effect.scheduling = scheduling;
     Scheduled {
         effect,
@@ -587,8 +584,7 @@ async fn saved_unknown_input_is_resolved_on_the_host_before_restoring_the_compos
 async fn new_task_admits_the_initial_input_in_one_rpc() {
     use crate::state::operations::Operation;
     use serde_json::json;
-    let ((client, _events), mut reader, writer) =
-        host_fixture::connect(&Snapshot::default()).await;
+    let ((client, _events), mut reader, writer) = host_fixture::connect(&Snapshot::default()).await;
     let mut subscriptions = Vec::new();
     let mut context = Execution {
         client: &client,
@@ -596,8 +592,7 @@ async fn new_task_admits_the_initial_input_in_one_rpc() {
         subscriptions: &mut subscriptions,
     };
     let operation = op::StartSubmission {
-        thread_id: crate::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string())
-            .unwrap(),
+        thread_id: crate::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap(),
         provider: agent_protocol::session::ProviderKind::Codex,
         cwd: Some("/project".into()),
         client_user_message_id: "00000000-0000-0000-0000-00000000002a".into(),
@@ -659,9 +654,7 @@ async fn new_task_admits_the_initial_input_in_one_rpc() {
             session: operation.thread_id.clone(),
             subscription_id: uuid::Uuid::nil(),
             initial: vec![
-                agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(
-                    projection,
-                ),
+                agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(projection),
                 agent_protocol::orchestration::projection::ThreadStreamItem::Synchronized,
             ],
             provider: operation.provider,
@@ -1161,9 +1154,7 @@ fn every_snapshot_field_notifies_subscribers_independently() {
             snapshot.catalog.permission_settings = Arc::new(
                 [(
                     agent_protocol::session::ProviderKind::Codex,
-                    Arc::new(crate::state::operations::PermissionSettingsState {
-                        result: None,
-                    }),
+                    Arc::new(crate::state::operations::PermissionSettingsState { result: None }),
                 )]
                 .into(),
             );

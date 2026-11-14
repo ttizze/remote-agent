@@ -25,6 +25,16 @@ pub struct Request {
     send: tokio::sync::Mutex<Option<transport::HostPeer>>,
 }
 impl Request {
+    /// Deliberately malformed payloads must reach the real client's typed decoder.
+    pub async fn reply_unchecked(&self, result: Value) -> std::io::Result<()> {
+        let mut send = self
+            .send
+            .lock()
+            .await
+            .take()
+            .expect("request already answered");
+        agent_transport::framing::write(&mut send, protocol::Response::Success { result }).await
+    }
     pub async fn acknowledge(&self) -> std::io::Result<()> {
         let mut send = self
             .send

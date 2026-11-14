@@ -97,13 +97,11 @@ fn missing_native_options_keep_saved_options_only_for_the_same_model(
             ..Default::default()
         }),
     );
-    open_thread(
+    super::open_thread(
         &mut snapshot,
         "",
-        Thread {
-            id: Some(id.clone()),
-            ..Default::default()
-        },
+        id.clone(),
+        String::new(),
         native_model.map(model),
         None,
         None,
@@ -430,7 +428,7 @@ fn navigating_back_keeps_an_unsent_provider_change() {
 
 #[test]
 fn opening_an_old_project_task_uses_metadata_before_history_and_clears_cached_status_on_disconnect()
- {
+{
     let id = SessionRef::new(ProviderKind::Codex, "old".into()).unwrap();
     let page: crate::models::ThreadList = serde_json::from_value(serde_json::json!({
         "data":[{"id":id,"projectId":"p","cwd":"/old-project","status":"running","canAcceptDirectInput":false}],
@@ -614,9 +612,9 @@ fn opening_restores_model_metadata_or_uses_the_provider_catalog(
             id: Some(session),
             ..Default::default()
         },
-        model_metadata.then(|| crate::models::ModelRef {
+        Some(crate::models::ModelRef {
             provider,
-            id: "saved".into(),
+            id: if model_metadata { "saved" } else { "default" }.into(),
         }),
         None,
         None,

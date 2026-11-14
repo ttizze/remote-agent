@@ -29,9 +29,14 @@ pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
             .map(|cwd| model::derived_id("project", &[cwd])),
         _ => thread.project_id.as_deref().map(str::to_owned),
     };
-    let selection = json!({"instanceId":provider.key(),"model":response.model.as_ref().map(|model|model.id.as_str()).unwrap_or("fixture-model"),"options":[]});
+    let selected_model = selection(
+        provider,
+        response.model.as_ref(),
+        response.effort.as_deref(),
+        response.service_tier.as_deref(),
+    );
     let mut projection:ThreadProjection=serde_json::from_value(json!({
-        "thread":{"id":id,"createdBy":"user","creationSource":if thread.can_accept_direct_input==Some(false) {"provider"} else {"mobile"},"projectId":project,"title":thread.name.clone().unwrap_or_default(),"providerInstanceId":provider.key(),"modelSelection":selection,"runtimeMode":"full-access","interactionMode":"default","branch":thread.git_branch,"worktreePath":thread.cwd,"activeProviderThreadId":null,"lineage":{"parentThreadId":thread.parent_id.as_ref().map(|parent|parent.application_id()),"relationshipToParent":thread.parent_id.as_ref().map(|_|"subagent"),"rootThreadId":id},"forkedFrom":null,"createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null},
+        "thread":{"id":id,"createdBy":"user","creationSource":if thread.can_accept_direct_input==Some(false) {"provider"} else {"mobile"},"projectId":project,"title":thread.name.clone().unwrap_or_default(),"providerInstanceId":provider.key(),"modelSelection":selected_model,"runtimeMode":"full-access","interactionMode":"default","branch":thread.git_branch,"worktreePath":thread.cwd,"activeProviderThreadId":null,"lineage":{"parentThreadId":thread.parent_id.as_ref().map(|parent|parent.application_id()),"relationshipToParent":thread.parent_id.as_ref().map(|_|"subagent"),"rootThreadId":id},"forkedFrom":null,"createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null},
         "runs":[],"attempts":[],"nodes":[],"subagents":[],"providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],"plans":[],"turnItems":[],"checkpointScopes":[],"checkpoints":[],"contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":[],"updatedAt":NOW
     })).unwrap();
     for (ordinal, turn) in thread.turns.iter().flatten().enumerate() {
@@ -59,7 +64,7 @@ pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
             message,
             ordinal as u64 + 1,
             status,
-            &selection,
+            &selected_model,
         ));
         for item in turn.items.iter().flatten() {
             let item = item_record(&id, Some(turn.id.as_str()), item, selected, turn.queued);
@@ -74,7 +79,12 @@ pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
             input.client_user_message_id.as_str(),
             projection.runs.len() as u64 + 1,
             model::RunStatus::Queued,
-            &selection,
+            &selection(
+                provider,
+                input.model.as_ref(),
+                input.effort.as_deref(),
+                input.service_tier.as_deref(),
+            ),
         );
         queued.queue_position = Some(position as u64 + 1);
         queued.queue_held = thread.queue.held;
@@ -107,7 +117,12 @@ pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
             input.client_user_message_id.as_str(),
             projection.runs.len() as u64 + 1,
             status,
-            &selection,
+            &selection(
+                provider,
+                input.model.as_ref(),
+                input.effort.as_deref(),
+                input.service_tier.as_deref(),
+            ),
         ));
         let mut native = agent_protocol::items::Item::new(
             input.client_user_message_id.as_str().into(),
@@ -146,6 +161,22 @@ pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
         has_more_history: thread.history_has_more == Some(true) || thread.history_cursor.is_some(),
         latest_local_turn_ordinal: latest,
     }
+}
+
+fn selection(
+    provider: ProviderKind,
+    model: Option<&agent_protocol::models::ModelRef>,
+    effort: Option<&str>,
+    tier: Option<&str>,
+) -> Value {
+    let mut options = vec![];
+    if let Some(effort) = effort {
+        options.push(json!({"id":if provider==ProviderKind::Claude {"effort"} else {"reasoningEffort"},"value":effort}));
+    }
+    if let Some(tier) = tier {
+        options.push(json!({"id":"serviceTier","value":tier}));
+    }
+    json!({"instanceId":provider.key(),"model":model.map_or("default", |model|model.id.as_str()),"options":options})
 }
 
 fn add_requests(
@@ -380,7 +411,7 @@ fn body(item: &agent_protocol::items::Item, queued: bool) -> model::TurnItemBody
             let mut records=vec![];
             for part in content {
                 match part {
-                    MessagePart::Image {source}=>{
+                    MessagePart::Image {source} if agent_protocol::paths::is_absolute_host_path(source) || agent_protocol::paths::attachment_file_name(source).is_some()=>{
                         let name=source.rsplit(['/', '\\']).next().unwrap_or("image.png");
                         let id=uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL,source.as_bytes()).to_string();
                         attachments.push(json!({"type":"image","id":format!("fixture-{id}-png"),"name":name,"mimeType":"image/png","sizeBytes":0}));
