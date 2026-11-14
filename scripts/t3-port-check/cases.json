@@ -61,6 +61,12 @@
       "orchestration::tests::recovery::a_prepared_continuation_can_recover_again_without_repeating_the_original_input",
       "orchestration::tests::recovery::restart_preserves_native_identity_and_admits_one_continuation_without_replaying_input",
       "orchestration::tests::recovery::continuation_loop_limit_uses_the_pinned_five_minute_window"
+    ],
+    "agent-core": [
+      "operation_corpus",
+      "delta_copies_only_the_changed_path_and_snapshot_round_trips",
+      "pending_submission_reconciles_both_reply_and_echo_orders",
+      "selected_folder_preserves_explicit_scope_without_losing_the_execution_directory"
     ]
   },
   "guards": {
@@ -227,7 +233,8 @@
       "orchestration::tests::recovery::a_restart_keeps_unknown_native_input_blocked_without_an_automatic_retry",
       "orchestration::tests::recovery::a_restart_requires_live_owned_work_and_respects_conversation_boundaries",
       "orchestration::tests::recovery::continuations_respect_newer_input_stop_and_native_maintenance_commands",
-      "orchestration::tests::recovery::provider_failure_preserves_other_processes_and_holds_queued_work"
+      "orchestration::tests::recovery::provider_failure_preserves_other_processes_and_holds_queued_work",
+      "session::text_tests::file_change_delta_appends_to_output_without_inventing_a_diff"
     ],
     "host-daemon": [
       "host_rpc::routing::credit::tests::streams_share_connection_credit_and_release_it_only_when_the_frame_is_dropped",

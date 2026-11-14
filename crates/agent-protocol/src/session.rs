@@ -1323,3 +1323,20 @@ mod history_tests {
 
     }
 }
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+    #[test]
+    fn file_change_delta_appends_to_output_without_inventing_a_diff() {
+        for output in ["", "prefix"] {
+            let thread = serde_json::from_value(serde_json::json!({"turns":[{"id":"turn","items":[{"id":"file","status":"unknown","body":{"inline":{"body":{"fileChange":{"changes":[],"output":output}}}}}]}]})).unwrap();
+            let change: SessionChange = serde_json::from_value(serde_json::json!({"type":"text","turnId":"turn","itemId":"file","delta":"tail","field":"fileOutput"})).unwrap();
+            let thread = change.apply(&thread).unwrap();
+            let item = &thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0];
+            assert!(
+                matches!(item.body(), crate::items::ItemBody::FileChange { changes, output: actual } if changes.is_empty() && actual == &format!("{output}tail"))
+            );
+        }
+    }
+}

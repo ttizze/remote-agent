@@ -27,7 +27,30 @@ fn fixture_change(previous: &Snapshot, params: Value) -> (Snapshot, Vec<Effect>)
     if previous.sessions.conversations.contains_key(&id) {
         let subscription = uuid::Uuid::nil();
         Arc::make_mut(&mut next.sessions.subscriptions).insert(id.clone(), subscription);
-        let thread = change.apply(&previous.sessions.conversations[&id]).unwrap();
+        let mut native = previous.sessions.conversations[&id].as_ref().clone();
+        // Empty native runs have no visible items yet. Retain their identity
+        // when scripting the first item, independently of display grouping.
+        if let agent_protocol::session::SessionChange::Item { turn_id, .. } = &change
+            && !native
+                .turns
+                .iter()
+                .flatten()
+                .any(|turn| &turn.id == turn_id)
+            && previous.sessions.projections[&id]
+                .projection
+                .runs
+                .iter()
+                .any(|run| run.id == turn_id.as_str())
+        {
+            native
+                .turns
+                .get_or_insert_default()
+                .push(Arc::new(agent_protocol::models::Turn {
+                    id: turn_id.clone(),
+                    ..Default::default()
+                }));
+        }
+        let thread = change.apply(&native).unwrap();
         let sequence = previous
             .sessions
             .projections
@@ -844,31 +867,6 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
     assert!(unassigned.panes.primary().workspace.review.is_none());
     assert!(unassigned.panes.primary().workspace.review_cwd.is_none());
     assert_eq!(previous.files.file_drafts, unassigned.files.file_drafts);
-}
-
-#[test]
-fn file_change_delta_appends_to_output_without_inventing_a_diff() {
-    for output in ["", "prefix"] {
-        let previous = initial(serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"file","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[],"output":output}}}}}],"status":"unknown"}]})).unwrap());
-        let (next, _) = fixture_change(
-            &previous,
-            json!({"session":{"provider":"codex","id":"thread"},"change":{"type":"text","turnId":"turn","itemId":"file","delta":"tail","field":"fileOutput"}}),
-        );
-        assert_eq!(next.panes.primary().error, None);
-        let item = &next.sessions.conversations[&SessionRef {
-            provider: Some(ProviderKind::Codex),
-            id: "thread".into(),
-        }]
-            .turns
-            .as_ref()
-            .unwrap()[0]
-            .items
-            .as_ref()
-            .unwrap()[0];
-        assert!(
-            matches!(item.body(), agent_protocol::items::ItemBody::FileChange { changes, output: actual } if changes.is_empty() && actual == &format!("{output}tail"))
-        );
-    }
 }
 
 #[test]

@@ -20,9 +20,18 @@ pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
         .or(identity.provider)
         .unwrap_or(ProviderKind::Codex);
     let id = identity.application_id();
+    // Native discoveries without a membership field belong to their discovered
+    // root project. An explicit null remains unassigned.
+    let project = match &thread.project_id {
+        agent_protocol::models::ProjectMembership::Unknown {} => thread
+            .cwd
+            .as_ref()
+            .map(|cwd| model::derived_id("project", &[cwd])),
+        _ => thread.project_id.as_deref().map(str::to_owned),
+    };
     let selection = json!({"instanceId":provider.key(),"model":response.model.as_ref().map(|model|model.id.as_str()).unwrap_or("fixture-model"),"options":[]});
     let mut projection:ThreadProjection=serde_json::from_value(json!({
-        "thread":{"id":id,"createdBy":"user","creationSource":if thread.can_accept_direct_input==Some(false) {"provider"} else {"mobile"},"projectId":thread.project_id.as_deref(),"title":thread.name.clone().unwrap_or_default(),"providerInstanceId":provider.key(),"modelSelection":selection,"runtimeMode":"full-access","interactionMode":"default","branch":thread.git_branch,"worktreePath":thread.cwd,"activeProviderThreadId":null,"lineage":{"parentThreadId":thread.parent_id.as_ref().map(|parent|parent.application_id()),"relationshipToParent":thread.parent_id.as_ref().map(|_|"subagent"),"rootThreadId":id},"forkedFrom":null,"createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null},
+        "thread":{"id":id,"createdBy":"user","creationSource":if thread.can_accept_direct_input==Some(false) {"provider"} else {"mobile"},"projectId":project,"title":thread.name.clone().unwrap_or_default(),"providerInstanceId":provider.key(),"modelSelection":selection,"runtimeMode":"full-access","interactionMode":"default","branch":thread.git_branch,"worktreePath":thread.cwd,"activeProviderThreadId":null,"lineage":{"parentThreadId":thread.parent_id.as_ref().map(|parent|parent.application_id()),"relationshipToParent":thread.parent_id.as_ref().map(|_|"subagent"),"rootThreadId":id},"forkedFrom":null,"createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,"settledAt":null,"lastVisitedAt":null,"deletedAt":null},
         "runs":[],"attempts":[],"nodes":[],"subagents":[],"providerSessions":[],"providerThreads":[],"providerTurns":[],"runtimeRequests":[],"plans":[],"turnItems":[],"checkpointScopes":[],"checkpoints":[],"contextHandoffs":[],"contextTransfers":[],"visibleTurnItems":[],"updatedAt":NOW
     })).unwrap();
     for (ordinal, turn) in thread.turns.iter().flatten().enumerate() {

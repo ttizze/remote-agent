@@ -17,7 +17,7 @@ GUARDS = {(crate, name) for crate, names in CASES["holdout" if HOLDOUT else "gua
 ALL = SCORED | GUARDS
 expression = " | ".join(f"test(={name})" for name in sorted({name for _, name in ALL}))
 command = [str(ROOT / "scripts/dev-env.sh"), "cargo", "nextest", "run", "--locked",
-           "--lib", "--no-fail-fast", "--retries", "0", "--color", "never"]
+           "--no-fail-fast", "--retries", "0", "--color", "never"]
 for crate in sorted({crate for crate, _ in ALL}):
     command += ["-p", crate]
 command += ["-E", expression]
@@ -25,7 +25,7 @@ result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, st
 log = ROOT / (".hill-climb/t3-port/holdout.txt" if HOLDOUT else ".hill-climb/t3-port/tests.txt")
 log.parent.mkdir(parents=True, exist_ok=True)
 log.write_text(result.stdout)
-passed = set(re.findall(r"PASS\s+\[[^\]]+\]\s+\([^\n]+?\)\s+(\S+)\s+(\S+)", result.stdout))
+passed = {(binary.split("::", 1)[0], name) for binary, name in re.findall(r"PASS\s+\[[^\]]+\]\s+\([^\n]+?\)\s+(\S+)\s+(\S+)", result.stdout)}
 if "Summary" not in result.stdout or not GUARDS.issubset(passed):
     print(result.stdout[-12000:])
     print("Invalid check: build, builder, or fixed guard failed", file=sys.stderr)

@@ -362,7 +362,7 @@ impl Writer {
                 {
                     state.extended(request, &mut value)?;
                 } else if request.call.method() == "host/conversation/hydrate"
-                    && value["result"].get("item").is_some()
+                    && value["result"]["item"].get("body").is_some()
                 {
                     let target: SessionRef =
                         serde_json::from_value(request["params"]["session"].clone())?;
