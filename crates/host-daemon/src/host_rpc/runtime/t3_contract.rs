@@ -2046,7 +2046,12 @@ async fn recovery_context_precedes_the_run_input_and_uses_a_stable_run_identity(
         .store(1, std::sync::atomic::Ordering::SeqCst);
     send(&service, &session, ProviderKind::Codex, "current-input").await;
     let current = settled(&service, &session, 3).await;
-    let run = &current.projection.runs[2];
+    let run = current
+        .projection
+        .runs
+        .iter()
+        .max_by_key(|run| run.ordinal)
+        .unwrap();
     let recovery = current
         .projection
         .turn_items
