@@ -199,6 +199,14 @@ pub fn admit(
     }
     let active = state.active_run();
     let queued = active.is_some();
+    let fork = state.pending_fork();
+    if fork.is_some_and(|fork| {
+        input.fork_origin.is_none()
+            || fork.source_provider_instance_id.as_deref()
+                != Some(input.model_selection.instance_id.as_str())
+    }) {
+        return Err("fork context must be prepared before starting this input".into());
+    }
     let run_id = id(context.command_id, "run");
     let mut item = user_item(
         &state.thread.id,
@@ -207,7 +215,7 @@ pub fn admit(
         if queued { "queued_turn" } else { "turn_start" },
         context,
     );
-    let provider_thread = state
+    let mut provider_thread = state
         .thread
         .active_provider_thread_id
         .as_ref()
@@ -233,6 +241,9 @@ pub fn admit(
             created_at: context.now.into(),
             updated_at: context.now.into(),
         });
+    if fork.is_some() {
+        provider_thread.forked_from = input.fork_origin.clone();
+    }
     let root_id = id(&run_id, "root-node");
     let attempt_id = id(&run_id, "attempt:1");
     item.node_id = Some(root_id.clone());
@@ -333,25 +344,14 @@ pub fn admit(
         Change::Node(root),
         Change::TurnItem(item),
     ];
-    changes.extend(
-        state
-            .context_transfers
-            .values()
-            .filter(|transfer| {
-                transfer.kind == TransferType::Fork
-                    && transfer.target_thread_id == state.thread.id
-                    && transfer.status == TransferStatus::Pending
-                    && transfer.target_run_id.is_none()
-            })
-            .map(|transfer| {
-                Change::ContextTransfer(ContextTransfer {
-                    target_run_id: Some(run_id.clone()),
-                    target_provider_instance_id: Some(selection.instance_id.clone()),
-                    updated_at: context.now.into(),
-                    ..transfer.clone()
-                })
-            }),
-    );
+    changes.extend(fork.map(|transfer| {
+        Change::ContextTransfer(ContextTransfer {
+            target_run_id: Some(run_id.clone()),
+            target_provider_instance_id: Some(selection.instance_id.clone()),
+            updated_at: context.now.into(),
+            ..transfer.clone()
+        })
+    }));
     changes.extend(preparation.map(Change::TurnItem));
     if !queued {
         changes.push(Change::Thread(Thread {

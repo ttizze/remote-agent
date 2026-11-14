@@ -207,12 +207,23 @@ impl Runtime {
         let operation = request.operation.to_string();
         let now = at();
         let kind = command_kind(&request.command);
+        let fork_origin = if matches!(request.command, Command::Submit { .. }) {
+            runtime
+                .storage
+                .fork_origin(&request.session)
+                .map_err(storage_failure)?
+        } else {
+            None
+        };
         let capabilities: std::collections::BTreeMap<_, _> = service
             .inner
             .providers
             .all()
             .into_iter()
-            .map(|(kind, agent)| (kind, agent.capabilities().steer))
+            .map(|(kind, agent)| {
+                let caps = agent.capabilities();
+                (kind, (caps.steer, caps.fork))
+            })
             .collect();
         let spec = super::super::storage::commands::Command {
             id: &operation,
@@ -225,7 +236,7 @@ impl Runtime {
             .storage
             .thread_command(spec, None, |state| {
                 let kind = ProviderKind::from_instance_id(&state.thread.provider_instance_id)?;
-                let can_steer = capabilities
+                let (can_steer, _) = capabilities
                     .get(&kind)
                     .copied()
                     .ok_or("provider is unavailable")?;
@@ -242,7 +253,22 @@ impl Runtime {
                         .ok_or("run ordinal exhausted")?,
                     can_steer,
                 };
-                decide(&request.command, state, content.as_ref(), context)
+                let selected = match &request.command {
+                    Command::Submit { content, .. } => {
+                        content.model.as_ref().map_or(kind, |model| model.provider)
+                    }
+                    _ => kind,
+                };
+                let fork_origin = fork_origin
+                    .as_ref()
+                    .filter(|_| capabilities.get(&selected).is_some_and(|(_, fork)| *fork));
+                decide(
+                    &request.command,
+                    state,
+                    content.as_ref(),
+                    context,
+                    fork_origin,
+                )
             })
             .map_err(storage_failure)
     }
@@ -278,6 +304,7 @@ fn decide(
     state: &model::State,
     content: Option<&MessageContent>,
     context: model::Context<'_>,
+    fork_origin: Option<&model::ProviderThreadFork>,
 ) -> Result<model::Decision, String> {
     match command {
         Command::Submit {
@@ -307,7 +334,7 @@ fn decide(
                         .into(),
                     model_selection: selected,
                     workspace_preparation: None,
-                    fork_origin: None,
+                    fork_origin: fork_origin.cloned(),
                 },
                 if options.follow_up == op::FollowUp::Steer {
                     model::Admission::Steer

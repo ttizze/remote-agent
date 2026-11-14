@@ -193,6 +193,29 @@ impl State {
             .min_by_key(|run| (run.queue_position.unwrap_or(run.ordinal), run.ordinal))
     }
 
+    /// A failed/cancelled start has not delivered its fork context. The next
+    /// input claims that same transfer instead of starting without its history.
+    pub fn pending_fork(&self) -> Option<&ContextTransfer> {
+        self.context_transfers.values().find(|transfer| {
+            transfer.kind == TransferType::Fork
+                && transfer.target_thread_id == self.thread.id
+                && transfer.status == TransferStatus::Pending
+                && transfer.resolution.is_none()
+                && transfer.target_run_id.as_ref().is_none_or(|id| {
+                    self.runs.get(id).is_some_and(|run| {
+                        matches!(
+                            run.status,
+                            RunStatus::Completed
+                                | RunStatus::Failed
+                                | RunStatus::Interrupted
+                                | RunStatus::Cancelled
+                                | RunStatus::RolledBack
+                        )
+                    })
+                })
+        })
+    }
+
     pub fn has_uncertain_input(&self) -> bool {
         self.effects.values().any(|effect| {
             effect.status == EffectStatus::Running

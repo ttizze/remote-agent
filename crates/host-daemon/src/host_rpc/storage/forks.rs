@@ -2,6 +2,94 @@ use super::*;
 use agent_protocol::orchestration as model;
 
 impl Storage {
+    pub(in crate::host_rpc) fn fork_origin(
+        &self,
+        target: &SessionRef,
+    ) -> Result<Option<model::ProviderThreadFork>, String> {
+        self.with(|connection| {
+            let tx = connection.transaction().map_err(failure)?;
+            let target = projections::metadata(&tx, &target.application_id())?;
+            let Some(fork) = target.pending_fork() else {
+                return Ok(None);
+            };
+            let source = projections::metadata(&tx, &fork.source_thread_id)?;
+            let run = fork
+                .source_point
+                .run_id
+                .as_ref()
+                .and_then(|id| source.runs.get(id))
+                .ok_or("fork source run is missing")?;
+            // CommandPolicy.decideForkExecution: these sources require a
+            // bounded portable handoff, never an unbounded fresh native turn.
+            if !matches!(
+                run.status,
+                model::RunStatus::Completed | model::RunStatus::Waiting
+            ) || source
+                .active_run()
+                .is_some_and(|active| active.ordinal > run.ordinal)
+            {
+                return Ok(None);
+            }
+            let thread = run
+                .provider_thread_id
+                .as_ref()
+                .and_then(|id| source.provider_threads.get(id))
+                .ok_or("fork source provider thread is missing")?;
+            let reference = thread.native_thread_ref.as_ref().filter(|reference| {
+                reference.strength == model::NativeRefStrength::Strong
+                    && reference.native_id.is_some()
+            });
+            if reference.is_none() || reference != fork.source_point.provider_thread_ref.as_ref() {
+                return Ok(None);
+            }
+            let Some(turn) = source.provider_turns.values().find(|turn| {
+                turn.provider_thread_id == thread.id
+                    && turn.native_turn_ref.is_some()
+                    && turn.native_turn_ref == fork.source_point.provider_turn_ref
+            }) else {
+                return Ok(None);
+            };
+            let origin = model::ProviderThreadFork {
+                provider_thread_id: thread.id.clone(),
+                provider_turn_id: Some(turn.id.clone()),
+                checkpoint_id: None,
+            };
+            tx.commit().map_err(failure)?;
+            Ok(Some(origin))
+        })
+    }
+
+    /// Resolve the canonical provenance recorded at admission, rather than
+    /// interpreting the transfer again in the native I/O worker.
+    pub(in crate::host_rpc) fn native_fork_source(
+        &self,
+        origin: &model::ProviderThreadFork,
+    ) -> Result<(model::ProviderRef, model::ProviderRef), String> {
+        self.with(|connection| {
+            let tx = connection.transaction().map_err(failure)?;
+            let thread =
+                projections::read::<model::ProviderThread>(&tx, &origin.provider_thread_id)?
+                    .ok_or("native fork source is missing")?;
+            let turn = origin
+                .provider_turn_id
+                .as_deref()
+                .ok_or("native fork boundary is missing")?;
+            let turn = projections::read::<model::ProviderTurn>(&tx, turn)?
+                .ok_or("native fork turn is missing")?;
+            if turn.provider_thread_id != thread.id {
+                return Err("fork turn belongs to another provider thread".into());
+            }
+            let source = thread
+                .native_thread_ref
+                .ok_or("native fork source reference is missing")?;
+            let through = turn
+                .native_turn_ref
+                .ok_or("native fork turn reference is missing")?;
+            tx.commit().map_err(failure)?;
+            Ok((source, through))
+        })
+    }
+
     pub(in crate::host_rpc) fn fork_thread(
         &self,
         source: &SessionRef,
