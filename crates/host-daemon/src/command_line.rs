@@ -70,6 +70,9 @@ pub(crate) enum Mode {
     /// offsets paginate the same history referenced by provider handoffs.
     History {
         session: agent_protocol::session::SessionRef,
+        /// Read exactly this visible item, including inherited source items.
+        #[arg(long, conflicts_with = "offset")]
+        item_id: Option<String>,
         #[arg(long, default_value_t = 0)]
         offset: usize,
         #[arg(long, default_value_t = 20)]

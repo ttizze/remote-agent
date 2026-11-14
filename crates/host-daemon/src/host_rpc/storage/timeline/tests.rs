@@ -390,6 +390,7 @@ fn context_excerpts_read_only_selected_bodies_and_do_not_count_nonhistorical_ite
     tx.commit().unwrap();
     db.execute("UPDATE orchestration_v2_projection_turn_items SET payload_json=json_remove(payload_json,'$.text') WHERE turn_item_id IN ('item:0','item:1','item:3')",[]).unwrap();
     let mut params = agent_protocol::handoff::ReadHistory {
+        item_id: None,
         session: SessionRef::new(None, "thread".into()).unwrap(),
         offset: 1,
         limit: 1,
@@ -419,6 +420,7 @@ fn context_excerpts_cannot_read_a_deleted_conversation() {
     projections::save(&tx, None, &removed).unwrap();
     tx.commit().unwrap();
     let params = agent_protocol::handoff::ReadHistory {
+        item_id: None,
         session: SessionRef::new(None, "thread".into()).unwrap(),
         offset: 0,
         limit: 20,

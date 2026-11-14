@@ -2044,6 +2044,7 @@ async fn context_history_reads_canonical_full_bodies_with_exact_unicode_continua
     let connection = service.open_session();
     let read = |offset, text_offset| {
         Call::ReadHandoffHistory(handoff::ReadHistory {
+            item_id: None,
             session: session.clone(),
             offset,
             limit: 1,
@@ -2122,6 +2123,7 @@ async fn context_history_inherits_only_the_selected_fork_prefix_with_source_iden
         &service,
         connection.id(),
         Call::ReadHandoffHistory(agent_protocol::handoff::ReadHistory {
+            item_id: None,
             session: target.clone(),
             offset: 0,
             limit: 20,

@@ -124,12 +124,14 @@ pub(crate) async fn run(mode: Mode, state_dir: Option<PathBuf>, isolated: bool) 
                 .map(|value| serde_json::to_value(value).expect("Host launch serializes")),
             Mode::History {
                 session,
+                item_id,
                 offset,
                 limit,
                 text_offset,
             } => client
                 .call(&agent_protocol::handoff::ReadHistory {
                     session,
+                    item_id,
                     offset,
                     limit,
                     text_offset,

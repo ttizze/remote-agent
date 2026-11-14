@@ -13,6 +13,7 @@ const EXCERPT_CHARS: usize = 4_000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadHistory {
     pub session: crate::session::SessionRef,
+    pub item_id: Option<String>,
     pub offset: usize,
     pub limit: usize,
     pub text_offset: usize,

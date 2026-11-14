@@ -190,6 +190,7 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
         let connection = service.open_session();
         let read = |text_offset| {
             Call::ReadHandoffHistory(handoff::ReadHistory {
+                item_id: None,
                 session: native.clone(),
                 offset: 0,
                 limit: 1,
