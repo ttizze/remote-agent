@@ -371,3 +371,58 @@ fn a_history_page_carries_the_stop_request_paired_with_its_result() {
     assert_eq!(page.items.last().unwrap().source_item_id, "result");
     assert!(page.has_more_history);
 }
+
+#[test]
+fn context_excerpts_read_only_selected_bodies_and_do_not_count_nonhistorical_items() {
+    let mut db = database();
+    save_thread(&mut db, "thread");
+    let tx = db.transaction().unwrap();
+    for ordinal in 0..4 {
+        let mut value = item(&format!("item:{ordinal}"), "thread", None, ordinal + 1);
+        if ordinal == 1 {
+            value.body = model::TurnItemBody::Reasoning {
+                text: "private reasoning".into(),
+                streaming: false,
+            };
+        }
+        save_item(&tx, &value).unwrap();
+    }
+    tx.commit().unwrap();
+    db.execute("UPDATE orchestration_v2_projection_turn_items SET payload_json=json_remove(payload_json,'$.text') WHERE turn_item_id IN ('item:0','item:1','item:3')",[]).unwrap();
+    let mut params = agent_protocol::handoff::ReadHistory {
+        session: SessionRef::new(None, "thread".into()).unwrap(),
+        offset: 1,
+        limit: 1,
+        text_offset: 0,
+    };
+    let page = context_history(&db, &params).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].position, 1);
+    assert_eq!(page.items[0].message.text, "item:2");
+    assert_eq!(page.next_offset, Some(2));
+    params.offset = 0;
+    assert!(
+        context_history(&db, &params).is_err(),
+        "the malformed selected body is observable"
+    );
+    params.offset = usize::MAX;
+    let end = context_history(&db, &params).unwrap();
+    assert!(end.items.is_empty() && end.next_offset.is_none());
+}
+
+#[test]
+fn context_excerpts_cannot_read_a_deleted_conversation() {
+    let mut db = database();
+    let tx = db.transaction().unwrap();
+    let mut removed = thread("thread");
+    removed.deleted_at = Some(NOW.into());
+    projections::save(&tx, None, &removed).unwrap();
+    tx.commit().unwrap();
+    let params = agent_protocol::handoff::ReadHistory {
+        session: SessionRef::new(None, "thread".into()).unwrap(),
+        offset: 0,
+        limit: 20,
+        text_offset: 0,
+    };
+    assert!(context_history(&db, &params).is_err());
+}

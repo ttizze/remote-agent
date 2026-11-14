@@ -2146,3 +2146,64 @@ async fn context_history_inherits_only_the_selected_fork_prefix_with_source_iden
     assert!(snapshot(&service, &target).projection.runs.is_empty());
     assert_eq!(agent.inputs.lock().unwrap().len(), 2);
 }
+
+#[tokio::test]
+async fn context_history_finds_an_omitted_item_by_its_canonical_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let session = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("request"),
+    )
+    .await;
+    let saved = settled(&service, &session, 1).await;
+    let assistant = saved
+        .projection
+        .visible_turn_items
+        .iter()
+        .find(|row| matches!(row.item.body, model::TurnItemBody::AssistantMessage { .. }))
+        .unwrap();
+    let connection = service.open_session();
+    let params = serde_json::from_value(serde_json::json!({"session":session,"offset":0,"limit":20,"text_offset":0,"item_id":assistant.source_item_id})).unwrap();
+    let page: agent_protocol::handoff::Page =
+        call(&service, connection.id(), Call::ReadHandoffHistory(params))
+            .await
+            .unwrap();
+    assert_eq!(
+        page.items.len(),
+        1,
+        "an exact item read does not include other activity"
+    );
+    assert_eq!(page.items[0].position, 1);
+    assert_eq!(
+        page.items[0].message.role,
+        agent_protocol::handoff::Role::Assistant
+    );
+    assert!(
+        page.items[0]
+            .message
+            .source
+            .contains(&assistant.source_item_id)
+    );
+    assert_eq!(page.next_offset, None);
+    let other = create(
+        &service,
+        directory.path().to_str().unwrap(),
+        Some("private-other"),
+    )
+    .await;
+    let private = settled(&service, &other, 1).await;
+    let foreign_id = &private.projection.visible_turn_items[0].source_item_id;
+    let params = serde_json::from_value(serde_json::json!({"session":session,"offset":0,"limit":20,"text_offset":0,"item_id":foreign_id})).unwrap();
+    let hidden: agent_protocol::handoff::Page =
+        call(&service, connection.id(), Call::ReadHandoffHistory(params))
+            .await
+            .unwrap();
+    assert!(
+        hidden.items.is_empty() && hidden.next_offset.is_none(),
+        "an item outside this visible timeline cannot be read"
+    );
+    assert_eq!(agent.inputs.lock().unwrap().len(), 2);
+}

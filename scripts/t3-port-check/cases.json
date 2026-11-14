@@ -46,7 +46,8 @@
       "host_rpc::storage::commands::tests::a_context_preparation_rejection_is_durable_without_partial_admission",
       "host_rpc::storage::commands::tests::queued_context_failure_preserves_the_preceding_native_completion",
       "host_rpc::runtime::t3_contract::context_history_reads_canonical_full_bodies_with_exact_unicode_continuations",
-      "host_rpc::runtime::t3_contract::context_history_inherits_only_the_selected_fork_prefix_with_source_identity"
+      "host_rpc::runtime::t3_contract::context_history_inherits_only_the_selected_fork_prefix_with_source_identity",
+      "host_rpc::runtime::t3_contract::context_history_finds_an_omitted_item_by_its_canonical_id"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
@@ -233,7 +234,17 @@
       "host_rpc::storage::outbox::tests::each_thread_is_serial_and_a_backing_off_head_blocks_later_work",
       "host_rpc::storage::outbox::tests::only_the_claiming_worker_can_settle_and_unknown_delivery_never_releases_the_lane",
       "host_rpc::storage::outbox::tests::process_loss_requeues_safe_work_cancels_unsent_work_and_leaves_native_writes_for_resolution",
-      "host_rpc::storage::outbox::tests::repeated_registration_cannot_reset_a_lease_or_reexecute_a_completed_effect"
+      "host_rpc::storage::outbox::tests::repeated_registration_cannot_reset_a_lease_or_reexecute_a_completed_effect",
+      "host_rpc::storage::timeline::tests::old_unknown_input_stays_actionable_outside_the_bounded_visible_page",
+      "host_rpc::storage::timeline::tests::windows_page_all_native_history_without_reading_unselected_bodies",
+      "host_rpc::storage::timeline::tests::forks_inherit_only_the_prefix_without_copying_items_or_renumbering_local_runs",
+      "host_rpc::storage::timeline::tests::a_later_parent_rewind_preserves_already_forked_history_and_side_chats_show_only_local_items",
+      "host_rpc::storage::timeline::tests::an_oversized_body_cannot_deadlock_paging_and_invalid_cursors_are_rejected",
+      "host_rpc::storage::timeline::tests::missing_or_cyclic_fork_sources_keep_local_history_available",
+      "host_rpc::storage::timeline::tests::rollback_cutoffs_compare_instants_including_different_timestamp_precisions",
+      "host_rpc::storage::timeline::tests::a_history_page_carries_the_stop_request_paired_with_its_result",
+      "host_rpc::storage::timeline::tests::context_excerpts_read_only_selected_bodies_and_do_not_count_nonhistorical_items",
+      "host_rpc::storage::timeline::tests::context_excerpts_cannot_read_a_deleted_conversation"
     ]
   },
   "obsolete_files": [
