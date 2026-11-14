@@ -11,5 +11,5 @@ expect "ホストで操作に失敗しました。" 20000
 expect "fixture fork storage is unavailable"
 screenshot failed
 press ここから会話を分岐
-expect "Simulator conversation" 20000
-expect "分岐に失敗する会話です" after "Simulator conversation"
+expect "Simulator conversation (1)" 20000
+expect "分岐に失敗する会話です" after "Simulator conversation (1)"

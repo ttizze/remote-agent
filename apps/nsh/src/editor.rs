@@ -302,11 +302,6 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                     .w_full()
             },
         ))
-        .map(|screen| {
-            #[cfg(desktop)]
-            let screen = screen.child(surroundings.selection_bar());
-            screen
-        })
 }
 
 pub(crate) fn editors() -> impl Element {
