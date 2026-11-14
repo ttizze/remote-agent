@@ -205,6 +205,46 @@ async fn native_source_queries_use_canonical_ownership_across_provider_switches(
     assert_eq!(owners.len(), 2);
     assert_eq!(owners[&codex_native], session);
     assert_eq!(owners[&claude_native], session);
+    // Replacing the current native reference must not release the previous
+    // identity: accepted attempts still own that provider conversation.
+    let state = storage.thread_state(&session.id, &[]).unwrap();
+    let original = state
+        .provider_threads
+        .values()
+        .find(|thread| thread.provider_instance_id == ProviderKind::Codex.key())
+        .unwrap();
+    let mut rebound = original.clone();
+    rebound.native_thread_ref.as_mut().unwrap().native_id = Some("codex-replacement".into());
+    let now = commands::at();
+    storage
+        .observe_thread(&session.id, &[], &now, |_| {
+            Ok(model::Decision {
+                changes: vec![model::Change::ProviderThread(rebound.clone())],
+                ..Default::default()
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        storage.native_owner(&codex_native).unwrap(),
+        Some(session.clone())
+    );
+    assert!(storage.active_sources().unwrap().contains(&codex_native));
+    let replacement = SessionRef::new(ProviderKind::Codex, "codex-replacement".into()).unwrap();
+    assert!(storage.active_sources().unwrap().contains(&replacement));
+    let other = create(&service, directory.path().to_str().unwrap(), None).await;
+    let mut stolen = original.clone();
+    stolen.id = "foreign-claim".into();
+    stolen.app_thread_id = Some(other.application_id());
+    let error = storage
+        .observe_thread(&other.id, &[], &now, |_| {
+            Ok(model::Decision {
+                changes: vec![model::Change::ProviderThread(stolen)],
+                ..Default::default()
+            })
+        })
+        .unwrap_err();
+    assert!(error.contains("belongs to another app thread"), "{error}");
+    assert_eq!(storage.native_owner(&codex_native).unwrap(), Some(session));
 }
 
 #[tokio::test]
