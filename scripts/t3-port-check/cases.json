@@ -122,7 +122,8 @@
       "host_rpc::storage::tests::one_day_event_retention_resets_old_cursors_and_keeps_command_receipts",
       "host_rpc::storage::tests::providerless_and_native_addresses_keep_separate_rows_receipts_and_parents",
       "host_rpc::runtime::t3_contract::native_source_queries_use_canonical_ownership_across_provider_switches",
-      "host_rpc::storage::event_store::tests::committed_content_updates_the_thread_clock_but_explicit_metadata_keeps_its_timestamp"
+      "host_rpc::storage::event_store::tests::committed_content_updates_the_thread_clock_but_explicit_metadata_keeps_its_timestamp",
+      "host_rpc::runtime::native::tests::weak_native_plan_ids_are_scoped_across_conversations_and_successive_turns_without_changing_raw_references"
     ],
     "agent-protocol": [
       "orchestration::tests::fork_tests::a_queued_input_claims_undelivered_fork_context_when_activated",
@@ -441,7 +442,8 @@
       "host_rpc::service::titles::tests::task_list_refreshes_branding_for_all_project_headers",
       "host_rpc::storage::tests::catalog_failure_keeps_rows_and_only_the_current_claim_changes_their_confidence",
       "host_rpc::storage::tests::each_header_producer_replays_to_the_next_snapshot::case_1",
-      "host_rpc::storage::tests::unknown_native_activity_stays_unknown_until_the_current_source_confirms_idle"
+      "host_rpc::storage::tests::unknown_native_activity_stays_unknown_until_the_current_source_confirms_idle",
+      "host_rpc::runtime::native::tests::strong_native_item_ids_keep_the_pinned_global_identity_and_match_text_updates"
     ]
   },
   "obsolete_files": [
