@@ -8,6 +8,7 @@ mod fork;
 pub(crate) mod native;
 mod permissions;
 mod retention;
+mod rollback;
 mod usage;
 
 use crate::providers::Failure;
@@ -1158,6 +1159,55 @@ impl Agent for Codex {
     }
     async fn discard_workspace_processes(&self, _dir: &std::path::Path) -> Result<(), Failure> {
         Ok(())
+    }
+    async fn rollback(
+        &self,
+        id: &str,
+        retained: Option<&str>,
+        first_removed: Option<&str>,
+        cwd: &str,
+        browser: Option<Value>,
+    ) -> Result<crate::providers::RollbackResult, Failure> {
+        if let Some(removed) = first_removed {
+            if id.is_empty() || removed.is_empty() || retained.is_some_and(str::is_empty) {
+                return Err(Failure::new(
+                    "invalid_rollback_history",
+                    "Native rollback references are empty",
+                ));
+            }
+            let metadata: Value = self
+                .request(
+                    "thread/read",
+                    &serde_json::json!({"threadId":id,"includeTurns":false}),
+                )
+                .await?;
+            if metadata["thread"]["id"].as_str() != Some(id)
+                || metadata["thread"]["historyMode"].as_str() != Some("paginated")
+            {
+                return Err(Failure::new(
+                    "invalid_rollback_history",
+                    "Codex rollback requires this thread's paginated native history",
+                ));
+            }
+            match metadata["thread"]["status"]["type"].as_str() {
+                Some("active" | "running") => {
+                    return Err(Failure::new(
+                        "provider_switch_busy",
+                        "Codex is still running",
+                    ));
+                }
+                Some("notLoaded") => self.resume(id, Some(cwd), browser, true).await?,
+                _ => {}
+            }
+            rollback::request(id, retained, removed, |method, params| async move {
+                self.request(method, &params).await
+            })
+            .await?;
+        }
+        Ok(crate::providers::RollbackResult {
+            native_id: id.into(),
+            head_id: retained.map(str::to_owned),
+        })
     }
     async fn fork(
         &self,

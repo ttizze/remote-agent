@@ -31,6 +31,7 @@ pub(in crate::host_rpc) mod recovery;
 #[cfg(test)]
 mod replay;
 mod resources;
+mod rollback;
 mod rpc;
 pub(in crate::host_rpc) mod stream;
 #[cfg(test)]

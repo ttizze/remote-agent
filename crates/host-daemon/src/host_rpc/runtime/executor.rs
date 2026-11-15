@@ -42,7 +42,7 @@ pub(super) fn provider_capabilities(
     capabilities
 }
 
-fn native_ref(provider: ProviderKind, id: &str) -> model::ProviderRef {
+pub(super) fn native_ref(provider: ProviderKind, id: &str) -> model::ProviderRef {
     model::ProviderRef {
         driver: provider.driver().into(),
         native_id: Some(id.into()),
@@ -383,6 +383,25 @@ impl Runtime {
                 provider_session_id,
                 ..
             } => Self::detach_native_session(service, effect, worker, provider_session_id).await?,
+            Request::ProviderThreadRollback {
+                provider_thread_id,
+                checkpoint_id,
+                scope_id,
+                restore_files,
+            } => {
+                if *restore_files == Some(true) {
+                    return Err("filesystem checkpoint restoration is unavailable".into());
+                }
+                Self::rollback_thread(
+                    service,
+                    effect,
+                    worker,
+                    provider_thread_id,
+                    checkpoint_id,
+                    scope_id,
+                )
+                .await?;
+            }
             _ => return Err("native effect handler has not been connected".into()),
         }
         // A guarded decision may already have settled an unknown or failed
