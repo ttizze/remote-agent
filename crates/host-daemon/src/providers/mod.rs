@@ -144,6 +144,12 @@ pub(crate) enum SubmissionTarget<'a> {
     Start { cwd: &'a str },
 }
 
+impl<'a> SubmissionTarget<'a> {
+    pub(crate) fn start(cwd: &'a str, _resume_at: Option<&'a str>, _native_has_turns: bool) -> Self {
+        Self::Start { cwd }
+    }
+}
+
 /// The actual resource/cursor returned by a provider's conversation rewind.
 pub(crate) struct RollbackResult {
     pub native_id: String,

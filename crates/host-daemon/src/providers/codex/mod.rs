@@ -1094,7 +1094,7 @@ impl Agent for Codex {
                 .await?;
                 Some(turn.into())
             }
-            SubmissionTarget::Start { cwd } => {
+            SubmissionTarget::Start { cwd, .. } => {
                 self.resume(&input.thread_id.id, Some(cwd), browser, reload)
                     .await?;
                 self.scopes.reserve(&input.thread_id.id, execution);
@@ -1826,7 +1826,7 @@ rl.on('line', line => {
         let (receipt, started) = tokio::join!(
             agent.submit(
                 &input,
-                crate::providers::SubmissionTarget::Start { cwd: "/fixture" },
+                crate::providers::SubmissionTarget::start("/fixture", None, false),
                 false,
                 None,
                 execution
@@ -1860,7 +1860,7 @@ rl.on('line', line => {
                 agent
                     .submit(
                         &input,
-                        crate::providers::SubmissionTarget::Start { cwd: "/fixture" },
+                        crate::providers::SubmissionTarget::start("/fixture", None, false),
                         false,
                         None,
                         uuid::Uuid::new_v4()

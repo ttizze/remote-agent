@@ -772,7 +772,7 @@ impl Runtime {
         let submitted = agent
             .submit(
                 &input,
-                SubmissionTarget::Start { cwd: &cwd },
+                SubmissionTarget::start(&cwd, None, false),
                 reload,
                 service.browser_config(&target.to_string())?,
                 execution,
