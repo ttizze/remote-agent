@@ -47,6 +47,7 @@ pub fn summary(
             rename: !subagent,
             steer: false,
             model_change: false,
+            rollback: false,
         }),
         updated_at: chrono::DateTime::parse_from_rfc3339(&shell.thread.updated_at)
             .ok()
