@@ -21,11 +21,13 @@ impl Storage {
         &self,
         origin: &model::ProviderThreadFork,
         source_point: Option<&model::ContextSourcePoint>,
-    ) -> Result<Option<(model::ProviderRef, model::ProviderRef)>, String> {
+    ) -> Result<Option<(model::ProviderRef, Option<model::ProviderRef>)>, String> {
         self.with(|connection| {
             let tx = connection.transaction().map_err(failure)?;
-            if let Some(point) = source_point {
-                let state = projections::metadata(&tx, &point.thread_id)?;
+            let source_state = source_point
+                .map(|point| projections::metadata(&tx, &point.thread_id))
+                .transpose()?;
+            if let (Some(point), Some(state)) = (source_point, source_state.as_ref()) {
                 if let Some(run_id) = &point.run_id {
                     let run = state
                         .runs
@@ -70,10 +72,55 @@ impl Storage {
             }
             let source = turn
                 .native_thread_ref
+                .clone()
                 .ok_or("native fork source reference is missing")?;
-            let through = turn
-                .native_turn_ref
-                .ok_or("native fork turn reference is missing")?;
+            let source_state = match source_state {
+                None if thread.driver == "claudeAgent" => Some(projections::metadata(
+                    &tx,
+                    thread
+                        .app_thread_id
+                        .as_deref()
+                        .ok_or("native fork source conversation is missing")?,
+                )?),
+                state => state,
+            };
+            if source_state
+                .as_ref()
+                .is_some_and(|state| state.is_rolled_back_attempt(turn.run_attempt_id.as_deref()))
+            {
+                return Err(
+                    "native fork boundary no longer belongs to the current provider conversation"
+                        .into(),
+                );
+            }
+            let mut through = turn.native_turn_ref.clone();
+            if thread.driver == "claudeAgent" {
+                if !through
+                    .as_ref()
+                    .and_then(|reference| reference.native_id.as_deref())
+                    .is_some_and(model::is_claude_assistant_cursor)
+                {
+                    let state = source_state
+                        .as_ref()
+                        .ok_or("native fork source conversation is missing")?;
+                    if state.provider_turns.values().any(|candidate| {
+                        candidate.provider_thread_id == thread.id
+                            && candidate.ordinal > turn.ordinal
+                            && candidate.status.is_terminal()
+                            && !state.is_rolled_back_attempt(candidate.run_attempt_id.as_deref())
+                    }) {
+                        return Err(
+                            "Claude assistant cursor is unavailable for this earlier fork boundary"
+                                .into(),
+                        );
+                    }
+                    // A rewind leaves the discarded raw transcript intact.
+                    // Latest missing-cursor forks copy its pin, or the full head.
+                    through = thread.native_conversation_head_ref.clone();
+                }
+            } else if through.is_none() {
+                return Err("native fork turn reference is missing".into());
+            }
             tx.commit().map_err(failure)?;
             Ok(Some((source, through)))
         })

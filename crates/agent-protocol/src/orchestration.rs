@@ -140,6 +140,15 @@ status!(ProviderTurnStatus {
     Failed,
     Cancelled
 });
+
+impl ProviderTurnStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Interrupted | Self::Failed | Self::Cancelled
+        )
+    }
+}
 status!(HandoffStatus {
     Pending,
     Ready,
@@ -504,6 +513,11 @@ pub fn native_head_id<'a>(
         .filter(|id| !id.is_empty())
         .map(Some)
         .ok_or_else(|| "native conversation head has no identity".into())
+}
+
+/// Claude's raw user/control turn handle is not an SDK history position.
+pub fn is_claude_assistant_cursor(id: &str) -> bool {
+    !id.is_empty() && !id.starts_with("turn:")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

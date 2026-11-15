@@ -10,16 +10,6 @@ pub struct RollbackTarget {
     pub first_removed_turn: Option<ProviderRef>,
 }
 
-fn terminal(turn: &ProviderTurn) -> bool {
-    matches!(
-        turn.status,
-        ProviderTurnStatus::Completed
-            | ProviderTurnStatus::Interrupted
-            | ProviderTurnStatus::Failed
-            | ProviderTurnStatus::Cancelled
-    )
-}
-
 /// Read actual checkpoint and provider-turn identities, never inferred native IDs.
 pub fn rollback_target(
     state: &State,
@@ -102,38 +92,49 @@ pub fn rollback_target(
                 .and_then(|attempt| attempt.provider_turn_id.as_ref())
                 .and_then(|id| state.provider_turns.get(id))
         });
-        Some(retained_rollback_boundary(run, attempt, thread, turn)?)
+        let (native_ordinal, reference) = retained_rollback_boundary(run, attempt, thread, turn)?;
+        let compact = thread.driver == "claudeAgent" && state.turn_items.get(&user_item_id(&state.thread.id,&run.user_message_id)).is_some_and(|item| {
+            matches!(&item.body, TurnItemBody::UserMessage {message_id,text,attachments,..}
+                if message_id == &run.user_message_id && crate::operations::is_compaction_message(text,attachments.len()))
+        });
+        Some((native_ordinal, reference, compact))
     };
-    let after = retained.as_ref().map_or(0, |(ordinal, _)| *ordinal);
+    let after = retained.as_ref().map_or(0, |(ordinal, _, _)| *ordinal);
     let first_removed = state
         .provider_turns
         .values()
         .filter(|turn| {
             turn.provider_thread_id == thread.id
                 && turn.ordinal > after
-                && terminal(turn)
-                && turn
-                    .run_attempt_id
-                    .as_ref()
-                    .and_then(|id| state.run_attempts.get(id))
-                    .and_then(|attempt| state.runs.get(&attempt.run_id))
-                    .is_none_or(|run| run.status != RunStatus::RolledBack)
+                && turn.status.is_terminal()
+                && !state.is_rolled_back_attempt(turn.run_attempt_id.as_deref())
         })
         .min_by_key(|turn| turn.ordinal);
-    let retained_turn = if ordinal == 0 && thread.driver == "claudeAgent" {
-        thread
-            .native_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.fork_head_message_id.as_ref())
-            .map(|head| ProviderRef {
-                driver: thread.driver.clone(),
-                native_id: Some(head.clone()),
-                strength: NativeRefStrength::Strong,
-                fingerprint: None,
-                ordinal: None,
+    let retained_turn = if thread.driver == "claudeAgent" {
+        let compact = retained.as_ref().is_some_and(|(_, _, compact)| *compact);
+        let previous = state
+            .provider_turns
+            .values()
+            .filter(|turn| {
+                turn.provider_thread_id == thread.id
+                    && turn.ordinal < after
+                    && !state.is_rolled_back_attempt(turn.run_attempt_id.as_deref())
             })
+            .max_by_key(|turn| turn.ordinal)
+            .filter(|turn| turn.native_thread_ref == thread.native_thread_ref)
+            .and_then(|turn| turn.native_turn_ref.as_ref());
+        claude_rollback_head(
+            retained.map(|(_, reference, _)| reference),
+            thread
+                .native_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.fork_head_message_id.as_deref()),
+            first_removed.is_some(),
+            compact,
+            previous,
+        )
     } else {
-        retained.map(|(_, reference)| reference)
+        retained.map(|(_, reference, _)| reference)
     };
     native_head_id(&thread.driver, retained_turn.as_ref())?;
     Ok(RollbackTarget {
@@ -143,6 +144,42 @@ pub fn rollback_target(
             .map(|turn| native_boundary(thread, turn))
             .transpose()?,
     })
+}
+
+/// Only cursor-less compaction can omit a retained prompt. Keep other missing
+/// cursors intact so the native adapter refuses them after closing its query.
+fn claude_rollback_head(
+    retained: Option<ProviderRef>,
+    fork_head: Option<&str>,
+    has_later: bool,
+    compact: bool,
+    previous: Option<&ProviderRef>,
+) -> Option<ProviderRef> {
+    let Some(retained) = retained else {
+        return fork_head.map(|head| ProviderRef {
+            driver: "claudeAgent".into(),
+            native_id: Some(head.into()),
+            strength: NativeRefStrength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+    };
+    if has_later
+        && compact
+        && !retained
+            .native_id
+            .as_deref()
+            .is_some_and(is_claude_assistant_cursor)
+        && let Some(previous) = previous.filter(|previous| {
+            previous
+                .native_id
+                .as_deref()
+                .is_some_and(is_claude_assistant_cursor)
+        })
+    {
+        return Some(previous.clone());
+    }
+    Some(retained)
 }
 
 /// The retained app run must name a real owned attempt and its latest native
@@ -164,7 +201,7 @@ pub fn retained_rollback_boundary(
     let turn = turn
         .filter(|turn| {
             turn.provider_thread_id == thread.id
-                && terminal(turn)
+                && turn.status.is_terminal()
                 && (turn.run_attempt_id.as_ref() == Some(&attempt.id)
                     || (turn.run_attempt_id.is_none()
                         && attempt.provider_turn_id.as_ref() == Some(&turn.id)))

@@ -2673,7 +2673,7 @@ impl Agent for Claude {
             model = record.model.clone();
         }
         if let Some(cursor) = retained {
-            let synthetic = cursor.starts_with("turn:");
+            let synthetic = !agent_protocol::orchestration::is_claude_assistant_cursor(cursor);
             if cursor.is_empty() || (synthetic && first_removed.is_some()) {
                 return Err(failure(
                     "Claude assistant cursor is unavailable for this retained turn".into(),
@@ -2706,7 +2706,8 @@ impl Agent for Claude {
     ) -> Result<crate::providers::ForkResult, Failure> {
         let failure = |error: String| Failure::new("fork_failed", error);
         Uuid::parse_str(id).map_err(|_| failure("invalid Claude ID".into()))?;
-        if turn.is_some_and(|turn| turn.is_empty() || turn.starts_with("turn:")) {
+        if turn.is_some_and(|turn| !agent_protocol::orchestration::is_claude_assistant_cursor(turn))
+        {
             return Err(failure("Claude assistant cursor is unavailable".into()));
         }
         let record = self

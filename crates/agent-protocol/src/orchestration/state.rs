@@ -200,6 +200,15 @@ impl State {
         })
     }
 
+    /// T3's rolledBackAttemptIds: audit turns stay saved, while an owned
+    /// rolled-back attempt no longer bounds the current native conversation.
+    pub fn is_rolled_back_attempt(&self, attempt_id: Option<&str>) -> bool {
+        attempt_id
+            .and_then(|id| self.run_attempts.get(id))
+            .and_then(|attempt| self.runs.get(&attempt.run_id))
+            .is_some_and(|run| run.status == RunStatus::RolledBack)
+    }
+
     pub fn active_run(&self) -> Option<&Run> {
         self.runs
             .values()

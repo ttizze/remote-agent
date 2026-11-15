@@ -412,8 +412,25 @@ pub(super) fn load(
     item_ids: &[String],
 ) -> Result<model::State, String> {
     let mut state = metadata(connection, thread_id)?;
-    state.turn_items = working_items(connection, thread_id, item_ids)?;
     state.effects = event_store::effects(connection, thread_id)?;
+    // Rollback distinguishes a compaction from an ordinary retained prompt.
+    // Load that canonical input in both the native-effect read and its fenced
+    // publication transaction; ordinary commands still read no past bodies.
+    let mut addressed = item_ids.to_vec();
+    addressed.extend(state.effects.values().filter_map(|effect| {
+        let model::EffectRequest::ProviderThreadRollback { checkpoint_id, .. } = &effect.request
+        else {
+            return None;
+        };
+        let ordinal = state
+            .checkpoints
+            .get(checkpoint_id)?
+            .app_run_ordinal
+            .filter(|ordinal| *ordinal > 0)?;
+        let run = state.runs.values().find(|run| run.ordinal == ordinal)?;
+        Some(model::user_item_id(thread_id, &run.user_message_id))
+    }));
+    state.turn_items = working_items(connection, thread_id, &addressed)?;
     Ok(state)
 }
 

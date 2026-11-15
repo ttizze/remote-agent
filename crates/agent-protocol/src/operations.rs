@@ -129,10 +129,15 @@ pub enum Input {
     LocalImage { path: String },
     Mention { path: String, name: String },
 }
+/// A compaction command carries no user attachment to discard.
+pub fn is_compaction_message(text: &str, attachment_count: usize) -> bool {
+    attachment_count == 0 && text.trim().eq_ignore_ascii_case("/compact")
+}
+
 impl Input {
     /// T3's isCompactionCommandMessage: a standalone command without attachments.
     pub fn is_compaction(input: &[Self]) -> bool {
-        matches!(input, [Self::Text { text }] if text.trim().eq_ignore_ascii_case("/compact"))
+        matches!(input, [Self::Text { text }] if is_compaction_message(text, 0))
     }
 
     pub fn message_parts(input: &[Self]) -> Vec<crate::items::MessagePart> {

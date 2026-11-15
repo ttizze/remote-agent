@@ -206,15 +206,8 @@ async fn fork_native(
         .as_deref()
         .filter(|id| !id.is_empty())
         .ok_or_else(invalid)?;
-    let turn_id = turn
-        .native_id
-        .as_deref()
-        .filter(|id| !id.is_empty())
-        .ok_or_else(invalid)?;
-    if source.driver != provider.driver()
-        || source.strength != model::NativeRefStrength::Strong
-        || turn.driver != provider.driver()
-    {
+    let turn_id = model::native_head_id(provider.driver(), turn.as_ref()).map_err(|_| invalid())?;
+    if source.driver != provider.driver() || source.strength != model::NativeRefStrength::Strong {
         return Err(invalid());
     }
     let native = SessionRef::new(provider, source_id.to_owned()).map_err(|_| invalid())?;
@@ -234,10 +227,7 @@ async fn fork_native(
     {
         return Ok(None);
     }
-    agent
-        .fork(source_id, Some(turn_id), browser)
-        .await
-        .map(Some)
+    agent.fork(source_id, turn_id, browser).await.map(Some)
 }
 
 impl Runtime {
