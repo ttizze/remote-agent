@@ -9,6 +9,10 @@ const SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 use super::*;
 use agent_protocol::orchestration as model;
 
+#[cfg(test)]
+#[path = "executor_fork_tests.rs"]
+mod fork_tests;
+
 pub(super) fn context<'a>(state: &model::State, id: &'a str, now: &'a str) -> model::Context<'a> {
     model::Context {
         command_id: id,

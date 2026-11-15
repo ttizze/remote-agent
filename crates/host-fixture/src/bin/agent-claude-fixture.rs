@@ -296,6 +296,7 @@ impl PermissionScenario {
 enum InputScenario {
     Crash,
     Error,
+    NoAssistant,
     BackgroundShell,
     BackgroundRoster,
     Wait,
@@ -308,6 +309,8 @@ impl InputScenario {
         match text {
             "crash" => Self::Crash,
             _ if result_error => Self::Error,
+            "no-assistant" => Self::NoAssistant,
+            _ if text.trim().eq_ignore_ascii_case("/compact") => Self::NoAssistant,
             "background-shell" => Self::BackgroundShell,
             "background-roster" => Self::BackgroundRoster,
             "wait" => Self::Wait,
@@ -638,6 +641,15 @@ impl Fixture {
                 emit(
                     &self.session,
                     json!({"type":"result","session_id":self.session,"is_error":true,"errors":["fixture inference failed"]}),
+                );
+                None
+            }
+            InputScenario::NoAssistant => {
+                // CLI commands can finish without a root assistant envelope.
+                // Persist/echo the real user input, then only the SDK result.
+                emit(
+                    &self.session,
+                    json!({"type":"result","subtype":"success","session_id":self.session,"is_error":false,"result":""}),
                 );
                 None
             }
