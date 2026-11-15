@@ -141,6 +141,8 @@ pub struct Turn {
     pub id: crate::ids::TurnId,
     pub provider: Option<crate::session::ProviderKind>,
     pub supports_fork: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_rewind: Option<bool>,
     #[serde(default)]
     pub status: TurnStatus,
     pub items: Option<Vec<Arc<Item>>>,

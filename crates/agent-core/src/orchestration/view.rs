@@ -17,9 +17,10 @@ pub fn project(
     let mut capabilities = session::Capabilities {
         steer: selected == capability_provider && capabilities.steer,
         model_change: selected == capability_provider && capabilities.model_change,
+        rollback: selected == capability_provider && capabilities.rollback,
         ..capabilities
     };
-    if let Some(session) = projection
+    let native = projection
         .thread
         .active_provider_thread_id
         .as_ref()
@@ -28,15 +29,17 @@ pub fn project(
                 &thread.id == id
                     && thread.provider_instance_id == projection.thread.provider_instance_id
             })
-        })
+        });
+    let native_session = native
         .and_then(|thread| thread.provider_session_id.as_ref())
         .and_then(|id| {
             projection.provider_sessions.iter().find(|session| {
                 &session.id == id
                     && session.provider_instance_id == projection.thread.provider_instance_id
             })
-        })
-    {
+        });
+    if let Some(session) = native_session {
+        capabilities.rollback = session.capabilities.can_rollback_conversation();
         capabilities.steer = session.capabilities.turns.supports_active_steering;
         capabilities.model_change = session
             .capabilities
@@ -60,7 +63,17 @@ pub fn project(
         return Err("conversation identity changed".into());
     }
     let id = identity.clone();
-    let turns = timeline(projection, provider, details, capabilities.fork)?;
+    let rewindable = native
+        .filter(|_| capabilities.rollback && native_session.is_some())
+        .map(|native| rewindable_runs(projection, native, snapshot.has_more_history))
+        .unwrap_or_default();
+    let turns = timeline(
+        projection,
+        provider,
+        details,
+        capabilities.fork,
+        &rewindable,
+    )?;
     let mut queue = op::InputQueue::default();
     let mut preparations = Vec::new();
     let mut submissions = BTreeMap::new();
@@ -409,11 +422,134 @@ pub(crate) fn fork_point(
     })
 }
 
+// The display sees a partial history window. As in T3 ChatView.logic,
+// only a local app run with an available retained ordinal/checkpoint can be
+// offered. The Host separately validates the complete state before native I/O.
+fn rewindable_runs(
+    projection: &ThreadProjection,
+    native: &model::ProviderThread,
+    has_more_history: bool,
+) -> BTreeSet<String> {
+    if native.provider_instance_id != projection.thread.model_selection.instance_id
+        || native.app_thread_id.as_deref() != Some(projection.thread.id.as_str())
+        || native
+            .native_thread_ref
+            .as_ref()
+            .and_then(|reference| reference.native_id.as_deref())
+            .is_none_or(str::is_empty)
+    {
+        return BTreeSet::new();
+    }
+    let mut available = BTreeSet::from([0]);
+    let mut latest = BTreeMap::<&str, &model::ProviderTurn>::new();
+    for turn in &projection.provider_turns {
+        if let Some(attempt) = turn.run_attempt_id.as_deref() {
+            let slot = latest.entry(attempt).or_insert(turn);
+            if turn.ordinal > slot.ordinal {
+                *slot = turn;
+            }
+        }
+    }
+    let mut runs: Vec<_> = projection
+        .runs
+        .iter()
+        .filter(|run| {
+            matches!(
+                run.status,
+                model::RunStatus::Completed
+                    | model::RunStatus::Failed
+                    | model::RunStatus::Interrupted
+                    | model::RunStatus::Cancelled
+            )
+        })
+        .collect();
+    runs.sort_by_key(|run| run.ordinal);
+    let attempts: BTreeMap<_, _> = projection
+        .attempts
+        .iter()
+        .map(|attempt| (attempt.id.as_str(), attempt))
+        .collect();
+    let by_id: BTreeMap<_, _> = projection
+        .provider_turns
+        .iter()
+        .map(|turn| (turn.id.as_str(), turn))
+        .collect();
+    for run in &runs {
+        let attempt = run
+            .active_attempt_id
+            .as_deref()
+            .and_then(|id| attempts.get(id).copied());
+        let turn = run
+            .active_attempt_id
+            .as_deref()
+            .and_then(|attempt| latest.get(attempt).copied())
+            .or_else(|| {
+                attempt
+                    .and_then(|attempt| attempt.provider_turn_id.as_deref())
+                    .and_then(|id| by_id.get(id).copied())
+            });
+        if model::retained_rollback_boundary(run, attempt, native, turn).is_ok() {
+            available.insert(run.ordinal);
+        }
+    }
+    let scopes: BTreeSet<_> = projection
+        .checkpoint_scopes
+        .iter()
+        .filter(|scope| scope.thread_id == projection.thread.id)
+        .map(|scope| scope.id.as_str())
+        .collect();
+    let checkpoints: BTreeSet<_> = projection
+        .checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            checkpoint.thread_id == projection.thread.id
+                && scopes.contains(checkpoint.scope_id.as_str())
+                && checkpoint.is_conversation_rewind_ready()
+        })
+        .map(|checkpoint| {
+            (
+                checkpoint.scope_id.as_str(),
+                checkpoint.app_run_ordinal.unwrap_or(0),
+            )
+        })
+        .collect();
+    let roots: BTreeMap<_, _> = projection
+        .nodes
+        .iter()
+        .filter(|node| node.thread_id == projection.thread.id)
+        .filter_map(|node| {
+            node.checkpoint_scope_id
+                .as_deref()
+                .map(|scope| (node.id.as_str(), scope))
+        })
+        .collect();
+    let mut previous = 0;
+    let mut result = BTreeSet::new();
+    for run in runs {
+        let retained = previous;
+        previous = run.ordinal;
+        if retained == 0 && has_more_history {
+            continue;
+        }
+        if available.contains(&retained)
+            && run
+                .root_node_id
+                .as_deref()
+                .and_then(|root| roots.get(root))
+                .is_some_and(|scope| checkpoints.contains(&(*scope, retained)))
+        {
+            result.insert(run.id.clone());
+        }
+    }
+    result
+}
+
 fn timeline(
     projection: &ThreadProjection,
     provider: session::ProviderKind,
     details: &BTreeMap<(String, String), Arc<model::TurnItem>>,
     can_fork: bool,
+    rewindable: &BTreeSet<String>,
 ) -> Result<Vec<Arc<models::Turn>>, String> {
     let mut turns: Vec<Arc<models::Turn>> = Vec::new();
     let native_by_id = projection
@@ -492,6 +628,11 @@ fn timeline(
                             .and_then(|reference| driver_kind(&reference.driver).ok())
                     })
             },
+            supports_rewind: Some(
+                local
+                    && row.source_thread_id == projection.thread.id
+                    && run.is_some_and(|run| rewindable.contains(&run.id)),
+            ),
             supports_fork: Some(
                 row.visibility == Visibility::Inherited
                     || (local

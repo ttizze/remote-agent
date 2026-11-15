@@ -40,7 +40,10 @@ pub use commands::{
     promote_queued, remove_input, user_item_id,
 };
 mod rollback;
-pub use rollback::{RollbackTarget, rewind, rollback_completed, rollback_failed, rollback_target};
+pub use rollback::{
+    RollbackTarget, retained_rollback_boundary, rewind, rollback_completed, rollback_failed,
+    rollback_target,
+};
 mod execution;
 mod native_observation;
 pub use native_observation::{

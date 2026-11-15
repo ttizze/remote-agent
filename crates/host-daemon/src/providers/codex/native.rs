@@ -617,6 +617,7 @@ pub(crate) fn parse_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
         id: field(&value, "id")?,
         provider: None,
         supports_fork: None,
+        supports_rewind: None,
         status: turn_status(value["status"].as_str()),
         items: optional_array(take_value(&mut value, "items"))?
             .map(|items| {

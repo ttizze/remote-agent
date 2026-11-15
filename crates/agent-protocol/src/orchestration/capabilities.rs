@@ -167,3 +167,11 @@ pub struct ProviderCapabilities {
     pub identity: IdentityCapabilities,
     pub runtime_policy: RuntimePolicyCapabilities,
 }
+
+impl ProviderCapabilities {
+    pub fn can_rollback_conversation(&self) -> bool {
+        self.threads.can_rollback_thread
+            && self.checkpointing.provider_can_rollback_conversation
+            && self.checkpointing.provider_rollback_returns_snapshot
+    }
+}

@@ -737,6 +737,9 @@ pub fn project_conversation(
     }
     let previous = previous.as_ref().filter(|old| source.id == old.source.id);
     let supports_fork = source.capabilities.unwrap_or_default().fork;
+    let supports_rewind = source.capabilities.unwrap_or_default().rollback;
+    let previous_supports_rewind =
+        previous.is_some_and(|old| old.source.capabilities.unwrap_or_default().rollback);
     let previous_supports_fork =
         previous.is_some_and(|old| old.source.capabilities.unwrap_or_default().fork);
     let cached: HashMap<_, _> = previous
@@ -844,6 +847,7 @@ pub fn project_conversation(
                 && language == old.language
                 && Arc::ptr_eq(turn, &old.source)
                 && (turn.supports_fork.is_some() || supports_fork == previous_supports_fork)
+                && supports_rewind == previous_supports_rewind
                 && old.rows.iter().find_map(|row| match &row.content {
                     ConversationRowContent::ProviderHandoff { text } => Some(text),
                     _ => None,
@@ -861,7 +865,7 @@ pub fn project_conversation(
             }
             render_turn(
                 source.id.as_ref(),
-                supports_fork,
+                (supports_fork, supports_rewind),
                 handoff,
                 (turn.clone(), occurrence, language),
                 pending.cloned().collect(),
@@ -1449,7 +1453,7 @@ mod preparation_tests {
 
 fn render_turn(
     session: Option<&crate::session::SessionRef>,
-    supports_fork: bool,
+    (supports_fork, supports_rewind): (bool, bool),
     handoff: Option<String>,
     (source, turn_occurrence, language): (Arc<models::Turn>, usize, UiLanguage),
     pending: PendingItems,
@@ -1459,6 +1463,7 @@ fn render_turn(
     let session_provider = session.and_then(|session| session.provider);
     let provider = source.provider.or(session_provider);
     let supports_fork = source.supports_fork.unwrap_or(supports_fork);
+    let supports_rewind = supports_rewind && source.supports_rewind.unwrap_or(true);
     let cached: HashMap<_, _> = previous
         .into_iter()
         .filter(|turn| turn.source.provider.or(session_provider) == provider)
@@ -1568,7 +1573,7 @@ fn render_turn(
         let queued = user && !steer && source.queued && !queued_shown.replace(true);
         let edit_turn_id = (user
             && !steer
-            && supports_fork
+            && supports_rewind
             && source.status != models::TurnStatus::Running
             && !edit_shown.replace(true))
         .then(|| source.id.clone());
@@ -2780,7 +2785,7 @@ mod tests {
             json!({"id":id,"status":"completed","clientInputId":null,
             "body":{"inline":{"body":{"assistantText":{"text":id,"phase":"final"}}}}})
         };
-        for (status, fork, expected) in [
+        for (status, rollback, expected) in [
             ("completed", true, [Some("turn"), None]),
             ("failed", true, [Some("turn"), None]),
             ("running", true, [None, None]),
@@ -2794,7 +2799,7 @@ mod tests {
                 },
                 Arc::new(
                     serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},
-                        "capabilities":{"fork":fork},
+                        "capabilities":{"fork":true,"rollback":rollback},
                         "turns":[{"id":"turn","status":status,
                             "items":[user("opened"),answer("first"),user("steered"),answer("second")]}]}))
                     .unwrap(),
@@ -3185,7 +3190,7 @@ mod tests {
             );
             let projected = render_turn(
                 Some(&crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "session".into()).unwrap()),
-                false,
+                (false, false),
                 None,
                 (Arc::new(models::Turn {
                     id: "turn".into(),

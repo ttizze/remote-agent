@@ -60,16 +60,7 @@ pub fn rollback_target(
     {
         return Err("rewind provider selection is inconsistent".into());
     }
-    if !session.capabilities.threads.can_rollback_thread
-        || !session
-            .capabilities
-            .checkpointing
-            .provider_can_rollback_conversation
-        || !session
-            .capabilities
-            .checkpointing
-            .provider_rollback_returns_snapshot
-    {
+    if !session.capabilities.can_rollback_conversation() {
         return Err("provider conversation rollback is unavailable".into());
     }
     let scope = state
@@ -83,10 +74,7 @@ pub fn rollback_target(
         .filter(|checkpoint| {
             checkpoint.thread_id == state.thread.id
                 && checkpoint.scope_id == scope.id
-                && matches!(
-                    checkpoint.status,
-                    CheckpointStatus::Ready | CheckpointStatus::Missing
-                )
+                && checkpoint.is_conversation_rewind_ready()
         })
         .ok_or("rewind checkpoint is unavailable")?;
     let ordinal = checkpoint.app_run_ordinal.unwrap_or(0);
@@ -98,20 +86,25 @@ pub fn rollback_target(
             .values()
             .find(|run| run.ordinal == ordinal && run.status != RunStatus::RolledBack)
             .ok_or("rewind retained run is unavailable")?;
-        Some(
+        let attempt = run
+            .active_attempt_id
+            .as_ref()
+            .and_then(|id| state.run_attempts.get(id));
+        let latest = run.active_attempt_id.as_ref().and_then(|attempt| {
             state
                 .provider_turns
                 .values()
-                .filter(|turn| {
-                    turn.run_attempt_id.as_ref() == run.active_attempt_id.as_ref()
-                        && turn.provider_thread_id == thread.id
-                        && terminal(turn)
-                })
+                .filter(|turn| turn.run_attempt_id.as_ref() == Some(attempt))
                 .max_by_key(|turn| turn.ordinal)
-                .ok_or("rewind retained provider turn is unavailable")?,
-        )
+        });
+        let turn = latest.or_else(|| {
+            attempt
+                .and_then(|attempt| attempt.provider_turn_id.as_ref())
+                .and_then(|id| state.provider_turns.get(id))
+        });
+        Some(retained_rollback_boundary(run, attempt, thread, turn)?)
     };
-    let after = retained.map_or(0, |turn| turn.ordinal);
+    let after = retained.as_ref().map_or(0, |(ordinal, _)| *ordinal);
     let first_removed = state
         .provider_turns
         .values()
@@ -129,13 +122,48 @@ pub fn rollback_target(
         .min_by_key(|turn| turn.ordinal);
     Ok(RollbackTarget {
         ordinal,
-        retained_turn: retained
-            .map(|turn| native_boundary(thread, turn))
-            .transpose()?,
+        retained_turn: retained.map(|(_, reference)| reference),
         first_removed_turn: first_removed
             .map(|turn| native_boundary(thread, turn))
             .transpose()?,
     })
+}
+
+/// The retained app run must name a real owned attempt and its latest native
+/// turn. An external turn with no attempt never supplies a missing app cursor.
+/// UI projections may index these values differently from the DB-owned State.
+pub fn retained_rollback_boundary(
+    run: &Run,
+    attempt: Option<&RunAttempt>,
+    thread: &ProviderThread,
+    turn: Option<&ProviderTurn>,
+) -> Result<(u64, ProviderRef), String> {
+    let attempt = attempt
+        .filter(|attempt| {
+            Some(&attempt.id) == run.active_attempt_id.as_ref()
+                && attempt.run_id == run.id
+                && attempt.provider_thread_id == thread.id
+        })
+        .ok_or("rewind retained attempt is unavailable")?;
+    let turn = turn
+        .filter(|turn| {
+            turn.provider_thread_id == thread.id
+                && terminal(turn)
+                && (turn.run_attempt_id.as_ref() == Some(&attempt.id)
+                    || (turn.run_attempt_id.is_none()
+                        && attempt.provider_turn_id.as_ref() == Some(&turn.id)))
+        })
+        .ok_or("rewind retained provider turn is unavailable")?;
+    Ok((turn.ordinal, native_boundary(thread, turn)?))
+}
+
+impl Checkpoint {
+    pub fn is_conversation_rewind_ready(&self) -> bool {
+        matches!(
+            self.status,
+            CheckpointStatus::Ready | CheckpointStatus::Missing
+        ) && (self.app_run_ordinal.unwrap_or(0) != 0 || self.ordinal_within_scope == 0)
+    }
 }
 
 fn native_boundary(thread: &ProviderThread, turn: &ProviderTurn) -> Result<ProviderRef, String> {
@@ -193,11 +221,7 @@ pub fn rewind(state: &State, run_id: &str, context: Context<'_>) -> Result<Decis
         .find(|checkpoint| {
             checkpoint.scope_id == *scope_id
                 && checkpoint.app_run_ordinal.unwrap_or(0) == retained_ordinal
-                && (retained_ordinal != 0 || checkpoint.ordinal_within_scope == 0)
-                && matches!(
-                    checkpoint.status,
-                    CheckpointStatus::Ready | CheckpointStatus::Missing
-                )
+                && checkpoint.is_conversation_rewind_ready()
         })
         .ok_or("rewind checkpoint is unavailable")?;
     let provider = state
