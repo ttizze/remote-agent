@@ -582,8 +582,6 @@ fn sent_input(
 pub struct RewindCapture {
     scope: String,
     epoch: u64,
-    draft_text: String,
-    draft_attachments: Vec<Attachment>,
     original: Option<(String, Vec<Attachment>)>,
 }
 
@@ -604,12 +602,9 @@ impl Operation for RewindSession {
             .transpose()
             .map_err(PeerError::InvalidMessage)?
             .flatten();
-        let draft = snapshot.input.drafts.get(&DraftKey::from(&self.thread_id));
         Ok(RewindCapture {
             scope: snapshot.connection.storage_scope.clone(),
             epoch: snapshot.connection.epoch,
-            draft_text: draft.map_or_else(String::new, |draft| draft.text.clone()),
-            draft_attachments: draft.map_or_else(Vec::new, |draft| draft.attachments.clone()),
             original,
         })
     }
@@ -637,17 +632,17 @@ impl Operation for RewindSession {
             return Ok(Vec::new());
         }
         let id = self.thread_id;
-        let draft = snapshot.input.drafts.get(&DraftKey::from(&id));
-        let unchanged = draft.map_or(
-            captured.draft_text.is_empty() && captured.draft_attachments.is_empty(),
-            |draft| {
-                draft.text == captured.draft_text && draft.attachments == captured.draft_attachments
-            },
-        );
-        if unchanged && let Some((text, attachments)) = captured.original {
+        if let Some((text, attachments)) = captured.original {
             let drafts = Arc::make_mut(&mut snapshot.input.drafts);
             let draft = Arc::make_mut(drafts.entry(id.clone().into()).or_default());
-            draft.text = text;
+            // T3 chatViewSend.ts reads the latest prompt after native success.
+            // Keep input typed while waiting and append the recalled message.
+            if !text.is_empty() {
+                if !draft.text.is_empty() {
+                    draft.text.push_str("\n\n");
+                }
+                draft.text.push_str(&text);
+            }
             for attachment in attachments {
                 if !draft.attachments.contains(&attachment) {
                     draft.attachments.push(attachment);
