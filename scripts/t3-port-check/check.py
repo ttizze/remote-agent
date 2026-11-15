@@ -11,10 +11,11 @@ ROOT = Path(__file__).resolve().parents[2]
 CASE_PATH = Path(__file__).with_name("cases.json")
 CASES = json.loads(CASE_PATH.read_text())
 MODE = sys.argv[1:]
-if MODE not in ([], ["--holdout"], ["--baseline"]):
-    sys.exit("expected --baseline, --holdout, or no arguments")
+if MODE not in ([], ["--holdout"], ["--baseline"], ["--milestone"]):
+    sys.exit("expected --baseline, --holdout, --milestone, or no arguments")
 HOLDOUT = MODE == ["--holdout"]
 BASELINE = MODE == ["--baseline"]
+MILESTONE = MODE == ["--milestone"]
 
 
 def entries(groups):
@@ -30,13 +31,21 @@ def grouped(cases):
 
 held_out = entries(CASES["holdout"])
 scored = set() if HOLDOUT or BASELINE else entries(CASES["scenarios"])
-guards = held_out if HOLDOUT else set() if BASELINE else entries(CASES["guards"])
+all_guards = entries(CASES["guards"])
+# These previously passing checks exercise unchanged credentials/audio/browser
+# resources. The full common suite retains them; avoid their real-time budgets
+# on every conversation-storage step. A failing scenario cannot be deferred.
+deferred = entries(CASES.get("milestone_guards", {}))
+if not deferred <= all_guards or deferred & entries(CASES["scenarios"]):
+    sys.exit("Invalid check: only an already passing guard may be deferred")
+guards = held_out if HOLDOUT else all_guards if MILESTONE else all_guards - deferred
 crates = sorted({binary.split("::", 1)[0] for binary, _ in held_out | scored | guards} | (set() if HOLDOUT else {"agent-protocol", "agent-core", "host-daemon"}))
 command = [str(ROOT / "scripts/dev-env.sh"), "cargo", "nextest"]
 arguments = ["--locked", "--color", "never"]
 for crate in crates:
     arguments += ["-p", crate]
-held_out_filter = " | ".join(f"test(={name})" for _, name in sorted(held_out))
+excluded = held_out | (set() if HOLDOUT or MILESTONE else deferred)
+held_out_filter = " | ".join(f"test(={name})" for _, name in sorted(excluded))
 if held_out_filter:
     arguments += ["-E", held_out_filter if HOLDOUT else f"not({held_out_filter})"]
 
@@ -65,9 +74,14 @@ if result.returncode not in (0, 100) or "Summary" not in result.stdout or not ex
         print(f"new test needs baseline: {binary} {name}", file=sys.stderr)
     sys.exit("Invalid check: build, runner, or complete test inventory failed")
 
+if BASELINE and not guards.issubset(passed):
+    for binary, name in sorted(guards - passed):
+        print(f"existing guard regressed: {binary} {name}", file=sys.stderr)
+    sys.exit("Refusing baseline: repair or independently justify the changed guard contract")
+
 if BASELINE:
     CASES["scenarios"] = grouped(failed)
-    CASES["guards"] = grouped(passed)
+    CASES["guards"] = grouped(passed | deferred)
     CASES["obsolete_files"] = [path for path in CASES["obsolete_files"] if path not in {
         "crates/agent-protocol/src/conversation/records/view.rs",
         "crates/host-daemon/src/host_rpc/storage/activity.rs",

@@ -2562,5 +2562,12 @@
       "exclude_paths": [],
       "pattern": "\\bsession_pages\\s*\\("
     }
-  ]
+  ],
+  "milestone_guards": {
+    "host-daemon": [
+      "providers::deepseek::tests::catalog_and_new_sessions_follow_credential_changes",
+      "dictation::tests::slow_preparation_preserves_the_complete_recording_fallback_budget",
+      "browser::cdp::tests::uncertain_navigation_and_input_keep_the_connection_without_replaying"
+    ]
+  }
 }
