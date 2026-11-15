@@ -159,9 +159,12 @@ impl Runtime {
             }
             .into(),
             Call::HydrateConversation(request) => {
-                let item =
-                    Self::read_canonical_item(service, &request.session, request.item.as_str())
-                        .await?;
+                let item = service
+                    .inner
+                    .conversation
+                    .storage
+                    .thread_item(&request.session, request.item.as_str())
+                    .map_err(storage_failure)?;
                 let mut reply = records::Hydrated {
                     item,
                     transfer: None,
