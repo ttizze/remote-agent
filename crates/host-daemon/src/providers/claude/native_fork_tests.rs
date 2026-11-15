@@ -232,3 +232,97 @@ async fn native_claude_resume_probe_classifies_transcripts_without_returning_his
         );
     }
 }
+
+#[rstest::rstest]
+#[case("same")]
+#[case("moved")]
+#[case("pinned")]
+#[tokio::test]
+async fn native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head(
+    #[case] mode: &str,
+) {
+    // T3 reuses a live background query only while its runtime policy still
+    // matches. Sending through its existing SDK input queue cannot change cwd
+    // or apply a historical resume position.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let other = root.join("other-workspace");
+    std::fs::create_dir(&other).unwrap();
+    let claude = Claude::load(
+        root.join("unused"),
+        root.join("adapter"),
+        Some(root.join("native")),
+    )
+    .await
+    .unwrap();
+    let session = claude
+        .create(root.to_str().unwrap(), "default")
+        .await
+        .unwrap()
+        .thread
+        .id
+        .unwrap();
+    let record = claude.record(&session.id).await.unwrap();
+    let (input, mut received) = mpsc::channel::<Command>(1);
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = writes.clone();
+    let acknowledgements = tokio::spawn(async move {
+        if let Some(mut command) = received.recv().await {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(receipt) = command.delivered.take() {
+                let _ = receipt.send(Ok(Some("accepted-native-turn".into())));
+            }
+        }
+    });
+    record.lock().await.running = Some(Running {
+        turn_id: "old-control".into(),
+        input,
+        interrupt: watch::channel(None).1,
+        effort: None,
+        work: watch::channel(Work {
+            settled: true,
+            background: true,
+        })
+        .1,
+    });
+    let params = op::Submission {
+        thread_id: session,
+        client_user_message_id: Uuid::new_v4().to_string().into(),
+        input: vec![op::Input::Text {
+            text: "next input".into(),
+        }],
+        model: None,
+        effort: None,
+        service_tier: None,
+        follow_up: op::FollowUp::Queue,
+    };
+    let cwd = if mode == "moved" { &other } else { &root };
+    let result = Agent::submit(
+        &claude,
+        &params,
+        crate::providers::SubmissionTarget::start(
+            cwd.to_str().unwrap(),
+            (mode == "pinned").then_some("retained-assistant"),
+            true,
+        ),
+        false,
+        None,
+        Uuid::new_v4(),
+    )
+    .await;
+    record.lock().await.running = None;
+    acknowledgements.await.unwrap();
+    if mode == "same" {
+        assert!(
+            result.is_ok(),
+            "an unchanged background query keeps accepting the next turn"
+        );
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    } else {
+        let error =
+            result.expect_err("replacing query scope must not send the input into the old process");
+        assert_eq!(error.delivery, agent_protocol::error::Delivery::NotSent);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(record.lock().await.cwd, root.to_str().unwrap());
+    }
+}

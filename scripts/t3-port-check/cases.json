@@ -16,7 +16,10 @@
       "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_3",
       "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_4",
       "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_5",
-      "providers::claude::execution_tests::queued_input_reads_only_metadata_and_keeps_owned_execution"
+      "providers::claude::execution_tests::queued_input_reads_only_metadata_and_keeps_owned_execution",
+      "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_1",
+      "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_2",
+      "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_3"
     ]
   },
   "guards": {
