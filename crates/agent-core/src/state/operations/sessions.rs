@@ -540,7 +540,16 @@ fn sent_input(
     let Some((text, images, context)) = projection
         .turn_items
         .iter()
-        .filter(|item| item.run_id.as_deref() == Some(turn.as_str()))
+        .map(AsRef::as_ref)
+        .chain(
+            projection
+                .visible_turn_items
+                .iter()
+                .map(|row| row.item.as_ref()),
+        )
+        .filter(|item| {
+            item.thread_id == projection.thread.id && item.run_id.as_deref() == Some(turn.as_str())
+        })
         .find_map(|item| match &item.body {
             TurnItemBody::UserMessage {
                 text,
@@ -569,13 +578,22 @@ fn sent_input(
     Ok(Some((text.clone(), attachments)))
 }
 
+#[derive(Debug)]
+pub struct RewindCapture {
+    scope: String,
+    epoch: u64,
+    draft_text: String,
+    draft_attachments: Vec<Attachment>,
+    original: Option<(String, Vec<Attachment>)>,
+}
+
 impl Operation for RewindSession {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::Rewind {
             session: self.thread_id.clone(),
         })
     }
-    type Input = (String, Option<(String, Vec<Attachment>)>);
+    type Input = RewindCapture;
     type Output = (Self::Input, u64);
     fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
         let original = snapshot
@@ -586,22 +604,22 @@ impl Operation for RewindSession {
             .transpose()
             .map_err(PeerError::InvalidMessage)?
             .flatten();
-        Ok((snapshot.connection.storage_scope.clone(), original))
+        let draft = snapshot.input.drafts.get(&DraftKey::from(&self.thread_id));
+        Ok(RewindCapture {
+            scope: snapshot.connection.storage_scope.clone(),
+            epoch: snapshot.connection.epoch,
+            draft_text: draft.map_or_else(String::new, |draft| draft.text.clone()),
+            draft_attachments: draft.map_or_else(Vec::new, |draft| draft.attachments.clone()),
+            original,
+        })
     }
     async fn run(
         &self,
         input: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        Ok((
-            input,
-            command(
-                context,
-                &self.thread_id,
-                agent_protocol::conversation::Command::Rewind(self.turn_id.clone()),
-            )
-            .await?,
-        ))
+        let cursor = crate::client::rewind(context.client, &self.thread_id, &self.turn_id).await?;
+        Ok((input, cursor))
     }
     fn invalidates(&self) -> bool {
         true
@@ -610,14 +628,23 @@ impl Operation for RewindSession {
         self,
         snapshot: &mut Snapshot,
         _pane_id: &str,
-        ((scope, original), _cursor): Self::Output,
+        (captured, _cursor): Self::Output,
         current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
-        if scope != snapshot.connection.storage_scope {
+        if captured.scope != snapshot.connection.storage_scope
+            || captured.epoch != snapshot.connection.epoch
+        {
             return Ok(Vec::new());
         }
         let id = self.thread_id;
-        if let Some((text, attachments)) = original {
+        let draft = snapshot.input.drafts.get(&DraftKey::from(&id));
+        let unchanged = draft.map_or(
+            captured.draft_text.is_empty() && captured.draft_attachments.is_empty(),
+            |draft| {
+                draft.text == captured.draft_text && draft.attachments == captured.draft_attachments
+            },
+        );
+        if unchanged && let Some((text, attachments)) = captured.original {
             let drafts = Arc::make_mut(&mut snapshot.input.drafts);
             let draft = Arc::make_mut(drafts.entry(id.clone().into()).or_default());
             draft.text = text;

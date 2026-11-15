@@ -1,8 +1,10 @@
 //! Client workflows built on the shared transport and protocol.
+mod rollback;
 use crate::peer::PeerError;
 use agent_protocol::operations::*;
 use agent_protocol::requests::{Answer, Request, validate_answer};
 use agent_transport::client::{Client, Updates};
+pub(crate) use rollback::rewind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -65,7 +67,7 @@ pub(crate) async fn resolve_hydration(
     Ok(item)
 }
 
-async fn gallery_frame(
+async fn thread_frame(
     snapshot: &mut agent_protocol::orchestration::projection::ThreadSnapshot,
     stream: &mut agent_transport::framing::Reader,
 ) -> Result<(), PeerError> {
@@ -73,11 +75,11 @@ async fn gallery_frame(
         .read::<agent_protocol::orchestration::projection::ThreadStreamItem>()
         .await
         .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?
-        .ok_or_else(|| PeerError::ConnectionClosed("gallery subscription ended".into()))?;
+        .ok_or_else(|| PeerError::ConnectionClosed("conversation subscription ended".into()))?;
     *snapshot =
         crate::orchestration::receive(&snapshot.projection.thread.id, Some(snapshot), message)
             .map_err(|error| PeerError::InvalidMessage(error.into()))?
-            .ok_or_else(|| PeerError::InvalidMessage("gallery snapshot is missing".into()))?;
+            .ok_or_else(|| PeerError::InvalidMessage("conversation snapshot is missing".into()))?;
     Ok(())
 }
 
@@ -92,7 +94,7 @@ async fn gallery_request<T>(
     loop {
         tokio::select! {
             result=&mut request=>return result,
-            result=gallery_frame(snapshot,stream)=>{result?;},
+            result=thread_frame(snapshot,stream)=>{result?;},
         }
     }
 }
@@ -372,8 +374,9 @@ impl ClientExt for Client {
                 )
                 .map_err(|error| PeerError::InvalidMessage(error.into()))?;
             }
-            let mut snapshot = snapshot
-                .ok_or_else(|| PeerError::InvalidMessage("gallery snapshot is missing".into()))?;
+            let mut snapshot = snapshot.ok_or_else(|| {
+                PeerError::InvalidMessage("conversation snapshot is missing".into())
+            })?;
             let mut details =
                 std::collections::BTreeMap::<(String, String), model::TurnItem>::new();
             loop {
