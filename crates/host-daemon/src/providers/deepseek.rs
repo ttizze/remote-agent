@@ -1363,7 +1363,12 @@ impl Agent for DeepSeek {
         self.0.scopes.forget(id);
         Ok(())
     }
-    async fn fork(&self, _: &str, _: &str, _: Option<Value>) -> Result<ThreadResponse, Failure> {
+    async fn fork(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<Value>,
+    ) -> Result<crate::providers::ForkResult, Failure> {
         Err(unsupported())
     }
     fn event_stream(&self) -> Option<mpsc::Receiver<AgentEvent>> {

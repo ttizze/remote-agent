@@ -1214,7 +1214,7 @@ impl Agent for Codex {
         id: &str,
         last_turn_id: &str,
         browser_config: Option<Value>,
-    ) -> Result<ThreadResponse, Failure> {
+    ) -> Result<crate::providers::ForkResult, Failure> {
         let params = thread_config(
             serde_json::json!({"threadId":id,"lastTurnId":last_turn_id,"excludeTurns":false}),
             browser_config,
@@ -1225,7 +1225,7 @@ impl Agent for Codex {
         .await?;
         let response = native::parse_thread_response(value)?;
         self.subscribed(&response);
-        Ok(response)
+        Ok(response.into())
     }
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>> {
         // Subscribe before spawning the pump. Otherwise Codex can emit a
@@ -1625,10 +1625,10 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
                     .await
                     .unwrap();
                 assert_eq!(
-                    response.thread.id.as_ref().unwrap().id,
+                    response.response.thread.id.as_ref().unwrap().id,
                     fork["result"]["thread"]["id"].as_str().unwrap()
                 );
-                assert!(ids.insert(response.thread.id.unwrap()));
+                assert!(ids.insert(response.response.thread.id.unwrap()));
             }
             agent.shutdown().await;
         }

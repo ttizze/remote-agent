@@ -150,7 +150,19 @@ pub(crate) struct RollbackResult {
     pub head_id: Option<String>,
 }
 
-pub(crate) type ForkResult = ThreadResponse;
+#[derive(Debug)]
+pub(crate) struct ForkResult {
+    pub response: ThreadResponse,
+    pub head_id: Option<String>,
+}
+impl From<ThreadResponse> for ForkResult {
+    fn from(response: ThreadResponse) -> Self {
+        Self {
+            response,
+            head_id: None,
+        }
+    }
+}
 
 pub(crate) struct SessionSummary {
     pub thread: Thread,

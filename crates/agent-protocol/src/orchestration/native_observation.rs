@@ -82,7 +82,7 @@ pub fn observe_external_turn(
             run_attempt_id: None,
             native_thread_ref: provider.native_thread_ref.clone(),
             native_turn_ref: Some(native_turn_ref),
-            native_control_id: None,
+            native_control_ref: None,
             ordinal: state
                 .provider_turns
                 .values()

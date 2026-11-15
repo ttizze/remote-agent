@@ -170,7 +170,7 @@ async fn load_native_start(
     };
     let native_fork = forked.is_some();
     let response = match forked {
-        Some(response) => response,
+        Some(result) => result.response,
         None => agent
             .create(cwd, Some(model), browser)
             .await
