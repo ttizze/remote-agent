@@ -3341,6 +3341,82 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
     }
 }
 
+// T3's native completion witness is retained in audit history, together with
+// the provider head. Dropping removed rows is not evidence of native success.
+fn rewind_initial_projection(
+    mut base: agent_protocol::orchestration::projection::ThreadSnapshot,
+) -> agent_protocol::orchestration::projection::ThreadSnapshot {
+    base.projection.thread.active_provider_thread_id = Some("rewind-provider".into());
+    base.projection.provider_threads=vec![serde_json::from_value(json!({
+        "id":"rewind-provider","driver":"codex","providerInstanceId":"codex","providerSessionId":null,
+        "appThreadId":base.projection.thread.id,"ownerNodeId":null,
+        "nativeThreadRef":{"driver":"codex","nativeId":"native","strength":"strong"},
+        "nativeConversationHeadRef":null,"status":"idle","firstRunOrdinal":1,"lastRunOrdinal":3,
+        "handoffIds":[],"forkedFrom":null,"createdAt":"2026-11-14T00:00:00.000Z","updatedAt":"2026-11-14T00:00:00.000Z"
+    })).unwrap()];
+    for run in &mut base.projection.runs {
+        run.provider_thread_id = Some("rewind-provider".into());
+    }
+    base
+}
+
+fn rewind_native_cut(
+    base: &agent_protocol::orchestration::projection::ThreadSnapshot,
+    request: &str,
+) -> agent_protocol::orchestration::projection::ThreadSnapshot {
+    use agent_protocol::orchestration as model;
+    let mut cut = base.clone();
+    cut.snapshot_sequence += 2;
+    cut.projection.thread.rollback_request_id = Some(request.into());
+    cut.projection.thread.rollback_failure = None;
+    cut.projection.provider_threads[0].last_run_ordinal = Some(1);
+    for run in &mut cut.projection.runs {
+        if run.id != "kept" {
+            run.status = model::RunStatus::RolledBack;
+        }
+    }
+    cut.projection
+        .visible_turn_items
+        .retain(|row| row.item.run_id.as_deref() == Some("kept"));
+    cut
+}
+
+async fn rewind_request(
+    reader: &mut host_fixture::Reader,
+    writer: &host_fixture::Writer,
+    source: &SessionRef,
+    base: &agent_protocol::orchestration::projection::ThreadSnapshot,
+) -> (host_fixture::Request, Option<uuid::Uuid>) {
+    let request = read(reader).await;
+    if request["method"] != "host/conversation/subscribe" {
+        return (request, None);
+    }
+    let id: uuid::Uuid = serde_json::from_value(request["params"]["subscription"].clone()).unwrap();
+    writer.reply(&request,json!({"result":agent_protocol::conversation::records::Opened {
+        session:source.clone(),subscription_id:id,provider:ProviderKind::Codex,capabilities:Default::default(),project_root:None,
+        initial:vec![ThreadStreamItem::Snapshot(base.clone()),ThreadStreamItem::Synchronized],
+    }})).await.unwrap();
+    (read(reader).await, Some(id))
+}
+
+async fn rewind_frame(
+    writer: &host_fixture::Writer,
+    active: Option<uuid::Uuid>,
+    scoped: Option<uuid::Uuid>,
+    frame: agent_protocol::orchestration::projection::ThreadSnapshot,
+) {
+    for id in [active, scoped]
+        .into_iter()
+        .flatten()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        writer
+            .send_stream(id, ThreadStreamItem::Snapshot(frame.clone()))
+            .await
+            .unwrap();
+    }
+}
+
 #[rstest::rstest]
 #[tokio::test]
 async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer(
@@ -3385,11 +3461,13 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             cwd: "/fixture".into(),
         });
     let (store, mut reader, writer) = setup(initial).await;
+    let base = rewind_initial_projection((*store.snapshot().sessions.projections[&source]).clone());
     let rewind = store.dispatch(Intent::RewindSession(op::RewindSession::new(
         source.clone(),
         "edit".into(),
     )));
-    let request = read(&mut reader).await;
+    tokio::pin!(rewind);
+    let (request, scoped) = rewind_request(&mut reader, &writer, &source, &base).await;
     assert_eq!(request["method"], "host/conversation/change");
     assert_eq!(request["params"]["command"]["Rewind"], "edit");
     if navigate {
@@ -3404,9 +3482,6 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             .unwrap();
         navigation.await.unwrap();
     }
-    // An active subscription receives the authoritative replacement before
-    // the command ACK. A conversation left in the meantime stays unsubscribed
-    // until an explicit read catches up its cached cursor.
     let subscription = store
         .snapshot()
         .sessions
@@ -3414,18 +3489,19 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         .get(&source)
         .copied();
     assert_eq!(subscription.is_some(), !navigate);
-    if let Some(subscription) = subscription {
-        let current = store.snapshot();
-        let response: agent_protocol::models::ThreadResponse = serde_json::from_value(
-            json!({"thread": {"id":source,"cwd":"/fixture","turns":[kept.clone()]}}),
-        )
-        .unwrap();
-        let sequence = current.sessions.projections[&source].snapshot_sequence + 1;
-        let replacement =
-            ThreadStreamItem::Snapshot(host_fixture::orchestration::snapshot(response, sequence));
-        writer.send_stream(subscription, replacement).await.unwrap();
-    }
-    writer.reply(&request, json!({"result":{}})).await.unwrap();
+    writer.reply(&request,json!({"result":{"sequence":base.snapshot_sequence+1,"acceptedAt":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rewind.as_mut())
+            .await
+            .is_err(),
+        "command acceptance alone is not native rollback success"
+    );
+    assert_eq!(
+        store.snapshot().input.drafts[&DraftKey::from(source.clone())].text,
+        "replaced"
+    );
+    let cut = rewind_native_cut(&base, request["params"]["operation"].as_str().unwrap());
+    rewind_frame(&writer, subscription, scoped, cut).await;
     rewind.await.unwrap();
     if navigate {
         assert!(
@@ -3527,6 +3603,109 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
             ),
             ("notes.md", "/fixture/notes.md", false)
         ]
+    );
+    store.close().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case(false, false)]
+#[case(true, false)]
+#[case(true, true)]
+#[tokio::test]
+async fn rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts(
+    #[case] edited: bool,
+    #[case] failure: bool,
+) {
+    use agent_protocol::orchestration as model;
+    let source = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
+    let mut initial = snapshot();
+    let user = |id: &str, text: &str| json!({"id":id,"status":"completed","items":[{"id":format!("input:{id}"),"status":"completed","body":{"inline":{"body":{"userMessage":{"text":text,"content":[]}}}}}]});
+    let thread:Thread=serde_json::from_value(json!({"id":source,"cwd":"/fixture","status":"idle","turns":[user("kept","kept"),user("edit","send this again"),user("later","removed")]})).unwrap();
+    Arc::make_mut(&mut initial.sessions.conversations).insert(source.clone(), Arc::new(thread));
+    Arc::make_mut(&mut initial.input.drafts).insert(
+        source.clone().into(),
+        Arc::new(Draft {
+            text: "original draft".into(),
+            ..Default::default()
+        }),
+    );
+    Arc::make_mut(initial.panes.primary_mut()).navigation =
+        Arc::new(agent_core::state::Navigation {
+            thread_id: Some(source.clone()),
+            draft_key: source.clone().into(),
+            cwd: "/fixture".into(),
+        });
+    let (store, mut reader, writer) = setup(initial).await;
+    let base = rewind_initial_projection((*store.snapshot().sessions.projections[&source]).clone());
+    let active = store
+        .snapshot()
+        .sessions
+        .subscriptions
+        .get(&source)
+        .copied();
+    let rewind = store.dispatch(Intent::RewindSession(op::RewindSession::new(
+        source.clone(),
+        "edit".into(),
+    )));
+    tokio::pin!(rewind);
+    let (request, scoped) = rewind_request(&mut reader, &writer, &source, &base).await;
+    let request_id = request["params"]["operation"].as_str().unwrap();
+    writer.reply(&request,json!({"result":{"sequence":base.snapshot_sequence+1,"acceptedAt":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rewind.as_mut())
+            .await
+            .is_err()
+    );
+    if edited {
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: source.clone().into(),
+                text: "typed during native rewind".into(),
+            })
+            .await
+            .unwrap();
+    }
+    let mut stale = base.clone();
+    stale.snapshot_sequence += 1;
+    stale.projection.thread.rollback_request_id = Some(request_id.into());
+    stale.projection.thread.rollback_failure = Some(model::RollbackFailure {
+        request_id: "older-request".into(),
+        message: "older failure".into(),
+    });
+    rewind_frame(&writer, active, scoped, stale).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), rewind.as_mut())
+            .await
+            .is_err(),
+        "an unrelated failure cannot settle this request"
+    );
+    let frame = if failure {
+        let mut refused = base.clone();
+        refused.snapshot_sequence += 2;
+        refused.projection.thread.rollback_request_id = Some(request_id.into());
+        refused.projection.thread.rollback_failure = Some(model::RollbackFailure {
+            request_id: request_id.into(),
+            message: "native refused this rollback".into(),
+        });
+        refused
+    } else {
+        rewind_native_cut(&base, request_id)
+    };
+    rewind_frame(&writer, active, scoped, frame).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), rewind.as_mut())
+        .await
+        .unwrap();
+    assert_eq!(result.is_err(), failure);
+    let expected = if edited {
+        "typed during native rewind"
+    } else if failure {
+        "original draft"
+    } else {
+        "send this again"
+    };
+    assert_eq!(
+        store.snapshot().input.drafts[&DraftKey::from(source)].text,
+        expected
     );
     store.close().await.unwrap();
 }
