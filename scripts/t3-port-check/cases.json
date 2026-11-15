@@ -2,6 +2,8 @@
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
     "agent-protocol": [
+      "orchestration::tests::a_fork_does_not_inherit_its_parents_rollback_request_or_failure",
+      "orchestration::tests::a_provider_exit_during_rollback_publishes_only_the_matching_failure",
       "orchestration::tests::rewind_publishes_a_correlated_request_and_clears_the_previous_failure",
       "orchestration::tests::rewind_refuses_missing_or_foreign_native_turn_boundaries",
       "orchestration::tests::rewind_refuses_native_work_even_without_an_active_application_run"

@@ -135,36 +135,14 @@ fn model() -> ModelSelection {
 }
 
 fn initial() -> State {
-    let thread = Thread {
-        id: "thread".into(),
-        history_origin: None,
-        workspace_launch: None,
-        created_by: Actor::User,
-        creation_source: CreationSource::Mobile,
-        project_id: None,
-        title: "Example".into(),
-        provider_instance_id: "codex".into(),
-        model_selection: model(),
-        runtime_mode: "full-access".into(),
-        interaction_mode: "default".into(),
-        branch: None,
-        worktree_path: Some("/project".into()),
-        active_provider_thread_id: Some("native-thread".into()),
-        lineage: Lineage {
-            parent_thread_id: None,
-            relationship_to_parent: None,
-            root_thread_id: "thread".into(),
-            side_chat: None,
-        },
-        forked_from: None,
-        created_at: NOW.into(),
-        updated_at: NOW.into(),
-        archived_at: None,
-        settled_override: None,
-        settled_at: None,
-        last_visited_at: None,
-        deleted_at: None,
-    };
+    let thread:Thread=serde_json::from_value(serde_json::json!({
+        "id":"thread","createdBy":"user","creationSource":"mobile","projectId":null,
+        "title":"Example","providerInstanceId":"codex","modelSelection":model(),
+        "runtimeMode":"full-access","interactionMode":"default","branch":null,"worktreePath":"/project",
+        "activeProviderThreadId":"native-thread","lineage":{"parentThreadId":null,"relationshipToParent":null,"rootThreadId":"thread","sideChat":null},
+        "forkedFrom":null,"createdAt":NOW,"updatedAt":NOW,"archivedAt":null,"settledOverride":null,
+        "settledAt":null,"lastVisitedAt":null,"deletedAt":null,"rollbackRequestId":null,"rollbackFailure":null
+    })).unwrap();
     let state = State::new(thread);
     state.apply(&Decision {
         changes: vec![
@@ -1351,6 +1329,95 @@ fn rewind_refuses_native_work_even_without_an_active_application_run() {
         .status = ProviderThreadStatus::Active;
     assert!(state.active_run().is_none());
     assert!(rewind(&state, &run, context("rewind", &state)).is_err());
+}
+
+#[test]
+fn a_provider_exit_during_rollback_publishes_only_the_matching_failure() {
+    let (state, run, attempt) = running();
+    let state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("done", &state),
+            )
+            .unwrap(),
+        ),
+    );
+    let requested =
+        state.apply(&rewind(&state, &run, context("rollback-request", &state)).unwrap());
+    let failure = ProviderFailure {
+        class: "provider_error".into(),
+        message: "provider ended during rewind".into(),
+        code: None,
+        retryable: None,
+        reset_at: None,
+    };
+    let stopped = requested.apply(
+        &provider_stopped(
+            &requested,
+            "codex",
+            &failure,
+            context("stopped", &requested),
+        )
+        .unwrap(),
+    );
+    let thread = serde_json::to_value(&stopped.thread).unwrap();
+    assert_eq!(thread["rollbackFailure"]["requestId"], "rollback-request");
+    assert_eq!(thread["rollbackFailure"]["message"], failure.message);
+    assert_eq!(stopped.runs[&run].status, RunStatus::Completed);
+    let mut newer = requested.clone();
+    let mut thread = serde_json::to_value(&newer.thread).unwrap();
+    thread["rollbackRequestId"] = "newer-request".into();
+    newer.thread = serde_json::from_value(thread).unwrap();
+    let stopped = newer.apply(
+        &provider_stopped(&newer, "codex", &failure, context("late-stopped", &newer)).unwrap(),
+    );
+    assert_eq!(
+        serde_json::to_value(&stopped.thread)
+            .unwrap()
+            .get("rollbackFailure"),
+        Some(&serde_json::Value::Null),
+        "an older rollback failure cannot overwrite the newer request"
+    );
+}
+
+#[test]
+fn a_fork_does_not_inherit_its_parents_rollback_request_or_failure() {
+    let (state, run, attempt) = running();
+    let mut state = state.apply(
+        &complete(
+            &state,
+            &attempt,
+            "session",
+            Completion::Completed,
+            context("done", &state),
+        )
+        .unwrap(),
+    );
+    let mut thread = serde_json::to_value(&state.thread).unwrap();
+    thread["rollbackRequestId"] = "parent-request".into();
+    thread["rollbackFailure"] =
+        serde_json::json!({"requestId":"parent-request","message":"parent failure"});
+    state.thread = serde_json::from_value(thread).unwrap();
+    let run = &state.runs[&run];
+    let (child, _) = fork_thread(
+        &state.thread,
+        run,
+        state.context_source_point(run),
+        "child",
+        "transfer",
+        NOW,
+    )
+    .unwrap();
+    let child = serde_json::to_value(child).unwrap();
+    assert_eq!(
+        child.get("rollbackRequestId"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(child.get("rollbackFailure"), Some(&serde_json::Value::Null));
 }
 
 #[test]
