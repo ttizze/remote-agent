@@ -41,7 +41,61 @@ fn project_directory(home: &Path) -> std::path::PathBuf {
     home.join("projects").join(name)
 }
 
-fn native(session: &str, mut value: Value) {
+fn native_path(home: &Path, session: &str) -> std::path::PathBuf {
+    let name = format!("{session}.jsonl");
+    let current = project_directory(home).join(&name);
+    if current.exists() {
+        return current;
+    }
+    fs::read_dir(home.join("projects"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join(&name))
+        .find(|path| path.is_file())
+        .unwrap_or(current)
+}
+
+/// Follow the selected native branch, preserving the discarded audit tail.
+/// The diagnostic metadata is optional; SDK forks own/copy the JSONL itself.
+fn native_inputs(path: &Path, head: Option<&str>) -> Vec<Value> {
+    let rows: Vec<Value> = fs::read_to_string(path)
+        .expect("resume must find the original native session")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let by_id: std::collections::HashMap<_, _> = rows
+        .iter()
+        .filter_map(|row| row["uuid"].as_str().map(|id| (id, row)))
+        .collect();
+    let mut cursor = head.or_else(|| rows.last().and_then(|row| row["uuid"].as_str()));
+    let mut visited = std::collections::HashSet::new();
+    let mut inputs = Vec::new();
+    while let Some(id) = cursor {
+        assert!(visited.insert(id), "cyclic native transcript");
+        let row = by_id.get(id).expect("native resume cursor must exist");
+        if row["type"] == "user"
+            && row["origin"].is_null()
+            && row["interruptedBySendNow"] != true
+            && row["message"]["content"].as_array().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| matches!(block["type"].as_str(), Some("text" | "image")))
+            })
+        {
+            inputs.push(if row["fixtureInput"].is_object() {
+                row["fixtureInput"].clone()
+            } else {
+                json!({"content":row["message"]["content"]})
+            });
+        }
+        cursor = row["parentUuid"].as_str();
+    }
+    inputs.reverse();
+    inputs
+}
+
+fn native(session: &str, mut value: Value, parent: Option<&str>) {
     if value["type"] == "system" && value["subtype"] == "task_notification" {
         // Claude saves the notification it wakes for, with the call that ran the work.
         let tool = value["tool_use_id"]
@@ -69,16 +123,16 @@ fn native(session: &str, mut value: Value) {
     if let Some(result) = value.as_object_mut().unwrap().remove("tool_use_result") {
         value["toolUseResult"] = result;
     }
-    let directory = project_directory(Path::new(&home));
-    fs::create_dir_all(&directory).unwrap();
-    let path = directory.join(format!("{session}.jsonl"));
+    let path = native_path(Path::new(&home), session);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
     let previous: Option<Value> = fs::read_to_string(&path).ok().and_then(|text| {
         text.lines()
             .last()
             .and_then(|line| serde_json::from_str(line).ok())
     });
-    value["parentUuid"] = previous
-        .map(|value| value["uuid"].clone())
+    value["parentUuid"] = parent
+        .map(Value::from)
+        .or_else(|| previous.map(|value| value["uuid"].clone()))
         .unwrap_or(Value::Null);
     value["uuid"] = value.get("uuid").cloned().unwrap_or_else(|| {
         format!(
@@ -112,7 +166,7 @@ fn session_state(session: &str, state: &str) -> Value {
 fn emit(session: &str, value: Value) {
     let idle = (value["type"] == "result")
         .then(|| session_state(value["session_id"].as_str().unwrap(), "idle"));
-    native(session, value.clone());
+    native(session, value.clone(), None);
     output(value);
     if let Some(idle) = idle {
         output(idle);
@@ -151,7 +205,7 @@ fn block(
     let envelope = json!({"type":"assistant","apiBlockIndex":index,"uuid":format!("envelope-{message}-{index}"),"session_id":session,"message":{"id":message,"role":"assistant","stop_reason":null,"content":[{"type":kind,field:text}]}});
     let mut saved = envelope.clone();
     saved["message"]["stop_reason"] = stop_reason.into();
-    native(session, saved);
+    native(session, saved, None);
     output(envelope);
     emit(
         session,
@@ -273,7 +327,7 @@ struct Fixture {
     session: String,
     inputs: Vec<Value>,
     process: String,
-    history: std::path::PathBuf,
+    resume_at: Option<String>,
     trace: String,
     waiting: Option<Waiting>,
     /// The current wait ended: by input, a stop, or the release of inputs.
@@ -364,7 +418,7 @@ impl Fixture {
         if prompted {
             emit(
                 &self.session,
-                json!({"type":"user","uuid":format!("tool-result-{}", self.inputs.len()),
+                json!({"type":"user","uuid":format!("tool-result-{}", self.message_id()),
                     "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"The user doesn't want to proceed with this tool use.","is_error":true}]}}),
             );
         }
@@ -384,7 +438,12 @@ impl Fixture {
     }
 
     fn message_id(&self) -> String {
-        format!("message-{}", self.inputs.len())
+        format!(
+            "message-{}-{}-{}",
+            self.session,
+            self.process,
+            self.inputs.len()
+        )
     }
 
     fn reply(&self, text: &str) {
@@ -471,6 +530,7 @@ impl Fixture {
                 &self.session,
                 json!({"type":"user","interruptedBySendNow":true,
                     "message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}),
+                None,
             );
             output(
                 json!({"type":"result","subtype":"error_during_execution","session_id":self.session,
@@ -481,14 +541,13 @@ impl Fixture {
             &self.session,
             json!({"type":"system","subtype":"init","session_id":self.session,"user_message_uuids":[value["uuid"]]}),
         );
-        emit(&self.session, value.clone());
         let content = value["message"]["content"].clone();
-        self.inputs.push(
-            json!({"content":content,"model":self.model,"effort":self.effort,"process":self.process}),
-        );
-        let bytes = serde_json::to_vec(&self.inputs).unwrap();
-        fs::create_dir_all(self.history.parent().unwrap()).unwrap();
-        fs::write(&self.history, &bytes).unwrap();
+        let input = json!({"content":content,"model":self.model,"effort":self.effort,"process":self.process});
+        let mut saved = value.clone();
+        saved["fixtureInput"] = input.clone();
+        native(&self.session, saved, self.resume_at.take().as_deref());
+        output(value.clone());
+        self.inputs.push(input);
         // Append: Windows cannot truncate a file that Git's workspace review maps.
         let mut trace = fs::OpenOptions::new()
             .create(true)
@@ -545,7 +604,7 @@ impl Fixture {
                 };
                 emit(
                     &self.session,
-                    json!({"type":"user","uuid":format!("tool-result-{}", self.inputs.len()),
+                    json!({"type":"user","uuid":format!("tool-result-{}", self.message_id()),
                         "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":text,"is_error":!allowed}]},
                         "tool_use_result":if allowed && self.waiting == Some(Waiting::Background) { json!({"backgroundTaskId":"background-1"}) }
                             else if allowed && self.waiting != Some(Waiting::Question) { json!({"exitCode":0}) } else { json!({}) }}),
@@ -695,7 +754,7 @@ impl Fixture {
                 let (tool, input) = permission.tool();
                 emit(
                     &self.session,
-                    json!({"type":"assistant","uuid":format!("tool-message-{}", self.inputs.len()),"message":{"id":"tool-message","role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":tool,"input":input}]}}),
+                    json!({"type":"assistant","uuid":format!("tool-{}", self.message_id()),"message":{"id":format!("tool-{}", self.message_id()),"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":tool,"input":input}]}}),
                 );
                 emit(
                     &self.session,
@@ -924,13 +983,13 @@ fn main() {
         })).unwrap();
     }
     let path = format!("claude-session-{session}.jsonl");
-    let history = project_directory(Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap()))
-        .join(format!("{session}.inputs.json"));
+    let history = native_path(
+        Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap()),
+        &session,
+    );
+    let resume_at = option(&args, "--resume-session-at");
     let inputs: Vec<Value> = if option(&args, "--resume").is_some() {
-        serde_json::from_slice(
-            &fs::read(&history).expect("resume must find the original session in native storage"),
-        )
-        .unwrap()
+        native_inputs(&history, resume_at.as_deref())
     } else {
         assert!(
             !history.exists(),
@@ -946,7 +1005,7 @@ fn main() {
         session,
         inputs,
         process,
-        history,
+        resume_at,
         trace: path,
         waiting: None,
         wait_settled: Default::default(),

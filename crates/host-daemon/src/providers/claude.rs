@@ -2425,6 +2425,7 @@ impl Agent for Claude {
         agent_protocol::session::Capabilities {
             steer: true,
             fork: true,
+            rollback: true,
             model_change: true,
             ..Default::default()
         }
