@@ -80,7 +80,8 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
         "scripts belong to the explicitly registered project"
     );
     let database =
-        rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
+        rusqlite::Connection::open(directory.path().join(crate::CONVERSATION_DATABASE_FILE))
+            .unwrap();
     let stored: String = database
         .query_row(
             "SELECT scripts_json FROM projection_projects WHERE workspace_root=?1",
@@ -187,7 +188,7 @@ async fn plain_folder_scripts_are_isolated_and_failed_writes_keep_the_previous_s
             .inner
             .projects
             .path()
-            .with_file_name("bex-conversations.sqlite"),
+            .with_file_name(crate::CONVERSATION_DATABASE_FILE),
     )
     .unwrap();
     database.execute_batch("CREATE TRIGGER reject_script_write BEFORE UPDATE OF scripts_json ON projection_projects BEGIN SELECT RAISE(ABORT,'script write failed'); END;").unwrap();
@@ -268,7 +269,7 @@ async fn script_validation_and_corrupt_storage_fail_without_replacing_saved_data
             .inner
             .projects
             .path()
-            .with_file_name("bex-conversations.sqlite"),
+            .with_file_name(crate::CONVERSATION_DATABASE_FILE),
     )
     .unwrap();
     database

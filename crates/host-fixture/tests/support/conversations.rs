@@ -391,8 +391,9 @@ impl Catalog {
 /// The fixture archives provider data under its private source, while public
 /// assertions continue to address the original conversation UUID.
 pub fn native_source(root: &std::path::Path, id: &SessionRef, provider: ProviderKind) -> String {
-    let connection = rusqlite::Connection::open(root.join("bex-conversations.sqlite")).unwrap();
-    connection.query_row("SELECT s.native_id FROM sources s JOIN bindings b ON b.source_id=s.id JOIN threads t ON t.key=b.thread WHERE t.provider IS ?1 AND t.id=?2 AND b.provider=?3 AND b.state='ready'",rusqlite::params![id.provider.map(ProviderKind::key),id.id,provider.key()],|row|row.get(0)).unwrap()
+    let connection =
+        rusqlite::Connection::open(root.join(host_daemon::CONVERSATION_DATABASE_FILE)).unwrap();
+    connection.query_row("SELECT json_extract(p.payload_json,'$.nativeThreadRef.nativeId') FROM orchestration_v2_projection_threads t JOIN orchestration_v2_projection_provider_threads p ON p.provider_thread_id=t.active_provider_thread_id AND p.thread_id=t.thread_id WHERE t.thread_id=?1 AND p.provider_instance_id=?2 AND p.driver=?3",rusqlite::params![id.application_id(),provider.key(),provider.driver()],|row|row.get(0)).unwrap()
 }
 
 pub fn list_ids(

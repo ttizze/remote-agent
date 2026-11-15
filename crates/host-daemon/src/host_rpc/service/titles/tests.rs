@@ -239,7 +239,7 @@ async fn list_decorations_use_the_listed_roots_without_reloading_project_catalog
     )
     .unwrap();
     let state = root.join("bex-worktrees.json");
-    std::fs::write(state.with_file_name("bex-conversations.sqlite"), "{").unwrap();
+    std::fs::write(state.with_file_name(crate::CONVERSATION_DATABASE_FILE), "{").unwrap();
     let service = HostRpcService::new(
         [crate::providers::codex::Codex::new(Err("provider is offline".into())).into()],
         state,

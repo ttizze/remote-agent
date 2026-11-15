@@ -443,7 +443,6 @@ async fn enabling_host_owned_harness_keeps_the_existing_draft_namespace() {
     .unwrap();
     let service = super::HostRpcService::new([claude.into()], root.path().join("projects.json"));
     let before = service.storage_scope().unwrap();
-    assert_eq!(before, service.inner.providers.storage_scope().unwrap());
     let claude = crate::providers::claude::Claude::load(
         "claude".into(),
         root.path().join("accounts"),
@@ -464,7 +463,6 @@ async fn enabling_host_owned_harness_keeps_the_existing_draft_namespace() {
         root.path().join("projects.json"),
     );
     let after = service.storage_scope().unwrap();
-    assert_eq!(after, service.inner.providers.storage_scope().unwrap());
     assert_eq!(
         before, after,
         "Adding Harness must not archive existing drafts or navigation"
@@ -592,4 +590,36 @@ async fn the_client_namespace_belongs_to_the_canonical_database_not_provider_hom
         scope,
         "another canonical database cannot reuse pending commands or cursors"
     );
+}
+
+#[tokio::test]
+async fn canonical_database_aliases_and_reopening_preserve_the_client_namespace() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("host/projects.json");
+    let service = super::HostRpcService::new([], project.clone());
+    let scope = service.storage_scope().unwrap();
+    assert_eq!(
+        scope.len(),
+        64,
+        "namespace has a stable opaque wire encoding"
+    );
+    assert!(scope.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    drop(service);
+    assert_eq!(
+        super::HostRpcService::new([], project)
+            .storage_scope()
+            .unwrap(),
+        scope
+    );
+    #[cfg(unix)]
+    {
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(root.path().join("host"), &alias).unwrap();
+        assert_eq!(
+            super::HostRpcService::new([], alias.join("projects.json"))
+                .storage_scope()
+                .unwrap(),
+            scope
+        );
+    }
 }

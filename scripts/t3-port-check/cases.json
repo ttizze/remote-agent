@@ -1,16 +1,6 @@
 {
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
-    "agent-core::store": [
-      "rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts::case_1",
-      "rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts::case_2",
-      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_1_false::image_1____fixture_shot_png__",
-      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_1_false::image_2_r__C_fixtureshot_png__",
-      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_1_false::image_3_r__servershareshot_png__",
-      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_2_true::image_1____fixture_shot_png__",
-      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_2_true::image_2_r__C_fixtureshot_png__",
-      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_2_true::image_3_r__servershareshot_png__"
-    ],
     "host-daemon": [
       "host_rpc::service::tests::canonical_storage_starts_fresh_when_an_unsupported_legacy_database_exists",
       "host_rpc::service::tests::the_client_namespace_belongs_to_the_canonical_database_not_provider_homes"
@@ -1328,8 +1318,16 @@
       "reconnect_cancels_obsolete_pairing_and_retains_local_state",
       "reconnect_preserves_edits_made_during_pairing",
       "restored_snapshot_discards_session_authority_and_preserves_unknown_dictation",
+      "rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts::case_1",
+      "rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts::case_2",
       "rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts::case_3",
       "rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts::case_4",
+      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_1_false::image_1____fixture_shot_png__",
+      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_1_false::image_2_r__C_fixtureshot_png__",
+      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_1_false::image_3_r__servershareshot_png__",
+      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_2_true::image_1____fixture_shot_png__",
+      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_2_true::image_2_r__C_fixtureshot_png__",
+      "rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer::navigate_2_true::image_3_r__servershareshot_png__",
       "saturated_dictation_preparations_leave_complete_recording_transcription_available",
       "saving_after_navigation_rebases_newer_edits_without_restoring_the_old_file",
       "saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save",
@@ -1850,6 +1848,7 @@
       "host_rpc::service::project_import::tests::native_project_import_is_selective_durable_and_preserves_session_identity",
       "host_rpc::service::tests::account_providers_are_read_in_parallel_without_blocking_conversation_lists",
       "host_rpc::service::tests::account_read_failures_keep_their_provider_alongside_startup_errors",
+      "host_rpc::service::tests::canonical_database_aliases_and_reopening_preserve_the_client_namespace",
       "host_rpc::service::tests::conversation_rpc_failures_are_logged_once_without_request_payloads",
       "host_rpc::service::tests::enabling_host_owned_harness_keeps_the_existing_draft_namespace",
       "host_rpc::service::tests::failed_model_providers_remain_identifiable_when_no_catalog_is_available",

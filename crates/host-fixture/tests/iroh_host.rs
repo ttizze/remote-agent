@@ -3932,7 +3932,7 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
             created.thread.project_id.as_deref(),
             Some(project_id.as_str())
         );
-        assert!(root.join("bex-conversations.sqlite").is_file());
+        assert!(root.join(host_daemon::CONVERSATION_DATABASE_FILE).is_file());
         assert!(!root.join(".codex-global-state.json").exists());
         store.close().await.unwrap();
         local.endpoint.close().await;

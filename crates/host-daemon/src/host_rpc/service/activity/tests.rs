@@ -3,7 +3,11 @@ use super::*;
 #[test]
 fn startup_reports_invalid_storage() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("bex-conversations.sqlite"), b"invalid").unwrap();
+    std::fs::write(
+        root.path().join(crate::CONVERSATION_DATABASE_FILE),
+        b"invalid",
+    )
+    .unwrap();
     let service = HostRpcService::new([], root.path().join("projects.json"));
     assert!(service.start().unwrap_err().contains("not a database"));
 }

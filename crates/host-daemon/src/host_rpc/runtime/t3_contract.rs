@@ -488,7 +488,8 @@ async fn obsolete_storage_is_absent(#[case] table: &str) {
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     create(&service, directory.path().to_str().unwrap(), None).await;
     let connection =
-        rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
+        rusqlite::Connection::open(directory.path().join(crate::CONVERSATION_DATABASE_FILE))
+            .unwrap();
     let exists: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
