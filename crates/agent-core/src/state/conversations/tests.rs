@@ -1,9 +1,6 @@
 use super::*;
 use crate::state::operations::Operation;
-use agent_protocol::{
-    conversation::Outcome,
-    orchestration::{self as model, projection::ThreadStreamItem},
-};
+use agent_protocol::orchestration::{self as model, projection::ThreadStreamItem};
 
 #[rstest::rstest]
 fn stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed(
@@ -402,15 +399,9 @@ fn pending() -> (Snapshot, crate::session::SessionRef, uuid::Uuid, uuid::Uuid) {
 
 #[test]
 fn durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_edits() {
-    for outcome in [
-        Outcome::Rejected("refused".into()),
-        Outcome::DeliveryUnknown,
-        Outcome::Accepted,
-    ] {
+    for (rejected, unknown) in [(true, false), (false, true), (false, false)] {
         let (mut snapshot, id, operation, scope) = pending();
         let cursor = snapshot.sessions.projections[&id].snapshot_sequence;
-        let rejected = matches!(outcome, Outcome::Rejected(_));
-        let unknown = outcome == Outcome::DeliveryUnknown;
         let through = cursor + 1;
         CheckReceipts {
             session: id.clone(),
@@ -427,10 +418,7 @@ fn durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_
                     vec![(
                         operation,
                         records::Acknowledged {
-                            error: match outcome {
-                                Outcome::Rejected(reason) => Some(reason),
-                                _ => None,
-                            },
+                            error: rejected.then(|| "refused".into()),
                             sequence: through,
                             accepted_at: String::new(),
                         },

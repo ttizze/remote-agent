@@ -110,6 +110,7 @@ projection!(model::TurnItem, "orchestration_v2_projection_turn_items", "turn_ite
     "turn_item_id" => "id", "thread_id" => "threadId", "run_id" => "runId", "node_id" => "nodeId",
     "provider_thread_id" => "providerThreadId", "provider_turn_id" => "providerTurnId",
     "parent_item_id" => "parentItemId", "ordinal" => "ordinal", "type" => "type",
+    "input_intent" => "inputIntent", "created_by" => "createdBy",
     "status" => "status", "updated_at" => "updatedAt",
 ]);
 projection!(model::RuntimeRequest, "orchestration_v2_projection_runtime_requests", "runtime_request_id", Some("thread_id"), [
@@ -275,10 +276,18 @@ pub(super) fn apply(
                 .as_ref()
                 .and_then(|reference| reference.native_id.as_ref())
             {
-                let occupied:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_provider_threads
-                    WHERE provider_instance_id=?1 AND driver=?2 AND json_extract(payload_json,'$.nativeThreadRef.nativeId')=?3
-                    AND thread_id IS NOT NULL AND thread_id IS NOT ?4)",
-                    params![value.provider_instance_id,value.driver,native,value.app_thread_id],|row|row.get(0)).map_err(failure)?;
+                let provider = ProviderKind::from_instance_id(&value.provider_instance_id)?;
+                if value.driver != provider.driver()
+                    || value
+                        .native_thread_ref
+                        .as_ref()
+                        .is_none_or(|reference| reference.driver != value.driver)
+                {
+                    return Err("native binding uses another provider".into());
+                }
+                let source = SessionRef::new(provider, native.clone()).map_err(str::to_owned)?;
+                let occupied = native_bindings::owner(transaction, &source)?
+                    .is_some_and(|owner| Some(owner.application_id()) != value.app_thread_id);
                 if occupied {
                     return Err("native conversation belongs to another app thread".into());
                 }

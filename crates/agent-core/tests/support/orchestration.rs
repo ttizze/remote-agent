@@ -241,6 +241,7 @@ fn add_requests(
                             id: question.id.clone(),
                             header: question.header.clone(),
                             question: question.prompt.clone(),
+                            is_secret: question.secret.then_some(true),
                             options: question
                                 .choices
                                 .iter()

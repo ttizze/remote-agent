@@ -2,6 +2,23 @@ use super::*;
 use agent_protocol::orchestration as model;
 
 impl Storage {
+    /// Load only this input's Host-owned preparation/error records, including
+    /// terminal cards that are outside the ordinary working-set projection.
+    pub(in crate::host_rpc) fn input_item_ids(
+        &self,
+        target: &SessionRef,
+        input: &str,
+    ) -> Result<Vec<String>, String> {
+        self.with(|connection| {
+            let mut query=connection.prepare("SELECT i.turn_item_id FROM orchestration_v2_projection_turn_items i
+                JOIN orchestration_v2_projection_runs r ON r.thread_id=i.thread_id AND r.run_id=i.run_id
+                WHERE i.thread_id=?1 AND json_extract(r.payload_json,'$.userMessageId')=?2
+                AND i.type IN ('error','command_execution','user_message') AND json_extract(i.payload_json,'$.nativeItemRef') IS NULL").map_err(failure)?;
+            query.query_map(params![target.application_id(),input],|row|row.get(0)).map_err(failure)?
+                .collect::<Result<Vec<_>,_>>().map_err(failure)
+        })
+    }
+
     pub(in crate::host_rpc) fn thread_receipt(
         &self,
         id: &str,
@@ -34,7 +51,7 @@ impl Storage {
         command: Command<'_>,
         create: Option<&model::Thread>,
         decide: impl FnOnce(&model::State) -> Result<model::Decision, String>,
-    ) -> Result<agent_protocol::conversation::records::Acknowledged, String> {
+    ) -> Result<Executed, String> {
         self.with(|connection| execute(connection, command, create, decide))
     }
 }
@@ -48,6 +65,12 @@ pub(in crate::host_rpc) struct Command<'a> {
 }
 
 pub(super) type Receipt = agent_protocol::conversation::records::Acknowledged;
+
+#[derive(Debug, PartialEq)]
+pub(in crate::host_rpc) struct Executed {
+    pub receipt: Receipt,
+    pub events: Vec<model::StoredEvent>,
+}
 
 pub(super) fn receipt(
     connection: &Connection,
@@ -95,16 +118,19 @@ pub(super) fn execute(
     command: Command<'_>,
     create: Option<&model::Thread>,
     decide: impl FnOnce(&model::State) -> Result<model::Decision, String>,
-) -> Result<Receipt, String> {
+) -> Result<Executed, String> {
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(failure)?;
     if let Some(receipt) = receipt(&transaction, command.id, command.thread_id, command.kind)? {
-        return Ok(receipt);
+        return Ok(Executed {
+            receipt,
+            events: vec![],
+        });
     }
     let existing = projections::read::<model::Thread>(&transaction, command.thread_id)?;
     let created = existing.is_none();
-    let state = match existing {
+    let mut state = match existing {
         Some(_) => projections::load(&transaction, command.thread_id, command.item_ids)?,
         None => model::State::new(
             create
@@ -113,8 +139,30 @@ pub(super) fn execute(
                 .clone(),
         ),
     };
+    if command.kind == "prepared-run.retry" {
+        let mut query = transaction
+            .prepare(&format!(
+                "SELECT {} FROM orchestration_v2_effect_outbox e
+            WHERE e.thread_id=?1 AND e.status IN ('failed','cancelled') AND e.effect_type='provider-turn.start'
+            AND EXISTS(SELECT 1 FROM orchestration_v2_projection_turn_items i
+                WHERE i.thread_id=e.thread_id AND i.run_id=json_extract(e.payload_json,'$.runId')
+                AND i.turn_item_id IN (SELECT value FROM json_each(?2)))",
+                event_store::EFFECT_COLUMNS
+            ))
+            .map_err(failure)?;
+        let mut rows = query
+            .query(params![
+                command.thread_id,
+                serde_json::to_string(command.item_ids).map_err(failure)?
+            ])
+            .map_err(failure)?;
+        while let Some(row) = rows.next().map_err(failure)? {
+            let effect = event_store::effect(row)?;
+            state.effects.insert(effect.id.clone(), effect);
+        }
+    }
     let outcome = decide(&state);
-    let error = match outcome {
+    let (error, events) = match outcome {
         Ok(mut decision) => {
             if created {
                 decision
@@ -137,25 +185,28 @@ pub(super) fn execute(
                         "ROLLBACK TO orchestration_decision; RELEASE orchestration_decision",
                     )
                     .map_err(failure)?;
-                Some(error)
+                (Some(error), Vec::new())
             } else {
                 transaction
                     .execute_batch("RELEASE orchestration_decision")
                     .map_err(failure)?;
-                None
+                (None, appended.events)
             }
         }
-        Err(error) => Some(error),
+        Err(error) => (Some(error), Vec::new()),
     };
     let sequence:i64=transaction.query_row("SELECT coalesce((SELECT last_sequence FROM orchestration_v2_projection_metadata WHERE projection_name='thread-projections'),0)",[],|row|row.get(0)).map_err(failure)?;
     transaction.execute("INSERT INTO orchestration_command_receipts(command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status,error,command_type)
         VALUES (?1,'thread',?2,?3,?4,?5,?6,?7)",params![command.id,command.thread_id,command.now,sequence,
             if error.is_some() {"rejected"} else {"accepted"},error,command.kind]).map_err(failure)?;
     transaction.commit().map_err(failure)?;
-    Ok(Receipt {
-        sequence: sequence.try_into().map_err(failure)?,
-        accepted_at: command.now.into(),
-        error,
+    Ok(Executed {
+        receipt: Receipt {
+            sequence: sequence.try_into().map_err(failure)?,
+            accepted_at: command.now.into(),
+            error,
+        },
+        events,
     })
 }
 

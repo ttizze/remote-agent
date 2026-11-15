@@ -60,7 +60,7 @@ async fn worktree_resolves_public_tasks_and_preserves_native_idle_warnings() {
             "bex-task:managed".into(),
         )
         .unwrap();
-        own(&host, &public, &response);
+        own(&host, &public, &response).await;
         let entries = host.worktree_list().await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].threads.len(), 1);
@@ -83,7 +83,7 @@ async fn worktree_resolves_public_tasks_and_preserves_native_idle_warnings() {
                 host.inner
                     .conversation
                     .storage
-                    .lookup(&public)
+                    .thread_header(&public)
                     .unwrap()
                     .is_some()
             );
@@ -129,6 +129,11 @@ async fn worktree_occupancy_uses_the_imported_status_when_source_history_is_inco
                 .create(checkout.to_str().unwrap(), None, None)
                 .await
                 .unwrap();
+            response.thread.status = if status == TurnStatus::Running {
+                agent_protocol::models::SessionStatus::Running
+            } else {
+                agent_protocol::models::SessionStatus::Idle
+            };
             response.thread.history_read_state =
                 Some(HistoryReadState::new(history.clone(), vec![]));
             response.thread.turns = Some(vec![Arc::new(agent_protocol::models::Turn {
@@ -143,7 +148,7 @@ async fn worktree_occupancy_uses_the_imported_status_when_source_history_is_inco
                 .unwrap()
                 .insert(native.id.clone(), response.clone());
             let public = SessionRef::new(ProviderKind::Claude, "bex-task:managed".into()).unwrap();
-            own(&host, &public, &response);
+            own(&host, &public, &response).await;
             let entries = host.worktree_list().await.unwrap();
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].threads.len(), 1);
@@ -450,7 +455,7 @@ async fn worktree_listing_blocks_only_checkouts_with_unverified_claude_activity(
 async fn failed_provider_preparation_keeps_the_owned_checkout_for_retry() {
     use super::*;
     use crate::host_rpc::runtime::native_fixture::{NativeAgent, call};
-    use agent_protocol::conversation::{InputContent, InputState, records};
+    use agent_protocol::conversation::{InputContent, records};
     let directory = tempfile::tempdir().unwrap();
     let repository = repository(directory.path());
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
@@ -500,11 +505,11 @@ async fn failed_provider_preparation_keeps_the_owned_checkout_for_retry() {
                 .inner
                 .conversation
                 .storage
-                .state(&target)
+                .thread_state(&target.application_id(), &[])
                 .unwrap()
-                .inputs
+                .runs
                 .values()
-                .any(|input| matches!(input.state, InputState::Failed { .. }))
+                .any(|input| input.status == agent_protocol::orchestration::RunStatus::Failed)
             {
                 break;
             }
@@ -513,8 +518,14 @@ async fn failed_provider_preparation_keeps_the_owned_checkout_for_retry() {
     })
     .await
     .unwrap();
-    let saved = host.inner.conversation.storage.header(&target).unwrap();
-    let checkout = saved.state.workspace.cwd().unwrap();
+    let saved = host
+        .inner
+        .conversation
+        .storage
+        .thread_header(&target)
+        .unwrap()
+        .unwrap();
+    let checkout = saved.worktree_path.as_deref().unwrap();
     assert_ne!(checkout, repository.to_str().unwrap());
     assert!(std::path::Path::new(checkout).is_dir());
     let entries = host.worktree_list().await.unwrap();
@@ -528,7 +539,9 @@ async fn failed_provider_preparation_keeps_the_owned_checkout_for_retry() {
 async fn unchanged_cleanup_follows_each_projects_override() {
     use super::*;
     use crate::host_rpc::runtime::native_fixture::{NativeAgent, own};
-    use agent_protocol::conversation::{Context, Event, Observation};
+    use crate::host_rpc::runtime::{Runtime, native_fixture::AnswerResource};
+    use crate::providers::{AgentChange, RequestOrigin};
+    use agent_protocol::session::SessionChange;
     use agent_protocol::session::SessionRef;
     use uuid::Uuid;
     let directory = tempfile::tempdir().unwrap();
@@ -579,81 +592,79 @@ async fn unchanged_cleanup_follows_each_projects_override() {
         .unwrap();
     let source = response.thread.id.clone().unwrap();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
-    own(&host, &target, &response);
+    own(&host, &target, &response).await;
     let storage = &host.inner.conversation.storage;
-    let context = Context {
-        preparation: None,
-        rewind_binding: None,
-        imported_turns: &[],
-        external_busy: false,
-        now: 100,
-        seed: Uuid::new_v4(),
-        steers: true,
-        steer_ready: true,
-    };
     let attempt = Uuid::new_v4();
-    storage
-        .decide(
-            &target,
-            Event::ObservedStart {
-                execution: attempt,
-                provider: ProviderKind::Codex,
-                source: source.id,
-            },
-            context,
-            None,
-        )
-        .unwrap();
-    for observation in [
-        Observation::Background {
-            tasks: vec![agent_protocol::execution::BackgroundTask {
-                id: "background-command".into(),
-                kind: agent_protocol::execution::BackgroundTaskKind::Command,
-                description: None,
-            }],
-        },
-        Observation::Request {
-            id: "permission".into(),
-            body: agent_protocol::requests::RequestBody::Permission {
-                description: "background command".into(),
-                details: String::new(),
-                choices: vec![],
-            },
-        },
-    ] {
-        storage
-            .decide(
-                &target,
-                Event::Provider {
-                    attempt,
-                    native_turn: None,
-                    native_items: vec![],
-                    observation,
+    let instance = Uuid::new_v4();
+    Runtime::observe(
+        &host,
+        AgentChange::Session {
+            session: source.clone(),
+            change: SessionChange::Turn {
+                turn: agent_protocol::models::Turn {
+                    id: "external".into(),
+                    status: agent_protocol::models::TurnStatus::Running,
+                    ..Default::default()
                 },
-                context,
-                None,
-            )
-            .unwrap();
-    }
-    let header = storage.header(&target).unwrap();
-    assert_eq!(
-        header.details.activity.status,
-        agent_protocol::models::SessionStatus::Idle
-    );
-    assert!(header.details.activity.waiting);
-    assert!(matches!(
-        storage
-            .state(&target)
-            .unwrap()
-            .turns
+                completed: false,
+            },
+        },
+        Some(attempt),
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &host,
+        AgentChange::Session {
+            session: source.clone(),
+            change: SessionChange::Background {
+                tasks: vec![agent_protocol::execution::BackgroundTask {
+                    id: "background-command".into(),
+                    kind: agent_protocol::execution::BackgroundTaskKind::Command,
+                    description: None,
+                }],
+            },
+        },
+        Some(attempt),
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &host,
+        AgentChange::Request {
+            session: source.clone(),
+            origin: RequestOrigin {
+                instance,
+                native_id: serde_json::json!(1),
+                provider: ProviderKind::Codex,
+                source: std::sync::Arc::new(AnswerResource),
+            },
+            request: agent_protocol::requests::Request {
+                id: "permission".into(),
+                target: agent_protocol::requests::RequestTarget::Turn {
+                    turn_id: "external".into(),
+                    item_id: None,
+                },
+                delivery: agent_protocol::session::RequestDelivery::Awaiting,
+                body: agent_protocol::requests::RequestBody::Permission {
+                    description: "background command".into(),
+                    details: String::new(),
+                    choices: vec![],
+                },
+            },
+        },
+        Some(attempt),
+    )
+    .await
+    .unwrap();
+    let state = storage.thread_state(&target.application_id(), &[]).unwrap();
+    assert!(state.runs.is_empty());
+    assert!(
+        state
+            .runtime_requests
             .values()
-            .last()
-            .unwrap()
-            .state,
-        agent_protocol::conversation::TurnState::Waiting(
-            agent_protocol::conversation::Wait::Background { .. }
-        )
-    ));
+            .any(|request| request.status == agent_protocol::orchestration::RequestStatus::Pending)
+    );
     let listed = host.worktree_list().await.unwrap();
     assert!(
         listed[0]
@@ -669,19 +680,43 @@ async fn unchanged_cleanup_follows_each_projects_override() {
     );
     host.cleanup_unchanged_worktrees().await.unwrap();
     assert!(kept.is_dir(), "a background permission keeps its checkout");
-    storage
-        .decide(
-            &target,
-            Event::Provider {
-                attempt,
-                native_turn: None,
-                native_items: vec![],
-                observation: Observation::Completed,
+    Runtime::observe(
+        &host,
+        AgentChange::Resolved {
+            instance,
+            native_id: serde_json::json!(1),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &host,
+        AgentChange::Session {
+            session: source.clone(),
+            change: SessionChange::Background { tasks: vec![] },
+        },
+        Some(attempt),
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &host,
+        AgentChange::Session {
+            session: source,
+            change: SessionChange::Turn {
+                turn: agent_protocol::models::Turn {
+                    id: "external".into(),
+                    status: agent_protocol::models::TurnStatus::Completed,
+                    ..Default::default()
+                },
+                completed: true,
             },
-            context,
-            None,
-        )
-        .unwrap();
+        },
+        Some(attempt),
+    )
+    .await
+    .unwrap();
     host.cleanup_unchanged_worktrees().await.unwrap();
     assert!(!kept.exists(), "the project's override enables cleanup");
 }

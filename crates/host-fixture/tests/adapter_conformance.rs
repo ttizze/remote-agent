@@ -206,17 +206,16 @@ async fn initial_import_discovers_native_projects_and_continues_the_original_ses
     );
     let catalog = conversations::Catalog::open(&host.local().await.unwrap().peer).await;
     let registered = catalog
-        .replica
-        .rows()
-        .values()
-        .filter_map(|row| match &row.content {
-            agent_protocol::sync::Content::Full(record)
-            | agent_protocol::sync::Content::Summary(record) => match record.as_ref() {
-                agent_protocol::conversation::records::Record::Project(project) => {
-                    Some(project.clone())
-                }
-                _ => None,
-            },
+        .snapshot
+        .projects
+        .iter()
+        .map(|project| agent_protocol::models::Project {
+            id: project.id.clone(),
+            name: project.title.clone(),
+            roots: vec![agent_protocol::models::ProjectRoot {
+                path: project.workspace_root.clone(),
+            }],
+            icon: None,
         })
         .collect::<Vec<_>>();
     assert_eq!(registered.len(), 1);
@@ -1021,8 +1020,12 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
         let mut catalog = conversations::Catalog::open(&local.peer).await;
         let activity = loop {
             let activity = catalog.activity();
-            let fresh=catalog.replica.rows().values().any(|row|match &row.content {
-                agent_protocol::sync::Content::Full(record)|agent_protocol::sync::Content::Summary(record)=>matches!(record.as_ref(),agent_protocol::conversation::records::Record::Thread(header) if header.state.name==format!("Conversation 0: {running}") && header.details.parent.is_some()==subagent && (header.details.activity.status==agent_protocol::execution::SessionStatus::Running)==running)
+            let fresh = catalog.snapshot.threads.iter().any(|shell| {
+                shell.thread.title == format!("Conversation 0: {running}")
+                    && shell.thread.lineage.parent_thread_id.is_some() == subagent
+                    && (shell.task_state().status
+                        == agent_protocol::execution::SessionStatus::Running)
+                        == running
             });
             if fresh && activity.display.current.total == u32::from(counted) {
                 break activity;
@@ -1147,11 +1150,8 @@ async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_r
     let local = host.local().await.unwrap();
     let mut catalog = conversations::Catalog::open(&local.peer).await;
     catalog.wait_rows(2000).await;
-    // A full final page can publish all rows before its empty terminal page.
-    // Isolate local paging only after native discovery has actually completed.
-    while !agent_protocol::conversation::records::catalog_ready(&catalog.replica) {
-        catalog.next().await;
-    }
+    // Full row count alone does not prove the terminal native page was committed.
+
     let mut initial = catalog.page(ListQuery::default());
     assert_eq!(initial.thread_list().unwrap().threads.len(), 5);
     let projects = initial
@@ -1258,7 +1258,7 @@ async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_r
             expanded: false,
         }),
     );
-    assert_eq!(collapsed.lists.replica, initial.lists.replica);
+    assert_eq!(collapsed.lists.shell, initial.lists.shell);
     assert_eq!(
         reads(),
         before,
@@ -1275,7 +1275,7 @@ async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_r
     assert_eq!(found.data.len(), 1);
     assert_eq!(found.data[0].id.as_ref().unwrap().id, "scoped-1900");
     assert!(
-        catalog.replica.rows().len() >= 2009,
+        catalog.snapshot.threads.len() + catalog.snapshot.projects.len() >= 2009,
         "search does not replace the replicated catalog"
     );
     local.close().await;

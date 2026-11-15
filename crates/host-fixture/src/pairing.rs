@@ -268,7 +268,7 @@ fn route(
                     .peer
                     .call(&agent_protocol::conversation::records::SubscribeList {
                         subscription: uuid::Uuid::new_v4(),
-                        cached: None,
+                        after_sequence: None,
                         refresh: true,
                     })
                     .await?;

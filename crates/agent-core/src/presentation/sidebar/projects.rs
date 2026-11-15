@@ -46,9 +46,7 @@ impl Snapshot {
         self.lists.list_query.search_term.trim().is_empty()
             && !self.operations.contains_key(&OperationKey::SessionList)
             && self.lists.subscription.is_some()
-            && self.lists.replica.as_ref().is_some_and(|replica| {
-                agent_protocol::conversation::records::catalog_ready(replica)
-            })
+            && self.lists.shell.is_some()
     }
 
     pub fn sidebar_route(&self, host_id: String, navigation: &Navigation) -> ProjectRoute {

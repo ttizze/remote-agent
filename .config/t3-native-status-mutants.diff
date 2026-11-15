@@ -1,0 +1,11 @@
+--- a/crates/agent-protocol/src/orchestration/execution.rs
++++ b/crates/agent-protocol/src/orchestration/execution.rs
+@@ -16,4 +16,4 @@
+-    if state.active_run().is_some()
+-        || state.native_work_blocks_delivery()
+-        || state.has_uncertain_input()
+-    {
++    if state.active_run().is_some()
++        || state.native_work_blocks_delivery()
++        || state.has_uncertain_input()
++    {

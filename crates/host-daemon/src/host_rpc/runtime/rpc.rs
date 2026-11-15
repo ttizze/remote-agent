@@ -10,26 +10,7 @@ impl Runtime {
     ) -> Result<Option<HostReply>, Failure> {
         let reply = match call {
             Call::SubscribeList(request) => {
-                let storage = service.inner.conversation.storage.clone();
-                let providers = service
-                    .inner
-                    .providers
-                    .all()
-                    .into_iter()
-                    .map(|(provider, _)| provider)
-                    .collect::<Vec<_>>();
-                let refresh = request.refresh;
                 let result = async {
-                    tokio::task::spawn_blocking(move || {
-                        if refresh {
-                            for provider in providers {
-                                storage.queue_catalog(provider, now())?;
-                            }
-                        }
-                        Ok::<_, String>(())
-                    })
-                    .await
-                    .map_err(|error| error.to_string())??;
                     super::list::subscribe(
                         service.inner.conversation.storage.clone(),
                         request,
@@ -66,7 +47,7 @@ impl Runtime {
                             | agent_protocol::orchestration::TurnItemStatus::Waiting
                     ) {
                         storage
-                            .thread_item_attempt(&item)
+                            .thread_item_output_scope(&item)
                             .map_err(storage_failure)?
                     } else {
                         None
@@ -122,7 +103,16 @@ impl Runtime {
             }
             Call::ForkConversation(request) => {
                 let result = async {
-                    Self::ensure_imported(service, &request.source).await?;
+                    if service
+                        .inner
+                        .conversation
+                        .storage
+                        .thread_header(&request.target)
+                        .map_err(storage_failure)?
+                        .is_none()
+                    {
+                        Self::ensure_imported(service, &request.source).await?;
+                    }
                     let _workspace = service.inner.worktree_access.read().await;
                     service.require_not_updating()?;
                     service
@@ -169,12 +159,9 @@ impl Runtime {
             }
             .into(),
             Call::HydrateConversation(request) => {
-                let item = service
-                    .inner
-                    .conversation
-                    .storage
-                    .thread_item(&request.session, request.item.as_str())
-                    .map_err(storage_failure)?;
+                let item =
+                    Self::read_canonical_item(service, &request.session, request.item.as_str())
+                        .await?;
                 let mut reply = records::Hydrated {
                     item,
                     transfer: None,
@@ -213,11 +200,17 @@ impl Runtime {
             .thread_header(&request.session)
             .map_err(storage_failure)?
             .ok_or_else(|| Failure::new("conversation_not_found", "conversation does not exist"))?;
-        let provider =
-            serde_json::from_value(serde_json::Value::String(thread.provider_instance_id))
-                .map_err(|error| Failure::new("invalid_provider", error))?;
-        let capabilities =
-            records::capabilities(service.inner.providers.get(provider)?.capabilities());
+        let provider = ProviderKind::from_instance_id(&thread.provider_instance_id)
+            .map_err(storage_failure)?;
+        // A saved canonical transcript remains readable without a provider process.
+        let capabilities = records::capabilities(
+            service
+                .inner
+                .providers
+                .get(provider)
+                .map(|agent| agent.capabilities())
+                .unwrap_or_default(),
+        );
         let root = storage
             .thread_project_root(&request.session)
             .map_err(storage_failure)?;
@@ -292,48 +285,25 @@ impl Runtime {
             agent_protocol::models::ProjectMembership::Assigned(id) => Some(id),
             _ => None,
         };
-        let strategy = match &request.workspace {
-            Some(strategy) => Some(strategy.clone()),
-            None if request.cwd.is_none() => {
-                Some(agent_protocol::workspace::WorkspaceStrategy::Root)
-            }
-            None => {
-                let settings = service
-                    .inner
-                    .worktrees
-                    .settings(None)
-                    .await
-                    .map_err(|error| Failure::new("worktree_settings_failed", error))?;
-                settings.create_on_new_session.then_some(
-                    agent_protocol::workspace::WorkspaceStrategy::Worktree {
-                        base_ref: String::new(),
-                        start_from_origin: true,
-                    },
-                )
-            }
-        };
-        let preparation = match strategy {
-            Some(agent_protocol::workspace::WorkspaceStrategy::Worktree {
-                base_ref,
-                start_from_origin,
-            }) => Some(model::WorkspacePreparation::Worktree {
-                base_ref,
-                start_from_origin,
-                branch: None,
-            }),
-            Some(agent_protocol::workspace::WorkspaceStrategy::ExistingWorktree { path }) => {
-                Some(model::WorkspacePreparation::ExistingWorktree {
-                    worktree_path: path,
-                    branch: None,
-                })
-            }
-            _ => None,
-        };
+        let requested = request.workspace.clone().or_else(|| {
+            request
+                .cwd
+                .is_none()
+                .then_some(agent_protocol::workspace::WorkspaceStrategy::Root)
+        });
+        let configuration = service
+            .workspace_preparation(cwd.clone(), requested)
+            .await?;
+        let preparation = configuration
+            .strategy
+            .as_ref()
+            .and_then(model::WorkspacePreparation::for_strategy);
         let thread_id = request.session.application_id();
         let now = super::commands::at();
-        let thread = model::Thread {
+        let mut thread = model::Thread {
             id: thread_id.clone(),
             history_origin: None,
+            workspace_launch: None,
             created_by: model::Actor::User,
             creation_source: model::CreationSource::Mobile,
             project_id,
@@ -349,6 +319,7 @@ impl Runtime {
                 Some(model::WorkspacePreparation::ExistingWorktree { worktree_path, .. }) => {
                     Some(worktree_path.clone())
                 }
+                Some(model::WorkspacePreparation::Worktree { .. }) => None,
                 _ => Some(cwd),
             },
             active_provider_thread_id: None,
@@ -383,6 +354,13 @@ impl Runtime {
                 )
                 .to_string()
             });
+        if configuration.setup.is_some() {
+            thread.workspace_launch =
+                Some(Box::new(agent_protocol::workspace::WorkspacePreparation {
+                    generation: Uuid::new_v5(&Uuid::NAMESPACE_URL, operation.as_bytes()),
+                    ..configuration
+                }));
+        }
         let receipt = storage
             .thread_command(
                 super::super::storage::commands::Command {
@@ -435,9 +413,10 @@ impl Runtime {
                 },
             )
             .map_err(storage_failure)?;
-        if let Some(error) = receipt.error {
+        if let Some(error) = receipt.receipt.error {
             return Err(Failure::new("input_rejected", error));
         }
+        Self::schedule_workspace(service, &request.session).map_err(storage_failure)?;
         Ok(())
     }
 
@@ -445,15 +424,33 @@ impl Runtime {
         service: &HostRpcService,
         target: &SessionRef,
     ) -> Result<(), Failure> {
-        if service
-            .inner
-            .conversation
-            .storage
-            .thread_header(target)
-            .map_err(storage_failure)?
-            .is_some()
-        {
-            return Ok(());
+        let storage = &service.inner.conversation.storage;
+        if let Some(thread) = storage.thread_header(target).map_err(storage_failure)? {
+            use agent_protocol::orchestration::{Actor, CreationSource};
+            let native_header = thread.created_by == Actor::System
+                && matches!(
+                    thread.creation_source,
+                    CreationSource::Server | CreationSource::Provider
+                );
+            if thread.history_origin.is_some() || !native_header {
+                return Ok(());
+            }
+            let state = storage
+                .thread_state(&thread.id, &[])
+                .map_err(storage_failure)?;
+            if !state.runs.is_empty() {
+                return Ok(());
+            }
+            let source = storage
+                .active_source(target)
+                .map_err(storage_failure)?
+                .ok_or_else(|| {
+                    Failure::new(
+                        "history_unavailable",
+                        "native history has no selected source",
+                    )
+                })?;
+            return Self::import_native(service, target, &source).await;
         }
         if target.provider.is_none() {
             return Err(Failure::new(
@@ -461,7 +458,7 @@ impl Runtime {
                 "conversation does not exist",
             ));
         }
-        Self::import_native(service, target).await
+        Self::import_native(service, target, target).await
     }
 
     pub(super) async fn native_history(
@@ -473,7 +470,10 @@ impl Runtime {
                 .native_provider()
                 .map_err(|error| Failure::new("invalid_session", error))?,
         )?;
-        let mut response = agent.open(&target.id, 10, true).await?;
+        let mut response = agent
+            .open(&target.id, 10, true)
+            .await
+            .map_err(|error| Failure::new("history_unavailable", error.message))?;
         op::validate_thread(&response, Some(target))
             .map_err(|error| Failure::new("invalid_thread", error))?;
         let mut seen = std::collections::HashSet::new();
@@ -484,7 +484,10 @@ impl Runtime {
                     "provider repeated its history cursor",
                 ));
             }
-            let page = agent.read_history(&target.id, &cursor, true).await?;
+            let page = agent
+                .read_history(&target.id, &cursor, true)
+                .await
+                .map_err(|error| Failure::new("history_unavailable", error.message))?;
             response.thread.turns = Some(agent_protocol::session::prepend_history(
                 &page.turns,
                 response.thread.turns.as_deref().unwrap_or_default(),

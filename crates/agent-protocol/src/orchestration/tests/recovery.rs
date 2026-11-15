@@ -1,6 +1,182 @@
 use super::*;
 
 #[test]
+fn explicit_retry_keeps_one_original_input_and_requires_proof_that_native_input_was_not_sent() {
+    let accepted = accepted(&initial(), 1, Admission::Queue);
+    let run = accepted.active_run().unwrap();
+    let run_id = run.id.clone();
+    let attempt = run.active_attempt_id.clone().unwrap();
+    let root = accepted.run_attempts[&attempt].root_node_id.clone();
+    let error = ProviderFailure {
+        class: "provider".into(),
+        message: "native source is busy".into(),
+        code: Some("provider_switch_busy".into()),
+        retryable: Some(true),
+        reset_at: None,
+    };
+    let mut failed = accepted.apply(
+        &fail_start(
+            &accepted,
+            &attempt,
+            error.clone(),
+            context("failed-start", &accepted),
+        )
+        .unwrap(),
+    );
+    let effect = failed.effects.values_mut().next().unwrap();
+    effect.status = EffectStatus::Failed;
+    effect.attempt_count = 5;
+    effect.last_error = Some("native source is busy".into());
+    let effect_id = effect.id.clone();
+    let mut other_input = input(2);
+    other_input.workspace_preparation = Some(WorkspacePreparation::Worktree {
+        base_ref: "main".into(),
+        start_from_origin: false,
+        branch: None,
+    });
+    let next = failed.apply(
+        &admit(
+            &failed,
+            other_input,
+            Admission::Queue,
+            context("other-input", &failed),
+        )
+        .unwrap(),
+    );
+    let other_run = next.active_run().unwrap().clone();
+    failed = next.apply(
+        &preparation_fail(&next, &other_run.id, error, context("other-failure", &next)).unwrap(),
+    );
+    for effect in failed.effects.values_mut() {
+        effect.status = EffectStatus::Failed;
+    }
+    let other_run = failed.runs[&other_run.id].clone();
+    let original_input=failed.turn_items.values().find(|item|matches!(&item.body,TurnItemBody::UserMessage {message_id,..} if message_id==&run.user_message_id)).unwrap().clone();
+    let other_items: Vec<_> = failed
+        .turn_items
+        .values()
+        .filter(|item| item.run_id.as_ref() == Some(&other_run.id))
+        .cloned()
+        .collect();
+    let retry_context = Context {
+        now: "2026-11-14T00:01:00.000Z",
+        ..context("manual-retry", &failed)
+    };
+    let decision = retry_input(&failed, &run_id, false, retry_context).unwrap();
+    let retry = failed.apply(&decision);
+    assert_eq!(retry.runs.len(), 2);
+    assert_eq!(retry.run_attempts.len(), 2);
+    assert_eq!(retry.runs[&run_id].status, RunStatus::Starting);
+    assert_eq!(
+        retry.run_attempts[&attempt].status,
+        RunAttemptStatus::Pending
+    );
+    assert_eq!(retry.nodes[&root].status, NodeStatus::Pending);
+    assert_eq!(
+        retry
+            .turn_items
+            .values()
+            .filter(|item| matches!(item.body, TurnItemBody::UserMessage { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(retry.turn_items[&original_input.id], original_input);
+    assert_eq!(retry.runs[&other_run.id], other_run);
+    for item in &other_items {
+        assert_eq!(
+            &retry.turn_items[&item.id], item,
+            "another input's failure stays intact"
+        );
+    }
+    assert!(
+        retry
+            .turn_items
+            .values()
+            .filter(|item| item.run_id.as_ref() == Some(&run_id)
+                && matches!(item.body, TurnItemBody::Error { .. }))
+            .all(|item| item.status == TurnItemStatus::Cancelled
+                && item.updated_at == "2026-11-14T00:01:00.000Z")
+    );
+    assert_eq!(decision.effects.len(), 1);
+    assert_ne!(
+        decision.effects[0].id, effect_id,
+        "the explicit retry owns a new outbox operation"
+    );
+    assert_eq!(
+        retry.effects[&effect_id].status,
+        EffectStatus::Failed,
+        "the original failure remains recorded"
+    );
+    assert_eq!(decision.effects[0].status, EffectStatus::Pending);
+    assert_eq!(decision.effects[0].attempt_count, 0);
+    assert!(retry.provider_turns.is_empty());
+    for invalid in [
+        "archived",
+        "deleted",
+        "unknown-write",
+        "delivered-pointer",
+        "delivered-record",
+        "no-failed-effect",
+        "no-failure",
+        "no-root",
+        "active-run",
+        "native-work",
+        "foreign-failure",
+    ] {
+        let mut state = failed.clone();
+        match invalid {
+            "archived" => state.thread.archived_at = Some(NOW.into()),
+            "deleted" => state.thread.deleted_at = Some(NOW.into()),
+            "unknown-write" => {
+                state.effects.get_mut(&effect_id).unwrap().status = EffectStatus::Running
+            }
+            "delivered-pointer" => {
+                state
+                    .run_attempts
+                    .get_mut(&attempt)
+                    .unwrap()
+                    .provider_turn_id = Some("actual-native-turn".into())
+            }
+            "delivered-record" => {
+                let (running, _, _) = running();
+                let mut turn = running.provider_turns.values().next().unwrap().clone();
+                turn.run_attempt_id = Some(attempt.clone());
+                state.provider_turns.insert(turn.id.clone(), turn);
+            }
+            "no-failed-effect" => {
+                state.effects.get_mut(&effect_id).unwrap().status = EffectStatus::Succeeded
+            }
+            "no-failure" => state
+                .turn_items
+                .retain(|_, item| !matches!(item.body, TurnItemBody::Error { .. })),
+            "no-root" => state.nodes.clear(),
+            "native-work" => {
+                state
+                    .provider_threads
+                    .get_mut("native-thread")
+                    .unwrap()
+                    .status = ProviderThreadStatus::Active
+            }
+            "foreign-failure" => state.turn_items.retain(|_, item| {
+                item.run_id.as_ref() != Some(&run_id)
+                    || !matches!(item.body, TurnItemBody::Error { .. })
+            }),
+            "active-run" => {
+                state = state.apply(
+                    &retry_input(&state, &other_run.id, false, context("other-retry", &state))
+                        .unwrap(),
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            retry_input(&state, &run_id, false, context("manual-retry", &state)).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn a_prepared_continuation_can_recover_again_without_repeating_the_original_input() {
     let (state, original, _) = running();
     let recovered =

@@ -2,6 +2,124 @@
 use super::execution::finish_run;
 use super::*;
 
+/// Bex can explicitly retry a prompt whose start failed before native input.
+/// A real native turn or an unresolved write makes resending that prompt unsafe.
+pub(super) fn retry_unsent_start(
+    state: &State,
+    run_id: &str,
+    context: Context<'_>,
+) -> Result<Decision, String> {
+    let now = context.now;
+    let run = state
+        .runs
+        .get(run_id)
+        .filter(|run| matches!(run.status, RunStatus::Failed | RunStatus::Cancelled))
+        .ok_or("input has no failed native start to retry")?;
+    if state.has_uncertain_input() || state.native_work_blocks_delivery() {
+        return Err("thread cannot retry native preparation".into());
+    }
+    let attempt = state
+        .active_attempt(run.active_attempt_id.as_deref())
+        .ok_or("input attempt is missing")?;
+    let cancelled = run.status == RunStatus::Cancelled;
+    if attempt.status
+        != (if cancelled {
+            RunAttemptStatus::Cancelled
+        } else {
+            RunAttemptStatus::Failed
+        })
+        || attempt.provider_turn_id.is_some()
+        || state
+            .provider_turns
+            .values()
+            .any(|turn| turn.run_attempt_id.as_deref() == Some(&attempt.id))
+    {
+        return Err("native input was already delivered".into());
+    }
+    if !state.effects.values().any(|effect| {
+        matches!(&effect.request,EffectRequest::ProviderTurnStart {run_id:id} if id==run_id)
+            && effect.status
+                == (if cancelled {
+                    EffectStatus::Cancelled
+                } else {
+                    EffectStatus::Failed
+                })
+    }) {
+        return Err("input has no failed native start effect".into());
+    }
+    let root = state
+        .nodes
+        .get(&attempt.root_node_id)
+        .ok_or("input root is missing")?;
+    if root.status
+        != (if cancelled {
+            NodeStatus::Cancelled
+        } else {
+            NodeStatus::Failed
+        })
+        || (!cancelled
+            && !state.turn_items.values().any(|item| {
+                item.run_id.as_deref() == Some(run_id)
+                    && item.node_id.as_deref() == Some(&root.id)
+                    && item.status == TurnItemStatus::Failed
+                    && matches!(item.body, TurnItemBody::Error { .. })
+            }))
+    {
+        return Err("failed native preparation is missing".into());
+    }
+    let mut changes = vec![
+        Change::Run(Run {
+            status: RunStatus::Starting,
+            completed_at: None,
+            ..run.clone()
+        }),
+        Change::RunAttempt(RunAttempt {
+            status: RunAttemptStatus::Pending,
+            completed_at: None,
+            ..attempt.clone()
+        }),
+        Change::Node(ExecutionNode {
+            status: NodeStatus::Pending,
+            completed_at: None,
+            ..root.clone()
+        }),
+        Change::Thread(Thread {
+            provider_instance_id: run.provider_instance_id.clone(),
+            active_provider_thread_id: run.provider_thread_id.clone(),
+            model_selection: run.model_selection.clone(),
+            updated_at: now.into(),
+            ..state.thread.clone()
+        }),
+    ];
+    changes.extend(
+        state
+            .turn_items
+            .values()
+            .filter(|item| {
+                item.run_id.as_deref() == Some(run_id)
+                    && item.status == TurnItemStatus::Failed
+                    && matches!(item.body, TurnItemBody::Error { .. })
+            })
+            .map(|item| {
+                Change::TurnItem(TurnItem {
+                    status: TurnItemStatus::Cancelled,
+                    updated_at: now.into(),
+                    ..item.clone()
+                })
+            }),
+    );
+    Ok(Decision {
+        changes,
+        effects: vec![commands::effect(
+            context,
+            &state.thread.id,
+            EffectRequest::ProviderTurnStart {
+                run_id: run_id.into(),
+            },
+        )],
+    })
+}
+
 fn restart_blocked(state: &State, run: &Run) -> bool {
     state.thread.archived_at.is_some()
         || state.thread.deleted_at.is_some()
@@ -88,6 +206,23 @@ pub fn runtime_restarted(
     } else {
         Decision::default()
     };
+    // Use the actual saved launch progress, then keep unrelated decisions
+    // already made above (including native delivery uncertainty) intact.
+    if let Some(workspace) = state.thread.workspace_launch.as_ref() {
+        let at = chrono::DateTime::parse_from_rfc3339(context.now)
+            .map_err(|error| error.to_string())?
+            .timestamp_millis()
+            .max(0) as u64;
+        if let Some(resource) = workspace.interrupted(at) {
+            let mut current = state.apply(&decision).thread;
+            current.workspace_launch = Some(Box::new(resource));
+            current.updated_at = context.now.into();
+            decision
+                .changes
+                .retain(|change| !matches!(change, Change::Thread(_)));
+            decision.changes.push(Change::Thread(current));
+        }
+    }
     for provider in state
         .provider_threads
         .values()
@@ -281,6 +416,35 @@ pub fn provider_stopped(
             provider_instance_id,
             context.now,
         ));
+    // Even a cancelled allocation can still have an outstanding creation
+    // reply. Persist process loss on every app-owned resource so that such a
+    // reply cannot reattach a session after its start effect was cancelled.
+    let stopped = state.apply(&decision);
+    decision.changes.extend(
+        stopped
+            .provider_threads
+            .values()
+            .filter(|thread| {
+                thread.provider_instance_id == provider_instance_id
+                    && matches!(
+                        thread.status,
+                        ProviderThreadStatus::Idle
+                            | ProviderThreadStatus::Active
+                            | ProviderThreadStatus::Unknown
+                    )
+                    && stopped
+                        .runs
+                        .values()
+                        .any(|run| run.provider_thread_id.as_ref() == Some(&thread.id))
+            })
+            .map(|thread| {
+                Change::ProviderThread(ProviderThread {
+                    status: ProviderThreadStatus::Error,
+                    updated_at: context.now.into(),
+                    ..thread.clone()
+                })
+            }),
+    );
     decision.changes.extend(
         state
             .provider_sessions

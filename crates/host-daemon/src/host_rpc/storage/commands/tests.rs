@@ -42,7 +42,7 @@ fn committed_admission_is_atomic_and_repeating_its_command_cannot_reexecute_the_
         )
     })
     .unwrap();
-    assert!(first.error.is_none());
+    assert!(first.receipt.error.is_none());
     let events = event_store::read(&db, None, 0, 100, 100).unwrap();
     assert!(!events.is_empty());
     let saved = projections::load(&db, "thread", &[]).unwrap();
@@ -55,7 +55,8 @@ fn committed_admission_is_atomic_and_repeating_its_command_cannot_reexecute_the_
         panic!("receipted decision must not run")
     })
     .unwrap();
-    assert_eq!(first, repeated);
+    assert_eq!(first.receipt, repeated.receipt);
+    assert!(repeated.events.is_empty());
     assert_eq!(event_store::read(&db, None, 0, 100, 100).unwrap(), events);
     assert_eq!(projections::load(&db, "thread", &[]).unwrap(), saved);
     assert!(receipt(&db, &id, "other", "message.dispatch").is_err());
@@ -73,12 +74,12 @@ fn a_rejection_is_durable_and_a_failed_commit_leaves_no_receipt_or_partial_proje
         Err("input is invalid".into())
     })
     .unwrap();
-    assert_eq!(rejected.error.as_deref(), Some("input is invalid"));
+    assert_eq!(rejected.receipt.error.as_deref(), Some("input is invalid"));
     let repeated = execute(&mut db, command("rejected"), None, |_| {
         panic!("rejection must not be recomputed")
     })
     .unwrap();
-    assert_eq!(repeated, rejected);
+    assert_eq!(repeated.receipt, rejected.receipt);
     assert_eq!(event_store::head(&db, None).unwrap(), 1);
     let before = projections::read::<model::Thread>(&db, "thread")
         .unwrap()
@@ -202,7 +203,7 @@ fn a_context_preparation_rejection_is_durable_without_partial_admission() {
         input_decision(state, &id, "new-input", "codex")
     })
     .expect("a logical context rejection is an acknowledged command result");
-    assert!(ack.error.is_some());
+    assert!(ack.receipt.error.is_some());
     let repeated = execute(&mut db, command(&id), None, |_| {
         panic!("a rejected operation cannot re-run its decision")
     })

@@ -172,7 +172,17 @@ impl Snapshot {
             );
             entries.insert(row.key.clone(), (parent.clone(), Some(id.clone()), row));
         }
+        entries = canonical_agents(
+            &self.sessions.projections,
+            &self.lists.activity.active,
+            &self.lists.activity.unread,
+            self.catalog.ui_language,
+            entries,
+        );
         for (owner, item, provider) in self.conversation_items() {
+            if self.sessions.projections.contains_key(owner) {
+                continue;
+            }
             let ItemBody::Subagent {
                 tool,
                 prompt,
@@ -272,6 +282,10 @@ pub(super) fn project(
             .conversations
             .same(&previous.snapshot.sessions.conversations)
         && snapshot
+            .sessions
+            .projections
+            .same(&previous.snapshot.sessions.projections)
+        && snapshot
             .lists
             .activity
             .same(&previous.snapshot.lists.activity)
@@ -285,6 +299,84 @@ pub(super) fn project(
         return previous.agents.clone();
     }
     Arc::new(agents)
+}
+
+fn canonical_agents(
+    projections: &BTreeMap<
+        SessionRef,
+        std::sync::Arc<agent_protocol::orchestration::projection::ThreadSnapshot>,
+    >,
+    active: &BTreeMap<SessionRef, bool>,
+    unread: &std::collections::BTreeSet<SessionRef>,
+    language: UiLanguage,
+    mut entries: AgentEntries,
+) -> AgentEntries {
+    use agent_protocol::orchestration as model;
+    for (owner, snapshot) in projections {
+        for task in &snapshot.projection.subagents {
+            let item=snapshot.projection.turn_items.iter().find(|item|matches!(&item.body,model::TurnItemBody::Subagent {subagent_id,..} if subagent_id==&task.id));
+            let (prompt, result) = item
+                .and_then(|item| match &item.body {
+                    model::TurnItemBody::Subagent { prompt, result, .. } => {
+                        Some((Some(prompt.as_str()), result.clone()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let detail = result.or_else(|| prompt.map(str::to_owned));
+            let (status, item_status) = match task.status {
+                model::SubagentStatus::Pending
+                | model::SubagentStatus::Running
+                | model::SubagentStatus::Waiting => (TurnStatus::Running, ItemStatus::Running),
+                model::SubagentStatus::Completed => (TurnStatus::Completed, ItemStatus::Completed),
+                model::SubagentStatus::Failed => (TurnStatus::Failed, ItemStatus::Failed),
+                model::SubagentStatus::Cancelled | model::SubagentStatus::Interrupted => {
+                    (TurnStatus::Interrupted, ItemStatus::Interrupted)
+                }
+                model::SubagentStatus::Idle => (TurnStatus::Unknown, ItemStatus::Unknown),
+            };
+            let (child, mut row) = if let Some(child) = task.child_thread_id.as_deref() {
+                let Ok(child) = model::shell::public_session_ref(child) else {
+                    continue;
+                };
+                let title = task_title(language, task.title.as_deref(), prompt);
+                let row = session_agent(
+                    language,
+                    &child,
+                    &title,
+                    status,
+                    active.get(&child).copied(),
+                    unread.contains(&child),
+                );
+                (Some(child), row)
+            } else {
+                (
+                    None,
+                    local_agent(
+                        language,
+                        owner,
+                        &item
+                            .map_or_else(|| task.id.clone(), |item| item.id.clone())
+                            .into(),
+                        item_status,
+                        prompt,
+                        None,
+                        None,
+                    ),
+                )
+            };
+            row.model = task.model.clone();
+            row.detail = detail;
+            if let Some((known_parent, _, known)) = entries.get(&row.key) {
+                if known_parent != owner {
+                    continue;
+                }
+                row.title = known.title.clone();
+            }
+            entries.insert(row.key.clone(), (owner.clone(), child, row));
+        }
+    }
+    entries
 }
 
 impl Snapshot {
@@ -758,6 +850,7 @@ mod tests {
                 vec![crate::models::SubagentState {
                     session: session("child"),
                     status: TurnStatus::Completed,
+                    native_status: None,
                     message: Some("Finished review".into()),
                 }],
             )],

@@ -13,7 +13,7 @@ pub(super) fn timestamp() -> String {
     .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
-pub(super) fn write(transaction: &Transaction<'_>, project: &Project) -> Result<Row, String> {
+pub(super) fn write(transaction: &Transaction<'_>, project: &Project) -> Result<(), String> {
     let [root] = project.roots.as_slice() else {
         return Err("a project must own exactly one workspace root".into());
     };
@@ -21,123 +21,121 @@ pub(super) fn write(transaction: &Transaction<'_>, project: &Project) -> Result<
         return Err("project title and workspace root are required".into());
     }
     let now = timestamp();
-    transaction.execute("INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES (?1,?2,?3,'[]',?4,?4)
-        ON CONFLICT(project_id) DO UPDATE SET title=excluded.title,workspace_root=excluded.workspace_root,updated_at=excluded.updated_at,deleted_at=NULL",
-        params![project.id,project.name,root.path,now]).map_err(failure)?;
-    let position: i64 = transaction
+    let exists: bool = transaction
         .query_row(
-            "SELECT rowid FROM projection_projects WHERE project_id=?1",
+            "SELECT EXISTS(SELECT 1 FROM projection_projects WHERE project_id=?1)",
             [&project.id],
             |row| row.get(0),
         )
         .map_err(failure)?;
-    let mut visible = project.clone();
-    visible.icon = None;
-    Ok(Row {
-        key: Key::Project(project.id.clone()),
-        version: 0,
-        position: Position::Project {
-            position: position.try_into().map_err(failure)?,
-        },
-        content: Content::Full(Arc::new(Record::Project(visible))),
+    let changed = transaction.execute("INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES (?1,?2,?3,'[]',?4,?4)
+        ON CONFLICT(project_id) DO UPDATE SET title=excluded.title,workspace_root=excluded.workspace_root,updated_at=excluded.updated_at,deleted_at=NULL WHERE projection_projects.title!=excluded.title OR projection_projects.workspace_root!=excluded.workspace_root OR projection_projects.deleted_at IS NOT NULL",
+        params![project.id,project.name,root.path,now]).map_err(failure)?;
+    if changed > 0 {
+        publish(
+            transaction,
+            &project.id,
+            if exists {
+                "project.meta-updated"
+            } else {
+                "project.created"
+            },
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn publish(transaction: &Transaction<'_>, id: &str, kind: &str) -> Result<(), String> {
+    let project = shell::projects(transaction)?
+        .into_iter()
+        .find(|project| project.id == id)
+        .ok_or("project does not exist")?;
+    let mut payload = serde_json::to_value(&project).map_err(failure)?;
+    let fields = payload.as_object_mut().ok_or("project is not an object")?;
+    fields.remove("id");
+    fields.insert("projectId".into(), id.into());
+    event_store::append_metadata(
+        transaction,
+        "project",
+        id,
+        kind,
+        &project.updated_at,
+        &payload,
+    )
+}
+
+pub(super) fn read(connection: &Connection) -> Result<Vec<Project>, String> {
+    shell::projects(connection).map(|projects| {
+        projects
+            .into_iter()
+            .map(|project| Project {
+                id: project.id,
+                name: project.title,
+                roots: vec![agent_protocol::models::ProjectRoot {
+                    path: project.workspace_root,
+                }],
+                icon: None,
+            })
+            .collect()
     })
 }
-
-pub(super) fn read(connection: &Connection) -> Result<Vec<Row>, String> {
-    let mut statement=connection.prepare("SELECT project_id,title,workspace_root,scripts_json,rowid FROM projection_projects WHERE deleted_at IS NULL ORDER BY rowid").map_err(failure)?;
-    let mut entries = statement.query([]).map_err(failure)?;
-    let mut rows = Vec::new();
-    while let Some(entry) = entries.next().map_err(failure)? {
-        let id: String = entry.get(0).map_err(failure)?;
-        let name: String = entry.get(1).map_err(failure)?;
-        let path: String = entry.get(2).map_err(failure)?;
-        if name.trim().is_empty() || path.trim().is_empty() {
-            return Err("project title and workspace root are required".into());
-        }
-        // Scripts are part of this same canonical project, including when the
-        // caller only asks for a list of project shells.
-        let _: Vec<agent_protocol::orchestration::ProjectScript> =
-            serde_json::from_str(&entry.get::<_, String>(3).map_err(failure)?).map_err(failure)?;
-        rows.push(Row {
-            key: Key::Project(id.clone()),
-            version: 0,
-            position: Position::Project {
-                position: entry
-                    .get::<_, i64>(4)
-                    .map_err(failure)?
-                    .try_into()
-                    .map_err(failure)?,
-            },
-            content: Content::Full(Arc::new(Record::Project(Project {
-                id,
-                name,
-                roots: vec![agent_protocol::models::ProjectRoot { path }],
-                icon: None,
-            }))),
-        });
-    }
-    Ok(rows)
-}
-
 impl Storage {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn replace_projects(&self, projects: &[Project]) -> Result<(), String> {
         self.with(|connection| {
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(failure)?;
-            let removed = read(&transaction)?
-                .into_iter()
-                .filter(|row| match &row.key {
-                    Key::Project(id) => !projects.iter().any(|project| &project.id == id),
-                    _ => false,
-                })
-                .map(|row| row.key)
-                .collect();
-            transaction
-                .execute(
-                    "UPDATE projection_projects SET deleted_at=?1 WHERE deleted_at IS NULL",
-                    [timestamp()],
-                )
-                .map_err(failure)?;
-            let rows = projects
-                .iter()
-                .map(|project| write(&transaction, project))
-                .collect::<Result<Vec<_>, _>>()?;
-            jobs::enqueue(
-                &transaction,
-                Uuid::new_v4(),
-                "projects",
-                super::super::runtime::now(),
-                &jobs::Work::ProjectsChanged,
-            )?;
-            Self::commit(transaction, None, Step::default(), rows, removed, false).map(|_| ())
+            let tx=connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
+            let now=timestamp();
+            for old in read(&tx)?.into_iter().filter(|old|!projects.iter().any(|project|project.id==old.id)) {
+                tx.execute("UPDATE projection_projects SET deleted_at=?1,updated_at=?1 WHERE project_id=?2",params![now,old.id]).map_err(failure)?;
+                event_store::append_metadata(&tx,"project",&old.id,"project.deleted",&now,&serde_json::json!({"projectId":old.id,"deletedAt":now}))?;
+            }
+            for project in projects {write(&tx,project)?;}
+            tx.commit().map_err(failure)
         })
     }
     pub(crate) fn projects(&self) -> Result<Vec<Project>, String> {
-        self.with(|connection| {
-            read(connection)?
-                .into_iter()
-                .map(|row| match row.content {
-                    Content::Full(record) | Content::Summary(record) => match record.as_ref() {
-                        Record::Project(project) => Ok(project.clone()),
-                        _ => unreachable!("project row"),
-                    },
-                })
-                .collect()
-        })
+        self.with(|connection| read(connection))
     }
     pub(crate) fn register_project(&self, project: &Project) -> Result<(), String> {
         self.with(|connection| {
-            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
-            let existing = read(&transaction)?;
-            if existing.iter().any(|row| match &row.content {
-                Content::Full(record) | Content::Summary(record) => matches!(record.as_ref(),Record::Project(saved)
-                    if saved.roots.iter().any(|root| project.roots.iter().any(|new|root.path==new.path))),
-            }) { return Ok(()); }
-            let row = write(&transaction,project)?;
-            jobs::enqueue(&transaction,Uuid::new_v4(),"projects",super::super::runtime::now(),&jobs::Work::ProjectsChanged)?;
-            Self::commit(transaction,None,Step::default(),vec![row],Vec::new(),false).map(|_|())
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(failure)?;
+            if read(&tx)?.iter().any(|saved| {
+                saved
+                    .roots
+                    .iter()
+                    .any(|root| project.roots.iter().any(|new| root.path == new.path))
+            }) {
+                return Ok(());
+            }
+            write(&tx, project)?;
+            tx.commit().map_err(failure)
+        })
+    }
+    // Bex explicitly supports projectless conversations. Assign them when a
+    // project is registered, using the same pure membership rule as creation.
+    // Existing assignments remain owned by their conversation commands.
+    pub(crate) fn assign_projectless_threads(
+        &self,
+        projects: &crate::projects::state::Snapshot,
+    ) -> Result<(), String> {
+        self.with(|connection| {
+            let tx=connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
+            let threads={
+                let mut query=tx.prepare("SELECT payload_json FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL AND json_extract(payload_json,'$.projectId') IS NULL").map_err(failure)?;
+                query.query_map([],|row|row.get::<_,String>(0)).map_err(failure)?.map(|row|serde_json::from_str::<agent_protocol::orchestration::Thread>(&row.map_err(failure)?).map_err(failure)).collect::<Result<Vec<_>,_>>()?
+            };
+            for thread in threads {
+                let project_id=projects.project_membership(thread.worktree_path.as_deref()).as_ref().cloned();
+                if project_id.is_none() {continue;}
+                let state=agent_protocol::orchestration::State::new(thread.clone());
+                let now=timestamp();
+                commands::append_decision(&tx,&state,agent_protocol::orchestration::Decision {
+                    changes:vec![agent_protocol::orchestration::Change::Thread(agent_protocol::orchestration::Thread {project_id,updated_at:now.clone(),..thread})],effects:vec![],
+                },None,&now)?;
+            }
+            tx.commit().map_err(failure)
         })
     }
 }

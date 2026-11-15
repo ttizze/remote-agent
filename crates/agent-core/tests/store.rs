@@ -3202,6 +3202,21 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
     store.close().await.unwrap();
 }
 
+fn fork_snapshot() -> Snapshot {
+    let mut snapshot = snapshot();
+    let (identity, thread) = snapshot.sessions.conversations.first_key_value().unwrap();
+    let projection = host_fixture::orchestration::snapshot(
+        agent_protocol::models::ThreadResponse {
+            thread: thread.as_ref().clone(),
+            ..Default::default()
+        },
+        1,
+    );
+    Arc::make_mut(&mut snapshot.sessions.projections)
+        .insert(identity.clone(), Arc::new(projection));
+    snapshot
+}
+
 #[tokio::test]
 async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
     for navigate in [false, true] {
@@ -3209,7 +3224,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
             provider: Some(ProviderKind::Codex),
             id: "thread".into(),
         };
-        let mut initial = snapshot();
+        let mut initial = fork_snapshot();
         let draft = Arc::new(Draft {
             text: "unsent message".into(),
             ..Default::default()
@@ -3225,7 +3240,10 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
         )));
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/conversation/fork");
-        assert_eq!(request["params"]["through"], "turn");
+        assert_eq!(
+            request["params"]["through"],
+            json!({"type":"run","runId":"turn"})
+        );
         let target: SessionRef =
             serde_json::from_value(request["params"]["target"].clone()).unwrap();
         let progress = op::OperationKey::Fork {
@@ -3515,7 +3533,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
 
 #[tokio::test]
 async fn fork_failure_clears_progress_and_allows_retry() {
-    let (store, mut reader, writer) = setup(snapshot()).await;
+    let (store, mut reader, writer) = setup(fork_snapshot()).await;
     let selected_before = store
         .snapshot()
         .panes

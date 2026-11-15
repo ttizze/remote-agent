@@ -121,25 +121,22 @@ async fn run(args: Args) -> anyhow::Result<()> {
         loop {
             {
                 let snapshot = updates.borrow_and_update();
-                let ready =
-                    match &args.command {
-                        Command::List { search, .. } => {
-                            snapshot.lists.threads.is_some()
-                                && snapshot.lists.replica.as_deref().is_some_and(
-                                    agent_protocol::conversation::records::catalog_ready,
-                                )
-                                && (search.trim().is_empty()
-                                    || snapshot
-                                        .lists
-                                        .search_results
-                                        .as_ref()
-                                        .is_some_and(|(term, _)| term == search))
-                        }
-                        Command::Send { thread_id, .. } => {
-                            snapshot.sessions.conversations.contains_key(thread_id)
-                        }
-                        Command::Approve { .. } => true,
-                    };
+                let ready = match &args.command {
+                    Command::List { search, .. } => {
+                        snapshot.lists.threads.is_some()
+                            && snapshot.lists.subscription.is_some()
+                            && (search.trim().is_empty()
+                                || snapshot
+                                    .lists
+                                    .search_results
+                                    .as_ref()
+                                    .is_some_and(|(term, _)| term == search))
+                    }
+                    Command::Send { thread_id, .. } => {
+                        snapshot.sessions.conversations.contains_key(thread_id)
+                    }
+                    Command::Approve { .. } => true,
+                };
                 if ready {
                     return Ok::<_, anyhow::Error>(());
                 }

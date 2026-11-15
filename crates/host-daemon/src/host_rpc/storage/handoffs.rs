@@ -4,6 +4,36 @@ use super::*;
 use agent_protocol::orchestration::{self as model, handoffs as history};
 
 impl Storage {
+    /// Allocation may return after its start was settled. Keep the physical
+    /// identity private, but only a user-cancelled start can retain a ready
+    /// resource. A process-loss result must not attach or revive its session.
+    pub(in crate::host_rpc) fn bind_abandoned_native_start(
+        &self,
+        effect: &model::Effect,
+        provider_thread_id: &str,
+        expected: Option<&model::ProviderRef>,
+        mut session: model::ProviderSession,
+        native: model::ProviderRef,
+        native_fork: bool,
+        now: &str,
+    ) -> Result<(), String> {
+        self.with(|connection| {
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
+            let status: Option<String> = tx.query_row(
+                "SELECT status FROM orchestration_v2_effect_outbox WHERE effect_id=?1 AND thread_id=?2 AND effect_type='provider-turn.start'",
+                params![effect.id,effect.thread_id], |row|row.get(0),
+            ).optional().map_err(failure)?;
+            let Some(status) = status.filter(|status|matches!(status.as_str(),"failed"|"cancelled")) else {return Ok(())};
+            let state = projections::load(&tx,&effect.thread_id,&[])?;
+            if status == "failed" || state.provider_threads.get(provider_thread_id).is_some_and(|thread|thread.status==model::ProviderThreadStatus::Error) {
+                session.status=model::ProviderSessionStatus::Error;
+            }
+            let decision = model::native_resource_loaded(&state,provider_thread_id,expected,session,native,native_fork,now)?;
+            commands::append_decision(&tx,&state,decision,None,now)?;
+            tx.commit().map_err(failure)
+        })
+    }
+
     pub(in crate::host_rpc) fn prepare_context(
         &self,
         effect: &model::Effect,
@@ -92,7 +122,7 @@ impl Storage {
         &self,
         effect: &model::Effect,
         worker: &str,
-        mut session: model::ProviderSession,
+        session: model::ProviderSession,
         native: model::ProviderRef,
         native_fork: bool,
         fork_failure: Option<&str>,
@@ -108,7 +138,7 @@ impl Storage {
             let run = state.runs.get(run_id).ok_or("native binding run is missing")?;
             let Some(attempt) = state.active_attempt(run.active_attempt_id.as_deref()).filter(|attempt| run.status == model::RunStatus::Starting && attempt.status == model::RunAttemptStatus::Pending && attempt.provider_turn_id.is_none()) else {return Ok(false)};
             let thread = state.provider_threads.get(&attempt.provider_thread_id).ok_or("native binding provider thread is missing")?;
-            if session.provider_instance_id != run.provider_instance_id || session.driver != thread.driver || native.driver != thread.driver || native.native_id.is_none() {
+            if session.provider_instance_id != run.provider_instance_id {
                 return Err("native binding uses another provider".into());
             }
             let fork = state.unconsumed_fork().filter(|fork| fork.target_run_id.as_ref() == Some(&run.id) && thread.forked_from.is_some());
@@ -128,14 +158,13 @@ impl Storage {
                 changes.push(model::Change::ContextHandoff(retry));
             }
             let prepared_thread = changes.iter().rev().find_map(|change|match change {model::Change::ProviderThread(value) if value.id == thread.id => Some(value), _=>None}).unwrap_or(thread);
-            session.created_at = state.provider_sessions.get(&session.id).map_or_else(|| now.into(), |existing| existing.created_at.clone());
-            let cwd = session.cwd.clone();
-            let mut decision = model::Decision {changes: {
-                let bound = model::ProviderThread {provider_session_id:Some(session.id.clone()),native_thread_ref:Some(native),status:model::ProviderThreadStatus::Idle,updated_at:now.into(),..prepared_thread.clone()};
-                let mut changes = changes;
-                changes.extend([model::Change::ProviderSessionAttached(session),model::Change::ProviderThread(bound)]);
-                changes
-            },effects:Vec::new()};
+            let cwd=session.cwd.clone();
+            let prepared=state.apply(&model::Decision{changes:changes.clone(),effects:Vec::new()});
+            let loaded=model::native_resource_loaded(&prepared,&thread.id,prepared_thread.native_thread_ref.as_ref(),session,native.clone(),native_fork,now)?;
+            if loaded.changes.is_empty(){return Ok(false);}
+            changes.extend(loaded.changes);
+            changes.push(model::Change::RunAttempt(model::RunAttempt{native_thread_ref:Some(native),..attempt.clone()}));
+            let mut decision=model::Decision{changes,effects:Vec::new()};
             if let Some(error) = fork_failure {
                 decision.changes.push(model::Change::TurnItem(model::TurnItem {
                     id:model::derived_id("turn-item", &["run",&run.id,"signal","native-fork-fallback"]),
@@ -413,7 +442,13 @@ fn prepare(
         fork.source_point
             .run_id
             .as_ref()
-            .and_then(|id| source.runs.get(id))
+            .map(|id| {
+                source
+                    .runs
+                    .get(id)
+                    .ok_or("fork context source run is missing")
+            })
+            .transpose()?
     } else {
         source
             .runs
@@ -436,7 +471,13 @@ fn prepare(
             .last_delivered_run(&thread.id)
             .map_or(0, |run| run.ordinal)
     };
-    let items = timeline::handoff_items(connection, &source.thread.id, after, through, after == 0)?;
+    let items = if fork.is_some() {
+        // The target's inherited timeline already owns the exact source cutoff.
+        // Its first new input is a local run and must not echo in that context.
+        timeline::handoff_items(connection, &state.thread.id, 0, 0, true)?
+    } else {
+        timeline::handoff_items(connection, &source.thread.id, after, through, after == 0)?
+    };
     let covered_runs: Vec<_> = source
         .runs
         .values()
@@ -512,12 +553,21 @@ fn prepare(
         covered_runs
     };
     source_runs.sort_by_key(|run| run.ordinal);
+    let native_source =
+        fork.filter(|_| latest.is_none())
+            .and_then(|_| match &state.thread.forked_from {
+                Some(model::ThreadForkSource::ProviderThread {
+                    provider_thread_id, ..
+                }) => source.provider_threads.get(provider_thread_id),
+                _ => None,
+            });
     let from: Vec<_> = if fresh {
         vec![thread.id.clone()]
     } else {
         source_runs
             .iter()
             .filter_map(|run| run.provider_thread_id.clone())
+            .chain(native_source.map(|thread| thread.id.clone()))
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -530,6 +580,7 @@ fn prepare(
         source_runs
             .iter()
             .map(|run| run.provider_instance_id.clone())
+            .chain(native_source.map(|thread| thread.provider_instance_id.clone()))
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect()
@@ -569,9 +620,6 @@ fn prepare(
         created_at: now.into(),
         updated_at: now.into(),
     };
-    if fork.is_some() && latest.is_none() {
-        return Err("fork context source run is missing".into());
-    }
     let actor = state
         .turn_items
         .values()
@@ -731,7 +779,11 @@ fn context_budget(
                     .and_then(|id| state.run_attempts.get(id))
                     .is_some_and(|attempt| {
                         native.is_some()
-                            && attempt.native_thread_id.as_deref() == native
+                            && attempt
+                                .native_thread_ref
+                                .as_ref()
+                                .and_then(|reference| reference.native_id.as_deref())
+                                == native
                             && attempt.provider_thread_id == turn.provider_thread_id
                             && attempt.root_node_id == turn.node_id
                     })
@@ -763,7 +815,11 @@ fn context_budget(
             })
             .filter(|attempt| {
                 attempt.provider_thread_id == thread.id
-                    && attempt.native_thread_id.as_deref() == Some(native)
+                    && attempt
+                        .native_thread_ref
+                        .as_ref()
+                        .and_then(|reference| reference.native_id.as_deref())
+                        == Some(native)
             })
             .map(|attempt| attempt.run_id.as_str())
             .collect();

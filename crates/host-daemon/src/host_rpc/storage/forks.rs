@@ -26,21 +26,26 @@ impl Storage {
             let tx = connection.transaction().map_err(failure)?;
             if let Some(point) = source_point {
                 let state = projections::metadata(&tx, &point.thread_id)?;
-                let run = point
-                    .run_id
-                    .as_ref()
-                    .and_then(|id| state.runs.get(id))
-                    .ok_or("native fork source run is missing")?;
-                if run.provider_thread_id.as_ref() != Some(&origin.provider_thread_id)
-                    || !state
-                        .provider_threads
-                        .contains_key(&origin.provider_thread_id)
-                {
-                    return Err("native fork source provider execution is missing".into());
-                }
-                if state
-                    .active_run()
-                    .is_some_and(|candidate| candidate.ordinal > run.ordinal)
+                if let Some(run_id) = &point.run_id {
+                    let run = state
+                        .runs
+                        .get(run_id)
+                        .ok_or("native fork source run is missing")?;
+                    if run.provider_thread_id.as_ref() != Some(&origin.provider_thread_id) {
+                        return Err("native fork source provider execution is missing".into());
+                    }
+                    if state
+                        .active_run()
+                        .is_some_and(|candidate| candidate.ordinal > run.ordinal)
+                    {
+                        return Ok(None);
+                    }
+                } else if state.active_run().is_some()
+                    || state.has_uncertain_input()
+                    || state.provider_turns.values().any(|turn| {
+                        turn.provider_thread_id == origin.provider_thread_id
+                            && turn.status == model::ProviderTurnStatus::Running
+                    })
                 {
                     return Ok(None);
                 }
@@ -57,7 +62,13 @@ impl Storage {
             if turn.provider_thread_id != thread.id {
                 return Err("fork turn belongs to another provider thread".into());
             }
-            let source = thread
+            if source_point.is_some_and(|point| {
+                point.provider_thread_ref.as_ref() != turn.native_thread_ref.as_ref()
+                    || point.provider_turn_ref.as_ref() != turn.native_turn_ref.as_ref()
+            }) {
+                return Ok(None);
+            }
+            let source = turn
                 .native_thread_ref
                 .ok_or("native fork source reference is missing")?;
             let through = turn
@@ -72,7 +83,7 @@ impl Storage {
         &self,
         source: &SessionRef,
         target: &SessionRef,
-        through: &TurnId,
+        through: &agent_protocol::conversation::records::ForkPoint,
         now: &str,
     ) -> Result<(), String> {
         if target.provider.is_some() || Uuid::parse_str(&target.id).is_err() {
@@ -82,14 +93,20 @@ impl Storage {
             let transaction=connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
             let source_id=source.application_id();
             let target_id=target.application_id();
-            let point=model::ThreadForkSource::Run {thread_id:source_id.clone(),run_id:through.to_string()};
             if let Some(existing)=projections::read::<model::Thread>(&transaction,&target_id)? {
-                return if existing.forked_from.as_ref()==Some(&point) {Ok(())} else {Err("fork target already exists".into())};
+                let target=projections::metadata(&transaction,&target_id)?;
+                let same=existing.deleted_at.is_none() && target.context_transfers.values().any(|transfer|
+                    transfer.kind==model::TransferType::Fork && transfer.source_thread_id==source_id && transfer.target_thread_id==target_id
+                        && match through {
+                            agent_protocol::conversation::records::ForkPoint::Run {run_id}=>transfer.source_point.run_id.as_ref()==Some(run_id),
+                            agent_protocol::conversation::records::ForkPoint::ProviderTurn {provider_turn_id}=>matches!(&existing.forked_from,Some(model::ThreadForkSource::ProviderThread {provider_turn_id:Some(id),..}) if id==provider_turn_id),
+                            agent_protocol::conversation::records::ForkPoint::TurnItem {turn_item_id}=>transfer.source_point.run_id.is_none() && transfer.source_point.turn_item_id.as_ref()==Some(turn_item_id),
+                        });
+                return if same {Ok(())} else {Err("fork target already exists".into())};
             }
             let state=projections::metadata(&transaction,&source_id)?;
-            let run=state.runs.get(through.as_str()).ok_or("fork run does not exist")?;
             let transfer_id=model::derived_id("context-transfer",&[&target_id,"fork"]);
-            let (thread,transfer)=model::fork_thread(&state.thread,run,state.context_source_point(run),&target_id,&transfer_id,now)?;
+            let (thread,transfer)=plan(&transaction,&state,through,&target_id,&transfer_id,now)?;
             let target_state=model::State::new(thread.clone());
             commands::append_decision(&transaction,&target_state,model::Decision {
                 changes:vec![model::Change::ThreadCreated(thread),model::Change::ContextTransfer(transfer)],effects:vec![],
@@ -99,6 +116,71 @@ impl Storage {
             transaction.commit().map_err(failure)
         })
     }
+}
+
+fn plan(
+    connection: &Connection,
+    state: &model::State,
+    through: &agent_protocol::conversation::records::ForkPoint,
+    target_id: &str,
+    transfer_id: &str,
+    now: &str,
+) -> Result<(model::Thread, model::ContextTransfer), String> {
+    use agent_protocol::conversation::records::ForkPoint;
+    if let ForkPoint::Run { run_id } = through {
+        let run = state.runs.get(run_id).ok_or("fork run does not exist")?;
+        return model::fork_thread(
+            &state.thread,
+            run,
+            state.context_source_point(run),
+            target_id,
+            transfer_id,
+            now,
+        );
+    }
+    let turn = if let ForkPoint::ProviderTurn { provider_turn_id } = through {
+        Some(
+            state
+                .provider_turns
+                .get(provider_turn_id)
+                .ok_or("native fork turn does not exist")?,
+        )
+    } else {
+        None
+    };
+    let provider = if let Some(turn) = turn {
+        state.provider_threads.get(&turn.provider_thread_id)
+    } else {
+        state.selected_native_thread()
+    }
+    .ok_or("native fork provider thread is missing")?;
+    let cutoff=match through {
+        ForkPoint::ProviderTurn {provider_turn_id}=>connection.query_row(
+            "SELECT turn_item_id FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND provider_turn_id=?2 AND run_id IS NULL ORDER BY ordinal DESC LIMIT 1",
+            params![state.thread.id,provider_turn_id],|row|row.get::<_,String>(0)).optional().map_err(failure)?.ok_or("native fork turn has no history")?,
+        ForkPoint::TurnItem {turn_item_id}=>connection.query_row(
+            "SELECT turn_item_id FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND turn_item_id=?2 AND run_id IS NULL AND provider_turn_id IS NULL AND type IN ('user_message','assistant_message','reasoning') AND status='completed'",
+            params![state.thread.id,turn_item_id],|row|row.get::<_,String>(0)).optional().map_err(failure)?.ok_or("imported fork boundary does not exist")?,
+        ForkPoint::Run {..}=>unreachable!(),
+    };
+    let reference = turn.and_then(|turn| turn.native_thread_ref.clone());
+    let point = model::ContextSourcePoint {
+        thread_id: state.thread.id.clone(),
+        run_id: None,
+        checkpoint_id: None,
+        turn_item_id: Some(cutoff),
+        provider_thread_ref: reference,
+        provider_turn_ref: turn.and_then(|turn| turn.native_turn_ref.clone()),
+    };
+    model::fork_native_thread(
+        &state.thread,
+        provider,
+        turn,
+        point,
+        target_id,
+        transfer_id,
+        now,
+    )
 }
 
 pub(super) fn native_origin(
@@ -113,34 +195,58 @@ pub(super) fn native_origin(
         .source_point
         .run_id
         .as_ref()
-        .and_then(|id| source.runs.get(id))
-        .ok_or("fork source run is missing")?;
-    // CommandPolicy.decideForkExecution: these sources require a
-    // bounded portable handoff, never an unbounded fresh native turn.
-    if !matches!(
-        run.status,
-        model::RunStatus::Completed | model::RunStatus::Waiting
-    ) || source
-        .active_run()
-        .is_some_and(|active| active.ordinal > run.ordinal)
+        .map(|id| source.runs.get(id).ok_or("fork source run is missing"))
+        .transpose()?;
+    // CommandPolicy.decideForkExecution: terminal unsuccessful work and a
+    // later active execution use a bounded portable handoff.
+    if let Some(run) = run {
+        if !matches!(
+            run.status,
+            model::RunStatus::Completed | model::RunStatus::Waiting
+        ) || source
+            .active_run()
+            .is_some_and(|active| active.ordinal > run.ordinal)
+        {
+            return Ok(None);
+        }
+    } else if source.active_run().is_some()
+        || source.has_uncertain_input()
+        || source
+            .provider_turns
+            .values()
+            .any(|turn| turn.status == model::ProviderTurnStatus::Running)
     {
         return Ok(None);
     }
-    let thread = run
-        .provider_thread_id
-        .as_ref()
-        .and_then(|id| source.provider_threads.get(id))
+    let provider_id = run
+        .and_then(|run| run.provider_thread_id.as_ref())
+        .or_else(|| match &target.thread.forked_from {
+            Some(model::ThreadForkSource::ProviderThread {
+                provider_thread_id, ..
+            }) => Some(provider_thread_id),
+            _ => None,
+        })
         .ok_or("fork source provider thread is missing")?;
-    let reference = thread.native_thread_ref.as_ref().filter(|reference| {
-        reference.strength == model::NativeRefStrength::Strong && reference.native_id.is_some()
-    });
-    if reference.is_none() || reference != fork.source_point.provider_thread_ref.as_ref() {
+    let thread = source
+        .provider_threads
+        .get(provider_id)
+        .ok_or("fork source provider thread is missing")?;
+    let reference = fork
+        .source_point
+        .provider_thread_ref
+        .as_ref()
+        .filter(|reference| {
+            reference.strength == model::NativeRefStrength::Strong && reference.native_id.is_some()
+        });
+    if reference.is_none() {
         return Ok(None);
     }
     let Some(turn) = source.provider_turns.values().find(|turn| {
         turn.provider_thread_id == thread.id
+            && turn.native_thread_ref.as_ref() == reference
             && turn.native_turn_ref.is_some()
             && turn.native_turn_ref == fork.source_point.provider_turn_ref
+            && (run.is_some() || turn.status == model::ProviderTurnStatus::Completed)
     }) else {
         return Ok(None);
     };

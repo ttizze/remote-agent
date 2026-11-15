@@ -1,11 +1,12 @@
 //! Workspace checkout and script execution publish through the conversation owner.
-use super::super::{runtime::now, storage::workspace::SetupChange};
+use super::super::runtime::now;
 use super::*;
+use agent_protocol::workspace::SetupChange;
 use agent_protocol::{
-    conversation::records::WorkspacePreparation,
-    ids::ClientInputId,
     session::SessionRef,
-    workspace::{SetupPhase, SetupStageId, SetupStageStatus, WorkspaceSetup, WorkspaceStrategy},
+    workspace::{
+        SetupStageId, SetupStageStatus, WorkspacePreparation, WorkspaceSetup, WorkspaceStrategy,
+    },
 };
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
@@ -77,6 +78,7 @@ impl HostRpcService {
                 .filter(|script| !script.command.trim().is_empty());
         }
         Ok(WorkspacePreparation {
+            run_id: None,
             project_cwd,
             strategy: Some(strategy),
             generation: Uuid::nil(),
@@ -93,35 +95,45 @@ impl HostRpcService {
         update: SetupChange,
     ) -> Result<(), Failure> {
         let output = matches!(&update, SetupChange::Output(_));
-        let (outcome, _) = self
-            .inner
-            .conversation
-            .owners
-            .write(
-                id,
-                Write::Setup {
-                    generation,
-                    update,
-                    now: now(),
-                },
-            )
-            .await
-            .map_err(super::super::runtime::storage_failure)?;
-        if outcome != agent_protocol::conversation::Outcome::Accepted || output {
-            return Ok(());
-        }
-        let workspace = self
+        let changed = self
             .inner
             .conversation
             .storage
-            .header(id)
+            .setup(id, generation, update, now())
+            .map_err(super::super::runtime::storage_failure)?;
+        if !changed || output {
+            return Ok(());
+        }
+        if let Some(workspace) = self
+            .inner
+            .conversation
+            .storage
+            .thread_header(id)
             .map_err(super::super::runtime::storage_failure)?
-            .details
-            .workspace;
-        if let Some(workspace) = workspace.filter(|workspace| workspace.generation == generation) {
+            .and_then(|thread| thread.workspace_launch)
+            .filter(|workspace| workspace.generation == generation)
+        {
             self.schedule_setup_expiry(id.clone(), *workspace);
         }
         Ok(())
+    }
+
+    pub(in crate::host_rpc) fn schedule_setup_events(
+        &self,
+        events: &[agent_protocol::orchestration::StoredEvent],
+    ) {
+        for saved in events {
+            if let agent_protocol::orchestration::Change::Thread(thread) = &saved.event.change
+                && let Some(workspace) = &thread.workspace_launch
+                && workspace
+                    .setup
+                    .as_ref()
+                    .is_some_and(|setup| setup.ended_at_ms.is_some())
+                && let Ok(id) = agent_protocol::orchestration::shell::public_session_ref(&thread.id)
+            {
+                self.schedule_setup_expiry(id, *workspace.clone());
+            }
+        }
     }
 
     pub(in crate::host_rpc) fn schedule_setup_expiry(
@@ -144,19 +156,12 @@ impl HostRpcService {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(remaining)).await;
             if let Some(inner) = owner.upgrade() {
-                if let Err(error) = inner
-                    .conversation
-                    .owners
-                    .write(
-                        &id,
-                        Write::Setup {
-                            generation: workspace.generation,
-                            update: SetupChange::Expire { ended_at },
-                            now: now(),
-                        },
-                    )
-                    .await
-                {
+                if let Err(error) = inner.conversation.storage.setup(
+                    &id,
+                    workspace.generation,
+                    SetupChange::Expire { ended_at },
+                    now(),
+                ) {
                     tracing::warn!(target:"agent",operation="workspace.expire",%error);
                 }
                 if let Some(handle) = workspace.setup.and_then(|setup| setup.terminal_handle) {
@@ -170,14 +175,20 @@ impl HostRpcService {
         let owner = Arc::downgrade(&self.inner);
         let storage = self.inner.conversation.storage.clone();
         tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || storage.headers(true)).await;
+            let result = tokio::task::spawn_blocking(move || storage.thread_headers()).await;
             match result {
                 Ok(Ok(headers)) => {
                     if let Some(inner) = owner.upgrade() {
                         let service = HostRpcService { inner };
-                        for (id, header) in headers {
-                            if let Some(workspace) = header.details.workspace {
-                                service.schedule_setup_expiry(id, *workspace);
+                        for header in headers {
+                            if let Some(workspace) = header.workspace_launch {
+                                if let Ok(id) =
+                                    agent_protocol::orchestration::shell::public_session_ref(
+                                        &header.id,
+                                    )
+                                {
+                                    service.schedule_setup_expiry(id, *workspace);
+                                }
                             }
                         }
                     }
@@ -192,21 +203,19 @@ impl HostRpcService {
     pub(in crate::host_rpc) async fn prepare_task_workspace(
         &self,
         target: &SessionRef,
-        input: &ClientInputId,
         action: Uuid,
-        cwd: &str,
         cancel: CancellationToken,
     ) -> Result<(String, bool), Failure> {
-        let header = self
+        let mut workspace = self
             .inner
             .conversation
             .storage
-            .header(target)
-            .map_err(super::super::runtime::storage_failure)?;
-        let mut workspace = match header.details.workspace {
-            Some(workspace) => *workspace,
-            None => self.workspace_preparation(cwd.into(), None).await?,
-        };
+            .thread_header(target)
+            .map_err(super::super::runtime::storage_failure)?
+            .and_then(|thread| thread.workspace_launch)
+            .map(|workspace| *workspace)
+            .filter(|workspace| workspace.generation == action)
+            .ok_or_else(|| Failure::new("preparation_interrupted", "Preparation cancelled"))?;
         let strategy = workspace
             .strategy
             .clone()
@@ -214,11 +223,7 @@ impl HostRpcService {
         let previous = workspace.setup.take();
         let retained = previous
             .as_ref()
-            .filter(|setup| {
-                !matches!(strategy, WorkspaceStrategy::Root)
-                    && (setup.phase == SetupPhase::Failed
-                        || setup.phase == SetupPhase::Cancelled && !workspace.created_worktree)
-            })
+            .filter(|_| !matches!(strategy, WorkspaceStrategy::Root))
             .and_then(|setup| setup.worktree_path.clone())
             .filter(|path| Path::new(path).exists());
 
@@ -236,28 +241,20 @@ impl HostRpcService {
             target,
             action,
             SetupChange::Begin {
-                input: input.clone(),
                 workspace: Box::new(workspace.clone()),
             },
         )
         .await?;
         let observer = {
-            let owners = self.inner.conversation.owners.clone();
+            let storage = self.inner.conversation.storage.clone();
             let id = target.clone();
             let cancelled = cancel.clone();
             crate::worktrees::Observer {
                 cancel,
                 notify: Arc::new(move |progress| {
                     anyhow::ensure!(!cancelled.is_cancelled(), "workspace preparation cancelled");
-                    owners
-                        .enqueue(
-                            &id,
-                            Write::Setup {
-                                generation: action,
-                                update: SetupChange::Progress(progress),
-                                now: now(),
-                            },
-                        )
+                    storage
+                        .setup(&id, action, progress.into(), now())
                         .map_err(anyhow::Error::msg)
                         .map(drop)
                 }),
@@ -320,10 +317,10 @@ impl HostRpcService {
                 self.setup_update(
                     target,
                     action,
-                    SetupChange::Progress(crate::worktrees::Progress::Created {
+                    SetupChange::Created {
                         path: path.clone(),
                         branch: String::new(),
-                    }),
+                    },
                 )
                 .await?;
                 for id in [SetupStageId::Fetch, SetupStageId::Checkout] {

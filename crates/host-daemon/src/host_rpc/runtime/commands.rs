@@ -176,7 +176,6 @@ impl Runtime {
         {
             return Ok(receipt);
         }
-        Self::ensure_imported(service, &request.session).await?;
         let _workspace = if matches!(
             request.command,
             Command::Submit { .. }
@@ -186,7 +185,6 @@ impl Runtime {
                 | Command::ResolveUnknown { retry: true, .. }
                 | Command::Answer { .. }
                 | Command::Rewind(_)
-                | Command::ContinueAfterRestart { .. }
         ) {
             let guard = service.inner.worktree_access.read().await;
             service.require_not_updating()?;
@@ -194,6 +192,7 @@ impl Runtime {
         } else {
             None
         };
+        Self::ensure_imported(service, &request.session).await?;
         let thread_id = request.session.application_id();
         let content = match &request.command {
             Command::Submit { id, content } => {
@@ -205,6 +204,13 @@ impl Runtime {
             _ => None,
         };
         let operation = request.operation.to_string();
+        let item_ids = match &request.command {
+            Command::RetryInput { id, .. } | Command::RemoveInput(id) => runtime
+                .storage
+                .input_item_ids(&request.session, id.as_str())
+                .map_err(storage_failure)?,
+            _ => Vec::new(),
+        };
         let now = at();
         let kind = command_kind(&request.command);
         let fork_origin = if matches!(request.command, Command::Submit { .. }) {
@@ -230,16 +236,14 @@ impl Runtime {
             thread_id: &thread_id,
             kind,
             now: &now,
-            item_ids: &[],
+            item_ids: &item_ids,
         };
-        runtime
+        let tails = runtime.outputs.checkpoints_by_thread().remove(&thread_id);
+        let committed = runtime
             .storage
             .thread_command(spec, None, |state| {
                 let kind = ProviderKind::from_instance_id(&state.thread.provider_instance_id)?;
-                let (can_steer, _) = capabilities
-                    .get(&kind)
-                    .copied()
-                    .ok_or("provider is unavailable")?;
+                let (can_steer, _) = capabilities.get(&kind).copied().unwrap_or((false, false));
                 let context = model::Context {
                     command_id: &operation,
                     now: &now,
@@ -262,14 +266,27 @@ impl Runtime {
                     context,
                     fork_origin,
                 )
+                .map(|decision| decision.with_command_outputs(tails.as_ref()))
             })
-            .map_err(storage_failure)
+            .map_err(storage_failure)?;
+        Self::finish_output_events(service, &committed.events);
+        runtime.prune_requests(&request.session);
+        let receipt = committed.receipt;
+        if receipt.error.is_none() {
+            if matches!(request.command, Command::Interrupt { .. }) {
+                Self::cancel_prepared_input(service, &request.session).map_err(storage_failure)?;
+                Self::cancel_workspace(service, &request.session).map_err(storage_failure)?;
+            } else {
+                Self::schedule_workspace(service, &request.session).map_err(storage_failure)?;
+            }
+        }
+        Ok(receipt)
     }
 }
 
 fn command_kind(command: &Command) -> &'static str {
     match command {
-        Command::Submit { .. } | Command::ContinueAfterRestart { .. } => "message.dispatch",
+        Command::Submit { .. } => "message.dispatch",
         Command::ResumeQueue => "queue.resume",
         Command::RemoveInput(_) => "queued-run.cancel",
         Command::EditInput { .. } => "queued-run.edit",
@@ -326,7 +343,24 @@ fn decide(
                         .driver()
                         .into(),
                     model_selection: selected,
-                    workspace_preparation: None,
+                    workspace_preparation: state
+                        .thread
+                        .workspace_launch
+                        .as_ref()
+                        .filter(|workspace| {
+                            workspace.setup.as_ref().is_some_and(|setup| {
+                                setup.can_cancel
+                                    || setup.phase
+                                        == agent_protocol::workspace::SetupPhase::Cancelled
+                                    || setup.phase == agent_protocol::workspace::SetupPhase::Failed
+                            })
+                        })
+                        .and_then(|workspace| {
+                            workspace
+                                .strategy
+                                .as_ref()
+                                .and_then(model::WorkspacePreparation::for_strategy)
+                        }),
                     fork_origin: fork_origin.cloned(),
                 },
                 if options.follow_up == op::FollowUp::Steer {
@@ -341,6 +375,7 @@ fn decide(
             let mut decision = model::hold_queue(state, false);
             let unheld = state.apply(&decision);
             if unheld.active_run().is_none()
+                && !unheld.native_work_blocks_delivery()
                 && let Some(run) = unheld
                     .runs
                     .values()
@@ -354,7 +389,7 @@ fn decide(
             Ok(decision)
         }
         Command::RemoveInput(id) => {
-            model::cancel_queued(state, &input_run(state, id)?.id, context.now)
+            model::remove_input(state, &input_run(state, id)?.id, context.now)
         }
         Command::EditInput { id, .. } => {
             let content = content.ok_or("message was not prepared")?;
@@ -379,7 +414,18 @@ fn decide(
         Command::Interrupt { turn } => {
             let run = turn
                 .as_ref()
-                .map(|turn| state.runs.get(turn.as_str()).ok_or("run does not exist"))
+                .map(|turn| {
+                    state
+                        .runs
+                        .get(turn.as_str())
+                        .or_else(|| {
+                            state
+                                .runs
+                                .values()
+                                .find(|run| run.user_message_id == turn.as_str())
+                        })
+                        .ok_or("run does not exist")
+                })
                 .transpose()?
                 .or_else(|| state.active_run());
             match run {
@@ -409,18 +455,13 @@ fn decide(
             ProviderKind::from_instance_id(&state.thread.provider_instance_id)?.driver(),
             context,
         ),
-        Command::RetryInput {
-            id,
-            work_locally: false,
-        } => model::preparation_retry(state, &input_run(state, id)?.id, context.now),
+        Command::RetryInput { id, work_locally } => {
+            model::retry_input(state, &input_run(state, id)?.id, *work_locally, context)
+        }
         Command::ResolveUnknown { id, retry: false } => {
             model::cancel_uncertain(state, id.as_str(), context)
         }
-        Command::RetryInput {
-            work_locally: true, ..
-        }
-        | Command::ResolveUnknown { .. }
-        | Command::ContinueAfterRestart { .. } => {
+        Command::ResolveUnknown { .. } => {
             Err("execution recovery is not available for this run".into())
         }
     }

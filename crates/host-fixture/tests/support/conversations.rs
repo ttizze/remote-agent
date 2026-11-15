@@ -11,7 +11,6 @@ use agent_protocol::{
     operations::{self as op},
     protocol::Call,
     session::{ProviderKind, SessionRef},
-    sync::Scope,
 };
 use agent_transport::{client::Client, framing::Reader};
 use std::{
@@ -299,7 +298,7 @@ pub async fn created(
 
 pub struct Catalog {
     reader: Reader,
-    pub replica: records::Replica,
+    pub snapshot: agent_protocol::orchestration::shell::ShellSnapshot,
     pub max_wire_bytes: usize,
 }
 
@@ -309,7 +308,7 @@ impl Catalog {
             .request_stream::<records::OpenedList>(&Call::SubscribeList(records::SubscribeList {
                 refresh: true,
                 subscription: Uuid::new_v4(),
-                cached: None,
+                after_sequence: None,
             }))
             .await
             .unwrap();
@@ -317,37 +316,37 @@ impl Catalog {
         let max_wire_bytes = agent_protocol::protocol::encode(&opened.initial)
             .unwrap()
             .len();
-        let replica = records::Replica::new(Scope::List, 1)
-            .apply(1, opened.initial)
-            .unwrap();
+        let mut snapshot = None;
+        for item in opened.initial {
+            snapshot =
+                agent_core::orchestration::shell::receive(snapshot.as_ref(), item, true).unwrap();
+        }
         Self {
             reader,
-            replica,
+            snapshot: snapshot.unwrap(),
             max_wire_bytes,
         }
     }
     pub async fn next(&mut self) {
-        let message: records::Message =
-            tokio::time::timeout(Duration::from_secs(15), self.reader.read())
-                .await
-                .expect("catalog deadline")
-                .unwrap()
-                .expect("catalog closed");
-        records::validate_list(&message).unwrap();
+        let message = tokio::time::timeout(
+            Duration::from_secs(15),
+            self.reader
+                .read::<agent_protocol::orchestration::shell::ShellStreamItem>(),
+        )
+        .await
+        .expect("catalog deadline")
+        .unwrap()
+        .expect("catalog closed");
         self.max_wire_bytes = self
             .max_wire_bytes
             .max(agent_protocol::protocol::encode(&message).unwrap().len());
-        self.replica = self.replica.clone().apply(1, message).unwrap();
+        self.snapshot =
+            agent_core::orchestration::shell::receive(Some(&self.snapshot), message, false)
+                .unwrap()
+                .unwrap();
     }
     pub async fn wait_rows(&mut self, count: usize) {
-        while self
-            .replica
-            .rows()
-            .keys()
-            .filter(|key| matches!(key, agent_protocol::sync::Key::Thread(_)))
-            .count()
-            < count
-        {
+        while self.snapshot.threads.len() < count {
             self.next().await;
         }
     }
@@ -362,7 +361,6 @@ impl Catalog {
             lists: Lists {
                 list_query: std::sync::Arc::new(query),
                 subscription: Some(subscription),
-                replica: Some(std::sync::Arc::new(records::Replica::new(Scope::List, 1))),
                 ..Default::default()
             },
             ..Default::default()
@@ -370,15 +368,23 @@ impl Catalog {
         reduce(
             &state,
             "",
-            Event::ListRows {
+            Event::ListStream {
                 subscription_id: subscription,
-                message: Box::new(self.replica.snapshot().unwrap()),
+                message: Box::new(
+                    agent_protocol::orchestration::shell::ShellStreamItem::Snapshot {
+                        snapshot: self.snapshot.clone(),
+                        resolved_repository_identity_roots: None,
+                    },
+                ),
             },
         )
         .0
     }
     pub fn activity(&self) -> agent_protocol::live_activity::TaskActivityState {
-        records::list_rows_activity(self.replica.rows().values())
+        agent_protocol::orchestration::shell::activity(
+            self.snapshot.threads.iter().map(AsRef::as_ref),
+        )
+        .unwrap()
     }
 }
 
@@ -389,14 +395,20 @@ pub fn native_source(root: &std::path::Path, id: &SessionRef, provider: Provider
     connection.query_row("SELECT s.native_id FROM sources s JOIN bindings b ON b.source_id=s.id JOIN threads t ON t.key=b.thread WHERE t.provider IS ?1 AND t.id=?2 AND b.provider=?3 AND b.state='ready'",rusqlite::params![id.provider.map(ProviderKind::key),id.id,provider.key()],|row|row.get(0)).unwrap()
 }
 
-pub fn list_ids(message: records::Message) -> Vec<SessionRef> {
-    let records::Message::Snapshot { rows, .. } = message else {
-        panic!("initial list is a snapshot")
-    };
-    rows.into_iter()
-        .filter_map(|row| match row.key {
-            agent_protocol::sync::Key::Thread(id) => Some(id),
-            _ => None,
+pub fn list_ids(
+    items: Vec<agent_protocol::orchestration::shell::ShellStreamItem>,
+) -> Vec<SessionRef> {
+    let mut snapshot = None;
+    for item in items {
+        snapshot =
+            agent_core::orchestration::shell::receive(snapshot.as_ref(), item, true).unwrap();
+    }
+    snapshot
+        .unwrap()
+        .threads
+        .iter()
+        .map(|thread| {
+            agent_protocol::orchestration::shell::public_session_ref(&thread.thread.id).unwrap()
         })
         .collect()
 }

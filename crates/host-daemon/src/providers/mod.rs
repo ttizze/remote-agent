@@ -144,6 +144,12 @@ pub(crate) enum SubmissionTarget<'a> {
     Start { cwd: &'a str },
 }
 
+/// The actual resource/cursor returned by a provider's conversation rewind.
+pub(crate) struct RollbackResult {
+    pub native_id: String,
+    pub head_id: Option<String>,
+}
+
 pub(crate) struct SessionSummary {
     pub thread: Thread,
     pub branch: Option<String>,
@@ -164,7 +170,6 @@ pub(crate) enum SessionListScope<'a> {
     /// Every native session, including agent-started runs whose activity
     /// still occupies a workspace.
     All,
-    Loaded,
     Descendants(&'a str),
 }
 
@@ -371,11 +376,6 @@ pub(crate) trait Discovery: Send + Sync {
 pub(crate) trait Agent: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     fn availability(&self) -> Result<(), Failure>;
-    /// An adapter that never started its process cannot own interrupted work.
-    /// Read failures after startup still require a complete restart snapshot.
-    fn requires_restart_snapshot(&self) -> bool {
-        true
-    }
     /// Reject creation before the Host creates a workspace. Some adapters can
     /// create a conversation locally and defer starting an executable.
     fn validate_create(&self) -> Result<(), Failure>;
@@ -388,11 +388,7 @@ pub(crate) trait Agent: Send + Sync {
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure>;
     /// False is an explicit unsupported operation, before any history mutation.
     /// Other failures may have delivered history and must not be blindly retried.
-    async fn inject_history(
-        &self,
-        _id: &str,
-        _items: &[Value],
-    ) -> Result<bool, Failure> {
+    async fn inject_history(&self, _id: &str, _items: &[Value]) -> Result<bool, Failure> {
         Ok(false)
     }
     /// Release an idle runtime while preserving its native conversation.
@@ -407,20 +403,6 @@ pub(crate) trait Agent: Send + Sync {
         browser: Option<Value>,
         execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure>;
-    /// Continue persisted native history without replaying a user message.
-    async fn continue_turn(
-        &self,
-        _id: &str,
-        _model: Option<&str>,
-        _effort: Option<&str>,
-        _service_tier: Option<&str>,
-        _execution: uuid::Uuid,
-    ) -> Result<op::SubmissionReceipt, Failure> {
-        Err(Failure::new(
-            "unsupported_operation",
-            "Native continuation is unavailable",
-        ))
-    }
     async fn interrupt(&self, id: &str, turn: &TurnId) -> Result<Empty, Failure>;
     /// Explain uncertainty when native history cannot prove inactivity. Providers
     /// with authoritative listed status need no additional check.
@@ -428,6 +410,19 @@ pub(crate) trait Agent: Send + Sync {
         None
     }
     async fn discard_workspace_processes(&self, dir: &Path) -> Result<(), Failure>;
+    async fn rollback(
+        &self,
+        _id: &str,
+        _retained: Option<&str>,
+        _first_removed: Option<&str>,
+        _cwd: &str,
+        _browser: Option<Value>,
+    ) -> Result<RollbackResult, Failure> {
+        Err(Failure::new(
+            "unsupported_operation",
+            "Provider conversation rollback is unavailable",
+        ))
+    }
     async fn fork(
         &self,
         id: &str,

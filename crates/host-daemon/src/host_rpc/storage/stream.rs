@@ -5,6 +5,19 @@ use super::*;
 use agent_protocol::orchestration::{self as model, projection::ThreadStreamItem};
 
 impl Storage {
+    pub(in crate::host_rpc) fn native_thread_reference(
+        &self,
+        thread_id: &str,
+        provider_thread: &str,
+    ) -> Result<Option<model::ProviderRef>, String> {
+        self.with(|connection| {
+            let thread = projections::read::<model::ProviderThread>(connection, provider_thread)?
+                .filter(|thread| thread.app_thread_id.as_deref() == Some(thread_id))
+                .ok_or("native resource belongs to another conversation")?;
+            Ok(thread.native_thread_ref)
+        })
+    }
+
     pub(in crate::host_rpc) fn context_history(
         &self,
         params: &agent_protocol::handoff::ReadHistory,
@@ -54,6 +67,13 @@ impl Storage {
         })
     }
 
+    pub(in crate::host_rpc) fn thread_headers(&self) -> Result<Vec<model::Thread>, String> {
+        self.with(|connection| {
+            let mut query=connection.prepare("SELECT payload_json FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL ORDER BY rowid").map_err(failure)?;
+            query.query_map([],|row|row.get::<_,String>(0)).map_err(failure)?
+                .map(|row|serde_json::from_str(&row.map_err(failure)?).map_err(failure)).collect()
+        })
+    }
     pub(in crate::host_rpc) fn thread_header(
         &self,
         id: &SessionRef,
@@ -61,18 +81,27 @@ impl Storage {
         self.with(|connection| Ok(projections::read(connection, &id.application_id())?))
     }
 
-    pub(in crate::host_rpc) fn thread_item_attempt(
+    pub(in crate::host_rpc) fn thread_item_output_scope(
         &self,
         item: &model::TurnItem,
-    ) -> Result<Option<Uuid>, String> {
+    ) -> Result<Option<String>, String> {
         self.with(|connection| {
             let Some(id) = &item.provider_turn_id else {
                 return Ok(None);
             };
             let turn = projections::read::<model::ProviderTurn>(connection, id)?;
-            turn.and_then(|turn| turn.run_attempt_id)
-                .map(|id| Uuid::parse_str(&id).map_err(failure))
-                .transpose()
+            Ok(turn.map(|turn| turn.run_attempt_id.unwrap_or(turn.id)))
+        })
+    }
+
+    pub(in crate::host_rpc) fn unfinished_turn_item_ids(
+        &self,
+        id: &SessionRef,
+        turn: &str,
+    ) -> Result<Vec<String>, String> {
+        self.with(|connection| {
+            let mut query=connection.prepare("SELECT turn_item_id FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND provider_turn_id=?2 AND status IN ('pending','running','waiting') ORDER BY ordinal").map_err(failure)?;
+            query.query_map(params![id.application_id(),turn],|row|row.get(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)
         })
     }
 

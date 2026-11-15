@@ -180,7 +180,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .call(&agent_protocol::conversation::records::SubscribeList {
                     refresh: false,
                     subscription: uuid::Uuid::new_v4(),
-                    cached: None
+                    after_sequence: None
                 })
                 .await
                 .map(|output| conversations::list_ids(output.initial))
@@ -345,7 +345,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .call(&agent_protocol::conversation::records::SubscribeList {
                     refresh: false,
                     subscription: uuid::Uuid::new_v4(),
-                    cached: None
+                    after_sequence: None
                 })
                 .await
                 .is_err()
@@ -358,7 +358,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .call(&agent_protocol::conversation::records::SubscribeList {
                     refresh: false,
                     subscription: uuid::Uuid::new_v4(),
-                    cached: None
+                    after_sequence: None
                 })
                 .await
                 .is_err()
@@ -492,7 +492,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
             .call(&agent_protocol::conversation::records::SubscribeList {
                 refresh: false,
                 subscription: uuid::Uuid::new_v4(),
-                cached: None,
+                after_sequence: None,
             })
             .await
             .map(|output| serde_json::to_value(output).unwrap())
@@ -660,7 +660,7 @@ async fn reconnecting_during_session_cleanup_keeps_host_requests_available() {
                 peer.call(&agent_protocol::conversation::records::SubscribeList {
                     refresh: false,
                     subscription: uuid::Uuid::new_v4(),
-                    cached: None
+                    after_sequence: None
                 })
                 .await
                 .map(|output| conversations::list_ids(output.initial))
@@ -683,7 +683,7 @@ async fn reconnecting_during_session_cleanup_keeps_host_requests_available() {
             peer.call(&agent_protocol::conversation::records::SubscribeList {
                 refresh: false,
                 subscription: uuid::Uuid::new_v4(),
-                cached: None
+                after_sequence: None
             })
             .await
             .map(|output| conversations::list_ids(output.initial))
@@ -1241,7 +1241,7 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
                 .call(&agent_protocol::conversation::records::SubscribeList {
                     refresh: false,
                     subscription: uuid::Uuid::new_v4(),
-                    cached: None
+                    after_sequence: None
                 })
                 .await
                 .map(|output| conversations::list_ids(output.initial))
@@ -1597,7 +1597,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         let mut updates = store.subscribe();
         updates.wait_for(|snapshot| {
             !snapshot.operation_running(agent_core::state::operations::OperationKey::SessionList)
-                && snapshot.lists.replica.as_deref().is_some_and(agent_protocol::conversation::records::catalog_ready)
+                && snapshot.lists.subscription.is_some()
         }).await.unwrap();
         let session = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "history".into()).unwrap();
         // The first open reads native history and imports it once.
@@ -1980,7 +1980,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         // The shared catalog carries one small header per native row; bodies
         // remain behind the conversation subscription/hydration boundary.
         assert!(catalog.max_wire_bytes < threads.len() * 1024 + 16 * 1024);
-        assert!(catalog.replica.rows().values().all(|row| agent_protocol::protocol::encode(row).unwrap().len() < 1024));
+        assert!(catalog.snapshot.threads.iter().all(|thread| thread.latest_visible_message.is_none() && agent_protocol::protocol::encode(thread).unwrap().len() < 1024));
         assert_eq!(first.projects.len(), 5);
         assert!(first.has_more && first.has_more_projects);
         assert_eq!(first.data.iter().map(|thread| thread.id.as_ref().unwrap().id.as_str()).collect::<Vec<_>>(), ["projectless", "chat-18", "chat-17", "chat-16", "chat-15"]);
@@ -2349,7 +2349,7 @@ async fn failed_handshakes_do_not_stop_the_host() {
                 .call(&agent_protocol::conversation::records::SubscribeList {
                     refresh: false,
                     subscription: uuid::Uuid::new_v4(),
-                    cached: None
+                    after_sequence: None
                 })
                 .await
                 .map(|output| conversations::list_ids(output.initial))
@@ -2548,7 +2548,7 @@ async fn unpaired_connections_cannot_exhaust_authorized_session_slots() {
                 .call(&agent_protocol::conversation::records::SubscribeList {
                     refresh: false,
                     subscription: uuid::Uuid::new_v4(),
-                    cached: None
+                    after_sequence: None
                 })
                 .await
                 .map(|output| conversations::list_ids(output.initial))
@@ -3052,7 +3052,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         assert!(store.snapshot().panes.primary().error.is_none());
         assert!(String::from_utf8(git(&["branch", "--list", "bex/*"])).unwrap().contains("bex/session-"));
         let catalog=conversations::Catalog::open(&local.peer).await;
-        assert!(catalog.replica.rows().contains_key(&agent_protocol::sync::Key::Thread(id.clone())), "removal must preserve conversation history");
+        assert!(catalog.snapshot.threads.iter().any(|thread|thread.thread.id==id.application_id()), "removal must preserve conversation history");
         let review = local.peer.call(&rpc::ReviewWorkspace { cwd: path.clone(), include_options: false, base_ref: None }).await.unwrap();
         assert!(review.files.is_empty());
         assert!(!Path::new(&path).exists(), "reading history must not recreate the worktree");
@@ -3187,9 +3187,10 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
         let catalog = conversations::Catalog::open(&local.peer).await;
         assert!(
             catalog
-                .replica
-                .rows()
-                .contains_key(&agent_protocol::sync::Key::Thread(active.clone()))
+                .snapshot
+                .threads
+                .iter()
+                .any(|thread| thread.thread.id == active.application_id())
         );
         let terminal_path = &checkouts[1].1;
         local
@@ -3474,11 +3475,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             if !snapshot.operation_running(key)
                 && !snapshot
                     .operation_running(agent_core::state::operations::OperationKey::SessionList)
-                && snapshot
-                    .lists
-                    .replica
-                    .as_deref()
-                    .is_some_and(agent_protocol::conversation::records::catalog_ready)
+                && snapshot.lists.subscription.is_some()
             {
                 return;
             }

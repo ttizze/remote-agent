@@ -112,59 +112,50 @@ fn fixture_change(previous: &Snapshot, params: Value) -> (Snapshot, Vec<Effect>)
         .projections
         .get(&id)
         .map_or(8, |snapshot| snapshot.snapshot_sequence);
-    let previous_cursor = updated
+    let sequence = updated
         .lists
-        .replica
+        .shell
         .as_ref()
-        .and_then(|replica| replica.cursor());
-    let cursor = agent_protocol::sync::Cursor {
-        store: previous_cursor.map_or(uuid::Uuid::from_u128(1), |cursor| cursor.store),
-        sequence: previous_cursor.map_or(conversation_sequence, |cursor| {
-            conversation_sequence.max(cursor.sequence + 1)
-        }),
-    };
-    if updated.lists.replica.is_none() {
-        updated.lists.replica = Some(Arc::new(
-            agent_protocol::conversation::records::Replica::new(
-                agent_protocol::sync::Scope::List,
-                1,
-            ),
-        ));
-    }
+        .map_or(conversation_sequence, |shell| {
+            conversation_sequence.max(shell.snapshot_sequence + 1)
+        });
     let subscription = *updated
         .lists
         .subscription
         .get_or_insert_with(uuid::Uuid::new_v4);
+    let mut shell = rows::shell(list, sequence);
+    if matches!(
+        change,
+        agent_protocol::session::SessionChange::Status { .. }
+    ) && let Some(previous) = previous.lists.shell.as_ref().and_then(|shell| {
+        shell
+            .threads
+            .iter()
+            .find(|thread| thread.thread.id == id.application_id())
+    }) && let Some(next) = shell
+        .threads
+        .iter_mut()
+        .find(|thread| thread.thread.id == id.application_id())
+    {
+        let next = Arc::make_mut(next);
+        next.latest_run_id.clone_from(&previous.latest_run_id);
+        next.latest_run_completed_at
+            .clone_from(&previous.latest_run_completed_at);
+        if next.activity_run_status.is_none() {
+            next.status = previous.status;
+        }
+    }
     let (updated, changes) = reduce(
         &updated,
         "",
-        Event::ListRows {
+        Event::ListStream {
             subscription_id: subscription,
-            message: Box::new({
-                let mut message = rows::catalog(list, cursor);
-                if matches!(
-                    change,
-                    agent_protocol::session::SessionChange::Status { .. }
-                ) && let Some(previous) = previous.lists.replica.as_ref().and_then(|replica| {
-                    replica
-                        .rows()
-                        .get(&agent_protocol::sync::Key::Thread(id.clone()))
-                }) && let agent_protocol::sync::Content::Full(record) = &previous.content
-                    && let agent_protocol::conversation::records::Record::Thread(header) =
-                        record.as_ref()
-                    && let agent_protocol::sync::Message::Snapshot { rows, .. } = &mut message
-                    && let Some(row) = rows
-                        .iter_mut()
-                        .find(|row| row.key == agent_protocol::sync::Key::Thread(id.clone()))
-                    && let agent_protocol::sync::Content::Full(record) = &mut row.content
-                    && let agent_protocol::conversation::records::Record::Thread(next) =
-                        Arc::make_mut(record)
-                {
-                    next.details.activity.latest = header.details.activity.latest;
-                    next.details.activity.completion = header.details.activity.completion.clone();
-                }
-                message
-            }),
+            message: Box::new(
+                agent_protocol::orchestration::shell::ShellStreamItem::Snapshot {
+                    snapshot: shell,
+                    resolved_repository_identity_roots: None,
+                },
+            ),
         },
     );
     effects.extend(changes);
@@ -284,7 +275,7 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     let mut expected = snapshot.clone();
     expected.sessions.projections = Default::default();
     expected.sessions.subscription_generations = Default::default();
-    expected.lists.replica = None;
+    expected.lists.shell = None;
     expected.lists.subscription = None;
     expected.lists.task_activity = None;
     Arc::make_mut(&mut expected.lists.activity).active.clear();
@@ -630,7 +621,7 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     let mut expected = next.clone();
     expected.sessions.projections = Default::default();
     expected.sessions.subscription_generations = Default::default();
-    expected.lists.replica = None;
+    expected.lists.shell = None;
     expected.lists.subscription = None;
     expected.lists.task_activity = None;
     Arc::make_mut(&mut expected.lists.activity).active.clear();

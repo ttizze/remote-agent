@@ -70,6 +70,7 @@ dependencies = [
  "agent-protocol",
  "agent-transport",
  "anyhow",
+ "chrono",
  "clap",
  "serde",
  "serde_json",

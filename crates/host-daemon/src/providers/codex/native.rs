@@ -438,7 +438,11 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
             duration_ms: field(&value, "durationMs")?,
         },
         "collabAgentToolCall" | "subAgentActivity" => ItemBody::Subagent {
-            tool: string(&value, "tool"),
+            tool: if value["type"] == "subAgentActivity" {
+                format!("subAgentActivity.{}", string(&value, "kind"))
+            } else {
+                string(&value, "tool")
+            },
             prompt: field(&value, "prompt")?,
             model: field(&value, "model")?,
             effort: field(&value, "reasoningEffort")?,
@@ -467,8 +471,23 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
                         id: id.clone(),
                     },
                     status: turn_status(state["status"].as_str()),
+                    native_status: state["status"].as_str().map(str::to_owned),
                     message: state["message"].as_str().map(str::to_owned),
                 })
+                .chain(
+                    value["agentThreadId"]
+                        .as_str()
+                        .filter(|_| value["type"] == "subAgentActivity")
+                        .map(|id| SubagentState {
+                            session: SessionRef {
+                                provider: Some(ProviderKind::Codex),
+                                id: id.into(),
+                            },
+                            status: turn_status(value["kind"].as_str()),
+                            native_status: value["kind"].as_str().map(str::to_owned),
+                            message: None,
+                        }),
+                )
                 .collect(),
             agent_id: None,
             result: None,

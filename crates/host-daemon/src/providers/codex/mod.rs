@@ -836,36 +836,6 @@ impl crate::providers::Discovery for Codex {
             .expect("list access is open");
         let (source_kinds, ancestor_thread_id): (&'static [&'static str], Option<&str>) =
             match scope {
-                SessionListScope::Loaded => {
-                    let page: Page<String> = self
-                        .request(
-                            "thread/loaded/list",
-                            &serde_json::json!({"limit":limit,"cursor":cursor}),
-                        )
-                        .await?;
-                    use futures_util::{StreamExt, TryStreamExt};
-                    let data =
-                        futures_util::stream::iter(page.data.into_iter().map(|id| async move {
-                            let mut response = self
-                                .thread_response(
-                                    "thread/read",
-                                    &serde_json::json!({"threadId":id,"includeTurns":false}),
-                                )
-                                .await?;
-                            response.thread.turns = None;
-                            Ok::<_, Failure>(SessionSummary {
-                                thread: response.thread,
-                                branch: None,
-                            })
-                        }))
-                        .buffer_unordered(4)
-                        .try_collect()
-                        .await?;
-                    return Ok(SessionPage {
-                        data,
-                        next_cursor: page.next_cursor,
-                    });
-                }
                 SessionListScope::Roots(_) => (&["cli", "vscode", "appServer", "unknown"], None),
                 SessionListScope::WithSubagents(_) => (
                     &[
@@ -998,15 +968,13 @@ impl Agent for Codex {
         agent_protocol::session::Capabilities {
             steer: true,
             fork: true,
+            rollback: true,
             model_change: true,
             ..Default::default()
         }
     }
     fn availability(&self) -> Result<(), Failure> {
         self.server().map(|_| ())
-    }
-    fn requires_restart_snapshot(&self) -> bool {
-        self.process.is_ok()
     }
     fn validate_create(&self) -> Result<(), Failure> {
         if let Some(error) = self.restoration_error.borrow().as_ref() {
@@ -1029,11 +997,7 @@ impl Agent for Codex {
         self.subscribed(&response);
         Ok(response)
     }
-    async fn inject_history(
-        &self,
-        id: &str,
-        items: &[Value],
-    ) -> Result<bool, Failure> {
+    async fn inject_history(&self, id: &str, items: &[Value]) -> Result<bool, Failure> {
         let state = self.state(id).await?;
         self.resume(
             id,
@@ -1163,24 +1127,6 @@ impl Agent for Codex {
                 .bind(&input.thread_id.id, turn.clone(), execution);
         }
         Ok(op::SubmissionReceipt { turn_id })
-    }
-    async fn continue_turn(
-        &self,
-        id: &str,
-        model: Option<&str>,
-        effort: Option<&str>,
-        service_tier: Option<&str>,
-        execution: uuid::Uuid,
-    ) -> Result<op::SubmissionReceipt, Failure> {
-        self.scopes.reserve(id, execution);
-        let reply = self
-            .request_execution::<Value>("turn/start", &serde_json::json!({"threadId":id,"input":[],"model":model,"effort":effort,"serviceTierForTurn":service_tier,"summary":REASONING_SUMMARY}), id, execution)
-            .await?;
-        let turn = native_turn_id(reply["turn"]["id"].as_str())?;
-        self.scopes.bind(id, turn.clone(), execution);
-        Ok(op::SubmissionReceipt {
-            turn_id: Some(turn),
-        })
     }
     async fn interrupt(
         &self,
@@ -1548,17 +1494,6 @@ rl.on('line', line => {
         assert!(
             matches!(background.change, AgentChange::Session { change: SessionChange::Turn { ref turn, completed: false, .. }, .. } if turn.id.as_str() == "background")
         );
-        let continued = agent
-            .continue_turn(
-                "thread",
-                Some("model"),
-                Some("high"),
-                Some("priority"),
-                uuid::Uuid::new_v4(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(continued.turn_id.unwrap().as_str(), "continued-native");
         agent.shutdown().await;
     }
 
@@ -1738,7 +1673,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn restart_snapshot_checks_loaded_codex_even_after_connection_closes() {
+    async fn update_report_does_not_require_an_unowned_codex_runtime_after_process_loss() {
         use std::{os::unix::fs::PermissionsExt, sync::Arc};
         let directory = tempfile::tempdir().unwrap();
         let program = directory.path().join("codex-fixture");
@@ -1783,7 +1718,7 @@ rl.on('line', line => {
         };
         service("healthy.json").prepare_update().await.unwrap();
         server.shutdown().await.unwrap();
-        assert!(service("broken.json").prepare_update().await.is_err());
+        service("broken.json").prepare_update().await.unwrap();
     }
 
     #[cfg(unix)]

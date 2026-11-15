@@ -36,18 +36,25 @@ pub mod wire;
 pub use state::{Change, State};
 mod commands;
 pub use commands::{
-    Admission, Context, Decision, Input, admit, cancel_queued, edit_queued, hold_queue,
-    move_queued, promote_queued, rewind, user_item_id,
+    Admission, Context, Decision, Input, admit, edit_queued, hold_queue, move_queued,
+    promote_queued, remove_input, user_item_id,
 };
+mod rollback;
+pub use rollback::{RollbackTarget, rewind, rollback_completed, rollback_target};
 mod execution;
+mod native_observation;
+pub use native_observation::{
+    observe_external_item, observe_external_plan, observe_external_subagent, observe_external_turn,
+};
 mod forks;
 pub mod handoffs;
 pub use execution::{
     Completion, activate_queued, cancel_start, cancel_uncertain, complete, fail_start,
-    finish_provider_turn, interrupt, observe_item, observe_plan, observe_subagent, started,
-    uncertain_delivery,
+    finish_provider_turn, interrupt, native_resource_loaded, native_resource_unloaded,
+    observe_item, observe_native_status, observe_plan, observe_subagent, observe_subagent_progress,
+    started, uncertain_delivery,
 };
-pub use forks::fork_thread;
+pub use forks::{fork_native_thread, fork_thread};
 mod generated_images;
 mod recovery;
 pub use generated_images::project_generated_images;
@@ -56,13 +63,13 @@ mod checkpoints;
 pub use checkpoints::{checkpoint_captured, prepare_checkpoint_scope};
 mod preparation;
 pub use preparation::{
-    PreparationPhase, preparation_fail, preparation_progress, preparation_release,
-    preparation_retry,
+    PreparationPhase, preparation_fail, preparation_progress, preparation_release, retry_input,
+    workspace_progress,
 };
 mod requests;
 pub use requests::{
-    RequestResponse, observe_request, request_source_closed, resolve_request, respond,
-    response_failed,
+    RequestResponse, observe_external_request, observe_request, request_source_closed,
+    resolve_request, respond, response_failed,
 };
 #[cfg(test)]
 mod tests;
@@ -110,7 +117,10 @@ status!(ProviderSessionStatus {
     Stopped,
     Error
 });
+// Bex also observes native work outside app runs. Unknown cannot certify that
+// native work ended; NotLoaded only describes a released runtime resource.
 status!(ProviderThreadStatus {
+    Unknown,
     NotLoaded,
     Idle,
     Active,
@@ -183,6 +193,14 @@ status!(TurnItemStatus {
     Cancelled,
     Interrupted
 });
+impl TurnItemStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
+    }
+}
 status!(PlanStatus {
     Draft,
     Active,
@@ -304,6 +322,9 @@ pub struct Thread {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_origin: Option<ThreadHistoryOrigin>,
+    /// Bex native clients retain detailed setup/cancellation UI beyond T3's run card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_launch: Option<Box<crate::workspace::WorkspacePreparation>>,
     pub created_by: Actor,
     pub creation_source: CreationSource,
     pub project_id: Option<String>,
@@ -400,12 +421,35 @@ pub enum WorkspacePreparation {
     },
 }
 
+impl WorkspacePreparation {
+    pub fn for_strategy(strategy: &crate::workspace::WorkspaceStrategy) -> Option<Self> {
+        match strategy {
+            crate::workspace::WorkspaceStrategy::Root => None,
+            crate::workspace::WorkspaceStrategy::ExistingWorktree { path } => {
+                Some(Self::ExistingWorktree {
+                    worktree_path: path.clone(),
+                    branch: None,
+                })
+            }
+            crate::workspace::WorkspaceStrategy::Worktree {
+                base_ref,
+                start_from_origin,
+            } => Some(Self::Worktree {
+                base_ref: base_ref.clone(),
+                start_from_origin: *start_from_origin,
+                branch: None,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAttempt {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_thread_id: Option<String>,
+    // Recovery may replace the selected native source; this attempt keeps its binding.
+    pub native_thread_ref: Option<ProviderRef>,
     pub run_id: String,
     pub attempt_ordinal: u64,
     pub root_node_id: String,
@@ -542,6 +586,11 @@ pub struct ProviderTurn {
     pub provider_thread_id: String,
     pub node_id: String,
     pub run_attempt_id: Option<String>,
+    /// Bex can expand native tool bodies after this logical provider thread is
+    /// rebound. An observed turn keeps the physical source it actually used,
+    /// including native work with no application attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_thread_ref: Option<ProviderRef>,
     pub native_turn_ref: Option<ProviderRef>,
     pub ordinal: u64,
     pub status: ProviderTurnStatus,
@@ -799,6 +848,21 @@ pub enum TurnItemBody {
     },
 }
 
+impl TurnItemBody {
+    pub fn has_omitted_detail(&self) -> bool {
+        match self {
+            Self::CommandExecution { output_omitted, .. } => *output_omitted == Some(true),
+            Self::DynamicTool {
+                output_omitted,
+                viewed_image_path,
+                ..
+            } => viewed_image_path.is_none() && *output_omitted == Some(true),
+            Self::FileChange { diff_str, .. } => diff_str.is_none(),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderFailure {
@@ -882,6 +946,9 @@ pub struct UserInputQuestion {
     pub header: String,
     pub question: String,
     pub options: Vec<UserInputOption>,
+    // Bex native clients also honor the SDK's password-input hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_secret: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multi_select: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

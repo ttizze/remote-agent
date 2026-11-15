@@ -461,24 +461,41 @@ impl Operation for ForkSession {
             turn: self.last_turn_id.clone(),
         })
     }
-    type Input = crate::session::SessionRef;
-    fn capture(&self, _: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
-        Ok(crate::session::SessionRef {
-            provider: None,
-            id: uuid::Uuid::new_v4().to_string(),
-        })
+    type Input = (
+        crate::session::SessionRef,
+        (
+            crate::session::SessionRef,
+            agent_protocol::conversation::records::ForkPoint,
+        ),
+    );
+    fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
+        let through = snapshot
+            .sessions
+            .projections
+            .get(&self.thread_id)
+            .and_then(|snapshot| {
+                crate::orchestration::fork_point(&snapshot.projection, &self.last_turn_id)
+            })
+            .ok_or_else(|| PeerError::InvalidMessage("fork history is unavailable".into()))?;
+        Ok((
+            crate::session::SessionRef {
+                provider: None,
+                id: uuid::Uuid::new_v4().to_string(),
+            },
+            through,
+        ))
     }
     type Output = crate::session::SessionRef;
     async fn run(
         &self,
-        target: Self::Input,
+        (target, (source, through)): Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
         let returned = context
             .call(&agent_protocol::conversation::records::Fork {
-                source: self.thread_id.clone(),
+                source,
                 target: target.clone(),
-                through: self.last_turn_id.clone(),
+                through,
             })
             .await?;
         if returned != target {

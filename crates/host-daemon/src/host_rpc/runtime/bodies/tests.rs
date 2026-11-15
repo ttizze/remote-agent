@@ -1,5 +1,6 @@
 use super::*;
 use crate::host_rpc::runtime::native_fixture::{NativeAgent, call, own};
+use agent_protocol::conversation as decision;
 use agent_protocol::{
     execution::{ItemStatus, TurnStatus},
     items::{AssistantPhase, Item, ItemBody},
@@ -7,8 +8,240 @@ use agent_protocol::{
     protocol::Call,
 };
 
+#[rstest::rstest]
+#[case(ProviderKind::Codex)]
+#[case(ProviderKind::Claude)]
+#[case(ProviderKind::DeepSeek)]
 #[tokio::test]
-async fn unreadable_message_body_can_be_retried_without_importing_native_tool_cards() {
+async fn a_missing_native_tool_body_keeps_later_work_and_detail_retry_does_not_rewrite_history(
+    #[case] provider: ProviderKind,
+) {
+    use agent_protocol::orchestration as model;
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(provider, directory.path().join("native"));
+    let native = SessionRef::new(provider, "actual-native-source".into()).unwrap();
+    let public = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let full_output = format!("先頭\n{}\n末尾", "日".repeat(5000));
+    let full = Item::new(
+        "actual-command".into(),
+        ItemStatus::Completed,
+        ItemBody::CommandExecution {
+            command: "recorded command".into(),
+            cwd: None,
+            output: full_output.clone(),
+            output_omitted: false,
+            exit_code: Some(0),
+        },
+    );
+    let response = ThreadResponse {
+        thread: Thread {
+            id: Some(native.clone()),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            turns: Some(vec![Arc::new(Turn {
+                id: "actual-native-turn".into(),
+                status: TurnStatus::Completed,
+                items: Some(vec![Arc::new(full.clone())]),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    agent
+        .records
+        .lock()
+        .unwrap()
+        .insert(native.id.clone(), response.clone());
+    agent.unreadable.lock().unwrap().insert(full.id.to_string());
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    own(&service, &public, &response).await;
+    let mut deferred = full;
+    deferred.defer();
+    assert!(deferred.is_deferred());
+    let native_change = |change| crate::providers::AgentChange::Session {
+        session: native.clone(),
+        change,
+    };
+    Runtime::observe(
+        &service,
+        native_change(SessionChange::Item {
+            turn_id: "actual-native-turn".into(),
+            item: Arc::new(deferred),
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &service,
+        native_change(SessionChange::Item {
+            turn_id: "actual-native-turn".into(),
+            item: Arc::new(Item::new(
+                "later-answer".into(),
+                ItemStatus::Completed,
+                ItemBody::AssistantText {
+                    text: "later native work survived".into(),
+                    phase: AssistantPhase::Final,
+                },
+            )),
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &service,
+        native_change(SessionChange::Turn {
+            turn: Turn {
+                id: "actual-native-turn".into(),
+                status: TurnStatus::Completed,
+                ..Default::default()
+            },
+            completed: true,
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let storage = &service.inner.conversation.storage;
+    let before = storage.thread_stream(&public, None).unwrap();
+    let model::projection::ThreadStreamItem::Snapshot(snapshot) = &before[0] else {
+        panic!("snapshot");
+    };
+    let command = snapshot
+        .projection
+        .turn_items
+        .iter()
+        .find(|item| matches!(item.body, model::TurnItemBody::CommandExecution { .. }))
+        .unwrap();
+    let saved = storage.thread_item(&public, &command.id).unwrap().unwrap();
+    assert!(saved.body.has_omitted_detail());
+    assert_eq!(saved.status, model::TurnItemStatus::Completed);
+    assert!(snapshot.projection.runs.is_empty());
+    assert!(snapshot.projection.turn_items.iter().any(|item|matches!(&item.body,model::TurnItemBody::AssistantMessage {text,..} if text=="later native work survived")));
+    let connection = service.open_session();
+    let request = || {
+        Call::HydrateConversation(records::Hydrate {
+            session: public.clone(),
+            item: saved.id.clone().into(),
+        })
+    };
+    let failed = call::<records::Hydrated>(&service, connection.id(), request())
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code, "unreadable");
+    assert_eq!(before, storage.thread_stream(&public, None).unwrap());
+    agent.unreadable.lock().unwrap().clear();
+    let result: records::Hydrated = call(&service, connection.id(), request()).await.unwrap();
+    let detail = result.item.unwrap();
+    assert_eq!(detail.id, saved.id);
+    assert_eq!(detail.updated_at, saved.updated_at);
+    assert_eq!(detail.ordinal, saved.ordinal);
+    assert!(!detail.body.has_omitted_detail());
+    assert!(
+        matches!(detail.body,model::TurnItemBody::CommandExecution {output:Some(text),..} if text==full_output)
+    );
+    assert_eq!(before, storage.thread_stream(&public, None).unwrap());
+    assert!(agent.inputs.lock().unwrap().is_empty());
+
+    // Actual app recovery reuses this logical provider row while allocating a
+    // different physical session. Its copied native IDs can overlap. Reading
+    // the old command must still use the source observed for that old turn.
+    *agent.state_error.lock().unwrap() = Some(crate::providers::Failure::new(
+        "lost_resource",
+        "old runtime was unloaded",
+    ));
+    let input = Uuid::new_v4();
+    let ack: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: public.clone(),
+            operation: input,
+            command: Command::Submit {
+                id: input.to_string().into(),
+                content: decision::InputContent {
+                    parts: vec![op::Input::Text {
+                        text: "explicit new input".into(),
+                    }],
+                    model: Some(agent_protocol::models::ModelRef {
+                        provider,
+                        id: "fixture".into(),
+                    }),
+                    effort: None,
+                    service_tier: None,
+                    follow_up: Default::default(),
+                },
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ack.error, None);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut changed = storage.changes();
+        loop {
+            let state = storage.thread_state(&public.application_id(), &[]).unwrap();
+            if state
+                .runs
+                .values()
+                .any(|run| run.status == model::RunStatus::Completed)
+            {
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the explicitly submitted input completes");
+    let rebound = storage.active_source(&public).unwrap().unwrap();
+    assert_ne!(
+        rebound, native,
+        "the normal recovery path replaces the physical source"
+    );
+    {
+        let mut records = agent.records.lock().unwrap();
+        records
+            .get_mut(&rebound.id)
+            .unwrap()
+            .thread
+            .turns
+            .as_mut()
+            .unwrap()
+            .push(Arc::new(Turn {
+                id: "actual-native-turn".into(),
+                status: TurnStatus::Completed,
+                items: Some(vec![Arc::new(Item::new(
+                    "actual-command".into(),
+                    ItemStatus::Completed,
+                    ItemBody::CommandExecution {
+                        command: "recorded command".into(),
+                        cwd: None,
+                        output: "another native source's output".into(),
+                        output_omitted: false,
+                        exit_code: Some(0),
+                    },
+                ))]),
+                ..Default::default()
+            }));
+    }
+    let before_detail = storage.thread_stream(&public, None).unwrap();
+    let reread: records::Hydrated = call(&service, connection.id(), request()).await.unwrap();
+    assert!(
+        matches!(reread.item.unwrap().body,model::TurnItemBody::CommandExecution {output:Some(text),..} if text==full_output)
+    );
+    assert_eq!(before_detail, storage.thread_stream(&public, None).unwrap());
+    assert_eq!(
+        storage.native_owner(&native).unwrap(),
+        Some(public.clone()),
+        "the historical physical source remains private after rebinding"
+    );
+    assert_eq!(agent.inputs.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unreadable_message_history_is_atomic_and_can_be_retried_without_importing_native_tool_cards()
+ {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
         let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
@@ -83,51 +316,54 @@ async fn unreadable_message_body_can_be_retried_without_importing_native_tool_ca
             imported.thread.history_read_state.as_ref().unwrap().kind,
             agent_protocol::session::HistoryReadKind::Partial
         );
-        own(&service, &public, &imported);
         assert!(
-            Runtime::hydrate_native(&service, &public, &"answer".into())
+            Runtime::import_native_response(&service, &public, &native, &imported)
                 .await
                 .is_err()
         );
-        assert!(
-            service
-                .inner
-                .conversation
-                .storage
-                .item(&public, &"answer".into())
-                .unwrap()
-                .unwrap()
-                .deferred
-        );
+        let storage = &service.inner.conversation.storage;
+        assert!(storage.thread_header(&public).unwrap().is_none());
         agent.unreadable.lock().unwrap().clear();
-        Runtime::hydrate_native(&service, &public, &"answer".into())
+        let imported = Runtime::native_history(&service, &native).await.unwrap();
+        Runtime::import_native_response(&service, &public, &native, &imported)
             .await
             .unwrap();
-        let saved = service
-            .inner
-            .conversation
-            .storage
-            .item(&public, &"answer".into())
-            .unwrap()
+        let state = storage.thread_state(&public.application_id(), &[]).unwrap();
+        assert_eq!(
+            state.thread.history_origin,
+            Some(agent_protocol::orchestration::ThreadHistoryOrigin::V1Import)
+        );
+        assert!(state.runs.is_empty());
+        assert!(state.provider_turns.is_empty());
+        let history = super::super::native_fixture::history(&service, &public).unwrap();
+        let text = history
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .flat_map(|turn| turn.items.iter().flatten())
+            .find_map(|item| match item.body() {
+                ItemBody::AssistantText { text, .. } => Some(text),
+                _ => None,
+            })
             .unwrap();
-        assert!(!saved.deferred);
-        assert!(matches!(&saved.body,ItemBody::AssistantText {text,..} if text==&body));
-        // Once canonical, reading no longer needs the native body.
+        assert_eq!(text, &body);
         agent.unreadable.lock().unwrap().insert("answer".into());
-        Runtime::hydrate_native(&service, &public, &"answer".into())
-            .await
-            .unwrap();
+        Runtime::ensure_imported(&service, &public).await.unwrap();
+        assert_eq!(
+            state,
+            storage.thread_state(&public.application_id(), &[]).unwrap()
+        );
     })
     .await
     .unwrap();
 }
 
 #[tokio::test]
-async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despite_unreadable_images()
- {
+async fn unreadable_native_messages_block_handoff_and_switch_until_atomic_import_succeeds() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         use agent_protocol::{
-            conversation::{Command, InputContent, InputState},
+            conversation::{Command, InputContent},
             handoff,
         };
         let directory = tempfile::tempdir().unwrap();
@@ -197,16 +433,15 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
                 text_offset,
             })
         };
-        let partial: handoff::Page = call(&service, connection.id(), read(0)).await.unwrap();
-        assert_eq!(partial.items[0].message.text, "readable message");
-        assert_eq!(
-            partial.history_read_state.unwrap().kind,
-            agent_protocol::session::HistoryReadKind::Partial
+        assert!(
+            call::<handoff::Page>(&service, connection.id(), read(0))
+                .await
+                .is_err()
         );
         let input = Uuid::new_v4();
         let storage = &service.inner.conversation.storage;
         let mut changed = storage.changes();
-        Runtime::change(
+        let rejected = Runtime::change(
             &service,
             &records::Change {
                 session: native.clone(),
@@ -228,20 +463,12 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
                 },
             },
         )
-        .await
-        .unwrap();
-        while !storage
-            .state(&native)
-            .unwrap()
-            .inputs
-            .values()
-            .any(|input| matches!(input.state, InputState::Failed { .. }))
-        {
-            changed.changed().await.unwrap();
-        }
+        .await;
+        assert!(rejected.is_err());
+        assert!(storage.thread_header(&native).unwrap().is_none());
         assert!(
             claude.inputs.lock().unwrap().is_empty(),
-            "required messages must not be omitted on a provider switch"
+            "an unreadable required message must not be silently omitted"
         );
         codex.unreadable.lock().unwrap().remove("answer");
         let first: handoff::Page = call(&service, connection.id(), read(0)).await.unwrap();
@@ -256,15 +483,31 @@ async fn handoff_rpc_imports_unloaded_history_and_switch_recovers_messages_despi
             &records::Change {
                 session: native.clone(),
                 operation: Uuid::new_v4(),
-                command: Command::RetryInput {
+                command: Command::Submit {
                     id: input.to_string().into(),
-                    work_locally: false,
+                    content: InputContent {
+                        parts: vec![op::Input::Text {
+                            text: "continue on Claude".into(),
+                        }],
+                        model: Some(agent_protocol::models::ModelRef {
+                            provider: ProviderKind::Claude,
+                            id: "model".into(),
+                        }),
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
                 },
             },
         )
         .await
         .unwrap();
-        while !storage.state(&native).unwrap().inputs.is_empty() {
+        while storage
+            .thread_state(&native.application_id(), &[])
+            .unwrap()
+            .active_run()
+            .is_some()
+        {
             changed.changed().await.unwrap();
         }
         let inputs = claude.inputs.lock().unwrap();

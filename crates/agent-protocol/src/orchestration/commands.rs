@@ -36,6 +36,41 @@ pub struct Decision {
     pub effects: Vec<Effect>,
 }
 
+impl Decision {
+    /// The I/O owner supplies its last observed bytes. Finalization transfers
+    /// them to terminal command rows in the same commit as their outcome;
+    /// still-running background items retain their live stream ownership.
+    pub fn with_command_outputs(
+        mut self,
+        tails: Option<&std::collections::HashMap<String, crate::sync::Output>>,
+    ) -> Self {
+        let Some(tails) = tails else {
+            return self;
+        };
+        for change in &mut self.changes {
+            let Change::TurnItem(item) = change else {
+                continue;
+            };
+            if !item.status.is_terminal() {
+                continue;
+            }
+            let Some(tail) = tails.get(&item.id) else {
+                continue;
+            };
+            if let TurnItemBody::CommandExecution {
+                output,
+                output_omitted,
+                ..
+            } = &mut item.body
+            {
+                *output = Some(tail.text.clone());
+                *output_omitted = Some(tail.truncated);
+            }
+        }
+        self
+    }
+}
+
 pub(super) fn id(command: &str, kind: &str) -> String {
     Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("{command}:{kind}").as_bytes()).to_string()
 }
@@ -198,7 +233,8 @@ pub fn admit(
         }
     }
     let active = state.active_run();
-    let queued = active.is_some();
+    let queued =
+        active.is_some() || state.native_work_blocks_delivery() || state.has_pending_rollback();
     let fork = state.pending_fork();
     let run_id = id(context.command_id, "run");
     let mut item = user_item(
@@ -315,10 +351,7 @@ pub fn admit(
     };
     let attempt = RunAttempt {
         id: attempt_id,
-        native_thread_id: provider_thread
-            .native_thread_ref
-            .as_ref()
-            .and_then(|r| r.native_id.clone()),
+        native_thread_ref: provider_thread.native_thread_ref.clone(),
         run_id: run.id.clone(),
         attempt_ordinal: 1,
         root_node_id: root_id.clone(),
@@ -366,6 +399,20 @@ pub fn admit(
             active_provider_thread_id: Some(provider_thread.id),
             provider_instance_id: selection.instance_id.clone(),
             model_selection: selection,
+            workspace_launch: if preparing {
+                state.thread.workspace_launch.as_ref().map(|workspace| {
+                    let mut workspace = workspace.clone();
+                    workspace.generation = uuid::Uuid::new_v5(
+                        &uuid::Uuid::NAMESPACE_URL,
+                        context.command_id.as_bytes(),
+                    );
+                    workspace.visible = true;
+                    workspace.run_id = Some(run_id.clone());
+                    workspace
+                })
+            } else {
+                state.thread.workspace_launch.clone()
+            },
             updated_at: context.now.into(),
             ..state.thread.clone()
         }));
@@ -436,15 +483,34 @@ pub fn edit_queued(
     })
 }
 
-pub fn cancel_queued(state: &State, run_id: &str, now: &str) -> Result<Decision, String> {
+pub fn remove_input(state: &State, run_id: &str, now: &str) -> Result<Decision, String> {
     let run = state
         .runs
         .get(run_id)
-        .filter(|run| run.status == RunStatus::Queued)
-        .ok_or("run is no longer queued")?;
+        .filter(|run| {
+            matches!(
+                run.status,
+                RunStatus::Queued | RunStatus::Failed | RunStatus::Cancelled
+            )
+        })
+        .ok_or("input is in flight or already accepted by the provider")?;
     let attempt = state
         .active_attempt(run.active_attempt_id.as_deref())
         .ok_or("queued run has no attempt")?;
+    if attempt.provider_turn_id.is_some()
+        || state.provider_turns.values().any(|turn| {
+            turn.run_attempt_id.as_ref().is_some_and(|id| {
+                state
+                    .run_attempts
+                    .get(id)
+                    .is_some_and(|attempt| attempt.run_id == run_id)
+            })
+        }) || state.effects.values().any(|effect| {
+        matches!(&effect.request,EffectRequest::ProviderTurnStart{run_id:target} if target==run_id)
+            && matches!(effect.status, EffectStatus::Pending | EffectStatus::Running)
+    }) {
+        return Err("input may already have been accepted by the provider".into());
+    }
     let mut changes = vec![
         Change::Run(Run {
             status: RunStatus::Cancelled,
@@ -560,7 +626,7 @@ pub fn promote_queued(
             *input_intent = "promoted_queued_to_steer".into();
         }
     }
-    let mut decision = cancel_queued(state, run_id, context.now)?;
+    let mut decision = remove_input(state, run_id, context.now)?;
     decision.changes.extend(steered.changes);
     decision.effects = steered.effects;
     Ok(decision)
@@ -603,124 +669,6 @@ pub fn move_queued(state: &State, run_id: &str, before: Option<&str>) -> Result<
                 })
             })
             .collect(),
-        ..Default::default()
-    })
-}
-
-/// Rolled-back runs retain their identities and items. Visibility follows run
-/// status, so imports cannot resurrect a removed suffix of the conversation.
-pub fn rewind(state: &State, run_id: &str, context: Context<'_>) -> Result<Decision, String> {
-    if state.active_run().is_some()
-        || state.has_uncertain_input()
-        || state
-            .runtime_requests
-            .values()
-            .any(|request| request.status == RequestStatus::Pending)
-    {
-        return Err("conversation is busy".into());
-    }
-    let target = state
-        .runs
-        .get(run_id)
-        .filter(|run| !matches!(run.status, RunStatus::RolledBack | RunStatus::Queued))
-        .ok_or("run is unavailable")?;
-    let mut changes: Vec<_> = state
-        .runs
-        .values()
-        .filter_map(|run| {
-            if run.status == RunStatus::Queued {
-                return (!run.queue_held).then(|| {
-                    Change::Run(Run {
-                        queue_held: true,
-                        ..run.clone()
-                    })
-                });
-            }
-            if run.ordinal >= target.ordinal && run.status != RunStatus::RolledBack {
-                Some(Change::Run(Run {
-                    status: RunStatus::RolledBack,
-                    queue_position: None,
-                    queue_held: false,
-                    steer_when_ready_run_id: None,
-                    completed_at: Some(context.now.into()),
-                    ..run.clone()
-                }))
-            } else {
-                None
-            }
-        })
-        .collect();
-    let retained = state
-        .runs
-        .values()
-        .filter(|run| {
-            run.ordinal < target.ordinal
-                && run.provider_instance_id == state.thread.provider_instance_id
-                && !matches!(
-                    run.status,
-                    RunStatus::Queued | RunStatus::RolledBack | RunStatus::Cancelled
-                )
-        })
-        .max_by_key(|run| run.ordinal);
-    let source = retained
-        .and_then(|run| run.provider_thread_id.as_ref())
-        .and_then(|id| state.provider_threads.get(id))
-        .or_else(|| {
-            state
-                .thread
-                .active_provider_thread_id
-                .as_ref()
-                .and_then(|id| state.provider_threads.get(id))
-        });
-    let replacement = source.map(|source| {
-        let provider_turn_id = retained
-            .and_then(|run| run.active_attempt_id.as_ref())
-            .and_then(|attempt_id| {
-                state
-                    .provider_turns
-                    .values()
-                    .filter(|turn| turn.run_attempt_id.as_ref() == Some(attempt_id))
-                    .max_by_key(|turn| turn.ordinal)
-                    .map(|turn| turn.id.clone())
-            });
-        let shared_session = state.provider_session(&source.id).filter(|session| {
-            session
-                .capabilities
-                .sessions
-                .supports_multiple_provider_threads_per_session
-        });
-        ProviderThread {
-            id: id(context.command_id, "rewound-provider-thread"),
-            driver: source.driver.clone(),
-            provider_instance_id: source.provider_instance_id.clone(),
-            provider_session_id: shared_session.map(|session| session.id.clone()),
-            app_thread_id: Some(state.thread.id.clone()),
-            owner_node_id: None,
-            native_thread_ref: None,
-            native_conversation_head_ref: None,
-            native_metadata: None,
-            status: ProviderThreadStatus::NotLoaded,
-            first_run_ordinal: retained.and(source.first_run_ordinal),
-            last_run_ordinal: retained.map(|run| run.ordinal),
-            handoff_ids: Vec::new(),
-            forked_from: provider_turn_id.map(|turn| ProviderThreadFork {
-                provider_thread_id: source.id.clone(),
-                provider_turn_id: Some(turn),
-                checkpoint_id: None,
-            }),
-            pending_background_tasks: Vec::new(),
-            created_at: context.now.into(),
-            updated_at: context.now.into(),
-        }
-    });
-    changes.push(Change::Thread(Thread {
-        active_provider_thread_id: replacement.as_ref().map(|thread| thread.id.clone()),
-        updated_at: context.now.into(),
-        ..state.thread.clone()
-    }));
-    changes.extend(replacement.map(Change::ProviderThread));
-    Ok(Decision {
-        changes,
         ..Default::default()
     })
 }

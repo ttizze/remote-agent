@@ -1,0 +1,19 @@
+--- a/crates/agent-protocol/src/orchestration/preparation.rs
++++ b/crates/agent-protocol/src/orchestration/preparation.rs
+@@ -198,0 +199,16 @@
++pub fn retry_input(state: &State, run_id: &str, context: Context<'_>) -> Result<Decision, String> {
++    if state.thread.archived_at.is_some()
++        || state.thread.deleted_at.is_some()
++        || state.active_run().is_some()
++    {
++        return Err("thread cannot retry preparation".into());
++    }
++    if let Some(failure)=state.turn_items.values().find(|item|item.run_id.as_deref()==Some(run_id)
++        && item.status==TurnItemStatus::Failed
++        && matches!(&item.body,TurnItemBody::Error {failure,..} if failure.code.as_deref()==Some(FAILURE_CODE))) {
++        retry_preparation(state,run_id,failure,context.now)
++    } else {
++        super::recovery::retry_unsent_start(state,run_id,context)
++    }
++}
++

@@ -202,7 +202,7 @@ CREATE TABLE orchestration_v2_projection_provider_threads (
     FOREIGN KEY (thread_id) REFERENCES orchestration_v2_projection_threads (thread_id) DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (provider_session_id) REFERENCES orchestration_v2_projection_provider_sessions (provider_session_id) DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (owner_node_id) REFERENCES orchestration_v2_projection_nodes (node_id) DEFERRABLE INITIALLY DEFERRED,
-    CHECK (status IN ('not_loaded', 'idle', 'active', 'archived', 'closed', 'error'))
+    CHECK (status IN ('unknown', 'not_loaded', 'idle', 'active', 'archived', 'closed', 'error'))
     ,
     UNIQUE (thread_id, provider_thread_id)
 ) STRICT;
@@ -238,6 +238,8 @@ CREATE TABLE orchestration_v2_projection_turn_items (
     ordinal INTEGER NOT NULL,
     type TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('idle','pending','running','waiting','completed','failed','cancelled','interrupted')),
+    input_intent TEXT,
+    created_by TEXT,
     updated_at TEXT NOT NULL,
     payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
     FOREIGN KEY (thread_id) REFERENCES orchestration_v2_projection_threads (thread_id) DEFERRABLE INITIALLY DEFERRED,
@@ -294,6 +296,8 @@ CREATE TABLE orchestration_v2_projection_subagents (
     ,
     UNIQUE (thread_id, subagent_id)
 ) STRICT;
+
+CREATE INDEX orchestration_v2_projection_subagents_child ON orchestration_v2_projection_subagents (child_thread_id);
 
 CREATE TABLE orchestration_v2_projection_plans (
     plan_id TEXT PRIMARY KEY,
@@ -443,3 +447,8 @@ CREATE UNIQUE INDEX orchestration_v2_turns_ordinal ON orchestration_v2_projectio
 CREATE UNIQUE INDEX orchestration_v2_item_positions_ordinal ON orchestration_v2_turn_item_positions (thread_id, ordinal);
 
 CREATE UNIQUE INDEX orchestration_events_version ON orchestration_events (aggregate_kind, stream_id, stream_version);
+
+-- Physical identities remain queryable after logical provider rows are rebound.
+CREATE INDEX orchestration_v2_provider_threads_native_idx ON orchestration_v2_projection_provider_threads(provider_instance_id,driver,json_extract(payload_json,'$.nativeThreadRef.nativeId'));
+CREATE INDEX orchestration_v2_attempts_native_idx ON orchestration_v2_projection_run_attempts(provider_instance_id,json_extract(payload_json,'$.nativeThreadRef.driver'),json_extract(payload_json,'$.nativeThreadRef.nativeId'));
+CREATE INDEX orchestration_v2_provider_turns_native_idx ON orchestration_v2_projection_provider_turns(json_extract(payload_json,'$.nativeThreadRef.driver'),json_extract(payload_json,'$.nativeThreadRef.nativeId'));

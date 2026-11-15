@@ -68,6 +68,7 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
         &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
     );
     let first = service(directory.path());
+    first.inner.projects.register(&repo).await.unwrap();
     change(&first, &repo, save(None, " Build ", " echo build "))
         .await
         .unwrap();
@@ -76,7 +77,7 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
         projects
             .project_for_workspace(repo.to_str().unwrap())
             .is_some(),
-        "saving the first script registers its project"
+        "scripts belong to the explicitly registered project"
     );
     let database =
         rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
@@ -175,6 +176,8 @@ async fn plain_folder_scripts_are_isolated_and_failed_writes_keep_the_previous_s
     std::fs::create_dir(&first).unwrap();
     std::fs::create_dir(&second).unwrap();
     let service = service(directory.path());
+    service.inner.projects.register(&first).await.unwrap();
+    service.inner.projects.register(&second).await.unwrap();
     change(&service, &first, save(None, "Run", "echo one"))
         .await
         .unwrap();
@@ -204,7 +207,7 @@ async fn plain_folder_scripts_are_isolated_and_failed_writes_keep_the_previous_s
             .unwrap()
             .project_for_workspace(unregistered.to_str().unwrap())
             .is_none(),
-        "a failed first script save must roll back project registration too"
+        "saving a script must not implicitly register an unknown project"
     );
     assert!(
         change(&service, &first, save(Some("Run"), "Changed", "echo two"))

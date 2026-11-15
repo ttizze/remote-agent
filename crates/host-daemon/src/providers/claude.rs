@@ -2291,29 +2291,6 @@ impl crate::providers::Discovery for Claude {
                     next_cursor: None,
                 });
             }
-            SessionListScope::Loaded => {
-                let limit = limit.max(1) as usize;
-                let mut threads = self.loaded_threads().await;
-                threads.sort_by(|a, b| a.id.cmp(&b.id));
-                let mut data: Vec<_> = threads
-                    .into_iter()
-                    .filter(|thread| {
-                        cursor
-                            .as_ref()
-                            .is_none_or(|cursor| thread.id.as_ref().unwrap().id > *cursor)
-                    })
-                    .take(limit + 1)
-                    .map(|thread| SessionSummary {
-                        thread,
-                        branch: None,
-                    })
-                    .collect();
-                let next_cursor = (data.len() > limit).then(|| {
-                    data.truncate(limit);
-                    data.last().unwrap().thread.id.as_ref().unwrap().id.clone()
-                });
-                return Ok(SessionPage { data, next_cursor });
-            }
             SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => Some(
                 owned
                     .iter()
@@ -2748,7 +2725,7 @@ pub(crate) mod execution_tests {
     }
 
     #[tokio::test]
-    async fn loaded_pages_keep_owned_activity_without_opening_native_history() {
+    async fn root_listings_include_only_live_unpersisted_native_work() {
         let directory = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(directory.path()).unwrap();
         let claude = Claude::load(
@@ -2759,7 +2736,7 @@ pub(crate) mod execution_tests {
         .await
         .unwrap();
         let mut expected = Vec::new();
-        for _ in 0..125 {
+        for _ in 0..3 {
             let session = claude
                 .create(root.to_str().unwrap(), "default")
                 .await
@@ -2785,58 +2762,6 @@ pub(crate) mod execution_tests {
             effort: None,
             work: watch::channel(Work::default()).1,
         });
-        let mut cursor = None;
-        let mut observed = Vec::new();
-        let mut running = 0;
-        for expected_count in [50, 50, 25] {
-            let page = crate::providers::Discovery::list(
-                &claude,
-                "",
-                cursor,
-                SessionListScope::Loaded,
-                50,
-            )
-            .await
-            .unwrap();
-            assert_eq!(page.data.len(), expected_count);
-            for summary in page.data {
-                assert!(summary.thread.turns.is_none());
-                assert_eq!(summary.thread.cwd.as_deref(), root.to_str());
-                running += usize::from(summary.thread.status == SessionStatus::Running);
-                observed.push(summary.thread.id.unwrap().id);
-            }
-            cursor = page.next_cursor;
-        }
-        assert_eq!(observed, expected);
-        assert_eq!(running, 1);
-        assert!(cursor.is_none());
-        let page = crate::providers::Discovery::list(
-            &claude,
-            "",
-            Some(expected[74].clone()),
-            SessionListScope::Loaded,
-            50,
-        )
-        .await
-        .unwrap();
-        assert_eq!(page.data.len(), 50);
-        assert!(page.next_cursor.is_none());
-        let page =
-            crate::providers::Discovery::list(&claude, "", None, SessionListScope::Loaded, 0)
-                .await
-                .unwrap();
-        assert_eq!(page.data.len(), 1);
-        assert!(page.next_cursor.is_some());
-        let page = crate::providers::Discovery::list(
-            &claude,
-            "",
-            Some(expected.last().unwrap().clone()),
-            SessionListScope::Loaded,
-            50,
-        )
-        .await
-        .unwrap();
-        assert!(page.data.is_empty() && page.next_cursor.is_none());
         let recent =
             crate::providers::Discovery::list(&claude, "", None, SessionListScope::Roots(&[]), 30)
                 .await

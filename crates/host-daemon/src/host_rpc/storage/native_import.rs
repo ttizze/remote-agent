@@ -16,6 +16,14 @@ impl Storage {
             let tx = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
+            let source = native_bindings::header_source(thread, provider_thread)?;
+            // EventSink.unlessNativeThreadOwned: a native alias cannot import
+            // private history into a second application conversation.
+            if native_bindings::owner(&tx, &source)?
+                .is_some_and(|owner| owner.application_id() != thread.id)
+            {
+                return Ok(());
+            }
             let existing = projections::read::<model::Thread>(&tx, &thread.id)?;
             let created = existing.is_none();
             let state = match existing {
@@ -31,7 +39,12 @@ impl Storage {
             if created {
                 changes.push(model::Change::ThreadCreated(thread.clone()));
             }
-            if created {
+            if !created
+                && state.thread.active_provider_thread_id.as_deref() != Some(&provider_thread.id)
+            {
+                return Err("native import source changed".into());
+            }
+            if !state.provider_threads.contains_key(&provider_thread.id) {
                 changes.push(model::Change::ProviderThread(provider_thread.clone()));
             }
             for item in items {
@@ -44,6 +57,10 @@ impl Storage {
             }
             changes.push(model::Change::Thread(model::Thread {
                 history_origin: Some(model::ThreadHistoryOrigin::V1Import),
+                workspace_launch: None,
+                model_selection: thread.model_selection.clone(),
+                created_at: thread.created_at.clone(),
+                deleted_at: None,
                 ..state.thread.clone()
             }));
             commands::append_decision(
@@ -70,7 +87,8 @@ mod tests {
     fn history_marker_and_bodies_commit_once_without_creating_runs_or_native_executions() {
         let directory = tempfile::tempdir().unwrap();
         let storage = Storage::open(&directory.path().join("state.sqlite"));
-        let thread = thread("imported");
+        let mut thread = thread("imported");
+        thread.active_provider_thread_id = Some("native".into());
         let native: model::ProviderThread = serde_json::from_value(serde_json::json!({
             "id":"native","driver":"codex","providerInstanceId":"codex",
             "providerSessionId":null,"appThreadId":"imported","ownerNodeId":null,

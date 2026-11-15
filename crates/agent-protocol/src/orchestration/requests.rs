@@ -20,6 +20,77 @@ pub fn observe_request(
     {
         return Ok(Decision::default());
     }
+    validate_prompt(&request, &item, session_id)?;
+    let mut decision = observe_item(state, attempt_id, session_id, item)?;
+    decision.changes.push(Change::RuntimeRequest(request));
+    Ok(decision)
+}
+
+pub fn observe_external_request(
+    state: &State,
+    provider_thread_id: &str,
+    native_thread_id: &str,
+    session_id: &str,
+    request: RuntimeRequest,
+    item: TurnItem,
+) -> Result<Decision, String> {
+    let Some(provider) = native_observation::selected(state, provider_thread_id, native_thread_id)
+    else {
+        return Ok(Decision::default());
+    };
+    if state.active_run().is_some()
+        || state.has_uncertain_input()
+        || state
+            .runtime_requests
+            .get(&request.id)
+            .is_some_and(|saved| saved.status != RequestStatus::Pending)
+    {
+        return Ok(Decision::default());
+    }
+    validate_prompt(&request, &item, session_id)?;
+    if item.thread_id != state.thread.id
+        || item.run_id.is_some()
+        || item.provider_thread_id.as_deref() != Some(provider_thread_id)
+        || state.turn_items.get(&item.id).is_some_and(|saved| {
+            saved.run_id != item.run_id
+                || saved.provider_turn_id != item.provider_turn_id
+                || saved.provider_thread_id != item.provider_thread_id
+        })
+    {
+        return Err("request does not belong to this native thread".into());
+    }
+    let mut decision = if let Some(turn_id) = item.provider_turn_id.clone() {
+        if !state
+            .provider_turns
+            .get(&turn_id)
+            .is_some_and(|turn| turn.status == ProviderTurnStatus::Running)
+        {
+            return Ok(Decision::default());
+        }
+        observe_external_item(state, &turn_id, native_thread_id, item)?
+    } else {
+        execution::commit_item(state, provider_thread_id, item)
+    };
+    if !decision.changes.is_empty() {
+        if provider.provider_session_id.as_deref() != Some(session_id) {
+            decision
+                .changes
+                .push(Change::ProviderThread(ProviderThread {
+                    provider_session_id: Some(session_id.into()),
+                    updated_at: request.created_at.clone(),
+                    ..provider.clone()
+                }));
+        }
+        decision.changes.push(Change::RuntimeRequest(request));
+    }
+    Ok(decision)
+}
+
+fn validate_prompt(
+    request: &RuntimeRequest,
+    item: &TurnItem,
+    session_id: &str,
+) -> Result<(), String> {
     let owns_prompt = match &item.body {
         TurnItemBody::UserInputRequest { request_id, .. } => {
             request.kind == "user_input" && request_id == &request.id
@@ -34,16 +105,15 @@ pub fn observe_request(
         }
         _ => false,
     };
-    if !owns_prompt
+    if request.status != RequestStatus::Pending
+        || !owns_prompt
         || item.node_id.as_ref() != Some(&request.node_id)
         || request.provider_turn_id != item.provider_turn_id
         || !matches!(&request.response_capability,ResponseCapability::Live {provider_session_id,..} if provider_session_id==session_id)
     {
         return Err("request and prompt do not belong to this provider session".into());
     }
-    let mut decision = observe_item(state, attempt_id, session_id, item)?;
-    decision.changes.push(Change::RuntimeRequest(request));
-    Ok(decision)
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -3,6 +3,7 @@
 //! orchestrationV2Timeline define the expectations, independently of old Rows.
 use super::native_fixture::{NativeAgent, call};
 use super::*;
+use agent_protocol::conversation as decision;
 use agent_protocol::{orchestration as model, protocol::Call};
 
 fn input(provider: ProviderKind, text: &str) -> decision::InputContent {
@@ -128,7 +129,7 @@ async fn shell(service: &HostRpcService) -> serde_json::Value {
         Call::SubscribeList(records::SubscribeList {
             refresh: false,
             subscription: Uuid::new_v4(),
-            cached: None,
+            after_sequence: None,
         }),
     )
     .await
@@ -350,7 +351,9 @@ async fn a_fork_keeps_the_selected_prefix_and_independent_native_resources() {
         Call::ForkConversation(records::Fork {
             source: source.clone(),
             target: target.clone(),
-            through: first.projection.runs[0].id.clone().into(),
+            through: records::ForkPoint::Run {
+                run_id: first.projection.runs[0].id.clone(),
+            },
         }),
     )
     .await
@@ -496,7 +499,7 @@ async fn obsolete_storage_is_absent(#[case] table: &str) {
     assert!(!exists, "obsolete storage table remains: {table}");
 }
 
-async fn running(
+pub(in crate::host_rpc) async fn running(
     service: &HostRpcService,
     agent: &NativeAgent,
     cwd: &str,
@@ -589,6 +592,316 @@ async fn provider_stop_settles_the_owned_run_and_preserves_the_conversation() {
     assert!(agent.inputs.lock().unwrap().is_empty());
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn a_late_creation_reply_cannot_publish_ready_after_provider_process_loss(
+    #[case] cancelled_first: bool,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+        let held = agent.create_response_gate.acquire().await.unwrap();
+        let service =
+            HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+        let session = create(
+            &service,
+            directory.path().to_str().unwrap(),
+            Some("unsent-marker"),
+        )
+        .await;
+        agent.created.notified().await;
+        let physical = agent.records.lock().unwrap().keys().next().unwrap().clone();
+        if cancelled_first {
+            let connection = service.open_session();
+            let run = snapshot(&service, &session).projection.runs[0].id.clone();
+            let ack: records::Acknowledged = call(
+                &service,
+                connection.id(),
+                Call::ChangeConversation(records::Change {
+                    session: session.clone(),
+                    operation: Uuid::new_v4(),
+                    command: Command::Interrupt {
+                        turn: Some(run.into()),
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(ack.error, None);
+        }
+        Runtime::observe(
+            &service,
+            AgentChange::Stopped {
+                provider: ProviderKind::Codex,
+                error: agent_protocol::execution::ExecutionError {
+                    message: "process was lost".into(),
+                    ..Default::default()
+                },
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let stopped = snapshot(&service, &session);
+        assert_eq!(
+            stopped.projection.runs[0].status,
+            if cancelled_first {
+                model::RunStatus::Cancelled
+            } else {
+                model::RunStatus::Failed
+            }
+        );
+        drop(held);
+        let mut changed = service.inner.conversation.storage.changes();
+        loop {
+            let current = snapshot(&service, &session);
+            if current.projection.provider_threads.iter().any(|thread| {
+                thread
+                    .native_thread_ref
+                    .as_ref()
+                    .and_then(|reference| reference.native_id.as_ref())
+                    == Some(&physical)
+            }) {
+                assert_eq!(
+                    current.projection.runs, stopped.projection.runs,
+                    "late I/O cannot reopen app work"
+                );
+                assert_eq!(
+                    current.projection.attempts, stopped.projection.attempts,
+                    "no native input was accepted"
+                );
+                assert!(
+                    current
+                        .projection
+                        .provider_sessions
+                        .iter()
+                        .all(|session| session.status != model::ProviderSessionStatus::Ready),
+                    "a late reply cannot reverse the process-loss fact"
+                );
+                assert!(
+                    current
+                        .projection
+                        .provider_threads
+                        .iter()
+                        .all(|thread| thread.status != model::ProviderThreadStatus::Idle),
+                    "the physical identity is retained without claiming a live resource"
+                );
+                assert!(agent.inputs.lock().unwrap().is_empty());
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("late allocation settles without sending input");
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn provider_stop_saves_live_command_output_without_reopening_a_completed_run(
+    #[case] background: bool,
+) {
+    use agent_protocol::{
+        execution::{BackgroundTask, BackgroundTaskKind, ItemStatus, TurnStatus},
+        items::{Item, ItemBody},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let (session, native, execution) =
+        running(&service, &agent, directory.path().to_str().unwrap()).await;
+    observe(
+        &service,
+        &native,
+        execution,
+        SessionChange::Item {
+            turn_id: "observed-turn".into(),
+            item: Arc::new(Item::new(
+                "live-command".into(),
+                ItemStatus::Running,
+                ItemBody::CommandExecution {
+                    command: "printf output".into(),
+                    cwd: None,
+                    output: "initial".into(),
+                    output_omitted: false,
+                    exit_code: None,
+                },
+            )),
+        },
+    )
+    .await;
+    let before = snapshot(&service, &session);
+    let item=before.projection.turn_items.iter().find(|item|matches!(&item.body,model::TurnItemBody::CommandExecution{input,..} if input=="printf output")).unwrap().id.clone();
+    observe(
+        &service,
+        &native,
+        execution,
+        SessionChange::Text {
+            turn_id: "observed-turn".into(),
+            item_id: "live-command".into(),
+            field: agent_protocol::session::TextField::CommandOutput,
+            delta: " tail".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        snapshot(&service, &session).snapshot_sequence,
+        before.snapshot_sequence,
+        "live output does not write transcript revisions"
+    );
+    let connection = service.open_session();
+    let mut reply = service
+        .dispatch(
+            connection.id(),
+            &Call::SubscribeCommandOutput(records::SubscribeOutput {
+                key: records::OutputKey {
+                    session: session.clone(),
+                    item: item.clone().into(),
+                },
+                subscription: Uuid::new_v4(),
+            }),
+        )
+        .await
+        .unwrap();
+    let agent_protocol::protocol::Response::Success{result:opened}=agent_protocol::protocol::decode::<agent_protocol::protocol::Response<records::OpenedOutput>>(&reply.initial).unwrap() else{panic!("output subscription");};
+    assert_eq!(opened.initial.text, "initial tail");
+    if background {
+        observe(
+            &service,
+            &native,
+            execution,
+            SessionChange::Background {
+                tasks: vec![BackgroundTask {
+                    id: "live-command".into(),
+                    kind: BackgroundTaskKind::Command,
+                    description: Some("printf output".into()),
+                }],
+            },
+        )
+        .await;
+        observe(
+            &service,
+            &native,
+            execution,
+            SessionChange::Turn {
+                turn: agent_protocol::models::Turn {
+                    id: "observed-turn".into(),
+                    status: TurnStatus::Completed,
+                    ..Default::default()
+                },
+                completed: true,
+            },
+        )
+        .await;
+        settled(&service, &session, 1).await;
+    }
+    Runtime::observe(
+        &service,
+        AgentChange::Stopped {
+            provider: ProviderKind::Codex,
+            error: agent_protocol::execution::ExecutionError {
+                message: "provider stopped".into(),
+                ..Default::default()
+            },
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let stopped = snapshot(&service, &session);
+    assert_eq!(stopped.projection.runs.len(), 1);
+    assert_eq!(
+        stopped.projection.runs[0].status,
+        if background {
+            model::RunStatus::Completed
+        } else {
+            model::RunStatus::Failed
+        }
+    );
+    let saved = stopped
+        .projection
+        .turn_items
+        .iter()
+        .find(|saved| saved.id == item)
+        .unwrap();
+    // RunExecutionService.ts1733-1780 distinguishes a failed active run from
+    // interrupted detached work; no native command exit code is fabricated.
+    assert_eq!(
+        saved.status,
+        if background {
+            model::TurnItemStatus::Interrupted
+        } else {
+            model::TurnItemStatus::Failed
+        }
+    );
+    let updates = reply.updates.as_mut().unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), updates.recv())
+            .await
+            .expect("stopped output closes its subscription")
+            .is_none()
+    );
+    // Command bodies are intentionally omitted from T3 snapshots. Expand the
+    // item through the actual public detail API, including after Host restart;
+    // the fake native transcript has no tool body to recover on demand.
+    let detail: records::Hydrated = call(
+        &service,
+        connection.id(),
+        Call::HydrateConversation(records::Hydrate {
+            session: session.clone(),
+            item: item.clone().into(),
+        }),
+    )
+    .await
+    .unwrap();
+    let detail = detail.item.unwrap();
+    assert!(
+        matches!(&detail.body,model::TurnItemBody::CommandExecution{output:Some(output),output_omitted:Some(false),exit_code:None,..} if output=="initial tail")
+    );
+    assert_eq!(
+        snapshot(&service, &session).snapshot_sequence,
+        stopped.snapshot_sequence,
+        "reading detail never rewrites history"
+    );
+    assert!(
+        agent.inputs.lock().unwrap().is_empty(),
+        "process loss never resends accepted input"
+    );
+    drop(reply);
+    drop(connection);
+    let owner = Arc::downgrade(&service.inner);
+    drop(service);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while owner.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let restarted = agent.restarted();
+    let service = HostRpcService::new(
+        [restarted.backend()],
+        directory.path().join("projects.json"),
+    );
+    let connection = service.open_session();
+    let reopened: records::Hydrated = call(
+        &service,
+        connection.id(),
+        Call::HydrateConversation(records::Hydrate {
+            session: session.clone(),
+            item: item.into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reopened.item.as_ref(), Some(&detail));
+    assert!(restarted.inputs.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn update_restart_continues_the_same_conversation_once_without_repeating_user_input() {
     let directory = tempfile::tempdir().unwrap();
@@ -596,12 +909,8 @@ async fn update_restart_continues_the_same_conversation_once_without_repeating_u
     let projects = directory.path().join("projects.json");
     let service = HostRpcService::new([agent.backend()], projects.clone());
     let (session, native, _) = running(&service, &agent, directory.path().to_str().unwrap()).await;
-    service
-        .inner
-        .conversation
-        .storage
-        .set_updating(true)
-        .unwrap();
+    service.set_history_scope(directory.path().into(), true);
+    service.prepare_update().await.unwrap();
     let owner = Arc::downgrade(&service.inner);
     drop(service);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -632,10 +941,23 @@ async fn update_restart_continues_the_same_conversation_once_without_repeating_u
     .await
     .expect("update continuation completes");
     for _ in 0..3 {
-        Runtime::recover(&service, &session, ProviderKind::Codex)
-            .await
-            .unwrap();
+        service.start().unwrap();
     }
+    service.resume_after_update(directory.path()).await.unwrap();
+    let report: agent_local_host::update::Recovery = serde_json::from_slice(
+        &std::fs::read(
+            directory
+                .path()
+                .join(agent_local_host::update::RECOVERY_FILE),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(report.restart_marker.is_none());
+    assert!(matches!(
+        &report.tasks[0].delivery,
+        agent_local_host::update::ContinuationDelivery::Accepted(_)
+    ));
     let inputs = restarted.inputs.lock().unwrap();
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].thread_id, native);
@@ -691,6 +1013,308 @@ async fn a_native_child_has_canonical_subagent_lineage_and_an_execution_node() {
             .iter()
             .any(|node| node.kind == model::NodeKind::Subagent)
     );
+    assert!(agent.inputs.lock().unwrap().is_empty());
+}
+
+// Codex's recorded spawn completes before either child does. Each real child
+// turn owns its work; its transport may still carry the parent's execution token.
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn native_children_with_the_parent_execution_token_keep_their_own_turns_and_results(
+    #[case] parent_finishes_first: bool,
+) {
+    use agent_protocol::{
+        execution::{ItemStatus, TurnStatus},
+        items::{Item, ItemBody},
+        models::Turn,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let (session, native, execution) =
+        running(&service, &agent, directory.path().to_str().unwrap()).await;
+    let children = [
+        SessionRef::new(ProviderKind::Codex, "child-one".into()).unwrap(),
+        SessionRef::new(ProviderKind::Codex, "child-two".into()).unwrap(),
+    ];
+    // An accepted turn keeps its model while a later default selection changes.
+    service
+        .inner
+        .conversation
+        .storage
+        .observe_thread(&session.id, &[], &commands::at(), |state| {
+            Ok(model::Decision {
+                changes: vec![model::Change::Thread(model::Thread {
+                    model_selection: model::ModelSelection {
+                        model: "next-input-model".into(),
+                        ..state.thread.model_selection.clone()
+                    },
+                    ..state.thread.clone()
+                })],
+                ..Default::default()
+            })
+        })
+        .unwrap();
+    for child in &children {
+        Runtime::observe(
+            &service,
+            AgentChange::TaskParent {
+                session: child.clone(),
+                parent: native.clone(),
+            },
+            Some(execution),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot(&service, child)
+                .projection
+                .thread
+                .model_selection
+                .model,
+            "fixture"
+        );
+    }
+    let spawn=crate::providers::codex::native::parse_item(serde_json::json!({
+        "type":"collabAgentToolCall","id":"spawn-real-children","tool":"spawnAgent","status":"completed",
+        "prompt":"review the requested behavior","model":"child-model","receiverThreadIds":["child-one","child-two"],
+        "agentsStates":{"child-one":{"status":"pendingInit","message":null},"child-two":{"status":"pendingInit","message":null}}
+    })).unwrap();
+    observe(
+        &service,
+        &native,
+        execution,
+        SessionChange::Item {
+            turn_id: "observed-turn".into(),
+            item: Arc::new(spawn),
+        },
+    )
+    .await;
+    let before = snapshot(&service, &session);
+    assert_eq!(before.projection.subagents.len(), 2);
+    for child in &children {
+        assert_eq!(
+            snapshot(&service, child)
+                .projection
+                .thread
+                .model_selection
+                .model,
+            "child-model"
+        );
+        // Metadata-only parent repeats cannot replace the concrete spawn model.
+        Runtime::observe(
+            &service,
+            AgentChange::TaskParent {
+                session: child.clone(),
+                parent: native.clone(),
+            },
+            Some(execution),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot(&service, child)
+                .projection
+                .thread
+                .model_selection
+                .model,
+            "child-model"
+        );
+    }
+    assert!(
+        before
+            .projection
+            .subagents
+            .iter()
+            .all(|task| task.status == model::SubagentStatus::Pending)
+    );
+    let references = before
+        .projection
+        .subagents
+        .iter()
+        .map(|task| (task.id.clone(), task.native_task_ref.clone()))
+        .collect::<HashMap<_, _>>();
+    if parent_finishes_first {
+        observe(
+            &service,
+            &native,
+            execution,
+            SessionChange::Turn {
+                turn: Turn {
+                    id: "observed-turn".into(),
+                    status: TurnStatus::Completed,
+                    ..Default::default()
+                },
+                completed: true,
+            },
+        )
+        .await;
+    }
+    for (index, child) in children.iter().enumerate() {
+        let turn_id: agent_protocol::ids::TurnId = format!("actual-child-turn-{index}").into();
+        observe(
+            &service,
+            child,
+            execution,
+            SessionChange::Turn {
+                turn: Turn {
+                    id: turn_id.clone(),
+                    status: TurnStatus::Running,
+                    items: Some(vec![Arc::new(Item::new(
+                        format!("actual-child-input-{index}").into(),
+                        ItemStatus::Completed,
+                        ItemBody::UserMessage {
+                            text: Some("actual SDK child input".into()),
+                            content: vec![],
+                        },
+                    ))]),
+                    ..Default::default()
+                },
+                completed: false,
+            },
+        )
+        .await;
+        let active = snapshot(&service, &session);
+        assert_eq!(
+            active.projection.provider_turns.len(),
+            before.projection.provider_turns.len()
+        );
+        assert_eq!(active.projection.runs.len(), 1);
+        let task = active
+            .projection
+            .subagents
+            .iter()
+            .find(|task| task.child_thread_id.as_deref() == Some(&child.application_id()))
+            .unwrap();
+        assert_eq!(task.status, model::SubagentStatus::Running);
+        assert_eq!(task.native_task_ref, references[&task.id]);
+        observe(
+            &service,
+            child,
+            execution,
+            SessionChange::Turn {
+                turn: Turn {
+                    id: turn_id,
+                    status: TurnStatus::Completed,
+                    items: Some(vec![Arc::new(Item::new(
+                        format!("actual-child-answer-{index}").into(),
+                        ItemStatus::Completed,
+                        ItemBody::AssistantText {
+                            text: format!("child result {index}"),
+                            phase: Default::default(),
+                        },
+                    ))]),
+                    ..Default::default()
+                },
+                completed: true,
+            },
+        )
+        .await;
+        let current = snapshot(&service, &session);
+        let task = current
+            .projection
+            .subagents
+            .iter()
+            .find(|task| task.child_thread_id.as_deref() == Some(&child.application_id()))
+            .unwrap();
+        assert_eq!(task.status, model::SubagentStatus::Completed);
+        let item = current
+            .projection
+            .turn_items
+            .iter()
+            .find(|item| item.node_id.as_ref() == Some(&task.id))
+            .unwrap();
+        assert_eq!(item.status, model::TurnItemStatus::Completed);
+        assert!(
+            matches!(&item.body,model::TurnItemBody::Subagent {result:Some(result),..} if result==&format!("child result {index}"))
+        );
+        assert!(
+            current
+                .projection
+                .nodes
+                .iter()
+                .any(|node| node.id == task.id
+                    && node.status == model::NodeStatus::Completed
+                    && !node.counts_for_run)
+        );
+        let child = snapshot(&service, child);
+        assert!(child.projection.runs.is_empty());
+        assert!(child.projection.attempts.is_empty());
+        assert_eq!(child.projection.provider_turns.len(), 1);
+        assert_eq!(child.projection.thread.created_by, model::Actor::Agent);
+        assert!(child.projection.turn_items.iter().any(|item|matches!(&item.body,model::TurnItemBody::UserMessage {created_by:model::Actor::Agent,text,..} if text=="actual SDK child input")));
+    }
+    let stale=crate::providers::codex::native::parse_item(serde_json::json!({
+        "type":"collabAgentToolCall","id":"late-wait-snapshot","tool":"wait","status":"completed",
+        "receiverThreadIds":["child-one"],"agentsStates":{"child-one":{"status":"pendingInit","message":null}}
+    })).unwrap();
+    observe(
+        &service,
+        &native,
+        execution,
+        SessionChange::Item {
+            turn_id: "observed-turn".into(),
+            item: Arc::new(stale),
+        },
+    )
+    .await;
+    assert!(
+        snapshot(&service, &session)
+            .projection
+            .subagents
+            .iter()
+            .all(|task| task.status == model::SubagentStatus::Completed)
+    );
+    // A genuine new child turn, unlike that snapshot, is evidence of new work.
+    observe(
+        &service,
+        &children[0],
+        execution,
+        SessionChange::Turn {
+            turn: Turn {
+                id: "actual-child-next-turn".into(),
+                status: TurnStatus::Running,
+                ..Default::default()
+            },
+            completed: false,
+        },
+    )
+    .await;
+    let current = snapshot(&service, &session);
+    let first = current
+        .projection
+        .subagents
+        .iter()
+        .find(|task| task.child_thread_id.as_deref() == Some(&children[0].application_id()))
+        .unwrap();
+    assert_eq!(first.status, model::SubagentStatus::Running);
+    assert!(first.completed_at.is_none());
+    assert_eq!(first.native_task_ref, references[&first.id]);
+    // A terminal snapshot from the previous child turn cannot settle this one.
+    observe(
+        &service,
+        &children[0],
+        execution,
+        SessionChange::Turn {
+            turn: Turn {
+                id: "actual-child-turn-0".into(),
+                status: TurnStatus::Completed,
+                ..Default::default()
+            },
+            completed: true,
+        },
+    )
+    .await;
+    let current = snapshot(&service, &session);
+    let first = current
+        .projection
+        .subagents
+        .iter()
+        .find(|task| task.child_thread_id.as_deref() == Some(&children[0].application_id()))
+        .unwrap();
+    assert_eq!(first.status, model::SubagentStatus::Running);
     assert!(agent.inputs.lock().unwrap().is_empty());
 }
 
@@ -1165,7 +1789,7 @@ async fn generated_image_bytes_are_bounded_files_instead_of_database_payloads(
 }
 
 #[tokio::test]
-async fn refreshed_native_catalog_is_visible_as_a_canonical_thread_without_inventing_a_run() {
+async fn explicit_project_import_is_visible_as_a_canonical_thread_without_inventing_a_run() {
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
     let native = SessionRef::new(ProviderKind::Codex, "catalog-native".into()).unwrap();
@@ -1185,6 +1809,21 @@ async fn refreshed_native_catalog_is_visible_as_a_canonical_thread_without_inven
     );
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     service.start().unwrap();
+    assert!(
+        shell(&service).await["threads"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    service
+        .inner
+        .projects
+        .register(directory.path())
+        .await
+        .unwrap();
+    Runtime::import_project_threads(&service, &[directory.path().to_str().unwrap().into()])
+        .await
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let listed = shell(&service).await;
@@ -1371,6 +2010,16 @@ async fn an_empty_worktree_launch_prepares_a_checkout_without_creating_a_run() {
 
 #[tokio::test]
 async fn foreground_completion_preserves_a_background_command_and_accepts_its_late_result() {
+    assert_background_late_result(false).await;
+}
+
+#[tokio::test]
+async fn replacing_the_selected_native_source_keeps_background_results_owned_by_their_actual_attempt()
+ {
+    assert_background_late_result(true).await;
+}
+
+async fn assert_background_late_result(replace_source: bool) {
     use agent_protocol::{
         execution::{BackgroundTask, BackgroundTaskKind, ItemStatus, TurnStatus},
         items::{Item, ItemBody},
@@ -1465,6 +2114,45 @@ async fn foreground_completion_preserves_a_background_command_and_accepts_its_la
         "rejected late items must not create orphan execution nodes"
     );
     assert_eq!(ignored.projection.turn_items, current.projection.turn_items);
+    if replace_source {
+        let selected = SessionRef::new(ProviderKind::Codex, "replacement-source".into()).unwrap();
+        let now = commands::at();
+        service
+            .inner
+            .conversation
+            .storage
+            .observe_thread(&session.id, &[], &now, |state| {
+                let thread = state.selected_native_thread().unwrap();
+                let mut reference = thread.native_thread_ref.clone().unwrap();
+                reference.native_id = Some(selected.id.clone());
+                Ok(model::Decision {
+                    changes: vec![model::Change::ProviderThread(model::ProviderThread {
+                        native_thread_ref: Some(reference),
+                        updated_at: now.clone(),
+                        ..thread.clone()
+                    })],
+                    ..Default::default()
+                })
+            })
+            .unwrap();
+        let before_foreign = snapshot(&service, &session);
+        observe(
+            &service,
+            &selected,
+            execution,
+            command(ItemStatus::Completed, "foreign-source-output"),
+        )
+        .await;
+        let after_foreign = snapshot(&service, &session);
+        assert_eq!(
+            after_foreign.projection.turn_items, before_foreign.projection.turn_items,
+            "a different source cannot borrow an old attempt's pending item identity"
+        );
+        assert_eq!(
+            after_foreign.projection.nodes,
+            before_foreign.projection.nodes
+        );
+    }
     observe(
         &service,
         &native,
@@ -1558,7 +2246,9 @@ async fn a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_rest
         Call::ForkConversation(records::Fork {
             source,
             target: target.clone(),
-            through: first.projection.runs[0].id.clone().into(),
+            through: records::ForkPoint::Run {
+                run_id: first.projection.runs[0].id.clone(),
+            },
         }),
     )
     .await
@@ -1717,7 +2407,9 @@ async fn queued_fork_input_preserves_context_after_a_failed_start(#[case] provid
         Call::ForkConversation(records::Fork {
             source,
             target: target.clone(),
-            through: first.projection.runs[0].id.clone().into(),
+            through: records::ForkPoint::Run {
+                run_id: first.projection.runs[0].id.clone(),
+            },
         }),
     )
     .await
@@ -1899,10 +2591,14 @@ async fn send(service: &HostRpcService, session: &SessionRef, provider: Provider
 #[case("")]
 #[case("injection_unknown")]
 #[case("not_sent")]
+#[case("import_incomplete")]
+#[case("state_error")]
+#[case("metadata_only")]
 #[tokio::test]
 async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[case] fault: &str) {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let mut codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    Arc::get_mut(&mut codex).unwrap().metadata_only_state = fault == "metadata_only";
     let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
@@ -1934,6 +2630,25 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
             .fail_submit
             .store(1, std::sync::atomic::Ordering::SeqCst);
     }
+    if fault == "import_incomplete" {
+        codex
+            .records
+            .lock()
+            .unwrap()
+            .get_mut(&original)
+            .unwrap()
+            .thread
+            .history_read_state = Some(agent_protocol::session::HistoryReadState::new(
+            agent_protocol::session::HistoryReadKind::Incomplete,
+            vec!["native history was compacted".into()],
+        ));
+    }
+    if fault == "state_error" {
+        *codex.state_error.lock().unwrap() = Some(Failure::unknown(
+            "resume_unavailable",
+            "native source is unavailable",
+        ));
+    }
     send(
         &service,
         &session,
@@ -1941,13 +2656,23 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
         "current-user-marker",
     )
     .await;
+    if fault == "injection_unknown" {
+        assert_eq!(codex.inputs.lock().unwrap().len(), 1);
+        retry_failed_start(&service, &session, 3).await;
+    }
     let current = settled(&service, &session, 3).await;
     let inputs = codex.inputs.lock().unwrap();
     assert_eq!(inputs.len(), 2, "one native prompt per accepted input");
     assert_eq!(claude.inputs.lock().unwrap().len(), 1);
     let injected = codex.injected.lock().unwrap();
-    let recovering = fault == "injection_unknown";
-    assert_eq!(injected.len(), if recovering { 2 } else { 1 });
+    let recovering = matches!(
+        fault,
+        "injection_unknown" | "import_incomplete" | "state_error"
+    );
+    assert_eq!(
+        injected.len(),
+        if fault == "injection_unknown" { 2 } else { 1 }
+    );
     assert_eq!(inputs[1].thread_id.id == original, !recovering);
     assert_eq!(injected.last().unwrap().0, inputs[1].thread_id.id);
     let context = serde_json::to_string(&injected.last().unwrap().1).unwrap();
@@ -2061,6 +2786,330 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
 }
 
 #[tokio::test]
+async fn stopping_during_provider_release_preserves_the_actual_unload_result_and_other_conversations()
+ {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let root = tempfile::tempdir().unwrap();
+        let codex = NativeAgent::new(ProviderKind::Codex, root.path().join("codex"));
+        let claude = NativeAgent::new(ProviderKind::Claude, root.path().join("claude"));
+        let service = HostRpcService::new(
+            [codex.backend(), claude.backend()],
+            root.path().join("projects.json"),
+        );
+        let source = create(
+            &service,
+            root.path().to_str().unwrap(),
+            Some("source input"),
+        )
+        .await;
+        let before = settled(&service, &source, 1).await;
+        let old_thread = before.projection.provider_threads[0].id.clone();
+        let peer = create(&service, root.path().to_str().unwrap(), Some("peer input")).await;
+        let peer_before = settled(&service, &peer, 1).await;
+        let held = codex.unload_gate.acquire().await.unwrap();
+        send(
+            &service,
+            &source,
+            ProviderKind::Claude,
+            "unsent after switch",
+        )
+        .await;
+        loop {
+            if !codex.released.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let connection = service.open_session();
+        let current = snapshot(&service, &source);
+        let run = current
+            .projection
+            .runs
+            .iter()
+            .max_by_key(|run| run.ordinal)
+            .unwrap();
+        let ack: records::Acknowledged = call(
+            &service,
+            connection.id(),
+            Call::ChangeConversation(records::Change {
+                session: source.clone(),
+                operation: Uuid::new_v4(),
+                command: Command::Interrupt {
+                    turn: Some(run.id.clone().into()),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ack.error, None);
+        let stopped = snapshot(&service, &source);
+        assert_eq!(
+            stopped
+                .projection
+                .runs
+                .iter()
+                .find(|saved| saved.id == run.id)
+                .unwrap()
+                .status,
+            model::RunStatus::Cancelled
+        );
+        drop(held);
+        let mut changed = service.inner.conversation.storage.changes();
+        loop {
+            let state = service
+                .inner
+                .conversation
+                .storage
+                .thread_state(&source.id, &[])
+                .unwrap();
+            if state.provider_threads[&old_thread].status == model::ProviderThreadStatus::NotLoaded
+            {
+                assert!(state.provider_session(&old_thread).is_none());
+                assert_eq!(state.runs[&run.id].status, model::RunStatus::Cancelled);
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+        assert!(
+            claude.inputs.lock().unwrap().is_empty(),
+            "cancelling startup never sends the waiting input"
+        );
+        let peer_after = snapshot(&service, &peer);
+        assert_eq!(peer_after.projection.thread, peer_before.projection.thread);
+        assert_eq!(peer_after.projection.runs, peer_before.projection.runs);
+        assert_eq!(
+            peer_after.projection.provider_threads,
+            peer_before.projection.provider_threads
+        );
+        assert!(
+            peer_after
+                .projection
+                .provider_sessions
+                .iter()
+                .any(|session| session.status == model::ProviderSessionStatus::Ready)
+        );
+        assert_eq!(codex.released.lock().unwrap().len(), 1);
+    })
+    .await
+    .expect("an in-flight unload commits its resource result after cancellation");
+}
+
+#[rstest::rstest]
+#[case("peer")]
+#[case("native_roster")]
+#[case("child")]
+#[case("unreadable")]
+#[tokio::test]
+async fn provider_release_checks_real_background_work_and_preserves_other_conversations(
+    #[case] condition: &str,
+) {
+    use agent_protocol::{execution, models};
+    let root = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, root.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, root.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        root.path().join("projects.json"),
+    );
+    let source = create(
+        &service,
+        root.path().to_str().unwrap(),
+        Some("source-input"),
+    )
+    .await;
+    let before = settled(&service, &source, 1).await;
+    let (native, execution) = super::native_fixture::bound_execution(&service, &source);
+    let peer = create(&service, root.path().to_str().unwrap(), Some("peer-input")).await;
+    let peer_before = settled(&service, &peer, 1).await;
+    let peer_native = codex.inputs.lock().unwrap()[1].thread_id.clone();
+    codex
+        .records
+        .lock()
+        .unwrap()
+        .get_mut(&peer_native.id)
+        .unwrap()
+        .thread
+        .status = execution::SessionStatus::Running;
+    match condition {
+        "native_roster" => {
+            codex
+                .records
+                .lock()
+                .unwrap()
+                .get_mut(&native.id)
+                .unwrap()
+                .thread
+                .background = vec![execution::BackgroundTask {
+                id: "native-only-child".into(),
+                kind: execution::BackgroundTaskKind::Subagent,
+                description: Some("actual SDK work absent from the projection".into()),
+            }]
+        }
+        "unreadable" => {
+            codex.records.lock().unwrap().remove(&native.id);
+        }
+        "child" => {
+            let child =
+                SessionRef::new(ProviderKind::Codex, "actual-pending-child".into()).unwrap();
+            Runtime::observe(
+                &service,
+                AgentChange::TaskParent {
+                    session: child.clone(),
+                    parent: native.clone(),
+                },
+                Some(execution),
+            )
+            .await
+            .unwrap();
+            Runtime::observe(
+                &service,
+                AgentChange::Session {
+                    session: child.clone(),
+                    change: SessionChange::Turn {
+                        turn: models::Turn {
+                            id: "actual-child-turn".into(),
+                            status: execution::TurnStatus::Running,
+                            ..Default::default()
+                        },
+                        completed: false,
+                    },
+                },
+                Some(execution),
+            )
+            .await
+            .unwrap();
+            let first = snapshot(&service, &source);
+            assert_eq!(
+                first.projection.subagents[0].status,
+                model::SubagentStatus::Running
+            );
+            assert!(
+                !first
+                    .projection
+                    .visible_turn_items
+                    .iter()
+                    .any(|row| matches!(row.item.body, model::TurnItemBody::Subagent { .. }))
+            );
+            Runtime::observe(
+                &service,
+                AgentChange::Session {
+                    session: child,
+                    change: SessionChange::Turn {
+                        turn: models::Turn {
+                            id: "actual-child-turn".into(),
+                            status: execution::TurnStatus::Running,
+                            ..Default::default()
+                        },
+                        completed: false,
+                    },
+                },
+                Some(execution),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                snapshot(&service, &source),
+                first,
+                "repeated child state does not publish another parent event"
+            );
+        }
+        _ => {}
+    }
+    send(&service, &source, ProviderKind::Claude, "switch-input").await;
+    if condition == "peer" {
+        let after = settled(&service, &source, 2).await;
+        assert!(
+            !after
+                .projection
+                .provider_sessions
+                .iter()
+                .any(|session| session.provider_instance_id == "codex")
+        );
+        assert_eq!(codex.released.lock().unwrap().as_slice(), [native.id]);
+        assert_eq!(claude.inputs.lock().unwrap().len(), 1);
+    } else {
+        let after = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let current = snapshot(&service, &source);
+                if current
+                    .projection
+                    .runs
+                    .iter()
+                    .any(|run| run.ordinal == 2 && run.status == model::RunStatus::Failed)
+                {
+                    break current;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|error| {
+            let current=snapshot(&service,&source);
+            panic!("unsafe release fails only the new input: {error}; runs={:?}; tasks={:?}; resources={:?}",
+                current.projection.runs.iter().map(|run|(&run.id,run.ordinal,run.status)).collect::<Vec<_>>(),
+                current.projection.subagents.iter().map(|task|(&task.id,task.status,&task.parent_node_id)).collect::<Vec<_>>(),
+                current.projection.provider_threads.iter().map(|thread|(&thread.id,thread.status,&thread.provider_session_id)).collect::<Vec<_>>()
+            );
+        });
+        assert!(codex.released.lock().unwrap().is_empty());
+        assert!(claude.inputs.lock().unwrap().is_empty());
+        assert_eq!(
+            after.projection.runs.iter().find(|run| run.ordinal == 1),
+            before.projection.runs.first()
+        );
+        assert!(
+            after
+                .projection
+                .provider_sessions
+                .iter()
+                .any(|session| session.provider_instance_id == "codex")
+        );
+        if condition == "child" {
+            assert_eq!(
+                after.projection.subagents[0].status,
+                model::SubagentStatus::Running
+            );
+            Runtime::observe(
+                &service,
+                AgentChange::Session {
+                    session: SessionRef::new(ProviderKind::Codex, "actual-pending-child".into())
+                        .unwrap(),
+                    change: SessionChange::Turn {
+                        turn: models::Turn {
+                            id: "actual-child-turn".into(),
+                            status: execution::TurnStatus::Completed,
+                            ..Default::default()
+                        },
+                        completed: true,
+                    },
+                },
+                Some(execution),
+            )
+            .await
+            .unwrap();
+            let finished = snapshot(&service, &source);
+            assert_eq!(
+                finished.projection.subagents[0].status,
+                model::SubagentStatus::Completed
+            );
+            assert!(
+                !finished
+                    .projection
+                    .visible_turn_items
+                    .iter()
+                    .any(|row| matches!(row.item.body, model::TurnItemBody::Subagent { .. }))
+            );
+        }
+    }
+    assert!(!codex.released.lock().unwrap().contains(&peer_native.id));
+    assert_eq!(snapshot(&service, &peer), peer_before);
+    assert_eq!(
+        codex.records.lock().unwrap()[&peer_native.id].thread.status,
+        execution::SessionStatus::Running
+    );
+}
+
+#[tokio::test]
 async fn portable_forks_include_only_the_selected_source_prefix() {
     let directory = tempfile::tempdir().unwrap();
     let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
@@ -2092,7 +3141,9 @@ async fn portable_forks_include_only_the_selected_source_prefix() {
         Call::ForkConversation(records::Fork {
             source: source.clone(),
             target: target.clone(),
-            through: first.projection.runs[0].id.clone().into(),
+            through: records::ForkPoint::Run {
+                run_id: first.projection.runs[0].id.clone(),
+            },
         }),
     )
     .await
@@ -2151,14 +3202,7 @@ async fn accepted_attempts_record_the_native_identity_used_for_context_coverage(
         .iter()
         .find(|thread| thread.id == attempt.provider_thread_id)
         .unwrap();
-    assert_eq!(
-        attempt.native_thread_id,
-        provider_thread
-            .native_thread_ref
-            .as_ref()
-            .unwrap()
-            .native_id
-    );
+    assert_eq!(attempt.native_thread_ref, provider_thread.native_thread_ref);
 }
 
 #[tokio::test]
@@ -2353,7 +3397,7 @@ async fn provider_handoff_uses_the_message_actor_for_agent_created_input() {
             },
         )
         .unwrap();
-    assert!(ack.error.is_none());
+    assert!(ack.receipt.error.is_none());
     let current = settled(&service, &session, 2).await;
     assert!(
         current
@@ -2450,7 +3494,9 @@ async fn native_fork_provenance_survives_provider_switches() {
         Call::ForkConversation(records::Fork {
             source,
             target: target.clone(),
-            through: first.projection.runs[0].id.clone().into(),
+            through: records::ForkPoint::Run {
+                run_id: first.projection.runs[0].id.clone(),
+            },
         }),
     )
     .await
@@ -2479,6 +3525,8 @@ async fn native_fork_provenance_survives_provider_switches() {
         .fail_inject
         .store(1, std::sync::atomic::Ordering::SeqCst);
     send(&service, &target, ProviderKind::Codex, "fork-return").await;
+    assert_eq!(codex.inputs.lock().unwrap().len(), 2);
+    retry_failed_start(&service, &target, 3).await;
     let current = settled(&service, &target, 3).await;
     assert_eq!(
         current
@@ -2504,6 +3552,205 @@ async fn native_fork_provenance_survives_provider_switches() {
             && context.contains("fork-first")
             && context.contains("fork-other-provider")
     );
+}
+
+#[rstest::rstest]
+#[case::native(false, ProviderKind::Codex)]
+#[case::other_provider(false, ProviderKind::Claude)]
+#[case::imported(true, ProviderKind::Codex)]
+#[tokio::test]
+async fn runless_forks_continue_only_the_selected_native_or_imported_prefix(
+    #[case] imported: bool,
+    #[case] destination: ProviderKind,
+) {
+    use agent_protocol::{execution, items, models};
+    let directory = tempfile::tempdir().unwrap();
+    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let service = HostRpcService::new(
+        [codex.backend(), claude.backend()],
+        directory.path().join("projects.json"),
+    );
+    let source = SessionRef::new(ProviderKind::Codex, "real-external-source".into()).unwrap();
+    let turns: Vec<_> = ["retained-native-marker", "excluded-native-marker"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            Arc::new(models::Turn {
+                id: format!("real-native-turn-{index}").into(),
+                status: execution::TurnStatus::Completed,
+                items: Some(vec![Arc::new(items::Item::new(
+                    format!("real-native-answer-{index}").into(),
+                    execution::ItemStatus::Completed,
+                    items::ItemBody::AssistantText {
+                        text: text.into(),
+                        phase: Default::default(),
+                    },
+                ))]),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let mut response = models::ThreadResponse {
+        thread: models::Thread {
+            id: Some(source.clone()),
+            status: execution::SessionStatus::Idle,
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            turns: Some(if imported { turns.clone() } else { vec![] }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    codex
+        .records
+        .lock()
+        .unwrap()
+        .insert(source.id.clone(), response.clone());
+    Runtime::ensure_imported(&service, &source).await.unwrap();
+    if !imported {
+        for turn in &turns {
+            for completed in [false, true] {
+                Runtime::observe(
+                    &service,
+                    AgentChange::Session {
+                        session: source.clone(),
+                        change: SessionChange::Turn {
+                            turn: models::Turn {
+                                status: if completed {
+                                    execution::TurnStatus::Completed
+                                } else {
+                                    execution::TurnStatus::Running
+                                },
+                                ..turn.as_ref().clone()
+                            },
+                            completed,
+                        },
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+        }
+    }
+    response.thread.turns = Some(turns);
+    codex
+        .records
+        .lock()
+        .unwrap()
+        .insert(source.id.clone(), response.clone());
+    let before = snapshot(&service, &source);
+    assert!(before.projection.runs.is_empty());
+    assert!(before.projection.attempts.is_empty());
+    let through = if imported {
+        records::ForkPoint::TurnItem {
+            turn_item_id: before.projection.visible_turn_items[0]
+                .source_item_id
+                .clone(),
+        }
+    } else {
+        records::ForkPoint::ProviderTurn {
+            provider_turn_id: before
+                .projection
+                .provider_turns
+                .iter()
+                .min_by_key(|turn| turn.ordinal)
+                .unwrap()
+                .id
+                .clone(),
+        }
+    };
+    let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let connection = service.open_session();
+    for _ in 0..2 {
+        let returned: SessionRef = call(
+            &service,
+            connection.id(),
+            Call::ForkConversation(records::Fork {
+                source: source.clone(),
+                target: target.clone(),
+                through: through.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(returned, target);
+    }
+    let fork = snapshot(&service, &target);
+    assert!(fork.projection.runs.is_empty());
+    assert!(fork.projection.attempts.is_empty());
+    assert_eq!(
+        fork.projection
+            .visible_turn_items
+            .iter()
+            .filter(|row| row.visibility == model::projection::Visibility::Inherited)
+            .count(),
+        1
+    );
+    send(&service, &target, destination, "new-fork-input").await;
+    let continued = settled(&service, &target, 1).await;
+    assert_eq!(continued.projection.attempts.len(), 1);
+    let backend = if destination == ProviderKind::Codex {
+        &codex
+    } else {
+        &claude
+    };
+    let inputs = backend.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 1, "the new input is sent exactly once");
+    let native_target = &inputs[0].thread_id;
+    assert_ne!(native_target, &source);
+    let records = backend.records.lock().unwrap();
+    let native_history = records[&native_target.id].thread.turns.as_ref().unwrap();
+    let native_copy = !imported && destination == ProviderKind::Codex;
+    assert_eq!(native_history.len(), if native_copy { 2 } else { 1 });
+    let context = serde_json::to_string(&*backend.injected.lock().unwrap()).unwrap();
+    if native_copy {
+        assert_eq!(
+            native_history[0],
+            response.thread.turns.as_ref().unwrap()[0]
+        );
+        assert_eq!(context, "[]");
+    } else {
+        let delivered = if destination == ProviderKind::Claude {
+            assert_eq!(context, "[]", "Claude receives portable history inline");
+            let op::Input::Text { text } = &inputs[0].input[0] else {
+                panic!("text input")
+            };
+            assert_eq!(
+                inputs[0].input.len(),
+                2,
+                "history and the new input remain separate SDK parts"
+            );
+            assert_eq!(
+                inputs[0].input[1],
+                op::Input::Text {
+                    text: "new-fork-input".into()
+                }
+            );
+            text.strip_suffix("\n\nUser message:\n").unwrap()
+        } else {
+            context.as_str()
+        };
+        assert!(delivered.contains("retained-native-marker"));
+        assert!(!delivered.contains("excluded-native-marker"));
+        assert!(!delivered.contains("new-fork-input"));
+        let handoff = &continued.projection.context_handoffs[0];
+        assert_eq!(
+            handoff.from_provider_thread_ids,
+            [before.projection.provider_threads[0].id.clone()]
+        );
+        assert_eq!(
+            continued.projection.context_transfers[0].source_point,
+            fork.projection.context_transfers[0].source_point
+        );
+    }
+    drop(records);
+    drop(inputs);
+    assert_eq!(
+        snapshot(&service, &source).projection.visible_turn_items,
+        before.projection.visible_turn_items
+    );
+    assert_eq!(codex.records.lock().unwrap()[&source.id], response);
 }
 
 #[tokio::test]
@@ -2546,6 +3793,8 @@ async fn first_injection_recovery_keeps_its_provider_without_inventing_a_source_
         "new-provider-current",
     )
     .await;
+    assert!(codex.inputs.lock().unwrap().is_empty());
+    retry_failed_start(&service, &session, 2).await;
     let current = settled(&service, &session, 2).await;
     let item = current
         .projection
@@ -2589,6 +3838,8 @@ async fn recovery_context_precedes_the_run_input_and_uses_a_stable_run_identity(
         .fail_inject
         .store(1, std::sync::atomic::Ordering::SeqCst);
     send(&service, &session, ProviderKind::Codex, "current-input").await;
+    assert_eq!(codex.inputs.lock().unwrap().len(), 1);
+    retry_failed_start(&service, &session, 3).await;
     let current = settled(&service, &session, 3).await;
     let run = current
         .projection
@@ -2733,7 +3984,9 @@ async fn context_history_inherits_only_the_selected_fork_prefix_with_source_iden
         Call::ForkConversation(records::Fork {
             source: source.clone(),
             target: target.clone(),
-            through: first.projection.runs[0].id.clone().into(),
+            through: records::ForkPoint::Run {
+                run_id: first.projection.runs[0].id.clone(),
+            },
         }),
     )
     .await
@@ -2855,6 +4108,43 @@ async fn finished_run(
     })
     .await
     .expect("execution reaches its terminal state")
+}
+
+// Pinned ProviderSwitch.integration.test.ts's injection case first fails the
+// run, then explicitly retries in a fresh resource. Bex retains RetryInput for
+// that user action; the failed prompt must not be sent by an outbox retry.
+async fn retry_failed_start(service: &HostRpcService, session: &SessionRef, ordinal: u64) {
+    let failed = finished_run(service, session, ordinal).await;
+    let run = failed
+        .projection
+        .runs
+        .iter()
+        .find(|run| run.ordinal == ordinal)
+        .unwrap();
+    assert_eq!(run.status, model::RunStatus::Failed);
+    assert!(
+        !failed
+            .projection
+            .provider_turns
+            .iter()
+            .any(|turn| turn.run_attempt_id.as_ref() == run.active_attempt_id.as_ref())
+    );
+    let connection = service.open_session();
+    let ack: records::Acknowledged = call(
+        service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: session.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::RetryInput {
+                id: run.user_message_id.clone().into(),
+                work_locally: false,
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    ack.accepted().unwrap();
 }
 
 #[tokio::test]
@@ -2999,7 +4289,9 @@ async fn a_spent_native_fork_uses_fresh_portable_context_without_an_extra_handof
         Call::ForkConversation(records::Fork {
             source: source.clone(),
             target: target.clone(),
-            through: first.projection.runs[0].id.clone().into(),
+            through: records::ForkPoint::Run {
+                run_id: first.projection.runs[0].id.clone(),
+            },
         }),
     )
     .await
@@ -3089,7 +4381,7 @@ fn admit_before_worker(
             },
         )
         .unwrap();
-    assert!(ack.error.is_none());
+    assert!(ack.receipt.error.is_none());
 }
 
 #[tokio::test]
@@ -3113,7 +4405,9 @@ async fn a_source_busy_after_admission_keeps_its_native_plan_until_fresh_allocat
         Call::ForkConversation(records::Fork {
             source: source.clone(),
             target: target.clone(),
-            through: first.projection.runs[0].id.clone().into(),
+            through: records::ForkPoint::Run {
+                run_id: first.projection.runs[0].id.clone(),
+            },
         }),
     )
     .await
@@ -3219,6 +4513,7 @@ async fn failed_recovery_allocation_keeps_the_existing_native_reference_and_unco
         "unsent-recovery-input",
     )
     .await;
+    retry_failed_start(&service, &session, 3).await;
     let failed = finished_run(&service, &session, 3).await;
     let run = failed
         .projection

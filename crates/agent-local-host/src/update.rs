@@ -7,6 +7,9 @@ pub const RECOVERY_FILE: &str = "host-update-recovery.json";
 #[derive(Serialize, Deserialize)]
 pub struct Recovery {
     pub tasks: Vec<InterruptedTask>,
+    /// Single-use desktop update marker, separate from durable task outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_marker: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]

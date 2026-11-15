@@ -9,21 +9,26 @@
         "method": "host/list/subscribe",
         "params": {
           "subscription": "00000000-0000-0000-0000-000000000002",
-          "cached": null
+          "after_sequence": null
         },
         "response": {
           "result": {
             "provider_errors": {},
-            "initial": {
-              "Snapshot": {
-                "cursor": {
-                  "store": "00000000-0000-0000-0000-000000000001",
-                  "sequence": 7
-                },
-                "window": null,
-                "rows": []
+            "initial": [
+              {
+                "kind": "snapshot",
+                "snapshot": {
+                  "schemaVersion": 2,
+                  "snapshotSequence": 7,
+                  "projects": [],
+                  "threads": [],
+                  "archivedThreads": []
+                }
+              },
+              {
+                "kind": "synchronized"
               }
-            },
+            ],
             "futureField": [
               42
             ]
@@ -31,16 +36,21 @@
         }
       }
     ],
-    "result": {
-      "Snapshot": {
-        "cursor": {
-          "store": "00000000-0000-0000-0000-000000000001",
-          "sequence": 7
-        },
-        "window": null,
-        "rows": []
+    "result": [
+      {
+        "kind": "snapshot",
+        "snapshot": {
+          "schemaVersion": 2,
+          "snapshotSequence": 7,
+          "projects": [],
+          "threads": [],
+          "archivedThreads": []
+        }
+      },
+      {
+        "kind": "synchronized"
       }
-    }
+    ]
   },
   {
     "name": "list-search",

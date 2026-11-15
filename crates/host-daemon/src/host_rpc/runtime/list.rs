@@ -1,24 +1,31 @@
 use super::*;
 use crate::host_rpc::routing::{HostReply, HostSubscription};
-use agent_protocol::protocol::{self, Response};
+use agent_protocol::{
+    orchestration::shell::{ShellSnapshot, ShellStreamItem, ThreadShell},
+    protocol::{self, Response},
+};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::{Duration, Instant},
+};
 
 pub struct Subscription {
     storage: Arc<Storage>,
-    changed: tokio::sync::watch::Receiver<Option<Cursor>>,
-    cursor: Cursor,
+    changed: tokio::sync::watch::Receiver<()>,
+    snapshot: Arc<ShellSnapshot>,
+    pending: VecDeque<ShellStreamItem>,
+    sent: HashMap<String, (ThreadShell, Instant)>,
 }
 
-fn through(message: &records::Message) -> Cursor {
-    match message {
-        records::Message::Snapshot { cursor, .. } => *cursor,
-        records::Message::Events { through, .. } => *through,
-        _ => unreachable!("list sends snapshots or changes"),
-    }
-}
-
-pub(in crate::host_rpc) fn unchanged(message: &records::Message) -> bool {
-    matches!(message, records::Message::Events { events, .. }
-        if events.is_empty())
+/// Text events update the thread clock, but do not stream its unchanged shell
+/// on every character. A periodic update still advances reconnect cursors.
+fn same_metadata(previous: &ThreadShell, current: &ThreadShell) -> bool {
+    let mut current = current.clone();
+    current
+        .thread
+        .updated_at
+        .clone_from(&previous.thread.updated_at);
+    previous == &current
 }
 
 pub(super) async fn subscribe(
@@ -26,15 +33,20 @@ pub(super) async fn subscribe(
     request: &records::SubscribeList,
     provider_errors: serde_json::Map<String, serde_json::Value>,
 ) -> Result<HostReply, String> {
-    // Register before the read transaction: a commit between the snapshot and
-    // the first recv must remain visible, including for a slow connection.
+    // Watch first: a commit between this transaction and recv must be observed.
     let changed = storage.changes();
     let read = storage.clone();
-    let cached = request.cached;
-    let initial = tokio::task::spawn_blocking(move || read.list(cached))
+    let after = request.after_sequence;
+    let (snapshot, initial) = tokio::task::spawn_blocking(move || read.open_shell(after))
         .await
         .map_err(|error| error.to_string())??;
-    let cursor = through(&initial);
+    let now = Instant::now();
+    let sent = snapshot
+        .threads
+        .iter()
+        .chain(&snapshot.archived_threads)
+        .map(|thread| (thread.thread.id.clone(), (thread.as_ref().clone(), now)))
+        .collect();
     Ok(HostReply {
         initial: protocol::response_frame(Response::Success {
             result: records::OpenedList {
@@ -48,143 +60,68 @@ pub(super) async fn subscribe(
         updates: Some(HostSubscription::List(Subscription {
             storage,
             changed,
-            cursor,
+            snapshot: Arc::new(snapshot),
+            pending: VecDeque::new(),
+            sent,
         })),
     })
 }
 
 impl Subscription {
+    fn publish(&mut self, item: ShellStreamItem, now: Instant) {
+        match &item {
+            ShellStreamItem::ThreadUpdated { thread, .. } => {
+                if self
+                    .sent
+                    .get(&thread.thread.id)
+                    .is_some_and(|(previous, sent)| {
+                        now.duration_since(*sent) < Duration::from_secs(5)
+                            && same_metadata(previous, thread)
+                    })
+                {
+                    return;
+                }
+                self.sent
+                    .insert(thread.thread.id.clone(), (thread.clone(), now));
+            }
+            ShellStreamItem::ThreadRemoved { thread_id, .. } => {
+                self.sent.remove(thread_id);
+            }
+            ShellStreamItem::Snapshot { snapshot, .. } => {
+                self.sent = snapshot
+                    .threads
+                    .iter()
+                    .chain(&snapshot.archived_threads)
+                    .map(|thread| (thread.thread.id.clone(), (thread.as_ref().clone(), now)))
+                    .collect();
+            }
+            _ => {}
+        }
+        self.pending.push_back(item);
+    }
+
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
         loop {
+            if let Some(item) = self.pending.pop_front() {
+                return protocol::encode(item).ok();
+            }
             self.changed.changed().await.ok()?;
-            if *self.changed.borrow_and_update() == Some(self.cursor) {
-                continue;
-            }
+            self.changed.borrow_and_update();
             let storage = self.storage.clone();
-            let cursor = self.cursor;
-            let message = tokio::task::spawn_blocking(move || storage.list(Some(cursor)))
-                .await
-                .ok()?
-                .ok()?;
-            self.cursor = through(&message);
-            if unchanged(&message) {
-                continue;
+            let previous = self.snapshot.clone();
+            let (snapshot, updates) =
+                tokio::task::spawn_blocking(move || storage.shell_changes(&previous))
+                    .await
+                    .ok()?
+                    .ok()?;
+            self.snapshot = Arc::new(snapshot);
+            let now = Instant::now();
+            for item in updates {
+                self.publish(item, now);
             }
-            return protocol::encode(message).ok();
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn item_only_commits_advance_the_reader_without_sending_list_frames() {
-        let directory = tempfile::tempdir().unwrap();
-        let storage = Arc::new(Storage::open(&directory.path().join("state.sqlite")));
-        let id = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
-        storage
-            .import(
-                &id,
-                &agent_protocol::models::ThreadResponse {
-                    thread: agent_protocol::models::Thread {
-                        id: Some(id.clone()),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                Some(&id),
-                100,
-            )
-            .unwrap();
-        let context = Context {
-            preparation: None,
-            rewind_binding: None,
-            imported_turns: &[],
-            external_busy: false,
-            now: 100,
-            seed: Uuid::new_v4(),
-            steers: true,
-            steer_ready: true,
-        };
-        let attempt = Uuid::new_v4();
-        storage
-            .decide(
-                &id,
-                Event::ObservedStart {
-                    execution: attempt,
-                    provider: ProviderKind::Codex,
-                    source: id.id.clone(),
-                },
-                context,
-                None,
-            )
-            .unwrap();
-        let initial = storage.list(None).unwrap();
-        let cursor = through(&initial);
-        let mut subscription = Subscription {
-            changed: storage.changes(),
-            storage: storage.clone(),
-            cursor,
-        };
-        for round in 0..2 {
-            let mut through = cursor;
-            for index in 0..501 {
-                let committed = storage
-                    .decide(
-                        &id,
-                        Event::Provider {
-                            attempt,
-                            native_turn: None,
-                            native_items: vec![],
-                            observation: Observation::Item {
-                                id: "reply".into(),
-                                status: agent_protocol::execution::ItemStatus::Running,
-                                deferred: false,
-                                body: agent_protocol::items::ItemBody::AssistantText {
-                                    text: format!("partial {round}-{index}"),
-                                    phase: Default::default(),
-                                },
-                            },
-                        },
-                        context,
-                        None,
-                    )
-                    .unwrap();
-                assert!(committed.cursor.sequence > cursor.sequence);
-                through = committed.cursor;
-            }
-            assert!(
-                tokio::time::timeout(std::time::Duration::from_millis(50), subscription.recv())
-                    .await
-                    .is_err()
-            );
-            assert_eq!(subscription.cursor, through);
-        }
-        storage
-            .decide(&id, Event::Title("renamed".into()), context, None)
-            .unwrap();
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), subscription.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let message = protocol::decode(&frame).unwrap();
-        assert!(
-            matches!(&message, records::Message::Events { events, .. } if events.iter().any(|event|!event.rows.is_empty()))
-        );
-        let replica = records::Replica::new(agent_protocol::sync::Scope::List, 1)
-            .apply(1, initial)
-            .unwrap()
-            .apply(1, message)
-            .unwrap();
-        let row = &replica.rows()[&agent_protocol::sync::Key::Thread(id)];
-        let agent_protocol::sync::Content::Summary(record) = &row.content else {
-            panic!("thread summary")
-        };
-        let records::Record::Thread(header) = record.as_ref() else {
-            panic!("thread header")
-        };
-        assert_eq!(header.state.name, "renamed");
-    }
-}
+mod tests;

@@ -58,6 +58,21 @@ pub(super) fn append(
     })
 }
 
+/// Project metadata shares the application log and the transaction that owns it.
+pub(super) fn append_metadata(
+    transaction: &Transaction<'_>,
+    aggregate: &str,
+    id: &str,
+    kind: &str,
+    now: &str,
+    payload: &Value,
+) -> Result<(), String> {
+    transaction.execute("INSERT INTO orchestration_events(event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,command_id,causation_event_id,correlation_id,actor_kind,payload_json,metadata_json,application_event_version)
+        VALUES (?1,?6,?2,coalesce((SELECT max(stream_version)+1 FROM orchestration_events WHERE aggregate_kind=?6 AND stream_id=?2),0),?3,?4,NULL,NULL,NULL,'server',?5,'{}',1)",
+        params![Uuid::new_v4().to_string(),id,kind,now,serde_json::to_string(payload).map_err(failure)?,aggregate]).map_err(failure)?;
+    Ok(())
+}
+
 /// T3's persisted item positions are allocated once.
 /// A queued body replaces T3's separate
 /// message row, so it receives a transcript position only when activated.

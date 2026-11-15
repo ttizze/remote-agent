@@ -114,6 +114,7 @@ impl ProjectStore {
                     .ok()
                     .is_some_and(|path| dunce::simplified(&path) == root)
             {
+                self.synchronize_projectless().await?;
                 return Ok(path.into());
             }
         }
@@ -130,7 +131,15 @@ impl ProjectStore {
         tokio::task::spawn_blocking(move || storage.register_project(&project))
             .await?
             .map_err(anyhow::Error::msg)?;
+        self.synchronize_projectless().await?;
         Ok(path.into())
+    }
+    async fn synchronize_projectless(&self) -> anyhow::Result<()> {
+        let projects = self.load().await?;
+        let storage = self.storage.clone();
+        tokio::task::spawn_blocking(move || storage.assign_projectless_threads(&projects))
+            .await?
+            .map_err(anyhow::Error::msg)
     }
     pub(crate) async fn load(&self) -> anyhow::Result<state::Snapshot> {
         let state_file = self.path.clone();

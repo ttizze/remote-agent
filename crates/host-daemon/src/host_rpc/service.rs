@@ -1,6 +1,5 @@
 //! The Host's RPC entry point. Dispatch admits each call, then routes it to the
 //! owner of its resource; workflows that span owners live in the domain files.
-use super::owners::Write;
 mod activity;
 mod project_import;
 mod sessions;
@@ -80,6 +79,13 @@ impl HostRpcService {
         let storage = Arc::new(super::storage::Storage::open(
             &project_path.with_file_name("bex-conversations.sqlite"),
         ));
+        let updating_recovery = update::consume_restart_marker(
+            &project_path.with_file_name(agent_local_host::update::RECOVERY_FILE),
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(target:"agent",operation="host.update.marker",%error);
+            false
+        });
         let projects = ProjectStore::new(project_path, storage.clone());
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
@@ -89,6 +95,7 @@ impl HostRpcService {
         let conversation = super::runtime::Runtime::new(
             storage,
             providers.all().into_iter().map(|(provider, _)| provider),
+            updating_recovery,
         );
         Self {
             inner: Arc::new(ServiceInner {
@@ -314,9 +321,8 @@ impl HostRpcService {
             Call::MarkSessionRead(params) => {
                 self.inner
                     .conversation
-                    .owners
-                    .write(&params.session, Write::Read(params.turn_id.clone()))
-                    .await
+                    .storage
+                    .mark_read(&params.session, &params.turn_id)
                     .map_err(super::runtime::storage_failure)?;
                 agent_protocol::models::Empty {}.into()
             }

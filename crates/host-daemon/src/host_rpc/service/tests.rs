@@ -158,7 +158,7 @@ async fn account_providers_are_read_in_parallel_without_blocking_conversation_li
             Call::SubscribeList(agent_protocol::conversation::records::SubscribeList {
                 refresh: false,
                 subscription: uuid::Uuid::new_v4(),
-                cached: None,
+                after_sequence: None,
             }),
         ),
     )
@@ -326,22 +326,6 @@ fn unknown_and_native_methods_are_rejected_before_dispatch() {
         }
     }
 }
-fn stored_header(
-    provider: agent_protocol::session::ProviderKind,
-    cwd: &std::path::Path,
-) -> agent_protocol::conversation::records::Header {
-    agent_protocol::conversation::records::Header {
-        state: agent_protocol::conversation::Thread {
-            name: String::new(),
-            workspace: agent_protocol::conversation::Workspace::Ready(
-                cwd.to_string_lossy().into_owned(),
-            ),
-            provider,
-            queue_held: false,
-        },
-        details: Default::default(),
-    }
-}
 #[tokio::test]
 async fn host_names_do_not_depend_on_provider_availability_and_failed_input_is_not_in_flight() {
     use super::*;
@@ -352,16 +336,25 @@ async fn host_names_do_not_depend_on_provider_availability_and_failed_input_is_n
         [Backend::unavailable(ProviderKind::Codex, "unavailable")],
         root.path().join("projects.json"),
     );
-    let target = agent_protocol::session::SessionRef::new(
-        ProviderKind::Codex,
-        uuid::Uuid::new_v4().to_string(),
-    )
-    .unwrap();
+    let target =
+        agent_protocol::session::SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+    let mut thread = crate::host_rpc::storage::test_support::thread(&target.application_id());
+    thread.worktree_path = Some(root.path().to_str().unwrap().into());
     service
         .inner
         .conversation
         .storage
-        .create(&target, &stored_header(ProviderKind::Codex, root.path()))
+        .thread_command(
+            crate::host_rpc::storage::commands::Command {
+                id: "create",
+                thread_id: &target.application_id(),
+                kind: "thread.create",
+                now: crate::host_rpc::storage::test_support::NOW,
+                item_ids: &[],
+            },
+            Some(&thread),
+            |_| Ok(agent_protocol::orchestration::Decision::default()),
+        )
         .unwrap();
     let session = service.open_session();
     let renamed: records::Acknowledged = call(
@@ -381,10 +374,10 @@ async fn host_names_do_not_depend_on_provider_availability_and_failed_input_is_n
             .inner
             .conversation
             .storage
-            .header(&target)
+            .thread_header(&target)
             .unwrap()
-            .state
-            .name,
+            .unwrap()
+            .title,
         "Renamed"
     );
     let input = uuid::Uuid::new_v4();
@@ -405,24 +398,37 @@ async fn host_names_do_not_depend_on_provider_availability_and_failed_input_is_n
         },
     });
     for _ in 0..2 {
-        let error = call::<records::Acknowledged>(&service, session.id(), request.clone())
+        call::<records::Acknowledged>(&service, session.id(), request.clone())
             .await
             .unwrap()
             .accepted()
-            .unwrap_err();
-        assert_eq!(error.code, "command_rejected");
-        assert_eq!(error.delivery, agent_protocol::error::Delivery::NotSent);
-        assert!(
-            service
+            .unwrap();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = service
                 .inner
                 .conversation
                 .storage
-                .state(&target)
-                .unwrap()
-                .inputs
-                .is_empty()
-        );
-    }
+                .thread_state(&target.application_id(), &[])
+                .unwrap();
+            if state
+                .runs
+                .values()
+                .any(|run| run.status == agent_protocol::orchestration::RunStatus::Failed)
+            {
+                assert_eq!(state.runs.len(), 1);
+                assert_eq!(
+                    state.runs.values().next().unwrap().user_message_id,
+                    input.to_string()
+                );
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

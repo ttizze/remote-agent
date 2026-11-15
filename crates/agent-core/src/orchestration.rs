@@ -5,7 +5,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+pub mod shell;
 mod view;
+pub(crate) use view::fork_point;
 pub use view::project;
 pub(crate) use view::{attachment_parts, attachments, context_parts};
 

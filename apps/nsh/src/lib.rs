@@ -805,21 +805,9 @@ mod conversation_rows;
 
 #[cfg(test)]
 fn seed_catalog(snapshot: &mut agent_core::state::Snapshot) {
-    use agent_protocol::{
-        conversation::records,
-        sync::{Cursor, Scope},
-    };
-    let message = conversation_rows::catalog(
-        snapshot.lists.threads.as_ref().unwrap().as_ref().clone(),
-        Cursor {
-            store: uuid::Uuid::from_u128(1),
-            sequence: 1,
-        },
-    );
-    snapshot.lists.replica = Some(std::sync::Arc::new(
-        records::Replica::new(Scope::List, 1)
-            .apply(1, message)
-            .unwrap(),
-    ));
+    let shell =
+        conversation_rows::shell(snapshot.lists.threads.as_ref().unwrap().as_ref().clone(), 1);
+    snapshot.lists.shell = Some(std::sync::Arc::new(shell));
+    snapshot.lists.generation = 1;
     snapshot.lists.subscription = Some(uuid::Uuid::new_v4());
 }

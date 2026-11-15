@@ -1168,6 +1168,7 @@ pub struct Capabilities {
     /// provider can queue input behind one; the Host owns that queue.
     pub steer: bool,
     pub fork: bool,
+    pub rollback: bool,
     pub rename: bool,
     pub model_change: bool,
 }

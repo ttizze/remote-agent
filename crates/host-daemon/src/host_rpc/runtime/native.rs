@@ -8,8 +8,10 @@ use agent_protocol::{
 };
 use serde_json::json;
 
+pub(super) mod external;
 mod observations;
 mod requests;
+mod subagents;
 
 /// Codex/Claude declare globally strong item identities. ACP's weak item keys
 /// (including DSH's constant plan ID) only identify an item within the Host's
@@ -66,6 +68,7 @@ pub(super) struct Context {
     pub provider_thread_id: String,
     pub provider_turn_id: String,
     pub native_turn_id: String,
+    pub native_thread_id: String,
     pub provider: ProviderKind,
     pub now: String,
     pub completed: bool,
@@ -104,13 +107,7 @@ impl Context {
         kind: model::NodeKind,
         body: model::TurnItemBody,
     ) -> Artifact {
-        let terminal = !matches!(
-            status,
-            model::TurnItemStatus::Idle
-                | model::TurnItemStatus::Pending
-                | model::TurnItemStatus::Running
-                | model::TurnItemStatus::Waiting
-        );
+        let terminal = status.is_terminal();
         let node_id = item_identity("node", self.provider, &self.native_turn_id, key);
         let native = native_id.map(|native_id| model::ProviderRef {
             driver: self.provider.driver().into(),
@@ -171,15 +168,64 @@ impl Context {
         }
     }
 
+    fn notifications(
+        &self,
+        id: &str,
+        status: model::TurnItemStatus,
+        reports: &[agent_protocol::execution::BackgroundReport],
+    ) -> Vec<Artifact> {
+        use agent_protocol::execution::{BackgroundOutcome as Outcome, BackgroundTaskKind as Kind};
+        reports.iter().enumerate().map(|(index,report)| {
+            let kind=match report.kind {Kind::Command=>"command",Kind::Subagent=>"subagent",Kind::Monitor=>"monitor",Kind::BackgroundTask=>"background_task"};
+            let outcome=match report.outcome {Outcome::Completed=>"completed",Outcome::Failed=>"failed",Outcome::Cancelled=>"cancelled",Outcome::Updated=>"updated",Outcome::Unknown=>"unknown"};
+            self.artifact(&json!([id,"report",index]).to_string(),Some(id),status,model::NodeKind::System,model::TurnItemBody::Notification {
+                source:json!({"kind":kind,"label":report.label,"exitCode":report.exit_code}),outcome:outcome.into(),summary:report.label.clone().unwrap_or_default(),detail:None,
+            })
+        }).collect()
+    }
+
     pub(super) fn item(&self, item: &Item) -> Result<Vec<Artifact>, String> {
         use model::{NodeKind as Kind, TurnItemBody as Body, TurnItemStatus as Status};
-        if item.is_deferred() {
+        if item.is_deferred()
+            && !matches!(
+                item.body(),
+                ItemBody::CommandExecution { .. }
+                    | ItemBody::ToolCall { .. }
+                    | ItemBody::FileChange { .. }
+            )
+        {
             return Err("native item must be fully read before it is committed".into());
         }
         let status = item_status(item.status, self.completed);
         let streaming = status == Status::Running;
         let id = item.id.as_str();
         let (kind, body) = match item.body() {
+            ItemBody::Notification { reports } => {
+                return Ok(self.notifications(id, status, reports));
+            }
+            ItemBody::UserMessage { text, content } => (
+                Kind::System,
+                Body::UserMessage {
+                    created_by: model::Actor::User,
+                    creation_source: model::CreationSource::Provider,
+                    message_id: item_identity("message", self.provider, &self.native_turn_id, id),
+                    input_intent: "turn_start".into(),
+                    text: text.clone().unwrap_or_else(|| {
+                        content
+                            .iter()
+                            .filter_map(|part| match part {
+                                agent_protocol::items::MessagePart::Text { text } => {
+                                    Some(text.as_str())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }),
+                    attachments: vec![],
+                    context: None,
+                },
+            ),
             ItemBody::AssistantText { text, phase } => (
                 Kind::AssistantMessage,
                 Body::AssistantMessage {
@@ -225,6 +271,7 @@ impl Context {
                 command,
                 output,
                 exit_code,
+                output_omitted,
                 ..
             } => (
                 Kind::ToolCall,
@@ -232,7 +279,7 @@ impl Context {
                     input: command.clone(),
                     output: Some(output.clone()),
                     exit_code: *exit_code,
-                    output_omitted: None,
+                    output_omitted: (*output_omitted || item.is_deferred()).then_some(true),
                     output_indicates_failure: None,
                 },
             ),
@@ -261,7 +308,7 @@ impl Context {
                                 _ => json!({"operation":"update","path":change.path}),
                             })
                             .collect(),
-                        diff_str: first.diff.clone(),
+                        diff_str: (!item.is_deferred()).then(|| first.diff.clone()).flatten(),
                     },
                 )
             }
@@ -305,7 +352,7 @@ impl Context {
                             .as_ref()
                             .map(|error| json!({"isError":true,"error":error}))
                     }),
-                    output_omitted: None,
+                    output_omitted: item.is_deferred().then_some(true),
                     viewed_image_path: None,
                 },
             ),
@@ -414,10 +461,7 @@ impl Context {
                     viewed_image_path: None,
                 },
             ),
-            ItemBody::UserMessage { .. }
-            | ItemBody::ImageGeneration { .. }
-            | ItemBody::Subagent { .. }
-            | ItemBody::Notification { .. } => {
+            ItemBody::ImageGeneration { .. } | ItemBody::Subagent { .. } => {
                 return Err("native item requires its owning resource handler".into());
             }
         };

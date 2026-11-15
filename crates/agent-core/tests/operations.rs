@@ -50,7 +50,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                 .call(&records::SubscribeList {
                     refresh: false,
                     subscription: uuid::Uuid::from_u128(2),
-                    cached: None,
+                    after_sequence: None,
                 })
                 .await?;
             json!(output.initial)
@@ -310,7 +310,9 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                 provider: None,
                 id: uuid::Uuid::from_u128(3).to_string()
             },
-            through: text(command, "lastTurnId").into(),
+            through: records::ForkPoint::Run {
+                run_id: text(command, "lastTurnId").into()
+            },
         }),
         kind => panic!("unknown operation {kind}"),
     };

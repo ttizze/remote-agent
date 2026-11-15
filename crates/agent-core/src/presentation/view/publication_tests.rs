@@ -110,10 +110,7 @@ fn list_publication_tracks_visible_operation_phases_without_reacting_to_generati
 
 #[test]
 fn waiting_membership_refreshes_lists_without_republishing_other_surfaces() {
-    use agent_protocol::{
-        conversation::records,
-        session::{ProviderKind, SessionRef},
-    };
+    use agent_protocol::session::{ProviderKind, SessionRef};
     let id = SessionRef::new(ProviderKind::Codex, "question".into()).unwrap();
     let mut snapshot = Snapshot {
         lists: crate::state::Lists {
@@ -133,7 +130,7 @@ fn waiting_membership_refreshes_lists_without_republishing_other_surfaces() {
         &mut snapshot,
         vec![(
             id.clone(),
-            records::Activity {
+            crate::state::list_sync::ActivityFacts {
                 status: agent_protocol::execution::SessionStatus::Running,
                 ..Default::default()
             },
@@ -145,7 +142,7 @@ fn waiting_membership_refreshes_lists_without_republishing_other_surfaces() {
             &mut snapshot,
             vec![(
                 id.clone(),
-                records::Activity {
+                crate::state::list_sync::ActivityFacts {
                     status: agent_protocol::execution::SessionStatus::Running,
                     waiting,
                     ..Default::default()

@@ -1,5 +1,6 @@
 use super::super::native_fixture::{NativeAgent, bound_execution, call};
 use super::*;
+use agent_protocol::conversation as decision;
 use agent_protocol::{execution::ItemStatus, items::ItemBody, protocol::Call};
 
 async fn launch(service: &HostRpcService, cwd: &str, text: &str) -> SessionRef {
@@ -85,20 +86,23 @@ async fn assistant(
         Some(execution),
     )
     .await?;
-    Runtime::observe(
-        service,
-        AgentChange::Session {
-            session: native.clone(),
-            change: SessionChange::Text {
-                turn_id: turn_id.into(),
-                item_id: "reused-message".into(),
-                field: agent_protocol::session::TextField::AssistantText,
-                delta: delta.into(),
+    for character in delta.chars() {
+        Runtime::observe(
+            service,
+            AgentChange::Session {
+                session: native.clone(),
+                change: SessionChange::Text {
+                    turn_id: turn_id.clone().into(),
+                    item_id: "reused-message".into(),
+                    field: agent_protocol::session::TextField::AssistantText,
+                    delta: character.to_string(),
+                },
             },
-        },
-        Some(execution),
-    )
-    .await
+            Some(execution),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn messages(service: &HostRpcService, target: &SessionRef) -> Vec<(String, String, String)> {
@@ -276,6 +280,22 @@ async fn weak_native_plan_ids_are_scoped_across_conversations_and_successive_tur
     let third = plan(&service, &same_native, next, "second plan A").await;
     let text_next = assistant(&service, &same_native, next, "A next: ", "done").await;
     let late = plan(&service, &native_a, execution_a, "stale first plan").await;
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native_a.clone(),
+            change: SessionChange::Text {
+                turn_id: format!("turn-{execution_a}").into(),
+                item_id: "reused-message".into(),
+                field: agent_protocol::session::TextField::AssistantText,
+                delta: "STALE".into(),
+            },
+        },
+        Some(execution_a),
+    )
+    .await
+    .unwrap();
+
     agent.submit_gate.as_ref().unwrap().add_permits(1);
     completed(&service, std::slice::from_ref(&a)).await;
     assert!(
@@ -344,6 +364,7 @@ fn strong_native_item_ids_keep_the_pinned_global_identity_and_match_text_updates
             provider_thread_id: "provider-thread".into(),
             provider_turn_id: "provider-turn".into(),
             native_turn_id: "native-turn".into(),
+            native_thread_id: "native-thread".into(),
             provider,
             now: "2026-11-14T00:00:00.000Z".into(),
             completed: false,

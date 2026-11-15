@@ -7,6 +7,7 @@ use agent_transport::peer::{RpcMessage, RpcMessageKind};
 use ring::digest;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 #[derive(Deserialize)]
 struct Recording {
@@ -37,12 +38,12 @@ fn frames(recording: &Recording) -> Vec<Value> {
         .collect()
 }
 
-fn ensure_session(service: &HostRpcService, session: &SessionRef) {
+async fn ensure_session(service: &HostRpcService, session: &SessionRef) {
     if service
         .inner
         .conversation
         .storage
-        .lookup(session)
+        .thread_header(session)
         .unwrap()
         .is_none()
     {
@@ -59,7 +60,8 @@ fn ensure_session(service: &HostRpcService, session: &SessionRef) {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .await;
     }
 }
 
@@ -142,7 +144,7 @@ process.stdin.destroy();
     let cwd = directory.path().to_str().unwrap();
     let created = adapter.create(cwd, None, None).await.unwrap();
     let native = created.thread.id.as_ref().unwrap().clone();
-    native_fixture::own(&service, &native, &created);
+    native_fixture::own(&service, &native, &created).await;
     let mut changes = service.inner.conversation.storage.changes();
     adapter
         .submit(
@@ -166,11 +168,7 @@ process.stdin.destroy();
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if service
-                .inner
-                .conversation
-                .storage
-                .history(&native, 0)
+            if native_fixture::history(&service, &native)
                 .unwrap()
                 .thread
                 .turns
@@ -187,12 +185,7 @@ process.stdin.destroy();
     })
     .await
     .unwrap();
-    let response = service
-        .inner
-        .conversation
-        .storage
-        .history(&native, 0)
-        .unwrap();
+    let response = native_fixture::history(&service, &native).unwrap();
     let turns = response.thread.turns.unwrap();
     assert_eq!(turns.len(), 1);
     assert!(turns[0].items.iter().flatten().any(|item|matches!(item.body(),agent_protocol::items::ItemBody::AssistantText {text,..} if text=="recorded deepseek ok")));
@@ -231,13 +224,22 @@ async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_w
             let mut settled = Some(settled);
             while let Some(event) = receiver.recv().await {
                 if let AgentChange::Session { session, change } = &event.change {
-                    ensure_session(&consumer, session);
+                    ensure_session(&consumer, session).await;
                     if let SessionChange::Background { tasks } = change {
                         received.lock().unwrap().push(tasks.clone());
                     }
                 }
                 let closed = matches!(event.change, AgentChange::SourceClosed(_));
+                let description = match &event.change {
+                    AgentChange::Session { change, .. } => format!("Session {change:?}"),
+                    AgentChange::Stopped { .. } => "Stopped".into(),
+                    AgentChange::SourceClosed(_) => "SourceClosed".into(),
+                    _ => "native metadata".into(),
+                };
                 let result = Runtime::observe(&consumer, event.change, event.execution).await;
+                result.as_ref().unwrap_or_else(|error| {
+                    panic!("recorded SDK observation failed: {error}: {description}")
+                });
                 if let Some(applied) = event.applied {
                     let _ = applied.send(result);
                 }
@@ -272,14 +274,20 @@ async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_w
             );
             assert!(rosters.last().unwrap().is_empty(), "{scenario}");
         }
-        let response = service
-            .inner
-            .conversation
-            .storage
-            .history(&session, 0)
-            .unwrap();
+        let response = native_fixture::history(&service, &session).unwrap();
         let turns = response.thread.turns.unwrap();
-        assert_eq!(turns.len(), expected.len().max(1), "{scenario}");
+        assert_eq!(
+            turns.len(),
+            expected.len().max(1),
+            "{scenario}: native turns {:?}",
+            service
+                .inner
+                .conversation
+                .storage
+                .thread_state(&session.application_id(), &[])
+                .unwrap()
+                .provider_turns
+        );
         for (turn, expected) in turns.iter().zip(expected) {
             assert_eq!(
                 turn.status,
@@ -309,42 +317,69 @@ async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_w
     }
 }
 
-fn assert_recorded_terminal(
-    storage: &Storage,
-    session: &SessionRef,
-    execution: Uuid,
-    frame: &Value,
-) {
-    let info = storage
-        .execution(session, execution)
-        .unwrap()
-        .expect("recorded execution");
-    let turn = storage
-        .turn(session, &info.attempt.turn)
-        .unwrap()
-        .expect("canonical turn");
+fn assert_recorded_terminal(service: &HostRpcService, session: &SessionRef, frame: &Value) {
+    let state = service
+        .inner
+        .conversation
+        .storage
+        .thread_state(&session.application_id(), &[])
+        .unwrap();
+    let native = frame["params"]["turn"]["id"].as_str().unwrap();
+    let turn = state
+        .provider_turns
+        .values()
+        .find(|turn| {
+            turn.native_turn_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref())
+                == Some(native)
+        })
+        .expect("recorded native turn");
     match frame["params"]["turn"]["status"].as_str().unwrap() {
-        "completed" => assert_eq!(turn.state, decision::TurnState::Completed),
-        "interrupted" => assert_eq!(turn.state, decision::TurnState::Interrupted),
+        "completed" => assert_eq!(
+            turn.status,
+            agent_protocol::orchestration::ProviderTurnStatus::Completed
+        ),
+        "interrupted" => assert_eq!(
+            turn.status,
+            agent_protocol::orchestration::ProviderTurnStatus::Interrupted
+        ),
         status => panic!("unhandled reference terminal status {status}"),
     }
-    // turn_interrupt_mid_tool/*_output.ts: finishing a turn settles its tools.
-    let history = storage.history(session, 0).unwrap();
-    let saved = history
-        .thread
-        .turns
-        .as_ref()
-        .unwrap()
-        .iter()
-        .find(|saved| saved.id == turn.id)
+    // Inspect the public canonical projection, including real empty native
+    // turns. Empty display groups need no invented message or application run.
+    let stream = service
+        .inner
+        .conversation
+        .storage
+        .thread_stream(session, None)
         .unwrap();
+    let agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(snapshot) =
+        &stream[0]
+    else {
+        panic!("snapshot")
+    };
     assert!(
-        saved
-            .items
+        snapshot
+            .projection
+            .turn_items
             .iter()
-            .flatten()
-            .all(|item| item.status != agent_protocol::execution::ItemStatus::Running)
+            .filter(|item| item.provider_turn_id.as_deref() == Some(&turn.id))
+            .all(|item| item.status != agent_protocol::orchestration::TurnItemStatus::Running)
     );
+    let root = snapshot
+        .projection
+        .nodes
+        .iter()
+        .find(|node| node.id == turn.node_id)
+        .expect("real native root");
+    assert!(!root.counts_for_run);
+    assert!(root.run_id.is_none());
+    assert!(!matches!(
+        root.status,
+        agent_protocol::orchestration::NodeStatus::Running
+            | agent_protocol::orchestration::NodeStatus::Waiting
+    ));
 }
 
 #[tokio::test]
@@ -371,11 +406,16 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                     .inner
                     .conversation
                     .storage
-                    .lookup(native)
+                    .thread_header(native)
                     .unwrap()
                     .is_none()
                 {
-                    native_fixture::own(&service, native, &response);
+                    // The recorded creation/read response supplies its actual
+                    // complete prefix now, including a genuinely empty new
+                    // thread. Use the production importer for that snapshot.
+                    Runtime::import_native_response(&service, native, native, &response)
+                        .await
+                        .unwrap();
                 }
             }
             let changes = decode_codex_frame(index, frame);
@@ -389,7 +429,14 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                         requested.push(request.body.clone());
                         requests.insert(
                             origin.native_id.to_string(),
-                            (session.clone(), request.id.clone()),
+                            (
+                                session.clone(),
+                                origin
+                                    .native_id
+                                    .as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| origin.native_id.to_string()),
+                            ),
                         );
 
                         None
@@ -401,7 +448,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                 };
                 let execution = match &change {
                     AgentChange::Session { session, change } => {
-                        ensure_session(&service, session);
+                        ensure_session(&service, session).await;
                         if matches!(
                             change,
                             SessionChange::Turn {
@@ -415,7 +462,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                     }
                     AgentChange::Request { session, .. } => executions.get(session).copied(),
                     AgentChange::TaskParent { parent, .. } => {
-                        ensure_session(&service, parent);
+                        ensure_session(&service, parent).await;
                         None
                     }
                     _ => None,
@@ -424,15 +471,20 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                     .await
                     .unwrap_or_else(|error| panic!("{} frame {index}: {error}", recording.file));
                 if let Some((session, id)) = resolved {
+                    let state = service
+                        .inner
+                        .conversation
+                        .storage
+                        .thread_state(&session.application_id(), &[])
+                        .unwrap();
                     assert!(
-                        !service
-                            .inner
-                            .conversation
-                            .storage
-                            .state(&session)
-                            .unwrap()
-                            .requests
-                            .contains_key(&id),
+                        state.runtime_requests.values().all(|request| request.status
+                            != agent_protocol::orchestration::RequestStatus::Pending
+                            || request
+                                .native_request_ref
+                                .as_ref()
+                                .and_then(|reference| reference.native_id.as_deref())
+                                != Some(&id)),
                         "{}: resolved request",
                         recording.scenario
                     );
@@ -443,12 +495,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                         frame["params"]["threadId"].as_str().unwrap().into(),
                     )
                     .unwrap();
-                    assert_recorded_terminal(
-                        &service.inner.conversation.storage,
-                        &session,
-                        executions[&session],
-                        frame,
-                    );
+                    assert_recorded_terminal(&service, &session, frame);
                 }
                 observed += 1;
             }
@@ -460,12 +507,34 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                     frame["params"]["threadId"].as_str().unwrap().into(),
                 )
                 .unwrap();
+                let items = service
+                    .inner
+                    .conversation
+                    .storage
+                    .thread_stream(&session, None)
+                    .unwrap();
+                let agent_protocol::orchestration::projection::ThreadStreamItem::Snapshot(snapshot) =
+                    &items[0]
+                else {
+                    panic!("snapshot")
+                };
+                let item = snapshot
+                    .projection
+                    .turn_items
+                    .iter()
+                    .find(|item| {
+                        item.native_item_ref
+                            .as_ref()
+                            .and_then(|reference| reference.native_id.as_deref())
+                            == frame["params"]["itemId"].as_str()
+                    })
+                    .expect("recorded command item");
                 let key = records::OutputKey {
-                    item: decision::provider_item_id(
-                        executions[&session],
-                        frame["params"]["itemId"].as_str().unwrap(),
-                    ),
-                    session,
+                    item: item.id.clone().into(),
+                    session: SessionRef {
+                        provider: None,
+                        id: session.application_id(),
+                    },
                 };
                 let (tail, _) = service
                     .inner
@@ -478,11 +547,11 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                     .inner
                     .conversation
                     .storage
-                    .item(&key.session, &key.item)
+                    .thread_item(&key.session, key.item.as_str())
                     .unwrap()
                     .unwrap();
                 assert!(
-                    matches!(item.body, agent_protocol::items::ItemBody::CommandExecution {output,..} if output.is_empty())
+                    matches!(item.body, agent_protocol::orchestration::TurnItemBody::CommandExecution {output,..} if output.as_deref().is_none_or(str::is_empty))
                 );
             }
         }
@@ -490,25 +559,20 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
         let sessions: Vec<_> = executions.into_keys().collect();
         assert_codex_projection(
             &recording.scenario,
-            &service.inner.conversation.storage,
+            &service,
             &sessions,
             &requested,
             live_output.as_ref(),
         );
         if recording.scenario == "thread_fork_native_prior_turn" {
-            assert_fork_prefix(
-                &service.inner.conversation.storage,
-                &service.inner.conversation.owners,
-                &recording,
-            )
-            .await;
+            assert_fork_prefix(&service, &recording).await;
         }
     }
 }
 
 fn assert_codex_projection(
     scenario: &str,
-    storage: &Storage,
+    service: &HostRpcService,
     sessions: &[SessionRef],
     requested: &[agent_protocol::requests::RequestBody],
     live_output: Option<&agent_protocol::sync::Output>,
@@ -549,7 +613,7 @@ fn assert_codex_projection(
     if !expected.is_empty() {
         assert_eq!(sessions.len(), 1, "{}", scenario);
         let session = sessions.first().unwrap();
-        let response = storage.history(session, 0).unwrap();
+        let response = native_fixture::history(service, session).unwrap();
         let turns = response.thread.turns.unwrap();
         assert_eq!(turns.len(), expected.len(), "{}", scenario);
         for (turn, reply) in turns.iter().zip(expected) {
@@ -617,7 +681,7 @@ fn assert_codex_projection(
     }
     if scenario == "proposed_plan" {
         let session = sessions.first().unwrap();
-        let response = storage.history(session, 0).unwrap();
+        let response = native_fixture::history(service, session).unwrap();
         let turns = response.thread.turns.unwrap();
         assert!(turns.iter().flat_map(|turn| turn.items.iter().flatten()).any(|item|
             matches!(item.body(), agent_protocol::items::ItemBody::Plan {text}
@@ -626,7 +690,7 @@ fn assert_codex_projection(
     }
 }
 
-async fn assert_fork_prefix(storage: &Storage, owners: &Arc<Owners>, recording: &Recording) {
+async fn assert_fork_prefix(service: &HostRpcService, recording: &Recording) {
     let rows = frames(recording);
     let fork = rows
         .iter()
@@ -637,14 +701,29 @@ async fn assert_fork_prefix(storage: &Storage, owners: &Arc<Owners>, recording: 
         fork["frame"]["params"]["threadId"].as_str().unwrap().into(),
     )
     .unwrap();
-    let history = storage.history(&source, 0).unwrap();
+    let history = native_fixture::history(service, &source).unwrap();
     let through = history.thread.turns.as_ref().unwrap()[0].id.clone();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
-    owners
-        .fork(&source, target.clone(), through, 100)
-        .await
+    let connection = service.open_session();
+    let forked: SessionRef = native_fixture::call(
+        service,
+        connection.id(),
+        agent_protocol::protocol::Call::ForkConversation(records::Fork {
+            source: source.clone(),
+            target: target.clone(),
+            through: records::ForkPoint::ProviderTurn {
+                provider_turn_id: through.to_string(),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(forked, target);
+    let turns = native_fixture::history(service, &target)
+        .unwrap()
+        .thread
+        .turns
         .unwrap();
-    let turns = storage.history(&target, 0).unwrap().thread.turns.unwrap();
     assert_eq!(turns.len(), 1);
     let texts = turns[0]
         .items

@@ -12,6 +12,22 @@ pub(crate) enum Progress {
     Created { path: String, branch: String },
 }
 
+impl From<Progress> for agent_protocol::workspace::SetupChange {
+    fn from(progress: Progress) -> Self {
+        match progress {
+            Progress::Stage(id, status) => Self::Stage {
+                id,
+                status,
+                exit_code: None,
+                error: None,
+            },
+            Progress::Base(base) => Self::Base(base),
+            Progress::Checkout(percent) => Self::Checkout(percent),
+            Progress::Created { path, branch } => Self::Created { path, branch },
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Observer {
     pub notify: Arc<dyn Fn(Progress) -> Result<()> + Send + Sync>,

@@ -61,19 +61,32 @@ impl HostRpcService {
         if worktrees.is_empty() {
             return Ok(worktrees);
         }
-        let saved = self
+        let snapshot = self
             .inner
             .conversation
             .storage
-            .headers(true)
-            .map_err(super::super::runtime::storage_failure)?
-            .into_iter()
-            .map(|(id, header)| {
-                let waiting = header.details.activity.facts().waiting;
-                let thread = agent_protocol::conversation::records::summary(&id, &header);
-                (id, (thread, waiting))
+            .shell_snapshot()
+            .map_err(super::super::runtime::storage_failure)?;
+        let saved = snapshot
+            .threads
+            .iter()
+            .chain(&snapshot.archived_threads)
+            .map(|shell| {
+                let root = shell
+                    .thread
+                    .project_id
+                    .as_ref()
+                    .and_then(|id| snapshot.projects.iter().find(|project| &project.id == id))
+                    .map(|project| project.workspace_root.as_str());
+                let thread = agent_protocol::orchestration::shell::summary(shell, root)?;
+                let id = thread
+                    .id
+                    .clone()
+                    .ok_or("conversation summary has no identity")?;
+                Ok((id, (thread, shell.task_state().waiting)))
             })
-            .collect::<std::collections::BTreeMap<_, _>>();
+            .collect::<Result<std::collections::BTreeMap<_, _>, String>>()
+            .map_err(super::super::runtime::storage_failure)?;
         let (threads, warning) = self.worktree_threads(&saved).await?;
         let mut worktrees = worktrees
             .into_iter()

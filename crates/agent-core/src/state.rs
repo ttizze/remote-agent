@@ -416,7 +416,9 @@ group! {
     /// Conversation lists, projects and the activity shown beside them.
     pub struct Lists {
         #[serde(skip)]
-        pub replica: Option<Arc<agent_protocol::conversation::records::Replica>>,
+        pub shell: Option<Arc<agent_protocol::orchestration::shell::ShellSnapshot>>,
+        #[serde(skip)]
+        pub generation: u64,
         #[serde(skip)]
         pub subscription: Option<uuid::Uuid>,
         #[serde(skip)]
@@ -755,9 +757,9 @@ pub struct ScopedData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    ListRows {
+    ListStream {
         subscription_id: uuid::Uuid,
-        message: Box<agent_protocol::conversation::records::Message>,
+        message: Box<agent_protocol::orchestration::shell::ShellStreamItem>,
     },
     CommandOutput {
         subscription_id: uuid::Uuid,
@@ -798,7 +800,7 @@ fn clear_workspace_location(workspace: &mut WorkspaceLocation) {
 
 pub fn reduce(previous: &Snapshot, pane_id: &str, event: Event) -> (Snapshot, Vec<Effect>) {
     let (mut next, mut effects) = match event {
-        Event::ListRows {
+        Event::ListStream {
             subscription_id,
             message,
         } => list_sync::received(previous, subscription_id, *message),
@@ -1520,7 +1522,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 next.sessions.item_details = Arc::default();
                 next.sessions.expanded_history = Arc::default();
                 next.sessions.conversations = Arc::default();
-                next.lists.replica = None;
+                next.lists.shell = None;
                 next.lists.subscription = None;
                 next.lists.search_results = None;
                 next.lists.threads = None;
@@ -1580,7 +1582,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
         Event::Intent(_)
         | Event::Notification(_)
         | Event::CommandOutput { .. }
-        | Event::ListRows { .. }
+        | Event::ListStream { .. }
         | Event::ConversationRows { .. } => {
             unreachable!("handled by the reducer router")
         }

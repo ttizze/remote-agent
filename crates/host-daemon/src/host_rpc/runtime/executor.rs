@@ -20,6 +20,28 @@ pub(super) fn context<'a>(state: &model::State, id: &'a str, now: &'a str) -> mo
     }
 }
 
+pub(super) fn provider_capabilities(
+    caps: agent_protocol::session::Capabilities,
+) -> model::ProviderCapabilities {
+    let mut capabilities = model::ProviderCapabilities::default();
+    capabilities.sessions.supports_model_switch_in_session = caps.model_change;
+    capabilities.threads.can_create_empty_thread = true;
+    capabilities.threads.can_read_thread_snapshot = true;
+    capabilities.threads.can_rollback_thread = caps.rollback;
+    capabilities
+        .checkpointing
+        .provider_can_rollback_conversation = caps.rollback;
+    capabilities
+        .checkpointing
+        .provider_rollback_returns_snapshot = caps.rollback;
+    capabilities.threads.can_fork_thread = caps.fork;
+    capabilities.threads.can_fork_from_turn = caps.fork;
+    capabilities.turns.supports_interrupt = true;
+    capabilities.turns.supports_active_steering = caps.steer;
+    capabilities.turns.supports_queued_messages = true;
+    capabilities
+}
+
 fn native_ref(provider: ProviderKind, id: &str) -> model::ProviderRef {
     model::ProviderRef {
         driver: provider.driver().into(),
@@ -67,9 +89,7 @@ async fn load_native_start(
     )>,
     will_retry: bool,
 ) -> Result<LoadedNative, Failure> {
-    if fork.is_none()
-        && let Some(id) = native_id
-    {
+    if let Some(id) = native_id {
         if let Ok(current) = agent.state(id).await {
             let expected = SessionRef::new(provider, id.into())
                 .map_err(|error| Failure::new("invalid_session", error))?;
@@ -79,17 +99,34 @@ async fn load_native_start(
                 || !current.response.thread.requests.is_empty()
             {
                 return Err(Failure::new(
-                    "native_thread_busy",
-                    "The native conversation is still running",
+                    "provider_switch_busy",
+                    "切り替え先のAIがまだ実行中です。完了を待ってください。",
                 ));
             }
-            return Ok(LoadedNative {
-                native: expected,
-                needs_reload: current.needs_reload
-                    || current.response.thread.cwd.as_deref() != Some(cwd),
-                forked: false,
-                fork_failure: None,
-            });
+            // An explicitly incomplete native transcript cannot prove that
+            // the already-delivered prefix remains in this native context.
+            // Reconstruct it in a fresh resource from canonical history.
+            if current
+                .response
+                .thread
+                .history_read_state
+                .as_ref()
+                .is_none_or(|read| {
+                    matches!(
+                        read.kind,
+                        agent_protocol::session::HistoryReadKind::Complete
+                            | agent_protocol::session::HistoryReadKind::Partial
+                    )
+                })
+            {
+                return Ok(LoadedNative {
+                    native: expected,
+                    needs_reload: current.needs_reload
+                        || current.response.thread.cwd.as_deref() != Some(cwd),
+                    forked: fork.is_some(),
+                    fork_failure: None,
+                });
+            }
         }
     }
     let browser = service.browser_config(&target.to_string())?;
@@ -385,11 +422,12 @@ impl Runtime {
         let now = commands::at();
         if let Err(error) = &result
             && error.delivery == agent_protocol::error::Delivery::NotSent
+            && error.code != "context_delivery_uncertain"
             && effect.attempt_count < MAX_ATTEMPTS
         {
             return Err(error.to_string());
         }
-        match result {
+        let observed = match result {
             Ok(Some((session_id, provider, turn))) => {
                 storage.observe_thread(&effect.thread_id, &[], &now, |state| {
                     model::started(
@@ -424,8 +462,9 @@ impl Runtime {
                 });
                 Ok(decision)
             }),
-        }
-        .map(|_| ())
+        }?;
+        service.schedule_setup_events(&observed);
+        Ok(())
     }
 
     async fn submit_start(
@@ -436,9 +475,26 @@ impl Runtime {
         run: &model::Run,
         attempt: &model::RunAttempt,
     ) -> Result<Option<(String, ProviderKind, agent_protocol::ids::TurnId)>, Failure> {
+        let runtime = &service.inner.conversation;
+        let target = SessionRef::new(None, state.thread.id.clone())
+            .map_err(|error| storage_failure(error.into()))?;
+        let _retire_preparation = scopeguard::guard((), |_| runtime.retire_preparation(&target));
+        let preparation = runtime.preparation(&target);
+        preparation
+            .preparing_input
+            .lock()
+            .unwrap()
+            .insert(effect.id.clone(), attempt.id.clone());
+        let allocation_stage = scopeguard::guard((), |_| {
+            preparation
+                .preparing_input
+                .lock()
+                .unwrap()
+                .remove(&effect.id);
+        });
+        let allocation_io = preparation.io.lock().await;
         let _workspace = service.inner.worktree_access.read().await;
         service.require_not_updating()?;
-        let runtime = &service.inner.conversation;
         let provider =
             ProviderKind::from_instance_id(&run.provider_instance_id).map_err(storage_failure)?;
         let agent = service.creation_agent(
@@ -448,8 +504,6 @@ impl Runtime {
                 id: run.model_selection.model.clone(),
             }),
         )?;
-        let target = SessionRef::new(None, state.thread.id.clone())
-            .map_err(|error| storage_failure(error.into()))?;
         let cwd = state
             .thread
             .worktree_path
@@ -473,6 +527,11 @@ impl Runtime {
             .to_str()
             .ok_or_else(|| Failure::new("workspace_unavailable", "workspace path is not UTF-8"))?
             .to_owned();
+        Self::cancel_prepared_input(service, &target).map_err(storage_failure)?;
+        let expected_native = runtime
+            .storage
+            .native_thread_reference(&effect.thread_id, &attempt.provider_thread_id)
+            .map_err(storage_failure)?;
         let Some(prepared) = runtime
             .storage
             .prepare_context(
@@ -500,18 +559,28 @@ impl Runtime {
             .unconsumed_fork()
             .filter(|fork| fork.target_run_id.as_ref() == Some(&run.id));
         let origin = thread.forked_from.as_ref().filter(|_| {
-            pending_fork.is_some()
-                || thread.native_thread_ref.is_none()
-                    && !state.context_handoffs.values().any(|handoff| {
-                        handoff.to_provider_thread_id == thread.id
-                            && handoff.status == model::HandoffStatus::Ready
-                            && matches!(
-                                handoff.strategy,
-                                model::HandoffStrategy::FullThreadSummary
-                                    | model::HandoffStrategy::ManualContext
-                            )
-                    })
+            (pending_fork.is_some() || thread.native_thread_ref.is_none())
+                && !state.context_handoffs.values().any(|handoff| {
+                    handoff.to_provider_thread_id == thread.id
+                        && handoff.status == model::HandoffStatus::Ready
+                        && matches!(
+                            handoff.strategy,
+                            model::HandoffStrategy::FullThreadSummary
+                                | model::HandoffStrategy::ManualContext
+                        )
+                })
         });
+        // Discovery must see the private binding before it can publish this
+        // newly allocated physical identity as another public conversation.
+        let catalog = runtime.native_access[&provider].read().await;
+        if runtime
+            .storage
+            .effect_state(effect, worker)
+            .map_err(storage_failure)?
+            .is_none()
+        {
+            return Ok(None);
+        }
         let loaded = load_native_start(
             service,
             agent.as_ref(),
@@ -533,33 +602,25 @@ impl Runtime {
         let source = runtime.register_native(&target, &native);
         let _io = source.io.lock().await;
         let now = commands::at();
-        let caps = agent.capabilities();
-        let mut capabilities = model::ProviderCapabilities::default();
-        capabilities.sessions.supports_model_switch_in_session = caps.model_change;
-        capabilities.threads.can_create_empty_thread = true;
-        capabilities.threads.can_read_thread_snapshot = true;
-        capabilities.threads.can_fork_thread = caps.fork;
-        capabilities.threads.can_fork_from_turn = caps.fork;
-        capabilities.turns.supports_interrupt = true;
-        capabilities.turns.supports_active_steering = caps.steer;
-        capabilities.turns.supports_queued_messages = true;
+        let capabilities = provider_capabilities(agent.capabilities());
+        let session = model::ProviderSession {
+            id: source.session_id.clone(),
+            driver: provider.driver().into(),
+            provider_instance_id: provider.key().into(),
+            status: model::ProviderSessionStatus::Ready,
+            cwd: cwd.clone(),
+            model: Some(run.model_selection.model.clone()),
+            capabilities,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            last_error: None,
+        };
         if !runtime
             .storage
             .bind_native_start(
                 effect,
                 worker,
-                model::ProviderSession {
-                    id: source.session_id.clone(),
-                    driver: provider.driver().into(),
-                    provider_instance_id: provider.key().into(),
-                    status: model::ProviderSessionStatus::Ready,
-                    cwd: cwd.clone(),
-                    model: Some(run.model_selection.model.clone()),
-                    capabilities,
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                    last_error: None,
-                },
+                session.clone(),
                 native_ref(provider, &native.id),
                 loaded.forked,
                 loaded.fork_failure.as_deref(),
@@ -567,8 +628,27 @@ impl Runtime {
             )
             .map_err(storage_failure)?
         {
+            // Stop certifies non-delivery immediately, but native creation may
+            // still reply later. Save only its physical resource, then let a
+            // separately accepted retry own the input and the attempt binding.
+            runtime
+                .storage
+                .bind_abandoned_native_start(
+                    effect,
+                    &thread.id,
+                    expected_native.as_ref(),
+                    session,
+                    native_ref(provider, &native.id),
+                    loaded.forked,
+                    &now,
+                )
+                .map_err(storage_failure)?;
             return Ok(None);
         }
+        drop(catalog);
+        Self::release_previous_native_sources(service, effect, worker, provider)
+            .await
+            .map_err(Failure::before_submission)?;
         let Some(current) = runtime
             .storage
             .effect_state(effect, worker)
@@ -604,15 +684,20 @@ impl Runtime {
         }
         let execution =
             Uuid::parse_str(&attempt.id).map_err(|error| Failure::new("invalid_run", error))?;
-        let inline =
-            Self::deliver_context(service, effect, worker, agent.as_ref(), &native, &target)
-                .await?;
-        if let Some((_, history)) = &inline
-            && let Some(op::Input::Text { text }) = input.input.first_mut()
-        {
-            *text = format!(
-                "{}\n\nUser message:\n{text}",
-                model::handoffs::render_history(&history.messages, &history.context)
+        let inline = if op::Input::is_compaction(&input.input) {
+            None
+        } else {
+            Self::deliver_context(service, effect, worker, agent.as_ref(), &native, &target).await?
+        };
+        if let Some((_, history)) = &inline {
+            input.input.insert(
+                0,
+                op::Input::Text {
+                    text: format!(
+                        "{}\n\nUser message:\n",
+                        model::handoffs::render_history(&history.messages, &history.context)
+                    ),
+                },
             );
         }
         let before_write = commands::at();
@@ -634,6 +719,10 @@ impl Runtime {
         {
             return Ok(None);
         }
+        // Clearing the owner's non-delivery proof is the user-write boundary.
+        // Stop holds the same mutex while certifying cancellation.
+        drop(allocation_stage);
+        drop(allocation_io);
         let submitted = agent
             .submit(
                 &input,
@@ -664,6 +753,159 @@ impl Runtime {
         Ok(submitted?
             .turn_id
             .map(|turn| (source.session_id.clone(), provider, turn)))
+    }
+
+    pub(super) fn cancel_prepared_input(
+        service: &HostRpcService,
+        target: &SessionRef,
+    ) -> Result<(), String> {
+        let runtime = &service.inner.conversation;
+        let Some(preparation) = runtime.preparations.lock().unwrap().get(target).cloned() else {
+            return Ok(());
+        };
+        let preparing_input = preparation.preparing_input.lock().unwrap();
+        if !preparing_input.is_empty() {
+            let at = commands::at();
+            let command = Uuid::new_v4().to_string();
+            let events=runtime.storage.observe_thread(&target.application_id(),&[],&at,|state| {
+                let Some(run)=state.active_run() else{return Ok(Default::default());};
+                let Some(attempt)=run.active_attempt_id.as_deref() else{return Ok(Default::default());};
+                let owned=state.effects.values().any(|effect|effect.status==model::EffectStatus::Running
+                    && preparing_input.get(&effect.id).is_some_and(|saved|saved==attempt)
+                    && matches!(&effect.request,model::EffectRequest::ProviderTurnStart{run_id} if run_id==&run.id));
+                if !owned {return Ok(Default::default());}
+                model::cancel_start(state,attempt,context(state,&command,&at))
+            })?;
+            service.schedule_setup_events(&events);
+        }
+        Ok(())
+    }
+
+    // Native teardown is part of the leased start, before the new prompt. Keep
+    // the old attachment until teardown succeeds, so a failed probe/unload
+    // cannot orphan its background callbacks or publish a false detachment.
+    async fn release_previous_native_sources(
+        service: &HostRpcService,
+        effect: &model::Effect,
+        worker: &str,
+        destination: ProviderKind,
+    ) -> Result<(), Failure> {
+        let runtime = &service.inner.conversation;
+        let Some(state) = runtime
+            .storage
+            .effect_state(effect, worker)
+            .map_err(storage_failure)?
+        else {
+            return Ok(());
+        };
+        let target = SessionRef::new(None, effect.thread_id.clone())
+            .map_err(|error| storage_failure(error.into()))?;
+        for thread in state.provider_threads.values().filter(|thread| {
+            thread.app_thread_id.as_deref() == Some(&effect.thread_id)
+                && thread.provider_instance_id != destination.key()
+                && state.provider_session(&thread.id).is_some()
+        }) {
+            let Some(reference) = thread.native_thread_ref.as_ref() else {
+                continue;
+            };
+            let Some(id) = reference.native_id.as_deref() else {
+                continue;
+            };
+            let provider = ProviderKind::from_instance_id(&thread.provider_instance_id)
+                .map_err(storage_failure)?;
+            let native = SessionRef::new(provider, id.into())
+                .map_err(|error| storage_failure(error.into()))?;
+            let _retire =
+                scopeguard::guard(native.clone(), |native| runtime.retire_source(&native));
+            let source = runtime.register_native(&target, &native);
+            let _io = source.io.lock().await;
+            let Some(current) = runtime
+                .storage
+                .effect_state(effect, worker)
+                .map_err(storage_failure)?
+            else {
+                return Ok(());
+            };
+            let current_thread = current
+                .provider_threads
+                .get(&thread.id)
+                .filter(|current| current.native_thread_ref.as_ref() == Some(reference))
+                .ok_or_else(|| {
+                    Failure::new(
+                        "provider_source_changed",
+                        "The previous provider source changed before release",
+                    )
+                })?;
+            if current.provider_session(&thread.id).is_none() {
+                continue;
+            }
+            if !current_thread.pending_background_tasks.is_empty()
+                || current.nodes.values().any(|node| {
+                    node.provider_thread_id.as_ref() == Some(&thread.id)
+                        && matches!(
+                            node.status,
+                            model::NodeStatus::Pending
+                                | model::NodeStatus::Running
+                                | model::NodeStatus::Waiting
+                        )
+                })
+                || current.subagents.values().any(|task| {
+                    matches!(
+                        task.status,
+                        model::SubagentStatus::Pending
+                            | model::SubagentStatus::Running
+                            | model::SubagentStatus::Waiting
+                    ) && current
+                        .nodes
+                        .get(&task.parent_node_id)
+                        .is_some_and(|parent| {
+                            parent.provider_thread_id.as_ref() == Some(&thread.id)
+                        })
+                })
+            {
+                return Err(Failure::new(
+                    "provider_background_running",
+                    "The previous provider still has running background work",
+                ));
+            }
+            let agent = service.inner.providers.get(provider)?;
+            // Claude can own native children without a saved roster. A failed
+            // live probe cannot prove that unloading the process is safe.
+            let live = agent.state(id).await?;
+            if !live.response.thread.background.is_empty()
+                || !live.response.thread.requests.is_empty()
+                || live.response.thread.status != agent_protocol::execution::SessionStatus::Idle
+            {
+                return Err(Failure::new(
+                    "provider_background_running",
+                    "The previous provider still has running background work",
+                ));
+            }
+            if runtime
+                .storage
+                .effect_state(effect, worker)
+                .map_err(storage_failure)?
+                .is_none()
+            {
+                return Ok(());
+            }
+            agent.unload(id).await?;
+            // The SDK completed this resource operation even if Stop settled
+            // the requesting input while unload was awaiting its reply.
+            let now = commands::at();
+            runtime
+                .storage
+                .observe_thread(&effect.thread_id, &[], &now, |state| {
+                    Ok(model::native_resource_unloaded(
+                        state,
+                        &thread.provider_instance_id,
+                        reference,
+                        &now,
+                    ))
+                })
+                .map_err(storage_failure)?;
+        }
+        Ok(())
     }
 
     async fn deliver_context(

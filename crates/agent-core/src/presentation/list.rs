@@ -980,10 +980,7 @@ mod tests {
     #[test]
     fn waiting_updates_all_list_scopes_without_opening_conversations() {
         use crate::state::{Event, Intent, list_sync, reduce};
-        use agent_protocol::{
-            conversation::records,
-            session::{ProviderKind, SessionRef},
-        };
+        use agent_protocol::session::{ProviderKind, SessionRef};
         let id = |provider, name: &str| SessionRef::new(provider, name.into()).unwrap();
         let root = id(ProviderKind::Codex, "same");
         let other = id(ProviderKind::Claude, "same");
@@ -1012,7 +1009,7 @@ mod tests {
                 .map(|id| {
                     (
                         id,
-                        records::Activity {
+                        crate::state::list_sync::ActivityFacts {
                             status: agent_protocol::execution::SessionStatus::Running,
                             waiting,
                             ..Default::default()
@@ -1057,7 +1054,6 @@ mod tests {
     #[test]
     fn work_left_running_after_an_answer_reads_waiting_only_when_it_wakes_the_agent() {
         use agent_protocol::{
-            conversation::records,
             execution::{BackgroundTask, BackgroundTaskKind},
             session::{ProviderKind, SessionRef},
         };
@@ -1076,7 +1072,7 @@ mod tests {
             vec![
                 (
                     agents.clone(),
-                    records::Activity {
+                    crate::state::list_sync::ActivityFacts {
                         status: agent_protocol::execution::SessionStatus::Running,
                         background: background(BackgroundTaskKind::Subagent),
                         ..Default::default()
@@ -1084,7 +1080,7 @@ mod tests {
                 ),
                 (
                     server.clone(),
-                    records::Activity {
+                    crate::state::list_sync::ActivityFacts {
                         status: agent_protocol::execution::SessionStatus::Running,
                         background: background(BackgroundTaskKind::Command),
                         ..Default::default()
@@ -1092,7 +1088,7 @@ mod tests {
                 ),
                 (
                     working.clone(),
-                    records::Activity {
+                    crate::state::list_sync::ActivityFacts {
                         status: agent_protocol::execution::SessionStatus::Running,
                         ..Default::default()
                     },
@@ -1215,34 +1211,13 @@ mod tests {
             }))
             .unwrap());
         for icon in [Some("AQID"), None] {
-            use agent_protocol::{
-                conversation::records,
-                sync::{Content, Cursor, Key, Position},
-            };
-            let project: crate::models::Project = serde_json::from_value(
-                json!({"id":"project","name":"Renamed project","roots":[],"icon":null}),
-            )
-            .unwrap();
-            let from = snapshot.lists.replica.as_ref().unwrap().cursor().unwrap();
-            let message = records::Message::Events {
-                through: Cursor {
-                    sequence: from.sequence + 1,
-                    ..from
-                },
-                events: vec![agent_protocol::sync::Event {
-                    sequence: (Cursor {
-                        sequence: from.sequence + 1,
-                        ..from
-                    })
-                    .sequence,
-                    rows: vec![records::Row {
-                        key: Key::Project(project.id.clone()),
-                        version: from.sequence + 1,
-                        position: Position::Project { position: 100 },
-                        content: Content::Full(Arc::new(records::Record::Project(project))),
-                    }],
-                    removed: Vec::new(),
-                }],
+            let mut project = snapshot.lists.shell.as_ref().unwrap().projects[0]
+                .as_ref()
+                .clone();
+            project.title = "Renamed project".into();
+            let message = agent_protocol::orchestration::shell::ShellStreamItem::ProjectUpdated {
+                sequence: snapshot.lists.shell.as_ref().unwrap().snapshot_sequence + 1,
+                project,
             };
             snapshot = crate::state::list_sync::received(
                 &snapshot,

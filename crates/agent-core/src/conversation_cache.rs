@@ -12,10 +12,7 @@ use crate::{
     session::SessionRef,
     state::Snapshot,
 };
-use agent_protocol::{
-    conversation::records,
-    sync::{Message, Scope},
-};
+use agent_protocol::orchestration::shell::{ShellSnapshot, validate_snapshot};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -29,7 +26,7 @@ use tokio::sync::watch;
 const RESTORED: usize = 20;
 /// Copies in another format are discarded instead of migrated.
 const FORMAT: u32 = 3;
-const LIST_FORMAT: u32 = 4;
+const LIST_FORMAT: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 struct Copy {
@@ -45,21 +42,15 @@ struct Copy {
 struct ListCopy {
     format: u32,
     storage_scope: String,
-    snapshot: records::Message,
+    snapshot: ShellSnapshot,
     expanded_projects: BTreeSet<String>,
 }
 
 impl ListCopy {
     fn unchanged(&self, previous: &Self) -> bool {
-        fn cursor(message: &records::Message) -> Option<agent_protocol::sync::Cursor> {
-            match message {
-                Message::Snapshot { cursor, .. } => Some(*cursor),
-                _ => None,
-            }
-        }
         self.storage_scope == previous.storage_scope
             && self.expanded_projects == previous.expanded_projects
-            && cursor(&self.snapshot) == cursor(&previous.snapshot)
+            && self.snapshot == previous.snapshot
     }
     fn write(self, path: &Path) -> std::io::Result<()> {
         write_value(path, self)
@@ -71,9 +62,7 @@ fn read_list(directory: &Path, storage_scope: &str) -> Option<ListCopy> {
     let copy = std::fs::read(&path)
         .ok()
         .and_then(|bytes| agent_protocol::protocol::decode::<ListCopy>(&bytes).ok())
-        .filter(|copy| {
-            copy.format == LIST_FORMAT && records::validate_list(&copy.snapshot).is_ok()
-        });
+        .filter(|copy| copy.format == LIST_FORMAT && validate_snapshot(&copy.snapshot).is_ok());
     if copy.is_none() {
         let _ = std::fs::remove_file(path);
     }
@@ -149,9 +138,8 @@ fn write_value(path: &Path, value: impl Serialize) -> std::io::Result<()> {
 
 /// Add the most recently saved copies that `snapshot` does not hold yet.
 pub fn restore(directory: &Path, snapshot: &mut Snapshot) {
-    if snapshot.lists.replica.is_none()
+    if snapshot.lists.shell.is_none()
         && let Some(list) = read_list(directory, &snapshot.connection.storage_scope)
-        && let Ok(replica) = records::Replica::new(Scope::List, 0).apply(0, list.snapshot)
     {
         snapshot.lists.expanded_projects = Arc::new(
             list.expanded_projects
@@ -160,7 +148,7 @@ pub fn restore(directory: &Path, snapshot: &mut Snapshot) {
                 .collect(),
         );
         snapshot.lists.list_query = Arc::new(ListQuery::default());
-        snapshot.lists.replica = Some(Arc::new(replica));
+        snapshot.lists.shell = Some(Arc::new(list.snapshot));
         crate::state::list_sync::project(snapshot, false);
     }
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -245,13 +233,12 @@ impl Saved {
         let mut writing = false;
         if snapshot.connection.connected
             && snapshot.lists.subscription.is_some()
-            && let Some(replica) = &snapshot.lists.replica
-            && let Some(message) = replica.snapshot()
+            && let Some(shell) = &snapshot.lists.shell
         {
             let list = ListCopy {
                 format: LIST_FORMAT,
                 storage_scope: snapshot.connection.storage_scope.clone(),
-                snapshot: message,
+                snapshot: shell.as_ref().clone(),
                 expanded_projects: snapshot.lists.expanded_projects.keys().cloned().collect(),
             };
             if self

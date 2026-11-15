@@ -180,9 +180,6 @@ pub(in crate::host_rpc) struct NativeAgent {
     /// Item IDs whose native bodies cannot be read.
     pub(in crate::host_rpc) unreadable: Mutex<std::collections::HashSet<String>>,
     pub(in crate::host_rpc) inputs: Arc<Mutex<Vec<op::Submission>>>,
-    pub(in crate::host_rpc) continuations: Mutex<Vec<(String, Uuid)>>,
-    pub(in crate::host_rpc) continue_gate: tokio::sync::Semaphore,
-    pub(in crate::host_rpc) continue_started: tokio::sync::Notify,
     pub(in crate::host_rpc) interrupts: Mutex<Vec<(String, TurnId)>>,
     pub(in crate::host_rpc) injected: Arc<Mutex<Vec<(String, Vec<Value>)>>>,
     pub(in crate::host_rpc) released: Arc<Mutex<Vec<String>>>,
@@ -224,9 +221,6 @@ impl NativeAgent {
             needs_reload: false,
             unreadable: Default::default(),
             inputs: Default::default(),
-            continuations: Default::default(),
-            continue_gate: tokio::sync::Semaphore::new(1),
-            continue_started: tokio::sync::Notify::new(),
             interrupts: Default::default(),
             injected: Default::default(),
             released: Default::default(),
@@ -263,9 +257,6 @@ impl NativeAgent {
             needs_reload: self.needs_reload,
             unreadable: Default::default(),
             inputs: self.inputs.clone(),
-            continuations: Default::default(),
-            continue_gate: tokio::sync::Semaphore::new(1),
-            continue_started: tokio::sync::Notify::new(),
             interrupts: Default::default(),
             injected: self.injected.clone(),
             released: self.released.clone(),
@@ -483,6 +474,7 @@ impl Agent for NativeAgent {
             model_change: true,
             rename: true,
             fork: self.provider == ProviderKind::Codex,
+            rollback: self.provider == ProviderKind::Codex,
         }
     }
     fn availability(&self) -> Result<(), Failure> {
@@ -667,28 +659,6 @@ impl Agent for NativeAgent {
             turn_id: Some(turn_id),
         })
     }
-    async fn continue_turn(
-        &self,
-        id: &str,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        execution: Uuid,
-    ) -> Result<op::SubmissionReceipt, Failure> {
-        self.continuations
-            .lock()
-            .unwrap()
-            .push((id.into(), execution));
-        self.continue_started.notify_one();
-        let _acknowledgement = self
-            .continue_gate
-            .acquire()
-            .await
-            .map_err(|_| unsupported())?;
-        Ok(op::SubmissionReceipt {
-            turn_id: Some(format!("continued-{execution}").into()),
-        })
-    }
     async fn interrupt(&self, id: &str, turn: &TurnId) -> Result<Empty, Failure> {
         self.interrupts
             .lock()
@@ -698,6 +668,34 @@ impl Agent for NativeAgent {
     }
     async fn discard_workspace_processes(&self, _: &Path) -> Result<(), Failure> {
         Ok(())
+    }
+    async fn rollback(
+        &self,
+        id: &str,
+        retained: Option<&str>,
+        first_removed: Option<&str>,
+        _cwd: &str,
+        _browser: Option<Value>,
+    ) -> Result<crate::providers::RollbackResult, Failure> {
+        let mut records = self.records.lock().unwrap();
+        let response = records.get_mut(id).ok_or_else(unsupported)?;
+        if let Some(first_removed) = first_removed {
+            let turns = response.thread.turns.as_mut().unwrap();
+            if let Some(index) = turns
+                .iter()
+                .position(|turn| turn.id.as_str() == first_removed)
+            {
+                turns.truncate(index);
+            } else if retained
+                .is_some_and(|retained| !turns.iter().any(|turn| turn.id.as_str() == retained))
+            {
+                return Err(unsupported());
+            }
+        }
+        Ok(crate::providers::RollbackResult {
+            native_id: id.into(),
+            head_id: retained.map(str::to_owned),
+        })
     }
     async fn fork(
         &self,
@@ -742,19 +740,20 @@ pub(in crate::host_rpc) async fn call<T: DeserializeOwned>(
     }
 }
 
-pub(in crate::host_rpc) fn own(
+pub(in crate::host_rpc) async fn own(
     host: &HostRpcService,
     public: &SessionRef,
     response: &ThreadResponse,
 ) {
     let native = response.thread.id.as_ref().unwrap();
-    let mut imported = response.clone();
-    imported.thread.id = Some(public.clone());
-    imported.thread.active_provider = native.provider;
+    let (thread, native) =
+        Runtime::native_header_records(host, public, native, response, &super::commands::at())
+            .await
+            .unwrap();
     host.inner
         .conversation
         .storage
-        .import(public, &imported, Some(native), now())
+        .seed_native_header(&thread, &native)
         .unwrap();
 }
 

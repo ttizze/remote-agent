@@ -478,7 +478,7 @@
           "target": {
             "id": "00000000-0000-0000-0000-000000000003"
           },
-          "through": "last"
+          "through": { "type": "run", "runId": "last" }
         },
         "response": {
           "result": {

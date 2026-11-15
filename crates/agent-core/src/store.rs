@@ -374,7 +374,7 @@ impl Scheduled {
             (key, generation)
         });
         if let Some(scope) = &effect.subscription {
-            use agent_protocol::{conversation::records::Replica, sync::Scope};
+            use agent_protocol::sync::Scope;
             let generation = operation
                 .as_ref()
                 .expect("subscriptions have an operation key")
@@ -385,13 +385,7 @@ impl Scheduled {
                         .insert(target.clone(), generation);
                 }
                 Scope::List => {
-                    let replica = match &snapshot.lists.replica {
-                        Some(replica) => replica
-                            .resubscribe(generation)
-                            .expect("operation generations increase"),
-                        None => Replica::new(Scope::List, generation),
-                    };
-                    snapshot.lists.replica = Some(Arc::new(replica));
+                    snapshot.lists.generation = generation;
                 }
             }
         }
@@ -1611,7 +1605,7 @@ async fn run(
                     let ended = matches!(kind, SubscriptionKind::Conversation | SubscriptionKind::List).then(|| Err(std::io::Error::other("subscription ended")));
                     subscriptions.insert(id, futures_util::stream::try_unfold(stream, move |mut stream| async move {
                         let event = match kind {
-                            SubscriptionKind::List => stream.read::<agent_protocol::conversation::records::Message>().await?.map(|message| Event::ListRows { subscription_id: id, message: Box::new(message) }),
+                            SubscriptionKind::List => stream.read::<agent_protocol::orchestration::shell::ShellStreamItem>().await?.map(|message| Event::ListStream { subscription_id: id, message: Box::new(message) }),
                             SubscriptionKind::Conversation => stream.read::<agent_protocol::orchestration::projection::ThreadStreamItem>().await?.map(|message| Event::ConversationRows { subscription_id: id, message: Box::new(message) }),
                             SubscriptionKind::Output => stream.read::<agent_protocol::sync::OutputUpdate>().await.ok().flatten().map(|update| Event::CommandOutput { subscription_id: id, update: Box::new(update) }),
                         };

@@ -278,7 +278,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let accounts = call(&service, &mut session, "host/account/list", json!({})).await;
         assert!(accounts["result"]["selected"]["codex"].is_null());
         assert!(accounts["result"]["errors"]["codex"].is_string());
-        assert!(call(&service, &mut session, "host/list/subscribe", json!(records::SubscribeList { refresh: false, subscription:uuid::Uuid::new_v4(),cached:None })).await.get("error").is_none());
+        assert!(call(&service, &mut session, "host/list/subscribe", json!(records::SubscribeList { refresh: false, subscription:uuid::Uuid::new_v4(),after_sequence:None })).await.get("error").is_none());
         let operation=uuid::Uuid::new_v4();
         let rejected=call(&service,&mut session,"host/conversation/change",json!(records::Change {
             session:thread.clone(),operation,command:decision::Command::Submit {

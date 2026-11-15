@@ -1,6 +1,123 @@
 use super::*;
 use commands::{effect, id};
 
+/// Loading a physical native resource does not start an app attempt. A late
+/// allocation after Stop remains reusable, without reopening or sending input.
+pub fn native_resource_loaded(
+    state: &State,
+    thread_id: &str,
+    expected: Option<&ProviderRef>,
+    mut session: ProviderSession,
+    native: ProviderRef,
+    native_fork: bool,
+    now: &str,
+) -> Result<Decision, String> {
+    let thread = state
+        .provider_threads
+        .get(thread_id)
+        .ok_or("native resource is missing")?;
+    if state.thread.deleted_at.is_some() || thread.native_thread_ref.as_ref() != expected {
+        return Ok(Default::default());
+    }
+    if thread.app_thread_id.as_ref() != Some(&state.thread.id)
+        || thread.provider_instance_id != session.provider_instance_id
+        || thread.driver != session.driver
+        || native.driver != thread.driver
+        || native.native_id.is_none()
+    {
+        return Err("native resource belongs to another provider or conversation".into());
+    }
+    if !matches!(
+        session.status,
+        ProviderSessionStatus::Ready | ProviderSessionStatus::Error
+    ) {
+        return Err("native allocation has no readiness result".into());
+    }
+    let ready = session.status == ProviderSessionStatus::Ready;
+    session.created_at = state
+        .provider_sessions
+        .get(&session.id)
+        .map_or_else(|| now.into(), |saved| saved.created_at.clone());
+    let bound = ProviderThread {
+        provider_session_id: ready.then(|| session.id.clone()),
+        native_thread_ref: Some(native),
+        status: if ready {
+            ProviderThreadStatus::Idle
+        } else {
+            ProviderThreadStatus::Error
+        },
+        forked_from: if native_fork || state.unconsumed_fork().is_none() {
+            thread.forked_from.clone()
+        } else {
+            None
+        },
+        updated_at: now.into(),
+        ..thread.clone()
+    };
+    let mut changes = Vec::new();
+    if ready {
+        changes.push(Change::ProviderSessionAttached(session));
+    }
+    changes.push(Change::ProviderThread(bound));
+    Ok(Decision {
+        changes,
+        ..Default::default()
+    })
+}
+
+/// An actual unload result owns resource liveness independently of the input
+/// that requested it. Clear every logical alias of that physical resource;
+/// other resources and other conversations keep their shared session binding.
+pub fn native_resource_unloaded(
+    state: &State,
+    provider_instance_id: &str,
+    native: &ProviderRef,
+    now: &str,
+) -> Decision {
+    let mut sessions = std::collections::BTreeSet::new();
+    let mut changes = Vec::new();
+    for thread in state.provider_threads.values().filter(|thread| {
+        thread.app_thread_id.as_ref() == Some(&state.thread.id)
+            && thread.provider_instance_id == provider_instance_id
+            && thread.native_thread_ref.as_ref() == Some(native)
+            && (thread.provider_session_id.is_some()
+                || thread.status != ProviderThreadStatus::NotLoaded)
+    }) {
+        if let Some(session) = &thread.provider_session_id {
+            sessions.insert(session.clone());
+        }
+        changes.push(Change::ProviderThread(ProviderThread {
+            provider_session_id: None,
+            status: ProviderThreadStatus::NotLoaded,
+            updated_at: now.into(),
+            ..thread.clone()
+        }));
+    }
+    let mut decision = Decision {
+        changes,
+        ..Default::default()
+    };
+    let released = state.apply(&decision);
+    decision.changes.extend(
+        sessions
+            .into_iter()
+            .filter(|session| {
+                state.attached_provider_sessions.contains(session)
+                    && !released.provider_threads.values().any(|thread| {
+                        thread.app_thread_id.as_ref() == Some(&state.thread.id)
+                            && thread.provider_session_id.as_ref() == Some(session)
+                    })
+            })
+            .map(|provider_session_id| {
+                Change::ProviderSessionDetached(ProviderSessionDetached {
+                    provider_session_id,
+                    detached_at: now.into(),
+                })
+            }),
+    );
+    decision
+}
+
 /// Queued work already owns an attempt and root at admission. Activation reuses
 /// those identities; only transcript order moves past work started ahead of it.
 pub fn activate_queued(
@@ -13,8 +130,14 @@ pub fn activate_queued(
         .get(run_id)
         .filter(|run| run.status == RunStatus::Queued && !run.queue_held)
         .ok_or("run is no longer available to start")?;
-    if state.active_run().is_some() {
-        return Err("another run is active".into());
+    if state.active_run().is_some()
+        || state.native_work_blocks_delivery()
+        || state.has_uncertain_input()
+        || state.has_pending_rollback()
+    {
+        return Err(
+            "another run, unobserved native work, or an uncertain write blocks delivery".into(),
+        );
     }
     let ordinal = if state.runs.values().any(|other| {
         other.status != RunStatus::Queued
@@ -151,6 +274,7 @@ pub fn started(
         provider_thread_id: provider_thread.id.clone(),
         node_id: attempt.root_node_id.clone(),
         run_attempt_id: Some(attempt.id.clone()),
+        native_thread_ref: attempt.native_thread_ref.clone(),
         native_turn_ref: Some(native_turn_ref),
         ordinal: state
             .provider_turns
@@ -185,10 +309,7 @@ pub fn started(
         Change::RunAttempt(RunAttempt {
             status: RunAttemptStatus::Running,
             provider_turn_id: Some(turn.id.clone()),
-            native_thread_id: provider_thread
-                .native_thread_ref
-                .as_ref()
-                .and_then(|reference| reference.native_id.clone()),
+
             started_at: attempt
                 .started_at
                 .clone()
@@ -210,6 +331,13 @@ pub fn started(
         }),
         Change::ProviderTurn(turn),
     ]);
+    changes.extend(preparation::workspace_result(
+        state,
+        run,
+        crate::workspace::SetupPhase::Done,
+        None,
+        context.now,
+    ));
     if let Some(reference) = &provider_thread.native_thread_ref {
         changes.extend(
             state
@@ -292,10 +420,7 @@ pub fn observe_item(
     let attempt = &state.run_attempts[attempt_id];
     if item.thread_id != state.thread.id
         || item.run_id.as_deref() != Some(&attempt.run_id)
-        || item.provider_thread_id.as_deref() != Some(&attempt.provider_thread_id)
-            && !matches!(&item.body,TurnItemBody::Subagent {child_thread_id:Some(child),..}
-                if item.provider_thread_id.as_ref().and_then(|id|state.provider_threads.get(id))
-                    .is_some_and(|thread|thread.app_thread_id.as_ref()==Some(child)))
+        || !item_provider_matches(state, &item, &attempt.provider_thread_id)
         || item.provider_turn_id.as_ref().is_some_and(|id| {
             !state
                 .provider_turns
@@ -312,14 +437,20 @@ pub fn observe_item(
     {
         return Err("item identity is already owned by another run".into());
     }
+    Ok(commit_item(state, &attempt.provider_thread_id, item))
+}
+
+pub(super) fn item_provider_matches(state: &State, item: &TurnItem, parent: &str) -> bool {
+    item.provider_thread_id.as_deref() == Some(parent)
+        || matches!(&item.body,TurnItemBody::Subagent {child_thread_id:Some(child),..}
+            if item.provider_thread_id.as_ref().and_then(|id|state.provider_threads.get(id))
+                .is_some_and(|thread|thread.app_thread_id.as_ref()==Some(child)))
+}
+
+pub(super) fn commit_item(state: &State, provider_thread_id: &str, item: TurnItem) -> Decision {
     let mut changes = vec![];
-    if !matches!(
-        item.status,
-        TurnItemStatus::Idle
-            | TurnItemStatus::Pending
-            | TurnItemStatus::Running
-            | TurnItemStatus::Waiting
-    ) && let Some(thread) = state.provider_threads.get(&attempt.provider_thread_id)
+    if item.status.is_terminal()
+        && let Some(thread) = state.provider_threads.get(provider_thread_id)
     {
         let pending: Vec<_> = thread
             .pending_background_tasks
@@ -336,10 +467,10 @@ pub fn observe_item(
         }
     }
     changes.push(Change::TurnItem(item));
-    Ok(Decision {
+    Decision {
         changes,
         ..Default::default()
-    })
+    }
 }
 
 pub fn observe_plan(
@@ -349,6 +480,15 @@ pub fn observe_plan(
     plan: Plan,
     item: TurnItem,
 ) -> Result<Decision, String> {
+    validate_plan(&plan, &item)?;
+    let mut decision = observe_item(state, attempt_id, session_id, item)?;
+    if !decision.changes.is_empty() {
+        decision.changes.push(Change::Plan(plan));
+    }
+    Ok(decision)
+}
+
+pub(super) fn validate_plan(plan: &Plan, item: &TurnItem) -> Result<(), String> {
     let matching = match &item.body {
         TurnItemBody::ProposedPlan { plan_id, .. } => {
             plan.kind == PlanKind::ProposedPlan && plan_id == &plan.id
@@ -365,11 +505,7 @@ pub fn observe_plan(
     {
         return Err("plan and item identities do not match".into());
     }
-    let mut decision = observe_item(state, attempt_id, session_id, item)?;
-    if !decision.changes.is_empty() {
-        decision.changes.push(Change::Plan(plan));
-    }
-    Ok(decision)
+    Ok(())
 }
 
 pub fn observe_subagent(
@@ -379,17 +515,149 @@ pub fn observe_subagent(
     subagent: Subagent,
     item: TurnItem,
 ) -> Result<Decision, String> {
+    validate_subagent(&subagent, &item)?;
+    let mut decision = observe_item(state, attempt_id, session_id, item)?;
+    if !decision.changes.is_empty() {
+        decision.changes.push(Change::Subagent(subagent));
+    }
+    Ok(decision)
+}
+
+/// A provider child reports its own work independently of its parent's
+/// foreground turn. Only a real new child turn may reopen a settled task.
+pub fn observe_subagent_progress(
+    state: &State,
+    subagent_id: &str,
+    status: TurnItemStatus,
+    result: Option<&str>,
+    new_turn: bool,
+    started_at: Option<&str>,
+    now: &str,
+) -> Result<Decision, String> {
+    let Some(task) = state.subagents.get(subagent_id) else {
+        return Ok(Decision::default());
+    };
+    let saved = state.turn_items.values().find(|item|
+        matches!(&item.body,TurnItemBody::Subagent {subagent_id,..} if subagent_id==&task.id));
+    if let Some(saved) = saved {
+        validate_subagent(task, saved)?;
+    } else if task.native_task_ref.is_some() {
+        return Err("native subagent item is missing".into());
+    }
+    let node = state
+        .nodes
+        .get(&task.id)
+        .ok_or("subagent node is missing")?;
+    if saved.is_some_and(|saved| saved.node_id.as_deref() != Some(&task.id))
+        || node.thread_id != task.thread_id
+        || node.run_id != task.run_id
+    {
+        return Err("subagent node identity does not match".into());
+    }
+    let active = !status.is_terminal();
+    let was_active = matches!(
+        task.status,
+        SubagentStatus::Idle
+            | SubagentStatus::Pending
+            | SubagentStatus::Running
+            | SubagentStatus::Waiting
+    );
+    if !was_active && active && !new_turn {
+        return Ok(Decision::default());
+    }
+    let advance = was_active || new_turn;
+    let started_at = if new_turn {
+        started_at
+            .map(str::to_owned)
+            .or_else(|| task.started_at.clone())
+    } else {
+        task.started_at.clone()
+    };
+    let completed_at = if advance {
+        (!active).then(|| task.completed_at.clone().unwrap_or_else(|| now.into()))
+    } else {
+        task.completed_at.clone()
+    };
+    let (task_status, node_status) = if !advance {
+        (task.status, node.status)
+    } else {
+        match status {
+            TurnItemStatus::Idle => (SubagentStatus::Idle, NodeStatus::Idle),
+            TurnItemStatus::Pending => (SubagentStatus::Pending, NodeStatus::Pending),
+            TurnItemStatus::Running => (SubagentStatus::Running, NodeStatus::Running),
+            TurnItemStatus::Waiting => (SubagentStatus::Waiting, NodeStatus::Waiting),
+            TurnItemStatus::Completed => (SubagentStatus::Completed, NodeStatus::Completed),
+            TurnItemStatus::Failed => (SubagentStatus::Failed, NodeStatus::Failed),
+            TurnItemStatus::Cancelled => (SubagentStatus::Cancelled, NodeStatus::Cancelled),
+            TurnItemStatus::Interrupted => (SubagentStatus::Interrupted, NodeStatus::Interrupted),
+        }
+    };
+    let mut decision = Decision::default();
+    if let Some(saved) = saved {
+        let mut item = TurnItem {
+            status: if advance { status } else { saved.status },
+            started_at: started_at.clone(),
+            completed_at: completed_at.clone(),
+            updated_at: saved.updated_at.clone(),
+            ..saved.clone()
+        };
+        if let TurnItemBody::Subagent {
+            result: saved_result,
+            progress,
+            ..
+        } = &mut item.body
+        {
+            if new_turn {
+                *progress = None;
+                *saved_result = result.map(str::to_owned);
+            } else if let Some(result) = result {
+                *saved_result = Some(result.into());
+            }
+        }
+        if &item != saved {
+            item.updated_at = now.into();
+            decision = execution::commit_item(
+                state,
+                saved
+                    .provider_turn_id
+                    .as_ref()
+                    .and_then(|id| state.provider_turns.get(id))
+                    .map(|turn| turn.provider_thread_id.as_str())
+                    .ok_or("subagent parent turn is missing")?,
+                item,
+            );
+        }
+    }
+    let next_node = ExecutionNode {
+        status: node_status,
+        started_at: started_at.clone(),
+        completed_at: completed_at.clone(),
+        ..node.clone()
+    };
+    if &next_node != node {
+        decision.changes.push(Change::Node(next_node));
+    }
+    let mut next_task = Subagent {
+        status: task_status,
+        started_at,
+        completed_at,
+        ..task.clone()
+    };
+    if &next_task != task {
+        next_task.updated_at = now.into();
+        decision.changes.push(Change::Subagent(next_task));
+    }
+    Ok(decision)
+}
+
+pub(super) fn validate_subagent(subagent: &Subagent, item: &TurnItem) -> Result<(), String> {
     let matching = matches!(&item.body,TurnItemBody::Subagent {subagent_id,origin,driver,provider_instance_id,child_thread_id,..}
         if subagent_id==&subagent.id && origin==&subagent.origin && driver==&subagent.driver
             && provider_instance_id==&subagent.provider_instance_id && child_thread_id==&subagent.child_thread_id);
     if !matching || subagent.thread_id != item.thread_id || subagent.run_id != item.run_id {
         return Err("subagent and item identities do not match".into());
     }
-    let mut decision = observe_item(state, attempt_id, session_id, item)?;
-    if !decision.changes.is_empty() {
-        decision.changes.push(Change::Subagent(subagent));
-    }
-    Ok(decision)
+    Ok(())
 }
 
 fn accepts_background_item(
@@ -406,7 +674,7 @@ fn accepts_background_item(
     };
     is_background_item(
         state,
-        attempt,
+        &attempt.provider_thread_id,
         state.turn_items.get(&item.id).unwrap_or(item),
     )
 }
@@ -421,11 +689,11 @@ fn background_task_matches(task: &PendingBackgroundTask, item: &TurnItem) -> boo
         .is_some_and(|native| task.native_item_id.as_ref().unwrap_or(&task.task_id) == native)
 }
 
-fn is_background_item(state: &State, attempt: &RunAttempt, item: &TurnItem) -> bool {
+pub(super) fn is_background_item(state: &State, provider_thread_id: &str, item: &TurnItem) -> bool {
     (state.turn_items.contains_key(&item.id) && is_pending_background_item(item))
         || state
             .provider_threads
-            .get(&attempt.provider_thread_id)
+            .get(provider_thread_id)
             .is_some_and(|thread| {
                 thread
                     .pending_background_tasks
@@ -799,24 +1067,14 @@ pub(super) fn finish_run(
     }
     for item in state.turn_items.values().filter(|item| {
         item.run_id.as_deref() == Some(&run.id)
-            && !(run_status == RunStatus::Completed && is_background_item(state, attempt, item))
+            && !(run_status == RunStatus::Completed
+                && is_background_item(state, &attempt.provider_thread_id, item))
             && matches!(
                 item.status,
                 TurnItemStatus::Pending | TurnItemStatus::Running | TurnItemStatus::Waiting
             )
     }) {
-        let mut item = TurnItem {
-            status: item_status,
-            completed_at: Some(context.now.into()),
-            updated_at: context.now.into(),
-            ..item.clone()
-        };
-        match &mut item.body {
-            TurnItemBody::AssistantMessage { streaming, .. }
-            | TurnItemBody::Reasoning { streaming, .. }
-            | TurnItemBody::ProposedPlan { streaming, .. } => *streaming = false,
-            _ => {}
-        }
+        let item = settle_item(item, item_status, context.now);
         changes.push(Change::TurnItem(item));
     }
     for node in state.nodes.values().filter(|node| {
@@ -824,7 +1082,7 @@ pub(super) fn finish_run(
             && !(run_status == RunStatus::Completed
                 && state.turn_items.values().any(|item| {
                     item.node_id.as_ref() == Some(&node.id)
-                        && is_background_item(state, attempt, item)
+                        && is_background_item(state, &attempt.provider_thread_id, item)
                 }))
             && matches!(
                 node.status,
@@ -868,6 +1126,25 @@ pub(super) fn finish_run(
             resolved_at: Some(context.now.into()),
             ..request.clone()
         }));
+    }
+    let workspace_failure = match &completion {
+        Completion::Failed(failure) => Some((
+            crate::workspace::SetupPhase::Failed,
+            Some(failure.message.clone()),
+        )),
+        Completion::Cancelled | Completion::Interrupted => {
+            Some((crate::workspace::SetupPhase::Cancelled, None))
+        }
+        Completion::Completed => None,
+    };
+    if let Some((phase, error)) = workspace_failure {
+        changes.extend(preparation::workspace_result(
+            state,
+            run,
+            phase,
+            error,
+            context.now,
+        ));
     }
     if let Completion::Failed(failure) = completion {
         let error_id = id(context.command_id, "error-item");
@@ -938,6 +1215,19 @@ pub fn interrupt(state: &State, run_id: &str, context: Context<'_>) -> Result<De
     let attempt = state
         .active_attempt(run.active_attempt_id.as_deref())
         .ok_or("run has no attempt")?;
+    if run.status == RunStatus::Starting
+        && run.workspace_preparation.is_some()
+        && state
+            .thread
+            .workspace_launch
+            .as_ref()
+            .and_then(|workspace| workspace.setup.as_ref())
+            .is_some_and(|setup| {
+                !setup.can_cancel && setup.phase == crate::workspace::SetupPhase::Running
+            })
+    {
+        return Err("agent startup has passed the cancellation boundary".into());
+    }
     let start_in_flight = state.effects.values().any(|effect| {
         matches!(&effect.request,
         EffectRequest::ProviderTurnStart {run_id} if run_id==&run.id)
@@ -1033,4 +1323,67 @@ pub(super) fn lose_background_work(state: &State, provider: &str, now: &str) -> 
         }
     }
     changes
+}
+
+/// Status observations cannot move an inactive provider or superseded native
+/// source. Unconsumed queued input can enter preparation once that source is
+/// no longer observed running. Unknown activity never permits replaying an
+/// uncertain write: that is a separate delivery fence.
+pub fn observe_native_status(
+    state: &State,
+    provider_instance_id: &str,
+    driver: &str,
+    native_id: &str,
+    status: ProviderThreadStatus,
+    context: Context<'_>,
+) -> Result<Decision, String> {
+    let Some(thread) = state.selected_native_thread().filter(|thread| {
+        thread.provider_instance_id == provider_instance_id
+            && thread.driver == driver
+            && thread
+                .native_thread_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref())
+                == Some(native_id)
+    }) else {
+        return Ok(Decision::default());
+    };
+    let mut decision = Decision::default();
+    if thread.status != status {
+        decision
+            .changes
+            .push(Change::ProviderThread(ProviderThread {
+                status,
+                updated_at: context.now.into(),
+                ..thread.clone()
+            }));
+    }
+    if status != ProviderThreadStatus::Active
+        && state.active_run().is_none()
+        && !state.has_uncertain_input()
+    {
+        let projected = state.apply(&decision);
+        if let Some(next) = projected.next_queued_run() {
+            let activation = activate_queued(&projected, &next.id, context)?;
+            decision.changes.extend(activation.changes);
+            decision.effects.extend(activation.effects);
+        }
+    }
+    Ok(decision)
+}
+
+pub(super) fn settle_item(item: &TurnItem, status: TurnItemStatus, now: &str) -> TurnItem {
+    let mut item = TurnItem {
+        status: status,
+        completed_at: Some(now.into()),
+        updated_at: now.into(),
+        ..item.clone()
+    };
+    match &mut item.body {
+        TurnItemBody::AssistantMessage { streaming, .. }
+        | TurnItemBody::Reasoning { streaming, .. }
+        | TurnItemBody::ProposedPlan { streaming, .. } => *streaming = false,
+        _ => {}
+    }
+    item
 }

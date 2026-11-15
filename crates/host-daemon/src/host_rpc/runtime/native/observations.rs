@@ -37,6 +37,11 @@ pub(super) fn native_context(
         provider_thread_id: attempt.provider_thread_id.clone(),
         provider_turn_id: turn.id.clone(),
         native_turn_id,
+        native_thread_id: attempt
+            .native_thread_ref
+            .as_ref()
+            .and_then(|reference| reference.native_id.clone())
+            .ok_or("native attempt source is missing")?,
         provider: ProviderKind::from_instance_id(&attempt.provider_instance_id)?,
         now: now.into(),
         completed,
@@ -63,38 +68,22 @@ impl Runtime {
         event: AgentChange,
         execution: Uuid,
     ) -> Result<(), String> {
+        let _requests = scopeguard::guard(target, |target| {
+            service.inner.conversation.prune_requests(target)
+        });
         match event {
             AgentChange::Session { session, change } => {
                 let source = service.inner.conversation.register_native(target, &session);
                 let _updates = source.updates.lock().await;
                 Self::execution_change(service, &source, &session, change, execution).await
             }
-            AgentChange::Renamed {
-                name: Some(name), ..
-            } => {
-                let now = commands::at();
-                service
-                    .inner
-                    .conversation
-                    .storage
-                    .observe_thread(&target.id, &[], &now, |state| {
-                        Ok(model::Decision {
-                            changes: vec![model::Change::Thread(model::Thread {
-                                title: name,
-                                updated_at: now.clone(),
-                                ..state.thread.clone()
-                            })],
-                            ..Default::default()
-                        })
-                    })
-                    .map(|_| ())
-            }
             AgentChange::Request {
                 session,
                 origin,
                 request,
             } => {
-                Self::execution_request(service, target, &session, origin, request, execution).await
+                Self::execution_request(service, target, &session, origin, request, Some(execution))
+                    .await
             }
             _ => Ok(()),
         }
@@ -128,7 +117,7 @@ impl Runtime {
                 fingerprint: None,
                 ordinal: None,
             };
-            storage.observe_thread(&source.target.id, &[], &now, |state| {
+            let events = storage.observe_thread(&source.target.id, &[], &now, |state| {
                 if !state.native_thread_matches(&attempt_id, driver, &native.id) {
                     return Ok(model::Decision::default());
                 }
@@ -140,6 +129,7 @@ impl Runtime {
                     executor::context(state, &command_id, &now),
                 )
             })?;
+            service.schedule_setup_events(&events);
         }
         let state = storage.thread_state(&source.target.id, &[])?;
         let foreground = state.accepts_observation(&attempt_id, &source.session_id);
@@ -158,7 +148,7 @@ impl Runtime {
         match change {
             SessionChange::Turn { turn, completed } => {
                 if completed {
-                    Self::flush_text(service, source).await?;
+                    Self::flush_text(service, source)?;
                 }
                 for item in turn.items.iter().flatten() {
                     Self::execution_item(
@@ -211,15 +201,22 @@ impl Runtime {
                             .finish_foreground(execution, super::super::events::background(&turn));
                     }
                     Self::execution_background(service, source, execution)?;
-                    storage.observe_thread(&source.target.id, &[], &now, |state| {
-                        model::complete(
+                    let tails = service
+                        .inner
+                        .conversation
+                        .outputs
+                        .checkpoints(&source.target, &attempt_id);
+                    let events = storage.observe_thread(&source.target.id, &[], &now, |state| {
+                        let decision = model::complete(
                             state,
                             &attempt_id,
                             &source.session_id,
                             completion,
                             executor::context(state, &command_id, &now),
-                        )
+                        )?;
+                        Ok(decision.with_command_outputs(Some(&tails)))
                     })?;
+                    Self::finish_output_events(service, &events);
                 }
             }
             SessionChange::Item { turn_id, item } => {
@@ -254,18 +251,21 @@ impl Runtime {
                 Self::ensure_text_item(
                     service,
                     source,
-                    &attempt_id,
+                    Some(&attempt_id),
                     &context,
                     item_id.as_str(),
                     field,
                 )?;
-                let attempt = Attempt {
-                    id: execution,
-                    turn: context.native_turn_id.into(),
-                    provider: context.provider,
-                    source: native.id.clone(),
-                };
-                Self::text_delta(service, source, &attempt, item_id.as_str(), field, &delta)?;
+                Self::text_delta(
+                    service,
+                    source,
+                    native,
+                    super::super::text::Owner::Attempt(execution),
+                    &context.native_turn_id,
+                    item_id.as_str(),
+                    field,
+                    &delta,
+                )?;
             }
             SessionChange::Background { mut tasks } => {
                 if !foreground {
@@ -291,17 +291,24 @@ impl Runtime {
                         retry: None,
                     },
                 );
-                Self::commit_artifacts(service, source, &attempt_id, vec![artifact], &now)?;
+                Self::commit_artifacts(
+                    service,
+                    source,
+                    Some(&attempt_id),
+                    &context.native_thread_id,
+                    vec![artifact],
+                    &now,
+                )?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn ensure_text_item(
+    pub(super) fn ensure_text_item(
         service: &HostRpcService,
         source: &resources::Source,
-        attempt_id: &str,
+        attempt_id: Option<&str>,
         context: &Context,
         native_id: &str,
         field: agent_protocol::session::TextField,
@@ -322,14 +329,11 @@ impl Runtime {
                 native_id.into(),
                 model::NodeKind::AssistantMessage,
                 model::TurnItemBody::AssistantMessage {
-                    message_id: model::derived_id(
+                    message_id: super::item_identity(
                         "message",
-                        &[
-                            "provider",
-                            context.provider.driver(),
-                            "native-item",
-                            native_id,
-                        ],
+                        context.provider,
+                        &context.native_turn_id,
+                        native_id,
                     ),
                     text: String::new(),
                     phase: None,
@@ -359,6 +363,7 @@ impl Runtime {
             service,
             source,
             attempt_id,
+            &context.native_thread_id,
             vec![context.artifact(
                 &key,
                 Some(native_id),
@@ -383,23 +388,6 @@ impl Runtime {
         if matches!(item.body(), ItemBody::UserMessage { .. }) {
             return Ok(());
         }
-        let full = if item.is_deferred() {
-            Some(
-                Self::read_native_body(
-                    service,
-                    &op::ReadItem {
-                        thread_id: native.clone(),
-                        turn_id: turn.clone(),
-                        item_id: item.id.clone(),
-                    },
-                )
-                .await
-                .map_err(|error| error.to_string())?,
-            )
-        } else {
-            None
-        };
-        let item = full.as_ref().unwrap_or(item);
         let now = commands::at();
         let state = service
             .inner
@@ -407,13 +395,68 @@ impl Runtime {
             .storage
             .thread_state(&source.target.id, &[])?;
         let context = native_context(&state, attempt_id, turn, &now, completed)?;
+        Self::canonical_native_item(service, source, native, Some(attempt_id), &context, item)
+            .await?;
+        if matches!(item.body(), ItemBody::ImageGeneration { .. })
+            && state
+                .provider_turns
+                .get(&context.provider_turn_id)
+                .is_some_and(|turn| turn.status != model::ProviderTurnStatus::Running)
+        {
+            Self::project_generated_images(service, source, attempt_id, &context.provider_turn_id)?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn canonical_native_item(
+        service: &HostRpcService,
+        source: &resources::Source,
+        native: &SessionRef,
+        attempt_id: Option<&str>,
+        context: &Context,
+        item: &Item,
+    ) -> Result<(), String> {
+        let full = if item.is_deferred() {
+            match Self::read_native_body(
+                service,
+                &op::ReadItem {
+                    thread_id: native.clone(),
+                    turn_id: context.native_turn_id.clone().into(),
+                    item_id: item.id.clone(),
+                },
+            )
+            .await
+            {
+                Ok(item) => Some(item),
+                // Native transcripts/output files can lag a terminal
+                // notification. Keep its status and an explicitly partial
+                // tool body, so this read cannot discard subsequent work.
+                Err(_)
+                    if matches!(
+                        item.body(),
+                        ItemBody::CommandExecution { .. }
+                            | ItemBody::ToolCall { .. }
+                            | ItemBody::FileChange { .. }
+                    ) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        } else {
+            None
+        };
+        let item = full.as_ref().unwrap_or(item);
+        if matches!(item.body(), ItemBody::Subagent { .. }) {
+            return Self::subagent_item(service, source, native, attempt_id, context, item).await;
+        }
         let artifacts = if let ItemBody::ImageGeneration {
             saved_path,
             data,
             revised_prompt,
         } = item.body()
         {
-            let mut status = super::item_status(item.status, completed);
+            let mut status = super::item_status(item.status, context.completed);
             let mut saved_path = saved_path.clone();
             let mut failure = None;
             if status == model::TurnItemStatus::Completed
@@ -438,13 +481,7 @@ impl Runtime {
                     }
                 }
             }
-            let terminal = !matches!(
-                status,
-                model::TurnItemStatus::Idle
-                    | model::TurnItemStatus::Pending
-                    | model::TurnItemStatus::Running
-                    | model::TurnItemStatus::Waiting
-            );
+            let terminal = status.is_terminal();
             let output = terminal.then(|| {
                 let mut output = json!({"status":status});
                 if let Some(path) = saved_path {
@@ -475,25 +512,40 @@ impl Runtime {
         } else {
             context.item(item)?
         };
-        Self::commit_artifacts(service, source, attempt_id, artifacts, &now)?;
-        if matches!(item.body(), ItemBody::ImageGeneration { .. })
-            && state
-                .provider_turns
-                .get(&context.provider_turn_id)
-                .is_some_and(|turn| turn.status != model::ProviderTurnStatus::Running)
-        {
-            Self::project_generated_images(service, source, attempt_id, &context.provider_turn_id)?;
-        }
-        Ok(())
+        Self::commit_artifacts(
+            service,
+            source,
+            attempt_id,
+            &context.native_thread_id,
+            artifacts,
+            &context.now,
+        )
     }
 
-    fn commit_artifacts(
+    pub(super) fn commit_artifacts(
         service: &HostRpcService,
         source: &resources::Source,
-        attempt_id: &str,
+        attempt_id: Option<&str>,
+        native_thread_id: &str,
         artifacts: Vec<Artifact>,
         now: &str,
     ) -> Result<(), String> {
+        let mut staged_output = HashMap::new();
+        let artifacts = artifacts
+            .into_iter()
+            .map(|mut artifact| {
+                let (item, output) = service
+                    .inner
+                    .conversation
+                    .outputs
+                    .prepare_native_item(artifact.item);
+                if let Some(output) = output {
+                    staged_output.insert(item.id.clone(), output);
+                }
+                artifact.item = item;
+                artifact
+            })
+            .collect::<Vec<_>>();
         let item_ids = artifacts
             .iter()
             .map(|artifact| artifact.item.id.clone())
@@ -505,6 +557,15 @@ impl Runtime {
             |state| {
                 let mut decision = model::Decision::default();
                 for mut artifact in artifacts {
+                    if state.thread.created_by == model::Actor::Agent
+                        && state.thread.creation_source == model::CreationSource::Provider
+                        && state.thread.lineage.relationship_to_parent.as_deref()
+                            == Some("subagent")
+                        && let model::TurnItemBody::UserMessage { created_by, .. } =
+                            &mut artifact.item.body
+                    {
+                        *created_by = model::Actor::Agent;
+                    }
                     if let Some(node) = state.nodes.get(&artifact.node.id) {
                         artifact.node.started_at =
                             node.started_at.clone().or(artifact.node.started_at);
@@ -513,21 +574,47 @@ impl Runtime {
                         artifact.item.started_at =
                             item.started_at.clone().or(artifact.item.started_at);
                     }
-                    let observed = if let Some(plan) = artifact.plan {
-                        model::observe_plan(
+                    let observed = match (attempt_id, artifact.plan) {
+                        (Some(attempt), Some(plan)) => model::observe_plan(
                             &state.apply(&decision),
-                            attempt_id,
+                            attempt,
                             &source.session_id,
                             plan,
                             artifact.item,
-                        )?
-                    } else {
-                        model::observe_item(
+                        )?,
+                        (Some(attempt), None) => model::observe_item(
                             &state.apply(&decision),
-                            attempt_id,
+                            attempt,
                             &source.session_id,
                             artifact.item,
-                        )?
+                        )?,
+                        (None, Some(plan)) => {
+                            let turn = artifact
+                                .item
+                                .provider_turn_id
+                                .clone()
+                                .ok_or("native plan has no turn")?;
+                            model::observe_external_plan(
+                                &state.apply(&decision),
+                                &turn,
+                                native_thread_id,
+                                plan,
+                                artifact.item,
+                            )?
+                        }
+                        (None, None) => {
+                            let turn = artifact
+                                .item
+                                .provider_turn_id
+                                .clone()
+                                .ok_or("native item has no turn")?;
+                            model::observe_external_item(
+                                &state.apply(&decision),
+                                &turn,
+                                native_thread_id,
+                                artifact.item,
+                            )?
+                        }
                     };
                     if !observed.changes.is_empty() {
                         decision.changes.push(model::Change::Node(artifact.node));
@@ -542,7 +629,8 @@ impl Runtime {
                 continue;
             };
             source.replace_text(&item.id.clone().into());
-            if item.status == model::TurnItemStatus::Completed
+            if let Some(attempt_id) = attempt_id
+                && item.status == model::TurnItemStatus::Completed
                 && let model::TurnItemBody::DynamicTool {
                     tool_name: Some(name),
                     output: Some(output),
@@ -563,25 +651,58 @@ impl Runtime {
                 );
             }
 
-            if let model::TurnItemBody::CommandExecution {
-                output: Some(output),
-                ..
-            } = &item.body
-            {
-                service.inner.conversation.outputs.write(
-                    Uuid::parse_str(attempt_id).map_err(|error| error.to_string())?,
-                    records::OutputKey {
-                        session: source.target.clone(),
-                        item: item.id.into(),
-                    },
-                    output::Change::Replace {
-                        text: output,
-                        truncated: false,
-                    },
-                )?;
+            if let model::TurnItemBody::CommandExecution { output, .. } = &item.body {
+                let key = records::OutputKey {
+                    session: source.target.clone(),
+                    item: item.id.clone().into(),
+                };
+                if let Some((raw, truncated)) = staged_output.remove(&item.id) {
+                    let scope = attempt_id
+                        .or(item.provider_turn_id.as_deref())
+                        .ok_or("command output has no execution scope")?;
+                    service.inner.conversation.outputs.write(
+                        scope,
+                        key,
+                        output::Change::Replace {
+                            text: &raw,
+                            truncated,
+                        },
+                    )?;
+                } else {
+                    service
+                        .inner
+                        .conversation
+                        .outputs
+                        .finish(&key, output.as_deref().unwrap_or_default());
+                }
             }
         }
         Ok(())
+    }
+
+    pub(in crate::host_rpc::runtime) fn finish_output_events(
+        service: &HostRpcService,
+        events: &[model::StoredEvent],
+    ) {
+        for event in events {
+            let model::Change::TurnItem(item) = &event.event.change else {
+                continue;
+            };
+            if item.status.is_terminal()
+                && let model::TurnItemBody::CommandExecution { output, .. } = &item.body
+            {
+                service.inner.conversation.outputs.finish(
+                    &records::OutputKey {
+                        session: SessionRef {
+                            provider: None,
+                            id: event.event.thread_id.clone(),
+                        },
+                        item: item.id.clone().into(),
+                    },
+                    output.as_deref().unwrap_or_default(),
+                );
+            }
+        }
     }
 
     fn project_generated_images(

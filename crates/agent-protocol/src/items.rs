@@ -193,6 +193,10 @@ pub enum FileChangeKind {
 pub struct SubagentState {
     pub session: SessionRef,
     pub status: TurnStatus,
+    /// Preserve distinctions such as pendingInit/shutdown that the display's
+    /// turn status cannot express. Canonical task status uses the SDK fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_status: Option<String>,
     pub message: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

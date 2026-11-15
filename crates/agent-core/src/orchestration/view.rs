@@ -44,7 +44,18 @@ pub fn project(
             .supports_model_switch_in_session;
     }
     let provider = selected;
-    let cwd = projection.thread.worktree_path.as_deref().or(project_root);
+    let cwd = projection
+        .thread
+        .worktree_path
+        .as_deref()
+        .or(project_root)
+        .or_else(|| {
+            projection
+                .thread
+                .workspace_launch
+                .as_ref()
+                .map(|launch| launch.project_cwd.as_str())
+        });
     if identity.application_id() != projection.thread.id {
         return Err("conversation identity changed".into());
     }
@@ -75,17 +86,53 @@ pub fn project(
                     } else {
                         session::PreparationStatus::Sending
                     },
-                    stage: if run.status == model::RunStatus::Preparing {
-                        session::PreparationStage::Workspace
-                    } else {
-                        session::PreparationStage::Provider
-                    },
+                    stage: preparation_stage(projection, run),
                 });
                 if uncertain {
                     session::SubmissionDelivery::Unknown
                 } else {
                     session::SubmissionDelivery::Sending
                 }
+            }
+            model::RunStatus::Failed | model::RunStatus::Cancelled
+                if item.status != model::TurnItemStatus::Cancelled
+                    && projection
+                        .attempts
+                        .iter()
+                        .find(|attempt| Some(&attempt.id) == run.active_attempt_id.as_ref())
+                        .is_some_and(|attempt| {
+                            attempt.provider_turn_id.is_none() && attempt.started_at.is_none()
+                        })
+                    && !projection.provider_turns.iter().any(|turn| {
+                        projection.attempts.iter().any(|attempt| {
+                            attempt.run_id == run.id
+                                && turn.run_attempt_id.as_ref() == Some(&attempt.id)
+                        })
+                    }) =>
+            {
+                let failure = projection.turn_items.iter().find_map(|item| {
+                    if item.run_id.as_ref() != Some(&run.id)
+                        || item.status != model::TurnItemStatus::Failed
+                    {
+                        return None;
+                    }
+                    match &item.body {
+                        model::TurnItemBody::Error { failure, .. } => Some(failure_view(failure)),
+                        _ => None,
+                    }
+                });
+                preparations.push(session::SessionPreparation {
+                    submission,
+                    status: if run.status == model::RunStatus::Cancelled {
+                        session::PreparationStatus::Interrupted
+                    } else {
+                        session::PreparationStatus::Failed {
+                            error: failure.unwrap_or_default(),
+                        }
+                    },
+                    stage: preparation_stage(projection, run),
+                });
+                session::SubmissionDelivery::Accepted { turn_id: None }
             }
             _ => session::SubmissionDelivery::Accepted {
                 turn_id: Some(run.id.clone().into()),
@@ -133,21 +180,28 @@ pub fn project(
             )
         })
         .max_by_key(|run| run.ordinal);
-    let background: Vec<_> = projection
-        .provider_threads
-        .iter()
-        .flat_map(|thread| &thread.pending_background_tasks)
-        .map(|task| display::BackgroundTask {
-            id: task.task_id.clone(),
-            kind: match task.kind.as_str() {
-                "command" => display::BackgroundTaskKind::Command,
-                "subagent" => display::BackgroundTaskKind::Subagent,
-                "monitor" => display::BackgroundTaskKind::Monitor,
-                _ => display::BackgroundTaskKind::BackgroundTask,
-            },
-            description: task.description.clone().or_else(|| task.command.clone()),
+    let native_status = projection
+        .thread
+        .active_provider_thread_id
+        .as_deref()
+        .and_then(|id| {
+            projection
+                .provider_threads
+                .iter()
+                .find(|thread| thread.id == id)
         })
-        .collect();
+        .filter(|thread| {
+            thread.app_thread_id.as_deref() == Some(&projection.thread.id)
+                && thread.provider_instance_id == projection.thread.provider_instance_id
+                && thread.driver == provider.driver()
+        })
+        .map(|thread| thread.status);
+    let background = model::shell::background_tasks(
+        projection
+            .provider_threads
+            .iter()
+            .flat_map(|thread| &thread.pending_background_tasks),
+    );
     let selection = &projection.thread.model_selection;
     Ok(models::ThreadResponse {
         thread: models::Thread {
@@ -156,13 +210,20 @@ pub fn project(
             name: Some(projection.thread.title.clone()),
             cwd: cwd.map(str::to_owned),
             git_branch: projection.thread.branch.clone(),
-            parent_id: projection
-                .thread
-                .lineage
-                .parent_thread_id
-                .as_ref()
-                .map(|id| session::SessionRef::new(None, id.clone()).map_err(str::to_owned))
-                .transpose()?,
+            parent_id: if model::shell::is_listed_lineage(
+                projection.thread.lineage.relationship_to_parent.as_deref(),
+                projection.thread.lineage.side_chat,
+            ) {
+                None
+            } else {
+                projection
+                    .thread
+                    .lineage
+                    .parent_thread_id
+                    .as_deref()
+                    .map(model::shell::public_session_ref)
+                    .transpose()?
+            },
             project_id: projection
                 .thread
                 .project_id
@@ -175,14 +236,10 @@ pub fn project(
             ),
             capabilities: Some(capabilities),
             steerable: capabilities.steer && active.is_some(),
-            status: active
-                .map(|run| match run.status {
-                    model::RunStatus::Preparing | model::RunStatus::Starting => {
-                        display::SessionStatus::Preparing
-                    }
-                    _ => display::SessionStatus::Running,
-                })
-                .unwrap_or(display::SessionStatus::Idle),
+            status: agent_protocol::orchestration::shell::task_status(
+                active.map(|run| run.status),
+                native_status,
+            ),
             updated_at: millis(Some(&projection.updated_at)).map(|at| at as f64 / 1000.0),
             turns: Some(turns),
             background,
@@ -190,6 +247,12 @@ pub fn project(
             preparations,
             submissions,
             requests: request_views(projection)?,
+            workspace_setup: projection
+                .thread
+                .workspace_launch
+                .as_ref()
+                .filter(|workspace| workspace.visible)
+                .and_then(|workspace| workspace.setup.clone()),
             history_has_more: Some(snapshot.has_more_history),
             history_cursor: snapshot.history_cursor.clone(),
             history_read_state: Some(session::HistoryReadState::new(
@@ -213,6 +276,44 @@ pub fn project(
     })
 }
 
+fn preparation_stage(projection: &ThreadProjection, run: &model::Run) -> session::PreparationStage {
+    use agent_protocol::workspace::{SetupStageId, SetupStageStatus};
+    if run.workspace_preparation.is_none() || run.status == model::RunStatus::Starting {
+        return session::PreparationStage::Provider;
+    }
+    let Some(setup) = run
+        .workspace_preparation
+        .as_ref()
+        .and(
+            projection
+                .thread
+                .workspace_launch
+                .as_ref()
+                .filter(|workspace| workspace.run_id.as_ref() == Some(&run.id)),
+        )
+        .and_then(|workspace| workspace.setup.as_ref())
+    else {
+        return session::PreparationStage::Workspace;
+    };
+    for (id, stage) in [
+        (SetupStageId::Agent, session::PreparationStage::Provider),
+        (
+            SetupStageId::SetupScript,
+            session::PreparationStage::SetupScript,
+        ),
+        (SetupStageId::Checkout, session::PreparationStage::Worktree),
+    ] {
+        if setup
+            .stages
+            .iter()
+            .any(|saved| saved.id == id && saved.status != SetupStageStatus::Pending)
+        {
+            return stage;
+        }
+    }
+    session::PreparationStage::Worktree
+}
+
 fn millis(value: Option<&str>) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value?)
         .ok()?
@@ -230,15 +331,10 @@ fn driver_kind(driver: &str) -> Result<session::ProviderKind, String> {
     }
 }
 
-fn timeline(
-    projection: &ThreadProjection,
-    provider: session::ProviderKind,
-    details: &BTreeMap<(String, String), Arc<model::TurnItem>>,
-    can_fork: bool,
-) -> Result<Vec<Arc<models::Turn>>, String> {
-    let mut turns: Vec<Arc<models::Turn>> = Vec::new();
+fn timeline_groups(items: &[ProjectedTurnItem]) -> Vec<Vec<&ProjectedTurnItem>> {
+    let mut groups: Vec<Vec<&ProjectedTurnItem>> = Vec::new();
     let mut previous = None;
-    for row in &projection.visible_turn_items {
+    for row in items {
         let key = (
             row.source_thread_id.as_str(),
             row.item
@@ -250,85 +346,223 @@ fn timeline(
             && row.item.provider_turn_id.is_none()
             && matches!(row.item.body, model::TurnItemBody::UserMessage { .. });
         if previous != Some(key) || imported_input {
-            let local = row.visibility == Visibility::Local;
-            let run = local
+            groups.push(Vec::new());
+        }
+        groups
+            .last_mut()
+            .expect("row allocated its group")
+            .push(row);
+        previous = Some(key);
+    }
+    groups
+}
+
+fn group_id(row: &ProjectedTurnItem) -> String {
+    row.item
+        .run_id
+        .clone()
+        .or_else(|| row.item.provider_turn_id.clone())
+        .unwrap_or_else(|| format!("history:{}:{}", row.source_thread_id, row.source_item_id))
+}
+
+pub(crate) fn fork_point(
+    projection: &ThreadProjection,
+    turn: &agent_protocol::ids::TurnId,
+) -> Option<(
+    session::SessionRef,
+    agent_protocol::conversation::records::ForkPoint,
+)> {
+    use agent_protocol::conversation::records::ForkPoint;
+    let group = timeline_groups(&projection.visible_turn_items)
+        .into_iter()
+        .find(|group| group_id(group[0]) == turn.as_str())?;
+    let first = group[0];
+    if first.visibility == Visibility::Synthetic {
+        return None;
+    }
+    let source = model::shell::public_session_ref(&first.source_thread_id).ok()?;
+    if let Some(run_id) = &first.item.run_id {
+        return Some((
+            source,
+            ForkPoint::Run {
+                run_id: run_id.clone(),
+            },
+        ));
+    }
+    if let Some(provider_turn_id) = &first.item.provider_turn_id {
+        return Some((
+            source,
+            ForkPoint::ProviderTurn {
+                provider_turn_id: provider_turn_id.clone(),
+            },
+        ));
+    }
+    (first.visibility == Visibility::Inherited
+        || projection.thread.history_origin == Some(model::ThreadHistoryOrigin::V1Import))
+    .then(|| {
+        (
+            source,
+            ForkPoint::TurnItem {
+                turn_item_id: group.last().expect("nonempty group").source_item_id.clone(),
+            },
+        )
+    })
+}
+
+fn timeline(
+    projection: &ThreadProjection,
+    provider: session::ProviderKind,
+    details: &BTreeMap<(String, String), Arc<model::TurnItem>>,
+    can_fork: bool,
+) -> Result<Vec<Arc<models::Turn>>, String> {
+    let mut turns: Vec<Arc<models::Turn>> = Vec::new();
+    let native_by_id = projection
+        .provider_turns
+        .iter()
+        .map(|turn| (turn.id.as_str(), turn))
+        .collect::<BTreeMap<_, _>>();
+    for group in timeline_groups(&projection.visible_turn_items) {
+        let row = group[0];
+        let local = row.visibility == Visibility::Local;
+        let run = local
+            .then(|| {
+                projection
+                    .runs
+                    .iter()
+                    .find(|run| Some(run.id.as_str()) == row.item.run_id.as_deref())
+            })
+            .flatten();
+        let native_turns = group
+            .iter()
+            .filter_map(|row| row.item.provider_turn_id.as_deref())
+            .filter_map(|id| native_by_id.get(id).copied())
+            .collect::<Vec<_>>();
+        let native_turn = native_turns.iter().min_by_key(|turn| turn.ordinal).copied();
+        let started_at = run
+            .and_then(|run| run.started_at.as_deref())
+            .or_else(|| native_turn.and_then(|turn| turn.started_at.as_deref()));
+        let completed_at = run.and_then(|run| run.completed_at.as_deref()).or_else(|| {
+            // A successful app run settles after its root checkpoint. Other
+            // late items (images, commands and child results) do not extend it.
+            let checkpoint = native_turns
+                .iter()
+                .all(|turn| turn.status == model::ProviderTurnStatus::Completed)
                 .then(|| {
-                    projection
-                        .runs
+                    group
                         .iter()
-                        .find(|run| Some(run.id.as_str()) == row.item.run_id.as_deref())
+                        .filter_map(|row| {
+                            matches!(row.item.body, model::TurnItemBody::Checkpoint { .. })
+                                .then_some(row.item.completed_at.as_deref())
+                                .flatten()
+                        })
+                        .max()
                 })
                 .flatten();
-            turns.push(Arc::new(models::Turn {
-                id: row
-                    .item
-                    .run_id
-                    .clone()
-                    .or_else(|| row.item.provider_turn_id.clone())
-                    .unwrap_or_else(|| {
-                        format!("history:{}:{}", row.source_thread_id, row.source_item_id)
-                    })
-                    .into(),
-                provider: if local {
-                    Some(
-                        run.and_then(|run| run.provider_thread_id.as_ref())
-                            .and_then(|id| {
-                                projection
-                                    .provider_threads
-                                    .iter()
-                                    .find(|thread| &thread.id == id)
-                            })
-                            .map(|thread| driver_kind(&thread.driver))
-                            .transpose()?
-                            .unwrap_or(provider),
-                    )
-                } else {
+            native_turns
+                .iter()
+                .filter_map(|turn| turn.completed_at.as_deref())
+                .chain(checkpoint)
+                .max()
+        });
+        turns.push(Arc::new(models::Turn {
+            id: group_id(row).into(),
+            provider: if local {
+                Some(
                     row.item
-                        .native_item_ref
+                        .provider_thread_id
                         .as_ref()
-                        .and_then(|reference| driver_kind(&reference.driver).ok())
+                        .and_then(|id| {
+                            projection
+                                .provider_threads
+                                .iter()
+                                .find(|thread| &thread.id == id)
+                        })
+                        .map(|thread| driver_kind(&thread.driver))
+                        .transpose()?
+                        .unwrap_or(provider),
+                )
+            } else {
+                native_turn
+                    .and_then(|turn| turn.native_turn_ref.as_ref())
+                    .and_then(|reference| driver_kind(&reference.driver).ok())
+                    .or_else(|| {
+                        row.item
+                            .native_item_ref
+                            .as_ref()
+                            .and_then(|reference| driver_kind(&reference.driver).ok())
+                    })
+            },
+            supports_fork: Some(
+                row.visibility == Visibility::Inherited
+                    || (local
+                        && can_fork
+                        && (run.is_some()
+                            || native_turn.is_some()
+                            || projection.thread.history_origin
+                                == Some(model::ThreadHistoryOrigin::V1Import))),
+            ),
+            status: run
+                .map(|run| run_status(run.status))
+                .or_else(|| {
+                    native_turns
+                        .iter()
+                        .max_by_key(|turn| turn.ordinal)
+                        .map(|turn| match turn.status {
+                            model::ProviderTurnStatus::Pending
+                            | model::ProviderTurnStatus::Running => display::TurnStatus::Running,
+                            model::ProviderTurnStatus::Completed => display::TurnStatus::Completed,
+                            model::ProviderTurnStatus::Failed => display::TurnStatus::Failed,
+                            model::ProviderTurnStatus::Interrupted
+                            | model::ProviderTurnStatus::Cancelled => {
+                                display::TurnStatus::Interrupted
+                            }
+                        })
+                })
+                .unwrap_or(display::TurnStatus::Completed),
+            items: Some(Vec::new()),
+            started_at: millis(started_at).map(|at| at as f64 / 1000.0),
+            started_at_ms: millis(started_at),
+            completed_at_ms: millis(completed_at),
+            ..Default::default()
+        }));
+        for row in group {
+            let turn = Arc::make_mut(turns.last_mut().expect("row allocated its display group"));
+            if matches!(&row.item.body,model::TurnItemBody::UserMessage {input_intent,..} if input_intent=="queued_turn")
+            {
+                turn.queued = true;
+            }
+            if row.visibility != Visibility::Local
+                && native_turns.is_empty()
+                && matches!(
+                    row.item.status,
+                    model::TurnItemStatus::Running | model::TurnItemStatus::Waiting
+                )
+            {
+                turn.status = display::TurnStatus::Running;
+            }
+            if let model::TurnItemBody::Error { failure, .. } = &row.item.body
+                && row.item.status == model::TurnItemStatus::Failed
+                && failure.class != "delivery_uncertain"
+            {
+                turn.error = Some(failure_view(failure));
+            }
+            let detail = details
+                .get(&(row.source_thread_id.clone(), row.source_item_id.clone()))
+                .filter(|detail| same_detail_revision(&row.item, detail));
+            turn.items.as_mut().unwrap().extend(item_view(
+                detail.map_or(row.item.as_ref(), |detail| detail.as_ref()),
+                provider,
+                detail.is_some(),
+                match &row.item.body {
+                    model::TurnItemBody::Subagent { subagent_id, .. } => projection
+                        .subagents
+                        .iter()
+                        .find(|task| &task.id == subagent_id)
+                        .and_then(|task| task.model.as_deref()),
+                    _ => None,
                 },
-                supports_fork: Some(local && run.is_some() && can_fork),
-                status: run
-                    .map(|run| run_status(run.status))
-                    .unwrap_or(display::TurnStatus::Completed),
-                items: Some(Vec::new()),
-                started_at: run
-                    .and_then(|run| millis(run.started_at.as_deref()))
-                    .map(|at| at as f64 / 1000.0),
-                started_at_ms: run.and_then(|run| millis(run.started_at.as_deref())),
-                completed_at_ms: run.and_then(|run| millis(run.completed_at.as_deref())),
-                ..Default::default()
-            }));
-            previous = Some(key);
+            )?);
         }
-        let turn = Arc::make_mut(turns.last_mut().expect("row allocated its display group"));
-        if matches!(&row.item.body,model::TurnItemBody::UserMessage {input_intent,..} if input_intent=="queued_turn")
-        {
-            turn.queued = true;
-        }
-        if row.visibility != Visibility::Local
-            && matches!(
-                row.item.status,
-                model::TurnItemStatus::Running | model::TurnItemStatus::Waiting
-            )
-        {
-            turn.status = display::TurnStatus::Running;
-        }
-        if let model::TurnItemBody::Error { failure, .. } = &row.item.body
-            && row.item.status == model::TurnItemStatus::Failed
-            && failure.class != "delivery_uncertain"
-        {
-            turn.error = Some(failure_view(failure));
-        }
-        let detail = details
-            .get(&(row.source_thread_id.clone(), row.source_item_id.clone()))
-            .filter(|detail| same_detail_revision(&row.item, detail));
-        turn.items.as_mut().unwrap().extend(item_view(
-            detail.map_or(row.item.as_ref(), |detail| detail.as_ref()),
-            provider,
-            detail.is_some(),
-        )?);
     }
     turns.retain(|turn| {
         turn.items.as_ref().is_some_and(|items| !items.is_empty()) || turn.error.is_some()
@@ -545,7 +779,7 @@ fn request_views(
             || matches!(&item.body,model::TurnItemBody::DynamicTool {..}) && matches!(request.kind.as_str(),"dynamic_tool_call"|"mcp-elicitation"))).ok_or("pending request card is missing")?;
         let body=match &item.body {
             model::TurnItemBody::UserInputRequest {questions,..}=>requests::RequestBody::Question {questions:questions.iter().map(|question|requests::Question {
-                id:question.id.clone(),header:question.header.clone(),prompt:question.question.clone(),secret:false,
+                id:question.id.clone(),header:question.header.clone(),prompt:question.question.clone(),secret:question.is_secret.unwrap_or(false),
                 allow_free_text:question.allow_custom_answer.unwrap_or(true),multiple:question.multi_select.unwrap_or(false),
                 choices:question.options.iter().map(|option|requests::QuestionChoice {id:option.value.clone().unwrap_or_else(||option.label.clone()),label:option.label.clone(),description:option.description.clone()}).collect(),
             }).collect()},
@@ -558,11 +792,15 @@ fn request_views(
                 else {requests::RequestBody::Approval {kind:match request.kind.as_str() {"file-change"=>requests::ApprovalKind::FileChange,"file-read"=>requests::ApprovalKind::Tool,_=>requests::ApprovalKind::Command},description,details,choices}}
             },
             model::TurnItemBody::DynamicTool {tool_name,input,..} if request.kind=="dynamic_tool_call"=>requests::RequestBody::ToolExecution {tool:tool_name.clone().unwrap_or_else(||"tool".into()),namespace:None,arguments:input.clone()},
-            model::TurnItemBody::DynamicTool {..}=>return Err("elicitation prompt conversion is unavailable".into()),
+            model::TurnItemBody::DynamicTool {input,..}=>requests::RequestBody::Elicitation {
+                server:input.get("server").and_then(serde_json::Value::as_str).ok_or("elicitation server is missing")?.into(),
+                message:input.get("message").and_then(serde_json::Value::as_str).ok_or("elicitation message is missing")?.into(),
+                input:serde_json::from_value(input.get("input").cloned().ok_or("elicitation input is missing")?).map_err(|error|error.to_string())?,
+            },
             _=>unreachable!(),
         };
         let id:agent_protocol::ids::RequestId=request.id.clone().into();
-        Ok((id.clone(),Arc::new(requests::Request {id,target:requests::RequestTarget::Turn {turn_id:item.run_id.clone().unwrap_or_else(||format!("history:{}",item.thread_id)).into(),item_id:Some(item.id.clone().into())},delivery:session::RequestDelivery::Awaiting,body})))
+        Ok((id.clone(),Arc::new(requests::Request {id,target:match item.provider_turn_id.as_ref() {Some(id)=>requests::RequestTarget::Turn {turn_id:item.run_id.as_ref().unwrap_or(id).clone().into(),item_id:Some(item.id.clone().into())},None=>requests::RequestTarget::Session},delivery:session::RequestDelivery::Awaiting,body})))
     }).collect()
 }
 
@@ -570,6 +808,7 @@ fn item_view(
     item: &model::TurnItem,
     provider: session::ProviderKind,
     has_detail: bool,
+    subagent_model: Option<&str>,
 ) -> Result<Vec<Arc<items::Item>>, String> {
     use model::TurnItemBody as Body;
     let body = match &item.body {
@@ -618,7 +857,10 @@ fn item_view(
                     Some("monitor") => display::BackgroundTaskKind::Monitor,
                     _ => display::BackgroundTaskKind::BackgroundTask,
                 },
-                label: Some(summary.clone()),
+                label: source
+                    .get("label")
+                    .map(|label| label.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| Some(summary.clone())),
                 outcome: match outcome.as_str() {
                     "completed" => display::BackgroundOutcome::Completed,
                     "failed" => display::BackgroundOutcome::Failed,
@@ -626,7 +868,10 @@ fn item_view(
                     "updated" => display::BackgroundOutcome::Updated,
                     _ => display::BackgroundOutcome::Unknown,
                 },
-                exit_code: None,
+                exit_code: source
+                    .get("exitCode")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|value| value.try_into().ok()),
             }],
         },
         Body::CommandExecution {
@@ -712,25 +957,44 @@ fn item_view(
                 .join("\n"),
         },
         Body::Subagent {
-            origin,
             prompt,
             result,
             child_thread_id,
             ..
         } => items::ItemBody::Subagent {
-            tool: origin.clone(),
+            tool: String::new(),
             prompt: Some(prompt.clone()),
-            model: None,
+            model: subagent_model.map(str::to_owned),
             effort: None,
             sender: None,
             receivers: child_thread_id
-                .as_ref()
-                .map(|id| session::SessionRef::new(None, id.clone()).map_err(str::to_owned))
+                .as_deref()
+                .map(agent_protocol::orchestration::shell::public_session_ref)
                 .transpose()?
                 .into_iter()
                 .collect(),
-            states: Vec::new(),
-            agent_id: child_thread_id.clone(),
+            states: child_thread_id
+                .as_deref()
+                .map(|child| {
+                    Ok::<_, String>(items::SubagentState {
+                        session: agent_protocol::orchestration::shell::public_session_ref(child)?,
+                        status: match item.status {
+                            model::TurnItemStatus::Completed => display::TurnStatus::Completed,
+                            model::TurnItemStatus::Failed => display::TurnStatus::Failed,
+                            model::TurnItemStatus::Cancelled
+                            | model::TurnItemStatus::Interrupted => {
+                                display::TurnStatus::Interrupted
+                            }
+                            _ => display::TurnStatus::Running,
+                        },
+                        native_status: None,
+                        message: result.clone(),
+                    })
+                })
+                .transpose()?
+                .into_iter()
+                .collect(),
+            agent_id: None,
             result: result.clone().map(serde_json::Value::String),
         },
         Body::DynamicTool {
@@ -742,20 +1006,28 @@ fn item_view(
             input,
             output,
             ..
-        } => items::ItemBody::ToolCall {
-            kind: items::ToolKind::Dynamic,
-            tool: tool_name.clone().unwrap_or_else(|| "Tool".into()),
-            server: None,
-            namespace: None,
-            resource_uri: None,
-            plugin_id: None,
-            arguments: input.clone(),
-            result: output.clone(),
-            error: None,
-            content: Vec::new(),
-            success: None,
-            duration_ms: None,
-        },
+        } => {
+            let collaboration = matches!(
+                tool_name.as_deref(),
+                Some("codex.collaboration" | "claudeAgent.collaboration" | "dsh.collaboration")
+            )
+            .then(|| collaboration(input, output).ok())
+            .flatten();
+            collaboration.unwrap_or_else(|| items::ItemBody::ToolCall {
+                kind: items::ToolKind::Dynamic,
+                tool: tool_name.clone().unwrap_or_else(|| "Tool".into()),
+                server: None,
+                namespace: None,
+                resource_uri: None,
+                plugin_id: None,
+                arguments: input.clone(),
+                result: output.clone(),
+                error: None,
+                content: Vec::new(),
+                success: None,
+                duration_ms: None,
+            })
+        }
         Body::Compaction { .. } => items::ItemBody::Compaction {},
         Body::SystemNotice { message }
         | Body::RunInterruptRequest { message }
@@ -814,22 +1086,59 @@ fn item_view(
     Ok(views)
 }
 
-fn needs_detail(item: &model::TurnItem) -> bool {
-    match &item.body {
-        model::TurnItemBody::CommandExecution { output_omitted, .. } => {
-            *output_omitted == Some(true)
-        }
-        model::TurnItemBody::DynamicTool {
-            input,
-            output_omitted,
-            viewed_image_path,
-            ..
-        } => {
-            viewed_image_path.is_none()
-                && (*output_omitted == Some(true)
-                    || input.get("truncated") == Some(&serde_json::Value::Bool(true)))
-        }
-        model::TurnItemBody::FileChange { diff_str, .. } => diff_str.is_none(),
-        _ => false,
+fn collaboration(
+    input: &serde_json::Value,
+    output: &Option<serde_json::Value>,
+) -> Result<items::ItemBody, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Collaboration {
+        tool: String,
+        prompt: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        sender_thread_id: Option<String>,
+        receiver_thread_ids: Vec<String>,
+        agents_states: BTreeMap<String, State>,
+        agent_id: Option<String>,
     }
+    #[derive(serde::Deserialize)]
+    struct State {
+        status: display::TurnStatus,
+        message: Option<String>,
+    }
+    let value: Collaboration =
+        serde_json::from_value(input.clone()).map_err(|error| error.to_string())?;
+    let public = agent_protocol::orchestration::shell::public_session_ref;
+    Ok(items::ItemBody::Subagent {
+        tool: value.tool,
+        prompt: value.prompt,
+        model: value.model,
+        effort: value.effort,
+        sender: value.sender_thread_id.as_deref().map(public).transpose()?,
+        receivers: value
+            .receiver_thread_ids
+            .iter()
+            .map(|id| public(id))
+            .collect::<Result<_, _>>()?,
+        states: value
+            .agents_states
+            .into_iter()
+            .map(|(id, state)| {
+                Ok(items::SubagentState {
+                    session: public(&id)?,
+                    status: state.status,
+                    native_status: None,
+                    message: state.message,
+                })
+            })
+            .collect::<Result<_, String>>()?,
+        agent_id: value.agent_id,
+        result: output.clone(),
+    })
+}
+
+fn needs_detail(item: &model::TurnItem) -> bool {
+    item.body.has_omitted_detail()
+        || matches!(&item.body,model::TurnItemBody::DynamicTool {input,viewed_image_path:None,..} if input.get("truncated")==Some(&serde_json::Value::Bool(true)))
 }

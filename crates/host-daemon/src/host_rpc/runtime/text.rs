@@ -8,8 +8,15 @@ use tokio::{
 };
 
 #[derive(Clone)]
+pub(super) enum Owner {
+    Attempt(Uuid),
+    NativeTurn { id: String, native_id: String },
+}
+
+#[derive(Clone)]
 struct Buffered {
-    attempt: Attempt,
+    owner: Owner,
+    native_turn_id: String,
     text: String,
     delivered: usize,
     changed: Instant,
@@ -103,18 +110,18 @@ impl resources::Source {
 }
 
 impl Runtime {
-    pub(super) async fn flush_text(
+    pub(super) fn flush_text(
         service: &HostRpcService,
         source: &resources::Source,
     ) -> Result<(), String> {
         for ((id, field), entry) in source.take_text() {
             if entry.text.len() != entry.delivered {
-                Self::publish_text(service, source, &id, field, &entry).await?;
+                Self::publish_text(service, source, &id, field, &entry)?;
             }
         }
         Ok(())
     }
-    async fn publish_text(
+    fn publish_text(
         service: &HostRpcService,
         source: &resources::Source,
         id: &ItemId,
@@ -140,50 +147,24 @@ impl Runtime {
                     &source.target.id,
                     &[item.id.clone()],
                     &item.updated_at.clone(),
-                    |state| {
-                        agent_protocol::orchestration::observe_item(
+                    |state| match &entry.owner {
+                        Owner::Attempt(attempt) => agent_protocol::orchestration::observe_item(
                             state,
-                            &entry.attempt.id.to_string(),
+                            &attempt.to_string(),
                             &source.session_id,
                             item,
-                        )
+                        ),
+                        Owner::NativeTurn {
+                            id: turn,
+                            native_id,
+                        } => agent_protocol::orchestration::observe_external_item(
+                            state, turn, native_id, item,
+                        ),
                     },
                 )
                 .map(|_| ());
         }
-        let Some(mut item) = service
-            .inner
-            .conversation
-            .storage
-            .item(&source.target, id)?
-        else {
-            return Ok(());
-        };
-        *agent_protocol::session::text_part(&mut item.body, field)
-            .map_err(|error| error.to_string())? = entry.text.clone();
-        let native_turn = service
-            .inner
-            .conversation
-            .storage
-            .execution(&source.target, entry.attempt.id)?
-            .and_then(|execution| execution.native_turn);
-        Self::event(
-            service,
-            &source.target,
-            Event::Provider {
-                attempt: entry.attempt.id,
-                native_turn,
-                native_items: Vec::new(),
-                observation: Observation::Item {
-                    deferred: item.deferred,
-                    id: item.id,
-                    status: item.status,
-                    body: item.body,
-                },
-            },
-        )
-        .await
-        .map(|_| ())
+        Ok(())
     }
 }
 
@@ -256,29 +237,99 @@ fn paragraph_boundary(text: &str) -> usize {
 }
 
 impl Runtime {
+    /// Existing buffers already own their immutable callback scope and seed.
+    /// Recheck ownership at publication, without a SQL read for every character.
+    pub(in crate::host_rpc::runtime) async fn append_buffered_change(
+        service: &HostRpcService,
+        event: &AgentChange,
+        execution: Option<Uuid>,
+    ) -> Result<bool, String> {
+        let AgentChange::Session {
+            session: native,
+            change:
+                SessionChange::Text {
+                    turn_id,
+                    item_id,
+                    field,
+                    delta,
+                },
+        } = event
+        else {
+            return Ok(false);
+        };
+        if !matches!(
+            field,
+            TextField::AssistantText
+                | TextField::ReasoningSummary { .. }
+                | TextField::ReasoningContent { .. }
+        ) {
+            return Ok(false);
+        }
+        let source = service
+            .inner
+            .conversation
+            .resources
+            .lock()
+            .unwrap()
+            .get(native)
+            .cloned();
+        let Some(source) = source else {
+            return Ok(false);
+        };
+        let _updates = source.updates.lock().await;
+        let (turn, item, field) = (turn_id.as_str(), item_id.as_str(), *field);
+        let id = super::native::text_item_id(
+            native.native_provider().map_err(str::to_owned)?,
+            turn,
+            item,
+            field,
+        )
+        .into();
+        let owner = source
+            .text
+            .lock()
+            .unwrap()
+            .pending
+            .get(&(id, field))
+            .filter(|entry| {
+                entry.native_turn_id == turn
+                    && match &entry.owner {
+                        Owner::Attempt(attempt) => execution == Some(*attempt),
+                        Owner::NativeTurn { native_id, .. } => native_id == &native.id,
+                    }
+            })
+            .map(|entry| entry.owner.clone());
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        Self::text_delta(service, &source, native, owner, turn, item, field, delta)?;
+        Ok(true)
+    }
+
     pub(super) fn text_delta(
         service: &HostRpcService,
         source: &Arc<resources::Source>,
-        attempt: &Attempt,
-        native: &str,
+        native: &SessionRef,
+        owner: Owner,
+        turn: &str,
+        item: &str,
         field: TextField,
         delta: &str,
     ) -> Result<(), String> {
-        let canonical = service
-            .inner
-            .conversation
-            .storage
-            .attempt_owner(&attempt.id.to_string())?
-            .is_some();
-        let id = if canonical {
-            super::native::text_item_id(attempt.provider, attempt.turn.as_str(), native, field)
-                .into()
-        } else {
-            decision::provider_item_id(attempt.id, native)
-        };
+        let id = super::native::text_item_id(
+            native.native_provider().map_err(str::to_owned)?,
+            turn,
+            item,
+            field,
+        )
+        .into();
         if field == TextField::CommandOutput {
+            let scope = match &owner {
+                Owner::Attempt(attempt) => attempt.to_string(),
+                Owner::NativeTurn { id, .. } => id.clone(),
+            };
             return service.inner.conversation.outputs.write(
-                attempt.id,
+                &scope,
                 records::OutputKey {
                     session: source.target.clone(),
                     item: id,
@@ -286,41 +337,42 @@ impl Runtime {
                 super::output::Change::Append(delta),
             );
         }
-        if canonical && field == TextField::FileOutput {
+        if field == TextField::FileOutput {
             return Ok(());
         }
+        Self::buffer_delta(service, source, native, owner, turn, id, field, delta)
+    }
+
+    fn buffer_delta(
+        service: &HostRpcService,
+        source: &Arc<resources::Source>,
+        native: &SessionRef,
+        owner: Owner,
+        turn: &str,
+        id: ItemId,
+        field: TextField,
+        delta: &str,
+    ) -> Result<(), String> {
         // The resource update lock serializes producers and its flush worker.
         let key = (id, field);
         let pending = source.text.lock().unwrap().pending.remove(&key);
         let mut entry = match pending {
             Some(entry) => entry,
             None => {
-                let seed = if canonical {
-                    service
-                        .inner
-                        .conversation
-                        .storage
-                        .thread_item(&source.target, key.0.as_str())?
-                        .and_then(|mut item| {
-                            super::native::text_part(&mut item.body, field).map(std::mem::take)
-                        })
-                } else {
-                    service
-                        .inner
-                        .conversation
-                        .storage
-                        .item(&source.target, &key.0)?
-                        .and_then(|mut item| {
-                            agent_protocol::session::text_part(&mut item.body, field)
-                                .ok()
-                                .map(std::mem::take)
-                        })
-                };
+                let seed = service
+                    .inner
+                    .conversation
+                    .storage
+                    .thread_item(&source.target, key.0.as_str())?
+                    .and_then(|mut item| {
+                        super::native::text_part(&mut item.body, field).map(std::mem::take)
+                    });
                 let Some(text) = seed else {
                     return Ok(());
                 };
                 Buffered {
-                    attempt: attempt.clone(),
+                    owner,
+                    native_turn_id: turn.into(),
                     delivered: text.len(),
                     text,
                     changed: Instant::now(),
@@ -341,8 +393,7 @@ impl Runtime {
         let wake = text.wake.clone();
         let owner = Arc::downgrade(&service.inner);
         let source = source.clone();
-        let native =
-            SessionRef::new(attempt.provider, attempt.source.clone()).map_err(str::to_owned)?;
+        let native = native.clone();
         tokio::spawn(async move {
             loop {
                 let deadline = {
@@ -366,9 +417,7 @@ impl Runtime {
                     break;
                 };
                 for ((id, field), entry) in ready {
-                    if let Err(error) =
-                        Self::publish_text(&service, &source, &id, field, &entry).await
-                    {
+                    if let Err(error) = Self::publish_text(&service, &source, &id, field, &entry) {
                         tracing::error!(target: "agent", operation="conversation.text", %error);
                         let mut text = source.text.lock().unwrap();
                         text.worker = Some(token);
@@ -412,12 +461,8 @@ mod tests {
 
     fn entry(text: &str) -> Buffered {
         let mut entry = Buffered {
-            attempt: Attempt {
-                id: Uuid::nil(),
-                turn: "turn".into(),
-                provider: ProviderKind::Codex,
-                source: "source".into(),
-            },
+            native_turn_id: "turn".into(),
+            owner: Owner::Attempt(Uuid::nil()),
             text: String::new(),
             delivered: 0,
             changed: Instant::now(),

@@ -5,7 +5,7 @@ use super::*;
 use agent_protocol::orchestration::{self as model, projection::*};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 struct IndexedItem {
     source_thread_id: String,
@@ -13,6 +13,7 @@ struct IndexedItem {
     kind: String,
     input_intent: Option<String>,
     created_by: Option<String>,
+    provider_turn_id: Option<String>,
     position: u64,
     visibility: Visibility,
     synthetic: Option<Arc<model::TurnItem>>,
@@ -27,20 +28,21 @@ fn local_items(
     connection: &Connection,
     thread_id: &str,
     inherited: Option<&[String]>,
-    origin: Option<model::ThreadHistoryOrigin>,
+    cutoff: Option<u64>,
 ) -> Result<Vec<IndexedItem>, ReadError> {
     let inherited_json = inherited
         .map(serde_json::to_string)
         .transpose()
         .map_err(ReadError::from)?;
     let mut query=connection.prepare("SELECT i.turn_item_id,i.type,
-        json_extract(i.payload_json,'$.inputIntent'),json_extract(i.payload_json,'$.createdBy')
+        i.input_intent,i.created_by,i.provider_turn_id
         FROM orchestration_v2_projection_turn_items i
         LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=i.run_id AND r.thread_id=i.thread_id
         WHERE i.thread_id=?1
-          AND (?2 IS NULL OR r.run_id IN (SELECT value FROM json_each(?2)) OR (i.run_id IS NULL AND ?3))
+          AND (?2 IS NULL OR r.run_id IN (SELECT value FROM json_each(?2)) OR i.run_id IS NULL)
+          AND (?3 IS NULL OR i.ordinal<=?3)
           AND (r.status IS NULL OR r.status!='rolled_back' OR ?2 IS NOT NULL)
-          AND NOT(i.type='user_message' AND json_extract(i.payload_json,'$.inputIntent')='queued_turn'
+          AND NOT(i.type='user_message' AND i.input_intent='queued_turn'
             AND coalesce((r.status IN ('queued','cancelled') OR (r.status='rolled_back' AND EXISTS(
               SELECT 1 FROM orchestration_v2_projection_run_attempts a WHERE a.run_id=r.run_id AND a.status='cancelled'))),0))
           AND NOT(i.type='run_interrupt_result' AND EXISTS(
@@ -54,7 +56,7 @@ fn local_items(
             params![
                 thread_id,
                 inherited_json,
-                origin == Some(model::ThreadHistoryOrigin::V1Import)
+                cutoff.map(integer).transpose().map_err(ReadError::from)?
             ],
             |row| {
                 Ok((
@@ -62,18 +64,21 @@ fn local_items(
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .map_err(ReadError::from)?;
     rows.map(|row| {
-        let (id, kind, input_intent, created_by) = row.map_err(ReadError::from)?;
+        let (id, kind, input_intent, created_by, provider_turn_id) =
+            row.map_err(ReadError::from)?;
         Ok(IndexedItem {
             source_thread_id: thread_id.into(),
             id,
             kind,
             input_intent,
             created_by,
+            provider_turn_id,
             position: 0,
             visibility: if inherited.is_some() {
                 Visibility::Inherited
@@ -119,36 +124,83 @@ fn read(
                         item
                     }),
             );
+            let cutoff=connection.query_row("SELECT max(ordinal) FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND run_id=?2",params![source_id,run.id],|row|row.get::<_,Option<i64>>(0)).map_err(ReadError::from)?
+                .ok_or("fork source run has no items")?.try_into().map_err(failure)?;
             items.extend(local_items(
                 connection,
                 source_id,
                 Some(&retained),
-                source.state.thread.history_origin,
+                Some(cutoff),
             )?);
         }
-        let marker = Arc::new(fork_marker(&state.thread, source_id, run_id));
-        items.push(IndexedItem {
-            source_thread_id: source_id.clone(),
-            id: marker.id.clone(),
-            kind: "fork".into(),
-            input_intent: None,
-            created_by: None,
-            position: 0,
-            visibility: Visibility::Synthetic,
-            synthetic: Some(marker),
-        });
+        items.push(fork_marker(&state.thread, source_id));
+    } else if state.thread.lineage.side_chat != Some(true)
+        && matches!(
+            state.thread.forked_from,
+            Some(
+                model::ThreadForkSource::ProviderThread { .. }
+                    | model::ThreadForkSource::Node { .. }
+            )
+        )
+        && let Some(transfer) = state.context_transfers.values().find(|transfer| {
+            transfer.kind == model::TransferType::Fork
+                && transfer.target_thread_id == state.thread.id
+        })
+        && !ancestors.contains(&transfer.source_thread_id)
+        && projections::read::<model::Thread>(connection, &transfer.source_thread_id)?.is_some()
+    {
+        let source_id = &transfer.source_thread_id;
+        let source = read(connection, source_id, ancestors)?;
+        let item = transfer
+            .source_point
+            .turn_item_id
+            .as_ref()
+            .ok_or("native fork has no item boundary")?;
+        let cutoff=connection.query_row("SELECT ordinal FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND turn_item_id=?2",params![source_id,item],|row|row.get::<_,i64>(0)).map_err(ReadError::from)?.try_into().map_err(failure)?;
+        let retained = inherited_run_ids(
+            source.state.runs.values(),
+            u64::MAX,
+            &state.thread.created_at,
+        )?;
+        items.extend(
+            source
+                .items
+                .into_iter()
+                .filter(|item| item.source_thread_id != *source_id || item.kind == "fork")
+                .map(|mut item| {
+                    item.visibility = Visibility::Inherited;
+                    item
+                }),
+        );
+        items.extend(local_items(
+            connection,
+            source_id,
+            Some(&retained),
+            Some(cutoff),
+        )?);
+        items.push(fork_marker(&state.thread, source_id));
     }
-    items.extend(local_items(
-        connection,
-        thread_id,
-        None,
-        state.thread.history_origin,
-    )?);
+    items.extend(local_items(connection, thread_id, None, None)?);
     for (position, item) in items.iter_mut().enumerate() {
         item.position = position as u64;
     }
     ancestors.remove(thread_id);
     Ok(Timeline { state, items })
+}
+
+/// Sidebar counts use this same visibility index as history, without loading
+/// any message or tool body. Fork prefixes retain their original cutoff.
+pub(super) fn item_counts(
+    connection: &Connection,
+    thread_id: &str,
+) -> Result<(u64, u64), ReadError> {
+    let timeline = read(connection, thread_id, &mut BTreeSet::new())?;
+    let local = timeline
+        .items
+        .iter()
+        .filter(|item| item.visibility == Visibility::Local)
+        .count();
+    Ok((local as u64, timeline.items.len() as u64))
 }
 
 /// Portable context uses the same visible inherited timeline as the client,
@@ -187,10 +239,7 @@ pub(super) fn handoff_items(
         {
             continue;
         }
-        if run.is_none()
-            && (after > 0
-                || source.thread.history_origin != Some(model::ThreadHistoryOrigin::V1Import))
-        {
+        if run.is_none() && after > 0 {
             continue;
         }
         items.push((item, run.map(|run| run.status)));
@@ -283,12 +332,8 @@ fn inherited_run_ids<'a>(
         .collect()
 }
 
-fn fork_marker(
-    thread: &model::Thread,
-    source_thread_id: &str,
-    source_run_id: &str,
-) -> model::TurnItem {
-    model::TurnItem {
+fn fork_marker(thread: &model::Thread, source_thread_id: &str) -> IndexedItem {
+    let marker = Arc::new(model::TurnItem {
         id: format!("turn-item:fork:{}", thread.id),
         thread_id: thread.id.clone(),
         run_id: None,
@@ -304,12 +349,23 @@ fn fork_marker(
         completed_at: Some(thread.created_at.clone()),
         updated_at: thread.created_at.clone(),
         body: model::TurnItemBody::Fork {
-            source: model::ThreadForkSource::Run {
-                thread_id: source_thread_id.into(),
-                run_id: source_run_id.into(),
-            },
+            source: thread
+                .forked_from
+                .clone()
+                .expect("fork header has its source"),
             target_thread_id: thread.id.clone(),
         },
+    });
+    IndexedItem {
+        source_thread_id: source_thread_id.into(),
+        id: marker.id.clone(),
+        kind: "fork".into(),
+        input_intent: None,
+        created_by: None,
+        provider_turn_id: None,
+        position: 0,
+        visibility: Visibility::Synthetic,
+        synthetic: Some(marker),
     }
 }
 
@@ -602,6 +658,7 @@ pub(super) fn snapshot(connection: &Connection, thread_id: &str) -> Result<Threa
         .into_iter()
         .map(|item| Arc::new(model::wire::item(&item)))
         .collect();
+    inherited_turns(connection, &items, &mut projection)?;
     model::wire::projection(&mut projection);
     let reserved = serde_json::to_vec(&dependencies).map_err(failure)?.len();
     let control = serde_json::to_vec(&projection).map_err(failure)?.len();
@@ -681,6 +738,32 @@ pub(super) fn snapshot(connection: &Connection, thread_id: &str) -> Result<Threa
         has_more_history: page.has_more_history,
         latest_local_turn_ordinal,
     })
+}
+
+/// Inherited items keep the source turn's actual timing and outcome. These
+/// referenced native resources do not become application runs of the fork.
+fn inherited_turns(
+    connection: &Connection,
+    items: &[IndexedItem],
+    projection: &mut ThreadProjection,
+) -> Result<(), String> {
+    let references = items
+        .iter()
+        .filter(|row| row.visibility == Visibility::Inherited)
+        .filter_map(|row| {
+            row.provider_turn_id
+                .as_ref()
+                .map(|turn| (turn.clone(), row.source_thread_id.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (id, owner) in references {
+        let json=connection.query_row("SELECT payload_json FROM orchestration_v2_projection_provider_turns WHERE provider_turn_id=?1 AND thread_id=?2",params![id,owner],|row|row.get::<_,String>(0)).optional().map_err(failure)?.ok_or("inherited provider turn is missing or changed owner")?;
+        let turn = serde_json::from_str(&json).map_err(failure)?;
+        if !projection.provider_turns.iter().any(|turn| turn.id == id) {
+            projection.provider_turns.push(turn);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -97,53 +97,8 @@ impl HostRpcService {
                 }
             }
         }
-        self.reimport_transcripts(&result.imported).await?;
+        super::super::runtime::Runtime::import_project_threads(self, &result.imported).await?;
         Ok(result)
-    }
-
-    /// Importing a project again copies native history continued outside the
-    /// Host into its conversations' transcripts.
-    async fn reimport_transcripts(&self, roots: &[String]) -> Result<(), Failure> {
-        let projects = self.project_snapshot().await?;
-        let imported: HashSet<_> = roots
-            .iter()
-            .filter_map(|root| projects.project_for_workspace(root))
-            .collect();
-        let conversations = self
-            .inner
-            .conversation
-            .storage
-            .summaries("", true)
-            .map_err(super::super::runtime::storage_failure)?
-            .into_iter()
-            .filter_map(|thread| Some((thread.id?, thread.cwd)));
-        for (conversation, cwd) in conversations {
-            // Registered roots are canonical; a recorded cwd may not be.
-            let cwd = cwd.map(|cwd| {
-                dunce::canonicalize(&cwd)
-                    .ok()
-                    .and_then(|path| path.into_os_string().into_string().ok())
-                    .unwrap_or(cwd)
-            });
-            if cwd
-                .as_deref()
-                .and_then(|cwd| projects.project_for_workspace(cwd))
-                .is_some_and(|project| imported.contains(project))
-                && let Some(source) = self
-                    .inner
-                    .conversation
-                    .storage
-                    .active_source(&conversation)
-                    .map_err(super::super::runtime::storage_failure)?
-            {
-                self.inner
-                    .conversation
-                    .storage
-                    .queue_import(&conversation, &source, super::super::runtime::now())
-                    .map_err(super::super::runtime::storage_failure)?;
-            }
-        }
-        Ok(())
     }
 }
 

@@ -171,7 +171,7 @@ struct State {
     sessions: HashMap<SessionRef, uuid::Uuid>,
     sequence: u64,
     list_subscription: Option<uuid::Uuid>,
-    list_replica: Option<agent_protocol::conversation::records::Replica>,
+    list_shell: Option<agent_protocol::orchestration::shell::ShellSnapshot>,
     threads: HashMap<SessionRef, Value>,
     projections: HashMap<SessionRef, agent_protocol::orchestration::projection::ThreadSnapshot>,
 }
@@ -461,14 +461,14 @@ impl Writer {
             let opened: agent_protocol::conversation::records::OpenedList =
                 serde_json::from_value(value["result"].clone())?;
             let mut state = self.state.lock().unwrap();
-            let replica = agent_protocol::conversation::records::Replica::new(
-                agent_protocol::sync::Scope::List,
-                1,
-            )
-            .apply(1, opened.initial)
-            .map_err(std::io::Error::other)?;
-            state.sequence = state.sequence.max(replica.cursor().unwrap().sequence);
-            state.list_replica = Some(replica);
+            let mut shell = state.list_shell.take();
+            for item in opened.initial {
+                shell = agent_core::orchestration::shell::receive(shell.as_ref(), item, true)
+                    .map_err(std::io::Error::other)?;
+            }
+            let shell = shell.ok_or_else(|| std::io::Error::other("missing shell snapshot"))?;
+            state.sequence = state.sequence.max(shell.snapshot_sequence);
+            state.list_shell = Some(shell);
             state.list_subscription = Some(subscription);
             Some(subscription)
         } else if matches!(
@@ -570,8 +570,8 @@ impl State {
     fn list_snapshot(
         &mut self,
         page: agent_protocol::models::ThreadList,
-    ) -> std::io::Result<agent_protocol::conversation::records::Message> {
-        use agent_protocol::sync::Cursor;
+    ) -> std::io::Result<Vec<agent_protocol::orchestration::shell::ShellStreamItem>> {
+        use agent_protocol::orchestration::shell::ShellStreamItem;
         self.sequence = self.sequence.max(7) + 1;
         for thread in &page.data {
             if let Some(id) = &thread.id {
@@ -584,73 +584,45 @@ impl State {
                 );
             }
         }
-        let message = rows::catalog(
-            page,
-            Cursor {
-                store: uuid::Uuid::from_u128(1),
-                sequence: self.sequence,
+        Ok(vec![
+            ShellStreamItem::Snapshot {
+                snapshot: rows::shell(page, self.sequence),
+                resolved_repository_identity_roots: None,
             },
-        );
-        Ok(message)
+            ShellStreamItem::Synchronized,
+        ])
     }
 
     fn list_change(
         &mut self,
         id: &SessionRef,
-    ) -> std::io::Result<Option<(uuid::Uuid, agent_protocol::conversation::records::Message)>> {
-        use agent_protocol::sync::{Cursor, Key, Message};
-        let (Some(subscription), Some(replica)) =
-            (self.list_subscription, self.list_replica.as_ref())
+    ) -> std::io::Result<
+        Option<(
+            uuid::Uuid,
+            agent_protocol::orchestration::shell::ShellStreamItem,
+        )>,
+    > {
+        use agent_protocol::orchestration::shell::{ShellLocation, ShellStreamItem};
+        let (Some(subscription), Some(shell)) = (self.list_subscription, self.list_shell.as_ref())
         else {
             return Ok(None);
         };
         let Some(thread) = self.threads.get(id) else {
             return Ok(None);
         };
-        let response: ThreadResponse = serde_json::from_value(thread.clone())?;
-        let Message::Snapshot { rows, .. } = rows::catalog(
-            agent_protocol::models::ThreadList {
-                data: vec![response.thread],
-                ..Default::default()
-            },
-            Cursor {
-                store: uuid::Uuid::from_u128(1),
-                sequence: self.sequence,
-            },
-        ) else {
-            unreachable!()
-        };
-        let Some(header) = rows
-            .into_iter()
-            .find(|row| row.key == Key::Thread(id.clone()))
-        else {
-            return Ok(None);
-        };
-        let from = replica.cursor().unwrap();
-        if header.version <= from.sequence {
+        if self.sequence <= shell.snapshot_sequence {
             return Ok(None);
         }
-        let message = Message::Events {
-            through: Cursor {
-                sequence: self.sequence,
-                ..from
-            },
-            events: vec![agent_protocol::sync::Event {
-                sequence: (Cursor {
-                    sequence: self.sequence,
-                    ..from
-                })
-                .sequence,
-                rows: vec![header],
-                removed: Vec::new(),
-            }],
+        let response: ThreadResponse = serde_json::from_value(thread.clone())?;
+        let item = ShellStreamItem::ThreadUpdated {
+            sequence: self.sequence,
+            location: ShellLocation::Active,
+            thread: rows::shell_thread(response.thread),
         };
-        self.list_replica = Some(
-            replica
-                .apply(1, message.clone())
-                .map_err(std::io::Error::other)?,
-        );
-        Ok(Some((subscription, message)))
+        self.list_shell =
+            agent_core::orchestration::shell::receive(Some(shell), item.clone(), false)
+                .map_err(std::io::Error::other)?;
+        Ok(Some((subscription, item)))
     }
 
     fn opened(&mut self, request: &Request, value: &mut Value) -> std::io::Result<()> {
@@ -674,7 +646,7 @@ impl State {
                 return Ok(());
             };
             self.sequence = self.sequence.max(7);
-            if self.list_replica.is_some() {
+            if self.list_shell.is_some() {
                 self.sequence += 1;
             }
             if matches!(&request.call, Call::SubscribeConversation(params) if params.after_sequence.is_some())

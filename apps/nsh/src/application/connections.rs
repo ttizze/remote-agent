@@ -335,7 +335,7 @@ mod tests {
         let mut offline = snapshot.clone();
         offline.connection.connected = false;
         let mut no_list = snapshot.clone();
-        no_list.lists.replica = None;
+        no_list.lists.shell = None;
         let mut searching = snapshot.clone();
         Arc::make_mut(&mut searching.lists.list_query).search_term = "query".into();
         let mut loading = snapshot.clone();

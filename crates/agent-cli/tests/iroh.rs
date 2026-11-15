@@ -54,7 +54,7 @@ async fn exercise(command: &[&str], expected: Value) {
                 Some("host/account/list") => json!({"accounts":[], "selected":{}}),
                 Some("host/list/subscribe") => {
                     lists += 1;
-                    assert!(request["params"]["cached"].is_null());
+                    assert_eq!(request["params"].get("after_sequence"), Some(&Value::Null));
                     json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false})
                 }
                 Some("host/list/search") => {
@@ -70,7 +70,7 @@ async fn exercise(command: &[&str], expected: Value) {
                         request["params"]["session"],
                         json!({"provider":"codex","id":"fixture-thread"})
                     );
-                    assert!(request["params"]["cached"].is_null());
+                    assert_eq!(request["params"].get("after_sequence"), Some(&Value::Null));
                     let mut thread = json!({"id":{"provider":"codex","id":"fixture-thread"},"cwd":"/fixture","status":"idle","turns":[]});
                     if let Some(id) = &approval {
                         thread["turns"] =

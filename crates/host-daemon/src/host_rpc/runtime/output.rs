@@ -17,7 +17,7 @@ pub(super) enum Change<'a> {
 #[derive(Default)]
 pub(super) struct Outputs(Mutex<HashMap<records::OutputKey, Live>>);
 struct Live {
-    execution: Uuid,
+    scope: String,
     tail: Option<Output>,
     sequence: u64,
     published: watch::Sender<Publication>,
@@ -92,7 +92,7 @@ impl Live {
             .cloned()
             .unwrap_or_else(|| Output::new(self.sequence, ""))
     }
-    fn new(execution: Uuid, tail: Output) -> Self {
+    fn new(scope: String, tail: Output) -> Self {
         let published = watch::channel(Publication {
             tail: tail.clone(),
             recent: Arc::default(),
@@ -100,7 +100,7 @@ impl Live {
         })
         .0;
         Self {
-            execution,
+            scope,
             sequence: tail.sequence,
             tail: Some(tail),
             published,
@@ -115,7 +115,7 @@ impl Live {
 impl Outputs {
     pub(super) fn write(
         self: &Arc<Self>,
-        execution: Uuid,
+        scope: &str,
         key: records::OutputKey,
         change: Change<'_>,
     ) -> Result<(), String> {
@@ -125,7 +125,7 @@ impl Outputs {
         let mut streams = self.0.lock().unwrap();
         let live = streams
             .entry(key.clone())
-            .or_insert_with(|| Live::new(execution, Output::default()));
+            .or_insert_with(|| Live::new(scope.to_owned(), Output::default()));
         let from = live.sequence;
         let through = from
             .checked_add(1)
@@ -219,6 +219,74 @@ impl Outputs {
             }
         }
     }
+    pub(super) fn prepare_native_item(
+        &self,
+        mut item: agent_protocol::orchestration::TurnItem,
+    ) -> (
+        agent_protocol::orchestration::TurnItem,
+        Option<(String, bool)>,
+    ) {
+        use agent_protocol::orchestration::TurnItemBody;
+        let TurnItemBody::CommandExecution {
+            output,
+            output_omitted,
+            ..
+        } = &mut item.body
+        else {
+            return (item, None);
+        };
+        let raw = output.take().unwrap_or_default();
+        let truncated = output_omitted.unwrap_or(false);
+        if !item.status.is_terminal() {
+            *output = Some(String::new());
+            *output_omitted = Some(true);
+            return (item, Some((raw, truncated)));
+        }
+        let key = records::OutputKey {
+            session: SessionRef {
+                provider: None,
+                id: item.thread_id.clone(),
+            },
+            item: item.id.clone().into(),
+        };
+        let tail = self.final_output(&key, &raw);
+        *output = Some(tail.text);
+        *output_omitted = Some(tail.truncated | truncated);
+        (item, None)
+    }
+
+    /// Inspect a final native aggregate without publishing or closing a stream;
+    /// the canonical writer must accept the item before those side effects.
+    pub(super) fn final_output(&self, key: &records::OutputKey, final_text: &str) -> Output {
+        if final_text.is_empty()
+            && let Some(live) = self.0.lock().unwrap().get(key)
+        {
+            return live.checkpoint();
+        }
+        Output::persisted(final_text)
+    }
+
+    pub(super) fn checkpoints(&self, session: &SessionRef, scope: &str) -> HashMap<String, Output> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, live)| &key.session == session && live.scope == scope)
+            .map(|(key, live)| (key.item.to_string(), live.checkpoint()))
+            .collect()
+    }
+
+    pub(super) fn checkpoints_by_thread(&self) -> HashMap<String, HashMap<String, Output>> {
+        let mut threads = HashMap::<String, HashMap<String, Output>>::new();
+        for (key, live) in self.0.lock().unwrap().iter() {
+            threads
+                .entry(key.session.application_id())
+                .or_default()
+                .insert(key.item.to_string(), live.checkpoint());
+        }
+        threads
+    }
+
     pub(super) fn finish(&self, key: &records::OutputKey, final_text: &str) -> Output {
         let live = self.0.lock().unwrap().remove(key);
         if final_text.is_empty()
@@ -228,34 +296,16 @@ impl Outputs {
         }
         Output::persisted(final_text)
     }
-    pub(super) fn finish_attempt(
-        &self,
-        session: &SessionRef,
-        execution: Uuid,
-    ) -> Vec<(records::OutputKey, Output)> {
-        let mut streams = self.0.lock().unwrap();
-        let keys: Vec<_> = streams
-            .iter()
-            .filter(|(key, live)| &key.session == session && live.execution == execution)
-            .map(|(key, _)| key.clone())
-            .collect();
-        keys.into_iter()
-            .map(|key| {
-                let live = streams.remove(&key).expect("selected live output");
-                (key, live.checkpoint())
-            })
-            .collect()
-    }
     pub(super) fn subscribe(
         &self,
         key: &records::OutputKey,
-        initial: Option<(Uuid, Output)>,
+        initial: Option<(String, Output)>,
     ) -> Option<(Output, Subscription)> {
         let mut streams = self.0.lock().unwrap();
-        if let Some((execution, tail)) = initial {
+        if let Some((scope, tail)) = initial {
             streams
                 .entry(key.clone())
-                .or_insert_with(|| Live::new(execution, tail));
+                .or_insert_with(|| Live::new(scope, tail));
         }
         Self::cap(&mut streams);
         let live = streams.get(key)?;
@@ -275,18 +325,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn fast_and_lagging_appends_fold_to_the_same_terminal() {
         let outputs = Arc::new(Outputs::default());
-        let execution = Uuid::new_v4();
+        let execution = Uuid::new_v4().to_string();
         let key = records::OutputKey {
             session: SessionRef::new(None, Uuid::new_v4().to_string()).unwrap(),
             item: "command".into(),
         };
         let (mut fast, mut watching) = outputs
-            .subscribe(&key, Some((execution, Output::new(0, "saved"))))
+            .subscribe(&key, Some((execution.clone(), Output::new(0, "saved"))))
             .unwrap();
         let (mut slow, mut lagging) = outputs.subscribe(&key, None).unwrap();
         for text in [" new", "\rprogress 1%", "\rprogress 99%\x1b[K"] {
             outputs
-                .write(execution, key.clone(), Change::Append(text))
+                .write(&execution, key.clone(), Change::Append(text))
                 .unwrap();
             tokio::task::yield_now().await;
             tokio::time::advance(Duration::from_millis(100)).await;
@@ -304,18 +354,22 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn late_and_once_lagging_viewers_return_to_append_cadence() {
         let outputs = Arc::new(Outputs::default());
-        let execution = Uuid::new_v4();
+        let execution = Uuid::new_v4().to_string();
         let key = records::OutputKey {
             session: SessionRef::new(None, execution.to_string()).unwrap(),
             item: "command".into(),
         };
         outputs
-            .write(execution, key.clone(), Change::Append("before expanding\n"))
+            .write(
+                &execution,
+                key.clone(),
+                Change::Append("before expanding\n"),
+            )
             .unwrap();
         let (mut folded, mut subscription) = outputs.subscribe(&key, None).unwrap();
         for index in 0..12 {
             outputs
-                .write(execution, key.clone(), Change::Append("next\n"))
+                .write(&execution, key.clone(), Change::Append("next\n"))
                 .unwrap();
             tokio::task::yield_now().await;
             tokio::time::advance(Duration::from_millis(100)).await;
@@ -344,32 +398,32 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn live_limit_evicts_the_tail_and_resynchronizes_its_existing_viewer() {
         let outputs = Arc::new(Outputs::default());
-        let execution = Uuid::new_v4();
+        let execution = Uuid::new_v4().to_string();
         let key = |n| records::OutputKey {
             session: SessionRef::new(None, execution.to_string()).unwrap(),
             item: format!("command-{n}").into(),
         };
         let (_, mut oldest) = outputs
-            .subscribe(&key(0), Some((execution, Output::default())))
+            .subscribe(&key(0), Some((execution.clone(), Output::default())))
             .unwrap();
         tokio::time::advance(Duration::from_millis(1)).await;
         let (_, mut touched) = outputs
-            .subscribe(&key(1), Some((execution, Output::default())))
+            .subscribe(&key(1), Some((execution.clone(), Output::default())))
             .unwrap();
         for n in 2..65 {
             tokio::time::advance(Duration::from_millis(1)).await;
             outputs
-                .write(execution, key(n), Change::Append("x"))
+                .write(&execution, key(n), Change::Append("x"))
                 .unwrap();
             if n == 63 {
                 outputs
-                    .write(execution, key(1), Change::Append("recent"))
+                    .write(&execution, key(1), Change::Append("recent"))
                     .unwrap();
             }
         }
         assert!(outputs.subscribe(&key(0), None).is_some());
         outputs
-            .write(execution, key(0), Change::Append("resumed"))
+            .write(&execution, key(0), Change::Append("resumed"))
             .unwrap();
         assert!(outputs.subscribe(&key(1), None).is_some());
         tokio::task::yield_now().await;
@@ -378,7 +432,7 @@ mod tests {
         let resumed: OutputUpdate = protocol::decode(&oldest.recv().await.unwrap()).unwrap();
         assert!(matches!(resumed,OutputUpdate::Tail(tail) if tail.text == "resumed"));
         outputs
-            .write(execution, key(0), Change::Append("!"))
+            .write(&execution, key(0), Change::Append("!"))
             .unwrap();
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(100)).await;
@@ -399,16 +453,16 @@ mod tests {
     async fn append_budget_counts_utf16_and_only_overflow_uses_the_longer_pause() {
         for units in [16 * 1024, 16 * 1024 + 1] {
             let outputs = Arc::new(Outputs::default());
-            let execution = Uuid::new_v4();
+            let execution = Uuid::new_v4().to_string();
             let key = records::OutputKey {
                 session: SessionRef::new(None, execution.to_string()).unwrap(),
                 item: "unicode".into(),
             };
             let (initial, mut stream) = outputs
-                .subscribe(&key, Some((execution, Output::default())))
+                .subscribe(&key, Some((execution.clone(), Output::default())))
                 .unwrap();
             outputs
-                .write(execution, key.clone(), Change::Append(&"日".repeat(units)))
+                .write(&execution, key.clone(), Change::Append(&"日".repeat(units)))
                 .unwrap();
             tokio::task::yield_now().await;
             tokio::time::advance(Duration::from_millis(100)).await;
@@ -419,7 +473,7 @@ mod tests {
             );
             let folded = initial.apply(update);
             outputs
-                .write(execution, key.clone(), Change::Append("!"))
+                .write(&execution, key.clone(), Change::Append("!"))
                 .unwrap();
             tokio::task::yield_now().await;
             tokio::time::advance(Duration::from_millis(100)).await;

@@ -215,6 +215,75 @@ impl WorkspaceSetup {
         self.ended_at_ms
             .is_none_or(|ended| at.saturating_sub(ended) < 30_000)
     }
+
+    pub fn apply(&mut self, update: SetupChange, now: u64) -> bool {
+        let setup = self;
+        if setup.phase != SetupPhase::Running {
+            return false;
+        }
+        match update {
+            SetupChange::Base(base) => setup.base_ref = Some(base),
+            SetupChange::Checkout(percent) => {
+                if let Some(stage) = setup
+                    .stages
+                    .iter_mut()
+                    .find(|stage| stage.id == SetupStageId::Checkout)
+                {
+                    stage.percent = Some(percent);
+                }
+            }
+            SetupChange::Created { path, branch } => {
+                setup.worktree_path = Some(path);
+                setup.branch = Some(branch);
+            }
+            SetupChange::Script { handle } => {
+                setup.terminal_handle = Some(handle);
+                setup.stage(SetupStageId::SetupScript, SetupStageStatus::Running, now);
+            }
+            SetupChange::Output(lines) => {
+                for line in lines {
+                    setup.append_output(SetupStageId::SetupScript, &line);
+                }
+            }
+            SetupChange::Stage {
+                id,
+                status,
+                exit_code,
+                error,
+            } => {
+                setup.stage(id, status, now);
+                if error.is_some() {
+                    setup.error = error;
+                }
+                if let Some(stage) = setup.stages.iter_mut().find(|stage| stage.id == id) {
+                    stage.exit_code = exit_code;
+                }
+            }
+            SetupChange::Finish { phase, error } => setup.finish(phase, error, now),
+            SetupChange::AgentStarted => {
+                setup.can_cancel = false;
+                setup.stage(SetupStageId::Agent, SetupStageStatus::Running, now);
+            }
+            SetupChange::Begin { .. } | SetupChange::Expire { .. } | SetupChange::Discarded => {
+                return false;
+            }
+        }
+        setup.finish_if_ready(now);
+        true
+    }
+
+    pub fn finish_if_ready(&mut self, at: u64) {
+        if self.phase == SetupPhase::Running
+            && self.stages.iter().all(|stage| {
+                !matches!(
+                    stage.status,
+                    SetupStageStatus::Pending | SetupStageStatus::Running
+                )
+            })
+        {
+            self.finish(SetupPhase::Done, self.error.clone(), at);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -331,5 +400,86 @@ mod tests {
             );
         }
         assert!(WorkspaceStrategy::Root.validate().is_ok());
+    }
+}
+
+/// Saved resource ownership and native setup-card progress. This is independent
+/// of app runs: an empty launch prepares its checkout without inventing input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspacePreparation {
+    /// The accepted startup run, absent for a launch without input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub project_cwd: String,
+    pub strategy: Option<crate::workspace::WorkspaceStrategy>,
+    pub generation: uuid::Uuid,
+    /// The current preparation created this checkout; cancellation owns its cleanup.
+    pub created_worktree: bool,
+    pub setup: Option<crate::workspace::WorkspaceSetup>,
+    pub visible: bool,
+}
+
+pub enum SetupChange {
+    Begin {
+        workspace: Box<WorkspacePreparation>,
+    },
+    Base(String),
+    Checkout(u32),
+    Created {
+        path: String,
+        branch: String,
+    },
+    Script {
+        handle: String,
+    },
+    Output(Vec<String>),
+    Stage {
+        id: SetupStageId,
+        status: SetupStageStatus,
+        exit_code: Option<i32>,
+        error: Option<String>,
+    },
+    Finish {
+        phase: SetupPhase,
+        error: Option<String>,
+    },
+    AgentStarted,
+    Discarded,
+    Expire {
+        ended_at: u64,
+    },
+}
+
+impl WorkspacePreparation {
+    /// Process loss cannot certify a script's result or grant a new owner
+    /// permission to delete a checkout that may contain local work.
+    pub fn interrupted(&self, at: u64) -> Option<Self> {
+        let mut workspace = self.clone();
+        let setup = workspace
+            .setup
+            .as_mut()
+            .filter(|setup| setup.phase == SetupPhase::Running)?;
+        let ready = setup.stages.iter().any(|stage| {
+            stage.id == SetupStageId::Agent
+                && matches!(
+                    stage.status,
+                    SetupStageStatus::Done | SetupStageStatus::Skipped
+                )
+        });
+        let error="Workspace setup was interrupted by the Host restart; its result could not be confirmed.".to_owned();
+        if ready {
+            setup.apply(
+                SetupChange::Stage {
+                    id: SetupStageId::SetupScript,
+                    status: SetupStageStatus::Warning,
+                    exit_code: None,
+                    error: Some(error),
+                },
+                at,
+            );
+        } else {
+            setup.finish(SetupPhase::Failed, Some(error), at);
+        }
+        Some(workspace)
     }
 }

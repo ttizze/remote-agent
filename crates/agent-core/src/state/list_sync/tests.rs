@@ -1,77 +1,79 @@
 use super::*;
 use agent_protocol::{
-    conversation::{
-        self as decision,
-        records::{Details, Header, Record, Row},
-    },
-    sync::{Cursor, Message, Position},
+    conversation::records,
+    orchestration::shell::{ProjectShell, ShellLocation, ThreadShell},
 };
 
 fn address(index: usize) -> crate::session::SessionRef {
     crate::session::SessionRef::new(crate::session::ProviderKind::Codex, format!("task-{index}"))
         .unwrap()
 }
-fn row(index: usize, project: bool, version: u64) -> Row {
-    Row {
-        key: Key::Thread(address(index)),
-        version,
-        position: Position::Unordered,
-        content: Content::Full(Arc::new(Record::Thread(Header {
-            state: decision::Thread {
-                name: format!("Task {index}"),
-                workspace: decision::Workspace::Missing,
-                provider: crate::session::ProviderKind::Codex,
-                queue_held: false,
-            },
-            details: Details {
-                updated_at: index as i64,
-                project: if project {
-                    crate::models::ProjectMembership::Assigned("project".into())
-                } else {
-                    Default::default()
-                },
+fn row(index: usize, project: bool) -> ThreadShell {
+    crate::test_conversations::shell_thread(crate::models::Thread {
+        id: Some(address(index)),
+        name: Some(format!("Task {index}")),
+        updated_at: Some(index as f64 / 1000.0),
+        project_id: if project {
+            crate::models::ProjectMembership::Assigned("project".into())
+        } else {
+            Default::default()
+        },
+        ..Default::default()
+    })
+}
+fn group(id: &str, title: &str) -> Arc<ProjectShell> {
+    crate::test_conversations::shell(
+        crate::models::ThreadList {
+            projects: vec![crate::models::Project {
+                id: id.into(),
+                name: title.into(),
                 ..Default::default()
-            },
-        }))),
+            }],
+            ..Default::default()
+        },
+        0,
+    )
+    .projects
+    .remove(0)
+}
+fn delta(thread: ThreadShell, sequence: u64) -> ShellStreamItem {
+    ShellStreamItem::ThreadUpdated {
+        sequence,
+        location: ShellLocation::Active,
+        thread,
     }
 }
 fn list() -> Snapshot {
     let mut snapshot = Snapshot::default();
-    let mut rows = (0..24)
-        .map(|index| row(index, index >= 20, 10))
-        .collect::<Vec<_>>();
-    rows.push(Row {
-        key: Key::Project("project".into()),
-        version: 10,
-        position: Position::Project { position: 0 },
-        content: Content::Full(Arc::new(Record::Project(crate::models::Project {
-            id: "project".into(),
-            name: "Project".into(),
-            ..Default::default()
-        }))),
-    });
-    let message = Message::Snapshot {
-        cursor: Cursor {
-            store: uuid::Uuid::from_u128(1),
-            sequence: 10,
-        },
-        window: None,
-        rows,
-    };
-    snapshot.lists.replica = Some(Arc::new(
-        records::Replica::new(Scope::List, 1)
-            .apply(1, message)
-            .unwrap(),
-    ));
+    snapshot.lists.shell = Some(Arc::new(ShellSnapshot {
+        schema_version: 2,
+        snapshot_sequence: 10,
+        threads: (0..24)
+            .map(|index| Arc::new(row(index, index >= 20)))
+            .collect(),
+        projects: vec![group("project", "Project")],
+        archived_threads: vec![],
+    }));
+    snapshot.lists.generation = 1;
     snapshot.lists.subscription = Some(uuid::Uuid::new_v4());
     project(&mut snapshot, false);
     snapshot
+}
+fn completed(thread: &mut ThreadShell) {
+    activity_fixture(
+        thread,
+        crate::state::list_sync::ActivityFacts {
+            completion: Some("completed".into()),
+            latest: Some(crate::models::TurnStatus::Completed),
+            ..Default::default()
+        },
+    );
 }
 
 #[test]
 fn pagination_and_project_disclosure_are_local_without_changing_the_list_cursor() {
     let snapshot = list();
-    let before = snapshot.lists.replica.clone().unwrap();
+    let before = snapshot.lists.shell.clone().unwrap();
     assert_eq!(snapshot.thread_list().unwrap().threads.len(), 5);
     assert!(
         snapshot.thread_list().unwrap().projects[0]
@@ -82,10 +84,7 @@ fn pagination_and_project_disclosure_are_local_without_changing_the_list_cursor(
         reduce_intent(&snapshot, "", Intent::ExpandThreadList { project_id: None });
     assert!(effects.is_empty());
     assert_eq!(expanded.thread_list().unwrap().threads.len(), 15);
-    assert!(Arc::ptr_eq(
-        expanded.lists.replica.as_ref().unwrap(),
-        &before
-    ));
+    assert!(Arc::ptr_eq(expanded.lists.shell.as_ref().unwrap(), &before));
     let (closed, effects) = reduce_intent(
         &expanded,
         "",
@@ -107,8 +106,8 @@ fn pagination_and_project_disclosure_are_local_without_changing_the_list_cursor(
     assert!(effects.is_empty());
     assert_eq!(reopened.thread_list().unwrap().projects[0].threads.len(), 4);
     assert_eq!(
-        reopened.lists.replica.as_ref().unwrap().cursor(),
-        before.cursor()
+        reopened.lists.shell.as_ref().unwrap().snapshot_sequence,
+        before.snapshot_sequence
     );
 }
 
@@ -126,33 +125,11 @@ fn changes_update_titles_and_unread_without_reloading_or_losing_drafts() {
             ..Default::default()
         }),
     );
-    let mut updated = row(0, false, 11);
-    let Content::Full(record) = &mut updated.content else {
-        unreachable!()
-    };
-    let Record::Thread(header) = Arc::make_mut(record) else {
-        unreachable!()
-    };
-    header.state.name = "New title".into();
-    header.details.updated_at = 1000;
-    header.details.activity.completion = Some("completed".into());
-    header.details.activity.latest = Some(crate::models::TurnStatus::Completed);
-    let from = snapshot.lists.replica.as_ref().unwrap().cursor().unwrap();
-    let message = Message::Events {
-        through: Cursor {
-            sequence: 11,
-            ..from
-        },
-        events: vec![agent_protocol::sync::Event {
-            sequence: (Cursor {
-                sequence: 11,
-                ..from
-            })
-            .sequence,
-            rows: vec![updated],
-            removed: Vec::new(),
-        }],
-    };
+    let mut updated = row(0, false);
+    updated.thread.title = "New title".into();
+    updated.thread.updated_at = "2026-11-14T00:00:01Z".into();
+    completed(&mut updated);
+    let message = delta(updated, 11);
     let subscription = snapshot.lists.subscription.unwrap();
     let (next, effects) = received(&snapshot, subscription, message.clone());
     assert_eq!(next.thread_list().unwrap().threads[0].title, "New title");
@@ -169,8 +146,8 @@ fn changes_update_titles_and_unread_without_reloading_or_losing_drafts() {
     let (duplicate, effects) = received(&next, subscription, message);
     assert!(effects.is_empty());
     assert!(Arc::ptr_eq(
-        duplicate.lists.replica.as_ref().unwrap(),
-        next.lists.replica.as_ref().unwrap()
+        duplicate.lists.shell.as_ref().unwrap(),
+        next.lists.shell.as_ref().unwrap()
     ));
 }
 
@@ -182,36 +159,10 @@ fn a_side_pane_does_not_mark_the_conversation_read_for_other_devices() {
     let id = address(0);
     Arc::make_mut(&mut Arc::make_mut(snapshot.panes.get_mut("side").unwrap()).navigation)
         .thread_id = Some(id.clone());
-    let mut updated = row(0, false, 11);
-    let Content::Full(record) = &mut updated.content else {
-        unreachable!()
-    };
-    let Record::Thread(header) = Arc::make_mut(record) else {
-        unreachable!()
-    };
-    header.details.activity.completion = Some("completed".into());
-    header.details.activity.latest = Some(crate::models::TurnStatus::Completed);
-    let from = snapshot.lists.replica.as_ref().unwrap().cursor().unwrap();
+    let mut updated = row(0, false);
+    completed(&mut updated);
     let subscription = snapshot.lists.subscription.unwrap();
-    let (next, effects) = received(
-        &snapshot,
-        subscription,
-        Message::Events {
-            through: Cursor {
-                sequence: 11,
-                ..from
-            },
-            events: vec![agent_protocol::sync::Event {
-                sequence: (Cursor {
-                    sequence: 11,
-                    ..from
-                })
-                .sequence,
-                rows: vec![updated],
-                removed: vec![],
-            }],
-        },
-    );
+    let (next, effects) = received(&snapshot, subscription, delta(updated, 11));
     assert!(
         effects.is_empty(),
         "viewing a side pane does not publish a read receipt"
@@ -223,52 +174,42 @@ fn a_side_pane_does_not_mark_the_conversation_read_for_other_devices() {
 fn bad_frames_reopen_once_and_a_new_store_replaces_every_old_row() {
     let snapshot = list();
     let subscription = snapshot.lists.subscription.unwrap();
-    let from = snapshot.lists.replica.as_ref().unwrap().cursor().unwrap();
-    let bad = Message::Snapshot {
-        cursor: Cursor {
-            sequence: 9,
-            ..from
+    let from = snapshot.lists.shell.as_ref().unwrap().snapshot_sequence;
+    let bad = ShellStreamItem::Snapshot {
+        snapshot: ShellSnapshot {
+            schema_version: 2,
+            snapshot_sequence: 9,
+            projects: vec![],
+            threads: vec![],
+            archived_threads: vec![],
         },
-        window: None,
-        rows: Vec::new(),
+        resolved_repository_identity_roots: None,
     };
     let (reopening, effects) = received(&snapshot, subscription, bad.clone());
     assert_eq!(effects.len(), 1);
     assert!(reopening.lists.subscription.is_none());
-    assert_eq!(
-        reopening.lists.replica.as_ref().unwrap().cursor(),
-        Some(from)
-    );
+    assert!(reopening.lists.shell.is_none());
     let (_, effects) = received(&reopening, subscription, bad);
     assert!(effects.is_empty());
     let mut replacement = reopening;
-    replacement.lists.replica = Some(Arc::new(
-        replacement
-            .lists
-            .replica
-            .as_ref()
-            .unwrap()
-            .resubscribe(2)
-            .unwrap(),
-    ));
-    let cursor = Cursor {
-        store: uuid::Uuid::from_u128(2),
-        sequence: 1,
+    replacement.lists.generation = 2;
+    let opened = ShellSnapshot {
+        schema_version: 2,
+        snapshot_sequence: 1,
+        threads: vec![Arc::new(row(99, false))],
+        projects: vec![],
+        archived_threads: vec![],
     };
-    let opened = records::Replica::new(Scope::List, 2)
-        .apply(
-            2,
-            Message::Snapshot {
-                cursor,
-                window: None,
-                rows: vec![row(99, false, 1)],
-            },
-        )
-        .unwrap();
     SubscribeCatalog { refresh: false }.apply(
         &mut replacement,
         "",
-        (opened, uuid::Uuid::new_v4(), Default::default()),
+        (
+            2,
+            Some(from),
+            opened,
+            uuid::Uuid::new_v4(),
+            Default::default(),
+        ),
     );
     assert_eq!(replacement.thread_list().unwrap().threads.len(), 1);
     assert_eq!(
@@ -277,8 +218,8 @@ fn bad_frames_reopen_once_and_a_new_store_replaces_every_old_row() {
     );
     assert!(replacement.thread_list().unwrap().projects.is_empty());
     assert_eq!(
-        replacement.lists.replica.as_ref().unwrap().cursor(),
-        Some(cursor)
+        replacement.lists.shell.as_ref().unwrap().snapshot_sequence,
+        1
     );
 }
 
@@ -302,7 +243,7 @@ async fn list_subscription_survives_navigation_and_pagination_does_not_read_anot
         }
         store.dispatch(Intent::NewChat {cwd:String::new()}).await.unwrap();
         let fixture=list();
-        writer.reply(&list_request.unwrap(),json!({"result":records::OpenedList {subscription_id:uuid::Uuid::nil(),provider_errors:Default::default(),initial:fixture.lists.replica.as_ref().unwrap().snapshot().unwrap()}})).await.unwrap();
+        writer.reply(&list_request.unwrap(),json!({"result":records::OpenedList {subscription_id:uuid::Uuid::nil(),provider_errors:Default::default(),initial:vec![ShellStreamItem::Snapshot {snapshot:fixture.lists.shell.as_ref().unwrap().as_ref().clone(),resolved_repository_identity_roots:None},ShellStreamItem::Synchronized]}})).await.unwrap();
         let mut updates=store.subscribe();
         while store.snapshot().lists.subscription.is_none() {updates.changed().await.unwrap();}
         assert_eq!(store.snapshot().thread_list().unwrap().threads.len(),5);
@@ -326,41 +267,27 @@ fn child_activity_updates_the_fleet_and_discovers_new_children_once(
     snapshot.connection.connected = true;
     let root = address(0);
     Arc::make_mut(snapshot.panes.primary_mut()).observed_agents = Some(root.clone());
-    let mut child = row(99, false, 11);
-    let Content::Full(record) = &mut child.content else {
-        panic!("full row")
-    };
-    let Record::Thread(header) = Arc::make_mut(record) else {
-        panic!("header")
-    };
-    header.details.parent = Some(root.clone());
-    header.details.activity.status = status;
-    let cursor = snapshot.lists.replica.as_ref().unwrap().cursor().unwrap();
+    let mut child = row(99, false);
+    child.thread.lineage.parent_thread_id = Some(root.application_id());
+    child.thread.lineage.relationship_to_parent = Some("subagent".into());
+    child.native_status = Some(match status {
+        crate::models::SessionStatus::Running => {
+            agent_protocol::orchestration::ProviderThreadStatus::Active
+        }
+        _ => agent_protocol::orchestration::ProviderThreadStatus::Unknown,
+    });
     let subscription = snapshot.lists.subscription.unwrap();
-    let (mut next, effects) = received(
-        &snapshot,
-        subscription,
-        Message::Events {
-            through: Cursor {
-                sequence: 11,
-                ..cursor
-            },
-            events: vec![agent_protocol::sync::Event {
-                sequence: (Cursor {
-                    sequence: 11,
-                    ..cursor
-                })
-                .sequence,
-                rows: vec![child],
-                removed: vec![],
-            }],
-        },
-    );
+    let (mut next, effects) = received(&snapshot, subscription, delta(child, 11));
     assert_eq!(
         next.lists.activity.active.get(&address(99)).copied(),
         (status == crate::models::SessionStatus::Running).then_some(true)
     );
     assert_eq!(effects.len(), 1, "a new child triggers one fleet discovery");
+    assert_eq!(
+        next.lists.activity.active.get(&root),
+        Some(&false),
+        "an uncertain child must not mark its healthy provider or parent unavailable"
+    );
     assert!(
         !next
             .lists
@@ -425,59 +352,26 @@ fn paging_during_initial_subscription_keeps_its_in_flight_operation() {
 #[test]
 fn search_projects_expand_page_and_collapse_without_changing_normal_disclosures() {
     let mut state = list();
-    let from = state.lists.replica.as_ref().unwrap().cursor().unwrap();
-    let through = Cursor {
-        sequence: from.sequence + 1,
-        ..from
-    };
-    let mut rows = (24..48)
-        .map(|index| row(index, true, through.sequence))
-        .collect::<Vec<_>>();
-    rows.push(Row {
-        key: Key::Project("other".into()),
-        version: through.sequence,
-        position: Position::Project { position: 1 },
-        content: Content::Full(Arc::new(Record::Project(crate::models::Project {
-            id: "other".into(),
-            name: "Other".into(),
-            ..Default::default()
-        }))),
-    });
+    let mut shell = state.lists.shell.as_ref().unwrap().as_ref().clone();
+    shell.snapshot_sequence += 1;
+    shell
+        .threads
+        .extend((24..48).map(|index| Arc::new(row(index, true))));
+    shell.projects.push(group("other", "Other"));
     for index in 0..7 {
         let id = format!("extra-{index}");
-        rows.push(Row {
-            key: Key::Project(id.clone()),
-            version: through.sequence,
-            position: Position::Project {
-                position: index as u64 + 2,
-            },
-            content: Content::Full(Arc::new(Record::Project(crate::models::Project {
-                id: id.clone(),
-                name: id.clone(),
-                ..Default::default()
-            }))),
-        });
-        let mut child = row(100 + index, true, through.sequence);
-        let Content::Full(record) = &mut child.content else {
-            unreachable!()
-        };
-        let Record::Thread(header) = Arc::make_mut(record) else {
-            unreachable!()
-        };
-        header.details.project = crate::models::ProjectMembership::Assigned(id);
-        header.details.updated_at = 0;
-        rows.push(child);
+        shell.projects.push(group(&id, &id));
+        let mut child = row(100 + index, true);
+        child.thread.project_id = Some(id);
+        child.thread.updated_at = "1970-01-01T00:00:00Z".into();
+        shell.threads.push(Arc::new(child));
     }
     state = received(
         &state,
         state.lists.subscription.unwrap(),
-        Message::Events {
-            through,
-            events: vec![agent_protocol::sync::Event {
-                sequence: through.sequence,
-                rows,
-                removed: Vec::new(),
-            }],
+        ShellStreamItem::Snapshot {
+            snapshot: shell,
+            resolved_repository_identity_roots: None,
         },
     )
     .0;
@@ -542,22 +436,10 @@ fn an_idle_catalog_update_releases_an_unselected_subscription_after_completion()
     Arc::make_mut(&mut state.lists.activity)
         .active
         .insert(id.clone(), true);
-    let from = state.lists.replica.as_ref().unwrap().cursor().unwrap();
-    let through = Cursor {
-        sequence: from.sequence + 1,
-        ..from
-    };
     let (next, _) = received(
         &state,
         state.lists.subscription.unwrap(),
-        Message::Events {
-            through,
-            events: vec![agent_protocol::sync::Event {
-                sequence: through.sequence,
-                rows: vec![row(0, false, through.sequence)],
-                removed: Vec::new(),
-            }],
-        },
+        delta(row(0, false), 11),
     );
     assert!(!next.sessions.subscriptions.contains_key(&id));
 }
@@ -565,46 +447,20 @@ fn an_idle_catalog_update_releases_an_unselected_subscription_after_completion()
 #[test]
 fn empty_projects_keep_registration_order_and_child_matches_only_show_in_search() {
     let mut state = Snapshot::default();
-    let mut rows = Vec::new();
-    for (position, id) in ["z", "project", "m"].into_iter().enumerate() {
-        rows.push(Row {
-            key: Key::Project(id.into()),
-            version: 10,
-            position: Position::Project {
-                position: position as u64,
-            },
-            content: Content::Full(Arc::new(Record::Project(crate::models::Project {
-                id: id.into(),
-                name: id.into(),
-                ..Default::default()
-            }))),
-        });
-    }
-    let mut child = row(99, true, 10);
-    let Content::Full(record) = &mut child.content else {
-        panic!("full record")
-    };
-    let Record::Thread(header) = Arc::make_mut(record) else {
-        panic!("thread")
-    };
-    header.state.name = "needle child".into();
-    header.details.parent = Some(address(0));
-    rows.push(child);
-    state.lists.replica = Some(Arc::new(
-        records::Replica::new(Scope::List, 1)
-            .apply(
-                1,
-                Message::Snapshot {
-                    cursor: Cursor {
-                        store: uuid::Uuid::from_u128(1),
-                        sequence: 10,
-                    },
-                    window: None,
-                    rows,
-                },
-            )
-            .unwrap(),
-    ));
+    let mut child = row(99, true);
+    child.thread.title = "needle child".into();
+    child.thread.lineage.parent_thread_id = Some(address(0).application_id());
+    child.thread.lineage.relationship_to_parent = Some("subagent".into());
+    state.lists.shell = Some(Arc::new(ShellSnapshot {
+        schema_version: 2,
+        snapshot_sequence: 10,
+        projects: ["z", "project", "m"]
+            .into_iter()
+            .map(|id| group(id, id))
+            .collect(),
+        threads: vec![Arc::new(child)],
+        archived_threads: vec![],
+    }));
     state.lists.subscription = Some(uuid::Uuid::new_v4());
     project(&mut state, false);
     let page = state.lists.threads.as_ref().unwrap();
@@ -637,4 +493,122 @@ fn empty_projects_keep_registration_order_and_child_matches_only_show_in_search(
         state.lists.project_threads["project"].data[0].id,
         Some(address(99))
     );
+}
+
+#[test]
+fn late_bootstraps_preserve_newer_live_metadata_and_old_generations_cannot_replace_it() {
+    let mut state = list();
+    state.lists.generation = 2;
+    let mut live = state.lists.shell.as_ref().unwrap().as_ref().clone();
+    live.snapshot_sequence = 12;
+    Arc::make_mut(&mut live.threads[0]).thread.title = "live title".into();
+    state.lists.shell = Some(Arc::new(live));
+    let incoming = list().lists.shell.unwrap().as_ref().clone();
+    let subscription = uuid::Uuid::new_v4();
+    SubscribeCatalog { refresh: false }.apply(
+        &mut state,
+        "",
+        (
+            2,
+            Some(10),
+            incoming.clone(),
+            subscription,
+            Default::default(),
+        ),
+    );
+    assert_eq!(state.lists.shell.as_ref().unwrap().snapshot_sequence, 12);
+    assert_eq!(
+        state.lists.shell.as_ref().unwrap().threads[0].thread.title,
+        "live title"
+    );
+    assert_eq!(state.lists.subscription, Some(subscription));
+    let shell = state.lists.shell.clone().unwrap();
+    SubscribeCatalog { refresh: false }.apply(
+        &mut state,
+        "",
+        (
+            1,
+            Some(10),
+            incoming,
+            uuid::Uuid::new_v4(),
+            Default::default(),
+        ),
+    );
+    assert!(Arc::ptr_eq(&shell, state.lists.shell.as_ref().unwrap()));
+    assert_eq!(state.lists.subscription, Some(subscription));
+}
+
+#[test]
+fn bootstrap_validation_requires_a_snapshot_without_a_cached_cursor_and_a_final_marker() {
+    use agent_protocol::operations::RpcMethod;
+    let mut request = records::SubscribeList {
+        refresh: false,
+        subscription: uuid::Uuid::nil(),
+        after_sequence: None,
+    };
+    let mut output = records::OpenedList {
+        subscription_id: uuid::Uuid::nil(),
+        provider_errors: Default::default(),
+        initial: vec![ShellStreamItem::Synchronized],
+    };
+    assert!(request.validate(&output).is_err());
+    request.after_sequence = Some(10);
+    assert!(request.validate(&output).is_ok());
+    output.initial.clear();
+    assert!(request.validate(&output).is_err());
+    output.initial = vec![
+        ShellStreamItem::Snapshot {
+            snapshot: list().lists.shell.unwrap().as_ref().clone(),
+            resolved_repository_identity_roots: None,
+        },
+        ShellStreamItem::Synchronized,
+    ];
+    request.after_sequence = None;
+    assert!(request.validate(&output).is_ok());
+    output.initial.push(ShellStreamItem::Synchronized);
+    assert!(request.validate(&output).is_err());
+}
+
+#[test]
+fn forks_remain_independent_threads_while_subagents_and_side_chats_remain_nested() {
+    let mut snapshot = list();
+    let subscription = snapshot.lists.subscription.unwrap();
+    for (index, relationship, side_chat) in [
+        (99, "fork", false),
+        (100, "subagent", false),
+        (101, "fork", true),
+    ] {
+        let mut branch = row(index, false);
+        branch.thread.lineage.parent_thread_id = Some(address(0).application_id());
+        branch.thread.lineage.relationship_to_parent = Some(relationship.into());
+        branch.thread.lineage.side_chat = Some(side_chat);
+        branch.native_status = Some(agent_protocol::orchestration::ProviderThreadStatus::Active);
+        snapshot = received(&snapshot, subscription, delta(branch, 11)).0;
+    }
+    let displayed = snapshot.thread_list().unwrap();
+    assert!(
+        displayed
+            .threads
+            .iter()
+            .any(|thread| thread.id == address(99)),
+        "the user must be able to find their fork as an independent conversation"
+    );
+    for index in [100, 101] {
+        assert!(
+            !displayed
+                .threads
+                .iter()
+                .any(|thread| thread.id == address(index))
+        );
+    }
+    let activity = snapshot.lists.task_activity.as_ref().unwrap();
+    assert!(activity.statuses.iter().any(|(id, _)| id == &address(99)));
+    for index in [100, 101] {
+        assert!(
+            !activity
+                .statuses
+                .iter()
+                .any(|(id, _)| id == &address(index))
+        );
+    }
 }

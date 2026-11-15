@@ -1,0 +1,18 @@
+--- a/crates/agent-protocol/src/orchestration/execution.rs
++++ b/crates/agent-protocol/src/orchestration/execution.rs
+@@ -14,0 +15,15 @@
++    let thread = state
++        .provider_threads
++        .get(thread_id)
++        .ok_or("native resource is missing")?;
++    if state.thread.deleted_at.is_some() || thread.native_thread_ref.as_ref() != expected {
++        return Ok(Default::default());
++    }
++    if thread.app_thread_id.as_ref() != Some(&state.thread.id)
++        || thread.provider_instance_id != session.provider_instance_id
++        || thread.driver != session.driver
++        || native.driver != thread.driver
++        || native.native_id.is_none()
++    {
++        return Err("native resource belongs to another provider or conversation".into());
++    }

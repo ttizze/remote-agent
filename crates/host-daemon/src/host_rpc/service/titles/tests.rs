@@ -22,8 +22,7 @@ async fn search_defaults_to_the_t3_bound_and_accepts_an_explicit_limit() {
             },
         );
     }
-    let service =
-        HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let all = service
         .search_list(&agent_protocol::conversation::records::SearchList {
             term: "matches".into(),
@@ -94,7 +93,7 @@ async fn sdk_reviews_stay_out_of_titles_and_search_after_host_restart() {
                 .discovery(ProviderKind::Claude)
                 .unwrap();
             let response = agent.open(&active.id, 10, true).await.unwrap();
-            own(&service, &public, &response);
+            own(&service, &public, &response).await;
             let created = service
                 .inner
                 .providers
@@ -111,7 +110,7 @@ async fn sdk_reviews_stay_out_of_titles_and_search_after_host_restart() {
             ].map(|row| row.to_string() + "\n").concat();
             std::fs::write(transcripts.join(format!("{}.jsonl", id.id)), rows).unwrap();
             let response = agent.open(&id.id, 10, true).await.unwrap();
-            own(&service, &id, &response);
+            own(&service, &id, &response).await;
             side_chat = Some(id);
         }
         for search in [
@@ -371,7 +370,7 @@ async fn task_list_refreshes_branding_for_all_project_headers() {
     let transcript = native.join("projects/p");
     std::fs::create_dir_all(&transcript).unwrap();
     let id = "12345678-1234-4234-8234-123456789abc";
-    std::fs::write(transcript.join(format!("{id}.jsonl")),serde_json::json!({"type":"user","sessionId":id,"cwd":dunce::canonicalize(&workspace).unwrap(),"message":{"content":"Branding task"}}).to_string()+"\n").unwrap();
+    std::fs::write(transcript.join(format!("{id}.jsonl")),serde_json::json!({"type":"user","uuid":"native-question","parentUuid":null,"sessionId":id,"cwd":dunce::canonicalize(&workspace).unwrap(),"message":{"content":"Branding task"}}).to_string()+"\n").unwrap();
     let projects = ProjectStore::fixture(root.path().join("bex-worktrees.json"));
     for workspace in &workspaces {
         projects.register(workspace).await.unwrap();
@@ -390,11 +389,14 @@ async fn task_list_refreshes_branding_for_all_project_headers() {
         ],
         projects.path(),
     );
+    crate::host_rpc::runtime::Runtime::import_project_threads(
+        &service,
+        &[workspace.to_str().unwrap().into()],
+    )
+    .await
+    .unwrap();
     use agent_core::state::operations::Operation;
-    use agent_protocol::{
-        conversation::records,
-        sync::{Key, Scope},
-    };
+    use agent_protocol::conversation::records;
     let session = service.open_session();
     let subscription = uuid::Uuid::new_v4();
     let reply = service
@@ -403,30 +405,28 @@ async fn task_list_refreshes_branding_for_all_project_headers() {
             &Call::SubscribeList(records::SubscribeList {
                 refresh: false,
                 subscription,
-                cached: None,
+                after_sequence: None,
             }),
         )
         .await
         .unwrap();
     let Response::Success { result: opened } =
-        agent_protocol::protocol::decode::<Response<records::OpenedList>>(&reply.initial)
-            .unwrap()
+        agent_protocol::protocol::decode::<Response<records::OpenedList>>(&reply.initial).unwrap()
     else {
         panic!("list subscription failed")
     };
-    let mut replica = records::Replica::new(Scope::List, 1)
-        .apply(1, opened.initial)
-        .unwrap();
+    let mut shell = None;
+    for item in opened.initial {
+        shell = agent_core::orchestration::shell::receive(shell.as_ref(), item, true).unwrap();
+    }
+    let mut shell = shell.unwrap();
     let mut updates = reply.updates.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !replica
-            .rows()
-            .keys()
-            .any(|key| matches!(key, Key::Thread(_)))
-        {
-            let message =
-                agent_protocol::protocol::decode(&updates.recv().await.unwrap()).unwrap();
-            replica = replica.apply(1, message).unwrap();
+        while shell.threads.is_empty() {
+            let message = agent_protocol::protocol::decode(&updates.recv().await.unwrap()).unwrap();
+            shell = agent_core::orchestration::shell::receive(Some(&shell), message, false)
+                .unwrap()
+                .unwrap();
         }
     })
     .await
@@ -444,13 +444,17 @@ async fn task_list_refreshes_branding_for_all_project_headers() {
                 ..Default::default()
             });
             initial.lists.subscription = Some(subscription);
-            initial.lists.replica = Some(Arc::new(records::Replica::new(Scope::List, 1)));
             let (mut snapshot, _) = agent_core::state::reduce(
                 &initial,
                 "",
-                agent_core::state::Event::ListRows {
+                agent_core::state::Event::ListStream {
                     subscription_id: subscription,
-                    message: Box::new(replica.snapshot().unwrap()),
+                    message: Box::new(
+                        agent_protocol::orchestration::shell::ShellStreamItem::Snapshot {
+                            snapshot: shell.clone(),
+                            resolved_repository_identity_roots: None,
+                        },
+                    ),
                 },
             );
             let projects = &snapshot.lists.threads.as_ref().unwrap().projects;

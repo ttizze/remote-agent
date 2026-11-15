@@ -171,6 +171,35 @@ impl State {
                     || matches!(item.body,TurnItemBody::DynamicTool {..}) && matches!(request.kind.as_str(),"dynamic_tool_call"|"mcp-elicitation")))
     }
 
+    pub fn selected_native_thread(&self) -> Option<&ProviderThread> {
+        let thread = self
+            .thread
+            .active_provider_thread_id
+            .as_ref()
+            .and_then(|id| self.provider_threads.get(id))?;
+        let reference = thread.native_thread_ref.as_ref()?;
+        (thread.app_thread_id.as_deref() == Some(&self.thread.id)
+            && thread.provider_instance_id == self.thread.provider_instance_id
+            && reference.driver == thread.driver
+            && reference
+                .native_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty()))
+        .then_some(thread)
+    }
+
+    pub fn native_work_blocks_delivery(&self) -> bool {
+        self.selected_native_thread()
+            .is_some_and(|thread| thread.status == ProviderThreadStatus::Active)
+    }
+
+    pub fn has_pending_rollback(&self) -> bool {
+        self.effects.values().any(|effect| {
+            matches!(effect.request, EffectRequest::ProviderThreadRollback { .. })
+                && matches!(effect.status, EffectStatus::Pending | EffectStatus::Running)
+        })
+    }
+
     pub fn active_run(&self) -> Option<&Run> {
         self.runs
             .values()
@@ -225,10 +254,10 @@ impl State {
             checkpoint_id: run.checkpoint_id.clone(),
             turn_item_id: None,
             provider_thread_ref: run
-                .provider_thread_id
+                .active_attempt_id
                 .as_ref()
-                .and_then(|id| self.provider_threads.get(id))
-                .and_then(|thread| thread.native_thread_ref.clone()),
+                .and_then(|id| self.run_attempts.get(id))
+                .and_then(|attempt| attempt.native_thread_ref.clone()),
             provider_turn_ref: self
                 .provider_turns
                 .values()
@@ -329,11 +358,21 @@ impl State {
     pub fn native_thread_matches(&self, attempt_id: &str, driver: &str, native_id: &str) -> bool {
         self.run_attempts
             .get(attempt_id)
-            .and_then(|attempt| self.provider_threads.get(&attempt.provider_thread_id))
-            .and_then(|thread| thread.native_thread_ref.as_ref())
+            .and_then(|attempt| attempt.native_thread_ref.as_ref())
             .is_some_and(|reference| {
                 reference.driver == driver && reference.native_id.as_deref() == Some(native_id)
             })
+    }
+
+    pub fn owns_native_source(
+        &self,
+        attempt_id: &str,
+        session_id: &str,
+        driver: &str,
+        native_id: &str,
+    ) -> bool {
+        self.owned_attempt(attempt_id, session_id).is_some()
+            && self.native_thread_matches(attempt_id, driver, native_id)
     }
 
     pub(super) fn owned_attempt(&self, attempt_id: &str, session_id: &str) -> Option<&RunAttempt> {

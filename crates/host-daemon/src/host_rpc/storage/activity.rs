@@ -7,80 +7,61 @@ impl Storage {
     pub(in crate::host_rpc) fn activity(
         &self,
     ) -> Result<agent_protocol::live_activity::TaskActivityState, String> {
-        let Message::Snapshot { rows, .. } = self.list(None)? else {
-            unreachable!("initial list is a snapshot")
-        };
-        Ok(decision::records::list_rows_activity(rows.iter()))
+        let shell = self.shell_snapshot()?;
+        agent_protocol::orchestration::shell::activity(shell.threads.iter().map(AsRef::as_ref))
     }
     pub(in crate::host_rpc) fn mark_read(
         &self,
         id: &SessionRef,
         turn: &TurnId,
-    ) -> Result<Committed, String> {
+    ) -> Result<(), String> {
         self.with(|connection| {
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(failure)?;
-            let key = thread_key(&transaction, id)?;
-            let (mut header, counters) = rows::header(&transaction, key)?;
-            let mut changed = Vec::new();
-            if header.details.activity.completion.as_ref() == Some(turn)
-                && header.details.read_through.as_ref() != Some(turn)
+            let thread_id = id.application_id();
+            let mut thread = projections::read::<agent_protocol::orchestration::Thread>(
+                &transaction,
+                &thread_id,
+            )?
+            .ok_or("conversation does not exist")?;
+            let snapshot = super::shell::thread(&transaction, thread.clone())?;
+            if let Some((receipt, completed)) = snapshot
+                .completion_receipt()
+                .filter(|(receipt, _)| *receipt == turn.as_str())
             {
-                header.details.read_through = Some(turn.clone());
-                transaction
-                    .execute(
-                        "UPDATE threads SET body=?1 WHERE key=?2",
-                        params![codec::header(&header, &counters)?, key],
-                    )
+                let run = (snapshot.latest_run_id.as_deref() == Some(receipt))
+                    .then(|| receipt.to_owned());
+                let completed_at =
+                    chrono::DateTime::parse_from_rfc3339(&completed).map_err(failure)?;
+                let visited = thread
+                    .last_visited_at
+                    .as_deref()
+                    .map(chrono::DateTime::parse_from_rfc3339)
+                    .transpose()
                     .map_err(failure)?;
-                changed.push(Row {
-                    key: Key::Thread(id.clone()),
-                    version: 0,
-                    position: Position::Unordered,
-                    content: Content::Full(Arc::new(Record::Thread(header))),
-                });
+                if visited.is_none_or(|visited| visited < completed_at) {
+                    thread.last_visited_at = Some(completed.to_owned());
+                    thread.updated_at = projects::timestamp();
+                    event_store::append(
+                        &transaction,
+                        &agent_protocol::orchestration::Event {
+                            id: Uuid::new_v4().to_string(),
+                            thread_id,
+                            run_id: run,
+                            node_id: None,
+                            driver: None,
+                            provider_instance_id: None,
+                            raw_event_id: None,
+                            occurred_at: thread.updated_at.clone(),
+                            change: agent_protocol::orchestration::Change::Thread(thread),
+                        },
+                        None,
+                        None,
+                    )?;
+                }
             }
-            Self::commit(
-                transaction,
-                Some(id),
-                Step {
-                    outcome: Outcome::Accepted,
-                    ..Default::default()
-                },
-                changed,
-                Vec::new(),
-                false,
-            )
+            transaction.commit().map_err(failure)
         })
     }
-}
-
-pub(super) fn native_status(
-    connection: &Transaction<'_>,
-    target: &SessionRef,
-    (provider, source, status): (ProviderKind, &str, agent_protocol::models::SessionStatus),
-    active: Option<(bool, bool)>,
-    activity: &mut decision::records::Activity,
-    now: i64,
-) -> Result<bool, String> {
-    use agent_protocol::models::SessionStatus;
-    if status == SessionStatus::Idle && active == Some((true, false)) {
-        imports::queue(
-            connection,
-            target,
-            &SessionRef::new(provider, source.to_owned()).map_err(failure)?,
-            now,
-        )?;
-    }
-    if active.is_none()
-        && activity.status != SessionStatus::Preparing
-        && activity.latest != Some(agent_protocol::execution::TurnStatus::Running)
-        && matches!(status, SessionStatus::Idle | SessionStatus::Running)
-    {
-        let changed = activity.status != status;
-        activity.status = status;
-        return Ok(changed);
-    }
-    Ok(false)
 }

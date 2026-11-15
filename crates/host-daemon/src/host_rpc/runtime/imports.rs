@@ -4,28 +4,158 @@ use agent_protocol::{
     orchestration as model,
 };
 
-fn timestamp(milliseconds: Option<u64>, fallback: &str) -> String {
-    milliseconds
-        .and_then(|at| i64::try_from(at).ok())
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-        .unwrap_or_else(|| fallback.into())
-}
+use super::native_metadata::timestamp;
+use futures_util::TryStreamExt;
 
 impl Runtime {
+    /// T3 AgentSessionImporter imports an unowned source once. Project scans
+    /// never backfill or replace an existing conversation's settled transcript.
+    pub(in crate::host_rpc) async fn import_project_threads(
+        service: &HostRpcService,
+        roots: &[String],
+    ) -> Result<(), Failure> {
+        let projects = service.project_snapshot().await?;
+        let selected: std::collections::BTreeSet<_> = roots
+            .iter()
+            .filter_map(|root| projects.project_for_workspace(root).map(str::to_owned))
+            .collect();
+        if selected.is_empty() {
+            return Ok(());
+        }
+        for (provider, _) in service.inner.providers.all() {
+            if service.require_provider_enabled(provider).is_err() {
+                continue;
+            }
+            let result = async {
+                let runtime = &service.inner.conversation;
+                // A pending private creation must publish ownership before a
+                // native scanner can decide that its source is importable.
+                let _native = runtime.native_access[&provider].write().await;
+                let agent = service.inner.providers.discovery(provider)?;
+                let owned = runtime.storage.active_sources().map_err(storage_failure)?;
+                let pages = crate::providers::session_pages(
+                    agent.as_ref(),
+                    "",
+                    crate::providers::SessionListScope::Roots(&owned),
+                    100,
+                    100,
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_secs(5)),
+                    None,
+                );
+                futures_util::pin_mut!(pages);
+                while let Some(page) = pages.try_next().await? {
+                    for summary in page {
+                        if summary.thread.parent_id.is_some() {
+                            continue;
+                        }
+                        let Some(cwd) = summary.thread.cwd.as_deref() else {
+                            continue;
+                        };
+                        if !projects
+                            .project_for_workspace(cwd)
+                            .is_some_and(|id| selected.contains(id))
+                        {
+                            continue;
+                        }
+                        let Some(native) =
+                            summary.thread.id.filter(|id| id.provider == Some(provider))
+                        else {
+                            continue;
+                        };
+                        if runtime
+                            .storage
+                            .native_owner(&native)
+                            .map_err(storage_failure)?
+                            .is_some()
+                        {
+                            continue;
+                        }
+                        if let Err(error) = Self::import_native(service, &native, &native).await {
+                            tracing::warn!(target:"agent",operation="project.import-native",%error);
+                        }
+                    }
+                }
+                Ok::<_, Failure>(())
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(target:"agent",operation="project.scan-native",%error);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn import_native(
         service: &HostRpcService,
+        target: &SessionRef,
         native: &SessionRef,
     ) -> Result<(), Failure> {
-        let provider = native
-            .native_provider()
-            .map_err(|error| Failure::new("invalid_session", error))?;
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(120),
             Self::native_history(service, native),
         )
         .await
         .map_err(|_| Failure::new("history_unavailable", "native history read timed out"))??;
+        Self::import_native_response(service, target, native, &response).await
+    }
+
+    pub(in crate::host_rpc) async fn native_header_records(
+        service: &HostRpcService,
+        target: &SessionRef,
+        native: &SessionRef,
+        response: &agent_protocol::models::ThreadResponse,
+        now: &str,
+    ) -> Result<(model::Thread, model::ProviderThread), Failure> {
+        let provider = native
+            .native_provider()
+            .map_err(|error| Failure::new("invalid_session", error))?;
+        op::validate_thread(response, Some(native))
+            .map_err(|error| Failure::new("invalid_thread", error))?;
+        let id = target.application_id();
+        if response
+            .model
+            .as_ref()
+            .is_some_and(|model| model.provider != provider || model.id.trim().is_empty())
+        {
+            return Err(Failure::new(
+                "invalid_thread",
+                "native model belongs to another provider",
+            ));
+        }
+        let selected = super::commands::selection(
+            &super::native_metadata::selection(provider, response.model.as_ref()),
+            &records::Selection {
+                model: None,
+                effort: response.effort.clone(),
+                service_tier: response.service_tier.clone(),
+            },
+        );
+        let projects = service.project_snapshot().await?;
+        let (mut thread, mut provider_thread) = super::native_metadata::records(
+            &response.thread,
+            selected,
+            projects
+                .project_membership(response.thread.cwd.as_deref())
+                .as_ref()
+                .cloned(),
+            &now,
+        )?;
+        thread.id = id.clone();
+        if thread.lineage.parent_thread_id.is_none() {
+            thread.lineage.root_thread_id = id.clone();
+        }
+        provider_thread.app_thread_id = Some(id.clone());
+        Ok((thread, provider_thread))
+    }
+
+    /// The caller supplies the application address that authorized this read.
+    /// A private native alias must not adopt or mutate its public owner.
+    pub(in crate::host_rpc) async fn import_native_response(
+        service: &HostRpcService,
+        target: &SessionRef,
+        native: &SessionRef,
+        response: &agent_protocol::models::ThreadResponse,
+    ) -> Result<(), Failure> {
         if let Some(state) = &response.thread.history_read_state
             && state.kind != agent_protocol::session::HistoryReadKind::Complete
         {
@@ -39,106 +169,12 @@ impl Runtime {
             ));
         }
         let now = commands::at();
-        let id = native.application_id();
-        let selected = Self::default_selection(
-            service,
-            provider,
-            &records::Selection {
-                model: response.model.clone(),
-                effort: response.effort.clone(),
-                service_tier: response.service_tier.clone(),
-            },
-        )
-        .await?;
-        let projects = service.project_snapshot().await?;
-        let provider_thread_id = model::derived_id(
-            "provider-thread",
-            &[
-                "provider",
-                provider.driver(),
-                "provider-instance",
-                provider.key(),
-                "native-thread",
-                &native.id,
-            ],
-        );
-        let updated = response
-            .thread
-            .updated_at
-            .filter(|at| at.is_finite() && *at >= 0.0)
-            .map(|at| timestamp(Some((at * 1000.0) as u64), &now))
-            .unwrap_or_else(|| now.clone());
-        let created = response.thread.turns.iter().flatten().find_map(|turn| {
-            turn.started_at_ms
-                .or_else(|| turn.started_at.map(|at| (at * 1000.0) as u64))
-        });
-        let created = timestamp(created, &updated);
-        let thread = model::Thread {
-            id: id.clone(),
-            history_origin: None,
-            created_by: model::Actor::System,
-            creation_source: model::CreationSource::Server,
-            project_id: projects
-                .project_membership(response.thread.cwd.as_deref())
-                .as_ref()
-                .cloned(),
-            title: response
-                .thread
-                .name
-                .clone()
-                .or(response.thread.preview.clone())
-                .unwrap_or_default(),
-            provider_instance_id: provider.key().into(),
-            model_selection: selected,
-            runtime_mode: "full-access".into(),
-            interaction_mode: "default".into(),
-            branch: response.thread.git_branch.clone(),
-            worktree_path: response.thread.cwd.clone(),
-            active_provider_thread_id: Some(provider_thread_id.clone()),
-            lineage: model::Lineage {
-                parent_thread_id: None,
-                relationship_to_parent: None,
-                root_thread_id: id.clone(),
-                side_chat: None,
-            },
-            forked_from: None,
-            created_at: created.clone(),
-            updated_at: updated.clone(),
-            archived_at: None,
-            settled_override: Some("settled".into()),
-            settled_at: Some(updated.clone()),
-            last_visited_at: None,
-            deleted_at: None,
-        };
-        let provider_thread = model::ProviderThread {
-            id: provider_thread_id,
-            driver: provider.driver().into(),
-            provider_instance_id: provider.key().into(),
-            provider_session_id: None,
-            app_thread_id: Some(id.clone()),
-            owner_node_id: None,
-            native_thread_ref: Some(model::ProviderRef {
-                driver: provider.driver().into(),
-                native_id: Some(native.id.clone()),
-                strength: if provider == ProviderKind::DeepSeek {
-                    model::NativeRefStrength::Weak
-                } else {
-                    model::NativeRefStrength::Strong
-                },
-                fingerprint: None,
-                ordinal: None,
-            }),
-            native_conversation_head_ref: None,
-            native_metadata: None,
-            status: model::ProviderThreadStatus::Idle,
-            first_run_ordinal: None,
-            last_run_ordinal: None,
-            handoff_ids: vec![],
-            forked_from: None,
-            pending_background_tasks: vec![],
-            created_at: created,
-            updated_at: updated,
-        };
+        let id = target.application_id();
+        let (thread, mut provider_thread) =
+            Self::native_header_records(service, target, native, response, &now).await?;
+        // An imported transcript is static history, as in AgentSessionImporter.
+        // Native file activity does not create an app-owned running resource.
+        provider_thread.status = model::ProviderThreadStatus::Idle;
         let mut items = Vec::new();
         for turn in response.thread.turns.iter().flatten() {
             let at = timestamp(
@@ -230,6 +266,7 @@ impl Runtime {
 mod tests {
     use super::super::native_fixture::{NativeAgent, Transcript, call};
     use super::*;
+    use agent_protocol::conversation as decision;
     use agent_protocol::{
         execution::{ItemStatus, TurnStatus},
         items::{Item, ItemBody},

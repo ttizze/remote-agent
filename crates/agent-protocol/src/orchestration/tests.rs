@@ -1,6 +1,7 @@
 use super::*;
 use uuid::Uuid;
 
+mod native_status;
 mod recovery;
 
 const NOW: &str = "2026-11-14T00:00:00.000Z";
@@ -137,6 +138,7 @@ fn initial() -> State {
     let thread = Thread {
         id: "thread".into(),
         history_origin: None,
+        workspace_launch: None,
         created_by: Actor::User,
         creation_source: CreationSource::Mobile,
         project_id: None,
@@ -1366,10 +1368,26 @@ fn approval_body_is_saved_once_and_in_flight_response_cannot_be_sent_twice() {
         &request,
         response.clone(),
         "codex",
-        context("4", &state),
+        Context {
+            now: "2026-11-15T00:00:10.000Z",
+            ..context("4", &state)
+        },
     )
     .unwrap();
     let next = state.apply(&decision);
+    assert_eq!(next.nodes["approval-item"].status, NodeStatus::Completed);
+    assert_eq!(
+        next.nodes["approval-item"].completed_at.as_deref(),
+        Some("2026-11-15T00:00:10.000Z")
+    );
+    assert_eq!(
+        next.turn_items["approval-item"].completed_at.as_deref(),
+        Some("2026-11-15T00:00:10.000Z")
+    );
+    assert_eq!(
+        next.turn_items["approval-item"].updated_at,
+        "2026-11-15T00:00:10.000Z"
+    );
     assert!(respond(&next, &request, response, "codex", context("5", &next)).is_err());
     assert_eq!(
         next.runtime_requests[&request].status,
@@ -1581,6 +1599,342 @@ fn queued_activation_reuses_execution_ids_and_moves_after_work_started_ahead() {
 }
 
 #[test]
+fn a_late_native_allocation_keeps_only_its_resource_and_cannot_replace_a_new_binding() {
+    let state = initial();
+    let state = state.apply(
+        &admit(
+            &state,
+            input(1),
+            Admission::Queue,
+            context("accepted", &state),
+        )
+        .unwrap(),
+    );
+    let run = state.active_run().unwrap().clone();
+    let stopped = state.apply(&interrupt(&state, &run.id, context("stop", &state)).unwrap());
+    let thread_id = run.provider_thread_id.as_ref().unwrap();
+    let expected = stopped.provider_threads[thread_id]
+        .native_thread_ref
+        .clone();
+    let session = stopped.provider_sessions.values().next().unwrap().clone();
+    let allocated = native("late-native-session", None);
+    let decision = native_resource_loaded(
+        &stopped,
+        thread_id,
+        expected.as_ref(),
+        session.clone(),
+        allocated.clone(),
+        false,
+        NOW,
+    )
+    .unwrap();
+    let loaded = stopped.apply(&decision);
+    assert_eq!(loaded.runs, stopped.runs);
+    assert_eq!(loaded.run_attempts, stopped.run_attempts);
+    assert_eq!(loaded.nodes, stopped.nodes);
+    assert_eq!(loaded.turn_items, stopped.turn_items);
+    assert_eq!(loaded.effects, stopped.effects);
+    assert!(loaded.provider_turns.is_empty());
+    assert_eq!(
+        loaded.provider_threads[thread_id]
+            .native_thread_ref
+            .as_ref(),
+        Some(&allocated)
+    );
+    let mut replaced = stopped.clone();
+    replaced
+        .provider_threads
+        .get_mut(thread_id)
+        .unwrap()
+        .native_thread_ref = Some(native("newer native resource", None));
+    assert!(
+        native_resource_loaded(
+            &replaced,
+            thread_id,
+            expected.as_ref(),
+            session.clone(),
+            allocated.clone(),
+            false,
+            NOW
+        )
+        .unwrap()
+        .changes
+        .is_empty()
+    );
+    let mut foreign = session.clone();
+    foreign.provider_instance_id = "claude".into();
+    assert!(
+        native_resource_loaded(
+            &stopped,
+            thread_id,
+            expected.as_ref(),
+            foreign,
+            allocated.clone(),
+            false,
+            NOW
+        )
+        .is_err()
+    );
+    let mut foreign = allocated.clone();
+    foreign.driver = "claudeAgent".into();
+    assert!(
+        native_resource_loaded(
+            &stopped,
+            thread_id,
+            expected.as_ref(),
+            session.clone(),
+            foreign,
+            false,
+            NOW
+        )
+        .is_err()
+    );
+    let mut foreign = stopped.clone();
+    foreign
+        .provider_threads
+        .get_mut(thread_id)
+        .unwrap()
+        .app_thread_id = Some("another conversation".into());
+    assert!(
+        native_resource_loaded(
+            &foreign,
+            thread_id,
+            expected.as_ref(),
+            session.clone(),
+            allocated.clone(),
+            false,
+            NOW
+        )
+        .is_err()
+    );
+    let mut foreign = session.clone();
+    foreign.driver = "claudeAgent".into();
+    assert!(
+        native_resource_loaded(
+            &stopped,
+            thread_id,
+            expected.as_ref(),
+            foreign,
+            allocated.clone(),
+            false,
+            NOW
+        )
+        .is_err()
+    );
+    let mut missing = allocated.clone();
+    missing.native_id = None;
+    assert!(
+        native_resource_loaded(
+            &stopped,
+            thread_id,
+            expected.as_ref(),
+            session.clone(),
+            missing,
+            false,
+            NOW
+        )
+        .is_err()
+    );
+    let mut deleted = stopped.clone();
+    deleted.thread.deleted_at = Some(NOW.into());
+    assert!(
+        native_resource_loaded(
+            &deleted,
+            thread_id,
+            expected.as_ref(),
+            session,
+            allocated,
+            false,
+            NOW
+        )
+        .unwrap()
+        .changes
+        .is_empty()
+    );
+}
+
+#[test]
+fn removing_an_unsent_stopped_input_preserves_the_queue_and_cannot_remove_real_native_work() {
+    let state = initial();
+    let state =
+        state.apply(&admit(&state, input(1), Admission::Queue, context("first", &state)).unwrap());
+    let original = state.active_run().unwrap().clone();
+    let state = state.apply(
+        &admit(
+            &state,
+            input(2),
+            Admission::Queue,
+            context("queued", &state),
+        )
+        .unwrap(),
+    );
+    let stopped = state.apply(&interrupt(&state, &original.id, context("stop", &state)).unwrap());
+    let queued = stopped
+        .runs
+        .values()
+        .find(|run| run.status == RunStatus::Queued)
+        .unwrap()
+        .clone();
+    let removed = stopped.apply(&remove_input(&stopped, &original.id, NOW).unwrap());
+    assert_eq!(removed.runs[&queued.id], queued);
+    assert_eq!(removed.effects, stopped.effects);
+    assert!(removed.provider_turns.is_empty());
+    assert!(removed.turn_items.values().any(|item|item.status==TurnItemStatus::Cancelled && matches!(&item.body,TurnItemBody::UserMessage{message_id,..} if message_id==&original.user_message_id)));
+    assert!(
+        retry_input(
+            &removed,
+            &original.id,
+            false,
+            context("retry removed", &removed)
+        )
+        .is_err()
+    );
+    let (running, run_id, attempt_id) = running();
+    let failed = running.apply(
+        &complete(
+            &running,
+            &attempt_id,
+            "session",
+            Completion::Failed(ProviderFailure {
+                class: "provider".into(),
+                message: "native failure".into(),
+                code: None,
+                retryable: None,
+                reset_at: None,
+            }),
+            context("failure", &running),
+        )
+        .unwrap(),
+    );
+    assert!(remove_input(&failed, &run_id, NOW).is_err());
+    let mut missing_pointer = failed.clone();
+    missing_pointer
+        .run_attempts
+        .get_mut(&attempt_id)
+        .unwrap()
+        .provider_turn_id = None;
+    assert!(
+        remove_input(&missing_pointer, &run_id, NOW).is_err(),
+        "a real saved provider turn remains proof of delivery"
+    );
+}
+
+#[test]
+fn workspace_resource_callbacks_cannot_restart_stopped_or_replaced_launches() {
+    use crate::workspace::{
+        SetupChange, WorkspacePreparation as Launch, WorkspaceSetup, WorkspaceStrategy,
+    };
+    let mut state = initial();
+    state.thread.workspace_launch = Some(Box::new(Launch {
+        run_id: None,
+        project_cwd: "/project".into(),
+        strategy: Some(WorkspaceStrategy::Worktree {
+            base_ref: "main".into(),
+            start_from_origin: false,
+        }),
+        generation: Uuid::nil(),
+        created_worktree: false,
+        setup: Some(WorkspaceSetup::new(Some("main".into()), 0)),
+        visible: true,
+    }));
+    let mut request = input(1);
+    request.workspace_preparation = Some(WorkspacePreparation::Worktree {
+        base_ref: "main".into(),
+        start_from_origin: false,
+        branch: None,
+    });
+    state =
+        state.apply(&admit(&state, request, Admission::Queue, context("launch", &state)).unwrap());
+    let run = state.active_run().unwrap().clone();
+    let launch = state.thread.workspace_launch.clone().unwrap();
+    assert_eq!(launch.run_id.as_ref(), Some(&run.id));
+    let generation = launch.generation;
+    assert!(
+        workspace_progress(
+            &state,
+            generation,
+            SetupChange::Begin {
+                workspace: launch.clone()
+            },
+            NOW
+        )
+        .unwrap()
+        .changes
+        .is_empty()
+    );
+    assert!(
+        workspace_progress(
+            &state,
+            Uuid::nil(),
+            SetupChange::Created {
+                path: "/wrong".into(),
+                branch: "wrong".into()
+            },
+            NOW
+        )
+        .is_err()
+    );
+    assert!(
+        workspace_progress(
+            &state,
+            Uuid::nil(),
+            SetupChange::Expire { ended_at: 0 },
+            NOW
+        )
+        .unwrap()
+        .changes
+        .is_empty()
+    );
+    let mut foreign = launch.clone();
+    foreign.run_id = Some("another accepted input".into());
+    assert!(
+        workspace_progress(
+            &state,
+            generation,
+            SetupChange::Begin { workspace: foreign },
+            NOW
+        )
+        .is_err()
+    );
+    let stopped = state.apply(&interrupt(&state, &run.id, context("stop", &state)).unwrap());
+    assert!(
+        workspace_progress(
+            &stopped,
+            generation,
+            SetupChange::Begin { workspace: launch },
+            NOW
+        )
+        .is_err()
+    );
+    assert!(
+        workspace_progress(
+            &stopped,
+            generation,
+            SetupChange::Script {
+                handle: "must not launch a PTY".into()
+            },
+            NOW
+        )
+        .is_err()
+    );
+    assert!(
+        workspace_progress(
+            &stopped,
+            generation,
+            SetupChange::Created {
+                path: "/late".into(),
+                branch: "late".into()
+            },
+            NOW
+        )
+        .is_err()
+    );
+    assert_eq!(stopped.thread.worktree_path.as_deref(), Some("/project"));
+    assert!(stopped.provider_turns.is_empty());
+    assert!(stopped.effects.is_empty());
+}
+
+#[test]
 fn workspace_preparation_failure_retry_and_release_keep_the_reserved_run_and_attempt() {
     let mut input = input(1);
     input.workspace_preparation = Some(WorkspacePreparation::Worktree {
@@ -1623,7 +1977,8 @@ fn workspace_preparation_failure_retry_and_release_keep_the_reserved_run_and_att
         .unwrap(),
     );
     assert_eq!(state.runs[&run.id].status, RunStatus::Failed);
-    let state = state.apply(&preparation_retry(&state, &run.id, NOW).unwrap());
+    let state = state
+        .apply(&retry_input(&state, &run.id, false, context("preparation-retry", &state)).unwrap());
     assert_eq!(state.runs[&run.id].active_attempt_id, run.active_attempt_id);
     assert_eq!(state.runs[&run.id].root_node_id, run.root_node_id);
     let state = state.apply(
@@ -1827,6 +2182,145 @@ fn callbacks_require_the_exact_attached_session_and_a_live_provider_process() {
 
 mod fork_tests {
     use super::*;
+
+    #[test]
+    fn native_forks_require_a_finished_owned_turn_and_keep_the_exact_item_boundary() {
+        let state = initial();
+        let provider = &state.provider_threads["native-thread"];
+        let point = ContextSourcePoint {
+            thread_id: state.thread.id.clone(),
+            run_id: None,
+            checkpoint_id: None,
+            turn_item_id: Some("real-last-source-item".into()),
+            provider_thread_ref: provider.native_thread_ref.clone(),
+            provider_turn_ref: Some(native("actual-raw-turn", None)),
+        };
+        let turn = ProviderTurn {
+            id: "observed-native-turn".into(),
+            provider_thread_id: provider.id.clone(),
+            node_id: "real-root".into(),
+            run_attempt_id: None,
+            native_thread_ref: point.provider_thread_ref.clone(),
+            native_turn_ref: point.provider_turn_ref.clone(),
+            ordinal: 1,
+            status: ProviderTurnStatus::Completed,
+            started_at: Some(NOW.into()),
+            completed_at: Some(NOW.into()),
+            token_usage: None,
+            model: None,
+        };
+        for (status, allowed) in [
+            (ProviderTurnStatus::Pending, false),
+            (ProviderTurnStatus::Running, false),
+            (ProviderTurnStatus::Completed, true),
+            (ProviderTurnStatus::Failed, true),
+            (ProviderTurnStatus::Interrupted, true),
+            (ProviderTurnStatus::Cancelled, true),
+        ] {
+            let turn = ProviderTurn {
+                status,
+                ..turn.clone()
+            };
+            let result = fork_native_thread(
+                &state.thread,
+                provider,
+                Some(&turn),
+                point.clone(),
+                "target",
+                "transfer",
+                NOW,
+            );
+            assert_eq!(result.is_ok(), allowed, "{status:?}");
+            if let Ok((thread, transfer)) = result {
+                assert_eq!(
+                    thread.forked_from,
+                    Some(ThreadForkSource::ProviderThread {
+                        provider_thread_id: provider.id.clone(),
+                        provider_turn_id: Some(turn.id)
+                    })
+                );
+                assert_eq!(transfer.source_point, point);
+                assert!(transfer.target_run_id.is_none());
+                assert!(thread.active_provider_thread_id.is_none());
+            }
+        }
+        for invalid in [
+            "foreign-turn",
+            "app-attempt",
+            "foreign-point",
+            "wrong-raw-turn",
+            "no-item",
+            "app-run",
+            "foreign-provider",
+            "deleted",
+            "same-thread",
+        ] {
+            let mut thread = state.thread.clone();
+            let mut provider = provider.clone();
+            let mut turn = turn.clone();
+            let mut point = point.clone();
+            match invalid {
+                "foreign-turn" => turn.provider_thread_id = "other-provider-thread".into(),
+                "app-attempt" => turn.run_attempt_id = Some("owned-attempt".into()),
+                "foreign-point" => point.thread_id = "other-thread".into(),
+                "wrong-raw-turn" => point.provider_turn_ref = Some(native("later-turn", None)),
+                "no-item" => point.turn_item_id = None,
+                "app-run" => point.run_id = Some("invented-run".into()),
+                "foreign-provider" => provider.app_thread_id = Some("other-thread".into()),
+                "deleted" => thread.deleted_at = Some(NOW.into()),
+                _ => {}
+            }
+            let target = if invalid == "same-thread" {
+                thread.id.as_str()
+            } else {
+                "target"
+            };
+            assert!(
+                fork_native_thread(
+                    &thread,
+                    &provider,
+                    Some(&turn),
+                    point,
+                    target,
+                    "transfer",
+                    NOW
+                )
+                .is_err(),
+                "{invalid}"
+            );
+        }
+        let mut imported = state.thread.clone();
+        imported.history_origin = Some(ThreadHistoryOrigin::V1Import);
+        let point = ContextSourcePoint {
+            provider_turn_ref: None,
+            ..point
+        };
+        assert!(
+            fork_native_thread(
+                &imported,
+                provider,
+                None,
+                point.clone(),
+                "target",
+                "transfer",
+                NOW
+            )
+            .is_ok()
+        );
+        assert!(
+            fork_native_thread(
+                &state.thread,
+                provider,
+                None,
+                point,
+                "target",
+                "transfer",
+                NOW
+            )
+            .is_err()
+        );
+    }
+
     fn undelivered_fork() -> (State, String) {
         let (source, mut run, point) = fork_source_fixture();
         run.status = RunStatus::Completed;

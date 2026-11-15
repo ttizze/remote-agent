@@ -68,6 +68,108 @@ fn row(item: TurnItem, visibility: Visibility, position: u64) -> ProjectedTurnIt
 }
 
 #[test]
+fn canonical_subagents_keep_public_child_links_models_and_status_without_opening_the_child() {
+    use agent_protocol::{execution, items, session};
+    let owner = session::SessionRef::new(None, "thread".into()).unwrap();
+    let child =
+        session::SessionRef::new(None, "105a6224-6aa3-4618-9fdc-d916232bfce5".into()).unwrap();
+    let mut snapshot = snapshot(1);
+    snapshot.has_more_history = false;
+    snapshot.history_cursor = None;
+    let task:Subagent=serde_json::from_value(json!({
+        "id":"real-task","threadId":"thread","runId":null,"parentNodeId":"real-native-root",
+        "origin":"provider_native","createdBy":"agent","driver":"codex","providerInstanceId":"codex",
+        "providerThreadId":"child-native-provider","childThreadId":child.application_id(),
+        "nativeTaskRef":{"driver":"codex","nativeId":"real-spawn:private-native-child","strength":"strong"},
+        "title":"Review","model":"requested-child-model","status":"completed","startedAt":NOW,"completedAt":NOW,"updatedAt":NOW
+    })).unwrap();
+    let mut value = item("real-task-item", 1);
+    value.run_id = None;
+    value.node_id = Some(task.id.clone());
+    value.body = TurnItemBody::Subagent {
+        subagent_id: task.id.clone(),
+        origin: task.origin.clone(),
+        driver: task.driver.clone(),
+        provider_instance_id: task.provider_instance_id.clone(),
+        child_thread_id: Some(child.application_id()),
+        prompt: "Review the requested behavior".into(),
+        result: Some("review completed".into()),
+        progress: None,
+    };
+    snapshot.projection.subagents.push(task);
+    snapshot.projection.turn_items.push(Arc::new(value.clone()));
+    snapshot
+        .projection
+        .visible_turn_items
+        .push(row(value, Visibility::Local, 0));
+    let shown = project(
+        &snapshot,
+        &owner,
+        session::ProviderKind::Codex,
+        session::Capabilities::default(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let item = &shown.thread.turns.as_ref().unwrap()[0]
+        .items
+        .as_ref()
+        .unwrap()[0];
+    let items::ItemBody::Subagent {
+        receivers,
+        states,
+        model,
+        agent_id,
+        ..
+    } = item.body()
+    else {
+        panic!("canonical task presentation");
+    };
+    assert_eq!(receivers, &[child.clone()]);
+    assert_eq!(states[0].session, child);
+    assert_eq!(states[0].status, execution::TurnStatus::Completed);
+    assert_eq!(states[0].message.as_deref(), Some("review completed"));
+    assert_eq!(model.as_deref(), Some("requested-child-model"));
+    assert!(
+        agent_id.is_none(),
+        "an app conversation ID is not a native agent ID"
+    );
+    let mut state = crate::state::Snapshot::default();
+    Arc::make_mut(&mut Arc::make_mut(state.panes.primary_mut()).navigation).thread_id =
+        Some(owner.clone());
+    Arc::make_mut(&mut state.sessions.conversations).insert(owner.clone(), Arc::new(shown.thread));
+    Arc::make_mut(&mut state.sessions.projections)
+        .insert(owner.clone(), Arc::new(snapshot.clone()));
+    let agents = state.agent_panel(state.panes.primary());
+    assert_eq!(agents.len(), 1);
+    assert!(!agents[0].active);
+    assert_eq!(agents[0].model.as_deref(), Some("requested-child-model"));
+    assert_eq!(agents[0].detail.as_deref(), Some("review completed"));
+    // Task metadata is authoritative even when the disposable conversation DTO
+    // hasn't changed and the child itself has never been loaded.
+    snapshot.projection.subagents[0].model = Some("newly-selected-child-model".into());
+    Arc::make_mut(&mut state.sessions.projections).insert(owner.clone(), Arc::new(snapshot));
+    assert_eq!(
+        state.agent_panel(state.panes.primary())[0].model.as_deref(),
+        Some("newly-selected-child-model")
+    );
+    assert!(!state.sessions.conversations.contains_key(&child));
+    Arc::make_mut(&mut state.sessions.conversations).insert(
+        child.clone(),
+        Arc::new(agent_protocol::models::Thread {
+            id: Some(child),
+            parent_id: Some(owner),
+            name: Some("User's reviewer".into()),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        state.agent_panel(state.panes.primary())[0].title,
+        "User's reviewer"
+    );
+}
+
+#[test]
 fn native_display_preserves_inherited_groups_without_creating_application_runs() {
     use agent_protocol::{execution, items, session};
     let identity =
@@ -122,6 +224,128 @@ fn native_display_preserves_inherited_groups_without_creating_application_runs()
         }
     ));
     assert_eq!(snapshot.projection.runs.len(), 1);
+}
+
+#[test]
+fn fork_actions_use_the_visible_rows_real_owner_and_explicit_boundary() {
+    use agent_protocol::{conversation::records::ForkPoint, session::SessionRef};
+    let owner = SessionRef::new(None, "d0ef657a-9331-425b-902d-fcc00a413a2c".into()).unwrap();
+    for visibility in [Visibility::Local, Visibility::Inherited] {
+        let mut projection = projection();
+        let mut value = item("answer", 1);
+        value.thread_id = owner.application_id();
+        projection.visible_turn_items = vec![row(value.clone(), visibility, 0)];
+        assert_eq!(
+            fork_point(&projection, &"run".into()),
+            Some((
+                owner.clone(),
+                ForkPoint::Run {
+                    run_id: "run".into()
+                }
+            ))
+        );
+        value.run_id = None;
+        value.provider_turn_id = Some("real-provider-turn".into());
+        projection.visible_turn_items = vec![row(value.clone(), visibility, 0)];
+        assert_eq!(
+            fork_point(&projection, &"real-provider-turn".into()),
+            Some((
+                owner.clone(),
+                ForkPoint::ProviderTurn {
+                    provider_turn_id: "real-provider-turn".into()
+                }
+            ))
+        );
+        value.provider_turn_id = None;
+        projection.thread.history_origin = Some(ThreadHistoryOrigin::V1Import);
+        let mut last = value.clone();
+        last.id = "last-reasoning".into();
+        last.ordinal = 2;
+        projection.visible_turn_items = vec![row(value, visibility, 0), row(last, visibility, 1)];
+        assert_eq!(
+            fork_point(
+                &projection,
+                &format!("history:{}:answer", owner.application_id()).into()
+            ),
+            Some((
+                owner.clone(),
+                ForkPoint::TurnItem {
+                    turn_item_id: "last-reasoning".into()
+                }
+            ))
+        );
+        assert!(fork_point(&projection, &"missing".into()).is_none());
+        projection.visible_turn_items[0].visibility = Visibility::Synthetic;
+        assert!(
+            fork_point(
+                &projection,
+                &format!("history:{}:answer", owner.application_id()).into()
+            )
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn inherited_success_waits_for_the_root_checkpoint_and_ignores_later_background_results() {
+    let mut snapshot = snapshot(1);
+    let mut answer = item("answer", 1);
+    answer.thread_id = "parent".into();
+    answer.provider_turn_id = Some("native-turn".into());
+    let mut checkpoint = answer.clone();
+    checkpoint.id = "root-checkpoint".into();
+    checkpoint.ordinal = 2;
+    checkpoint.completed_at = Some("1970-01-01T00:00:03.000Z".into());
+    checkpoint.body = TurnItemBody::Checkpoint {
+        checkpoint_id: "actual-checkpoint".into(),
+        scope_id: "root-scope".into(),
+        files: vec![],
+        files_total: None,
+    };
+    let mut late = answer.clone();
+    late.id = "late-tool".into();
+    late.ordinal = 3;
+    late.completed_at = Some("1970-01-01T00:00:09.000Z".into());
+    snapshot.projection.provider_turns.push(ProviderTurn {
+        id: "native-turn".into(),
+        provider_thread_id: "source-native".into(),
+        node_id: "source-root".into(),
+        run_attempt_id: Some("actual-source-attempt".into()),
+        native_thread_ref: None,
+        native_turn_ref: Some(ProviderRef {
+            driver: "codex".into(),
+            native_id: Some("raw-turn".into()),
+            strength: NativeRefStrength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        }),
+        ordinal: 1,
+        status: ProviderTurnStatus::Completed,
+        started_at: Some("1970-01-01T00:00:01.000Z".into()),
+        completed_at: Some("1970-01-01T00:00:02.000Z".into()),
+        token_usage: None,
+        model: None,
+    });
+    snapshot.projection.visible_turn_items = vec![
+        row(answer, Visibility::Inherited, 0),
+        row(checkpoint, Visibility::Inherited, 1),
+        row(late, Visibility::Inherited, 2),
+    ];
+    let view = project(
+        &snapshot,
+        &agent_protocol::session::SessionRef::new(None, "thread".into()).unwrap(),
+        agent_protocol::session::ProviderKind::Codex,
+        Default::default(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let turns = view.thread.turns.unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].started_at_ms, Some(1000));
+    assert_eq!(turns[0].completed_at_ms, Some(3000));
+    assert!(snapshot.projection.runs.is_empty());
+    assert!(snapshot.projection.attempts.is_empty());
 }
 
 #[test]

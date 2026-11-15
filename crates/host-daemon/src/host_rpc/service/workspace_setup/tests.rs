@@ -11,6 +11,72 @@ use agent_protocol::{
 };
 use std::{path::Path, sync::atomic::Ordering, time::Duration};
 
+fn save_launch(
+    host: &HostRpcService,
+    target: &SessionRef,
+    workspace: WorkspacePreparation,
+    input: Option<&str>,
+) {
+    use agent_protocol::orchestration as model;
+    let mut thread = crate::host_rpc::storage::test_support::thread(&target.application_id());
+    thread.model_selection.model = "fixture-model".into();
+    thread.worktree_path = workspace
+        .setup
+        .as_ref()
+        .and_then(|setup| setup.worktree_path.clone())
+        .or_else(|| Some(workspace.project_cwd.clone()));
+    thread.workspace_launch = Some(Box::new(workspace));
+    let operation = input.unwrap_or("saved-launch");
+    host.inner
+        .conversation
+        .storage
+        .thread_command(
+            crate::host_rpc::storage::commands::Command {
+                id: operation,
+                thread_id: &thread.id,
+                kind: "thread.create",
+                now: crate::host_rpc::storage::test_support::NOW,
+                item_ids: &[],
+            },
+            Some(&thread),
+            |state| {
+                let Some(input) = input else {
+                    return Ok(Default::default());
+                };
+                model::admit(
+                    state,
+                    model::Input {
+                        message_id: input.into(),
+                        created_by: model::Actor::User,
+                        creation_source: model::CreationSource::Mobile,
+                        text: "do work".into(),
+                        attachments: vec![],
+                        context: None,
+                        model_selection: thread.model_selection.clone(),
+                        driver: "codex".into(),
+                        workspace_preparation: Some(model::WorkspacePreparation::Worktree {
+                            base_ref: "main".into(),
+                            start_from_origin: false,
+                            branch: None,
+                        }),
+                        fork_origin: None,
+                    },
+                    model::Admission::Queue,
+                    model::Context {
+                        command_id: operation,
+                        now: crate::host_rpc::storage::test_support::NOW,
+                        next_run_ordinal: 1,
+                        can_steer: false,
+                    },
+                )
+            },
+        )
+        .unwrap()
+        .receipt
+        .accepted()
+        .unwrap();
+}
+
 struct Updates {
     stream: HostSubscription,
     replica: Transcript,
@@ -308,10 +374,10 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         .inner
         .conversation
         .storage
-        .header(&opened)
+        .thread_header(&opened)
         .unwrap()
-        .details
-        .workspace
+        .unwrap()
+        .workspace_launch
         .unwrap()
         .generation;
     fixture
@@ -319,7 +385,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         .setup_update(
             &opened,
             generation,
-            crate::host_rpc::storage::workspace::SetupChange::Expire {
+            agent_protocol::workspace::SetupChange::Expire {
                 ended_at: done.ended_at_ms.unwrap(),
             },
         )
@@ -377,10 +443,10 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
             .inner
             .conversation
             .storage
-            .header(&opened)
+            .thread_header(&opened)
             .unwrap()
-            .details
-            .workspace
+            .unwrap()
+            .workspace_launch
             .unwrap()
             .generation,
         generation
@@ -392,23 +458,30 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
     for fork in [true, false] {
         let target = if fork {
             let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
-            fixture
-                .host
-                .inner
-                .conversation
-                .storage
-                .fork(&opened, &target, &through, 100)
-                .unwrap();
+            let forked: SessionRef = call(
+                &fixture.host,
+                client.id(),
+                Call::ForkConversation(records::Fork {
+                    source: opened.clone(),
+                    target: target.clone(),
+                    through: records::ForkPoint::Run {
+                        run_id: through.to_string(),
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(forked, target);
             assert!(
                 fixture
                     .host
                     .inner
                     .conversation
                     .storage
-                    .header(&target)
+                    .thread_header(&target)
                     .unwrap()
-                    .details
-                    .workspace
+                    .unwrap()
+                    .workspace_launch
                     .is_none()
             );
             target
@@ -507,10 +580,10 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
             .inner
             .conversation
             .storage
-            .header(&opened)
+            .thread_header(&opened)
             .unwrap()
-            .details
-            .workspace
+            .unwrap()
+            .workspace_launch
             .unwrap();
         assert_eq!(saved.generation, generation);
         assert_eq!(saved.setup.unwrap().phase, SetupPhase::Done);
@@ -648,10 +721,10 @@ async fn project_script_failure_has_real_terminal_output_and_retries_in_the_same
             .inner
             .conversation
             .storage
-            .header(&opened)
+            .thread_header(&opened)
             .unwrap()
-            .details
-            .workspace
+            .unwrap()
+            .workspace_launch
             .unwrap()
             .setup
             .unwrap();
@@ -724,6 +797,60 @@ async fn workspace_options_share_the_review_and_existing_worktrees_must_belong_t
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn an_empty_launch_keeps_its_async_script_live_until_the_real_process_exits() {
+    let fixture = Fixture::new(script(
+        "printf 'waiting\\n'; while [ ! -f .release ]; do sleep 0.02; done; printf 'finished\\n'",
+        true,
+    ))
+    .await;
+    let client = fixture.host.open_session();
+    let mut request = fixture.request("main", false);
+    let Call::CreateConversation(params) = &mut request else {
+        unreachable!()
+    };
+    params.initial = None;
+    let (id, mut updates) = admit(&fixture.host, client.id(), &request).await;
+    let live = setup_until(&mut updates, |setup| {
+        setup.stages.iter().any(|stage| {
+            stage.id == SetupStageId::SetupScript
+                && stage.tail.iter().any(|line| line.contains("waiting"))
+        }) && setup.stages.iter().any(|stage| {
+            stage.id == SetupStageId::Agent && stage.status == SetupStageStatus::Skipped
+        })
+    })
+    .await;
+    assert_eq!(live.phase, SetupPhase::Running);
+    assert!(live.ended_at_ms.is_none());
+    let state = fixture
+        .host
+        .inner
+        .conversation
+        .storage
+        .thread_state(&id.application_id(), &[])
+        .unwrap();
+    assert!(state.runs.is_empty());
+    assert!(state.run_attempts.is_empty());
+    assert!(state.provider_turns.is_empty());
+    assert!(fixture.agent.inputs.lock().unwrap().is_empty());
+    assert_eq!(fixture.agent.next.load(Ordering::SeqCst), 0);
+    std::fs::write(
+        Path::new(live.worktree_path.as_ref().unwrap()).join(".release"),
+        "",
+    )
+    .unwrap();
+    let done = setup_until(&mut updates, |setup| setup.phase == SetupPhase::Done).await;
+    assert_eq!(
+        done.stages
+            .iter()
+            .find(|stage| stage.id == SetupStageId::SetupScript)
+            .unwrap()
+            .exit_code,
+        Some(0)
+    );
+    assert!(fixture.agent.inputs.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn asynchronous_failure_does_not_block_or_resend_the_initial_input() {
     let fixture = Fixture::new(script("printf 'waiting\\n'; while [ ! -f .release ]; do sleep 0.02; done; printf 'async failure\\n'; exit 9", true)).await;
@@ -885,7 +1012,14 @@ async fn automatic_workspace_preference_selects_the_initial_checkout() {
             Path::new(thread.cwd.as_deref().unwrap()) == fixture.repository,
             !automatic,
             "automatic={automatic}; projected={thread:?}; stored={:?}",
-            fixture.host.inner.conversation.storage.header(&id).unwrap()
+            fixture
+                .host
+                .inner
+                .conversation
+                .storage
+                .thread_header(&id)
+                .unwrap()
+                .unwrap()
         );
         drop(blocked);
         until(&mut updates, |thread| thread.preparations.is_empty()).await;
@@ -962,9 +1096,16 @@ async fn stopped_checkout(retry_existing: bool) {
         .unwrap()
         .is_empty()
     );
-    let header = fixture.host.inner.conversation.storage.header(&id).unwrap();
-    assert_eq!(header.state.workspace.cwd(), fixture.repository.to_str());
-    let setup = header.details.workspace.unwrap().setup.unwrap();
+    let header = fixture
+        .host
+        .inner
+        .conversation
+        .storage
+        .thread_header(&id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(header.worktree_path.as_deref(), fixture.repository.to_str());
+    let setup = header.workspace_launch.unwrap().setup.unwrap();
     assert!(setup.worktree_path.is_none());
     assert!(setup.branch.is_none());
     let request = if retry_existing {
@@ -1025,32 +1166,20 @@ async fn restarted_host_restores_the_remaining_setup_card_lifetime() {
     let ended = now().max(20_000) as u64 - 20_000;
     let mut setup = WorkspaceSetup::new(None, ended - 1);
     setup.finish(SetupPhase::Done, None, ended);
-    host.inner
-        .conversation
-        .storage
-        .create(
-            &id,
-            &records::Header {
-                state: agent_protocol::conversation::Thread {
-                    name: "Finished setup".into(),
-                    provider: ProviderKind::Codex,
-                    workspace: agent_protocol::conversation::Workspace::Ready("/project".into()),
-                    queue_held: false,
-                },
-                details: records::Details {
-                    workspace: Some(Box::new(WorkspacePreparation {
-                        project_cwd: "/project".into(),
-                        strategy: None,
-                        generation,
-                        created_worktree: false,
-                        setup: Some(setup),
-                        visible: true,
-                    })),
-                    ..Default::default()
-                },
-            },
-        )
-        .unwrap();
+    save_launch(
+        &host,
+        &id,
+        WorkspacePreparation {
+            run_id: None,
+            project_cwd: "/project".into(),
+            strategy: None,
+            generation,
+            created_worktree: false,
+            setup: Some(setup),
+            visible: true,
+        },
+        None,
+    );
     let mut changes = host.inner.conversation.storage.changes();
     changes.borrow_and_update();
     let started = tokio::time::Instant::now();
@@ -1060,10 +1189,10 @@ async fn restarted_host_restores_the_remaining_setup_card_lifetime() {
             .inner
             .conversation
             .storage
-            .header(&id)
+            .thread_header(&id)
             .unwrap()
-            .details
-            .workspace
+            .unwrap()
+            .workspace_launch
             .as_ref()
             .unwrap()
             .visible
@@ -1082,14 +1211,197 @@ async fn restarted_host_restores_the_remaining_setup_card_lifetime() {
         host.inner
             .conversation
             .storage
-            .header(&id)
+            .thread_header(&id)
             .unwrap()
-            .details
-            .workspace
+            .unwrap()
+            .workspace_launch
             .unwrap()
             .setup
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn restart_preserves_interrupted_checkouts_and_waits_for_an_explicit_retry_or_input() {
+    for (initial, async_ready) in [(false, false), (true, false), (false, true)] {
+        let fixture = Fixture::new(None).await;
+        let checkout = fixture
+            .host
+            .inner
+            .worktrees
+            .prepare_selected(
+                fixture.repository.to_str().unwrap(),
+                "main".into(),
+                false,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        let branch = crate::git::text(&checkout, &["branch", "--show-current"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        std::fs::write(checkout.join(".script-history"), "before\n").unwrap();
+        std::fs::write(checkout.join("uncommitted.txt"), "keep local work").unwrap();
+        let mut setup = WorkspaceSetup::new(Some("main".into()), now().max(0) as u64);
+        setup.worktree_path = Some(checkout.to_str().unwrap().into());
+        setup.branch = Some(branch);
+        setup.script = script("printf 'after\\n' >> .script-history", async_ready);
+        setup.stage(SetupStageId::Fetch, SetupStageStatus::Skipped, 0);
+        setup.stage(SetupStageId::Checkout, SetupStageStatus::Done, 0);
+        setup.stage(SetupStageId::SetupScript, SetupStageStatus::Running, 0);
+        if async_ready {
+            setup.stage(SetupStageId::Agent, SetupStageStatus::Skipped, 0);
+            setup.can_cancel = false;
+        }
+        let id = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+        let input = Uuid::from_u128(42).to_string();
+        // Seed the actual persisted crash boundary: checkout exists, script
+        // result is unknown, and the old process has no live Rust future here.
+        save_launch(
+            &fixture.host,
+            &id,
+            WorkspacePreparation {
+                run_id: None,
+                project_cwd: fixture.repository.to_str().unwrap().into(),
+                strategy: Some(WorkspaceStrategy::Worktree {
+                    base_ref: "main".into(),
+                    start_from_origin: false,
+                }),
+                generation: Uuid::new_v4(),
+                created_worktree: true,
+                setup: Some(setup),
+                visible: true,
+            },
+            initial.then_some(input.as_str()),
+        );
+        let Fixture {
+            host,
+            agent,
+            repository: _,
+            directory,
+        } = fixture;
+        drop(host);
+        let agent = agent.restarted();
+        let host = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+        let client = host.open_session();
+        let (_, mut updates) = admit(
+            &host,
+            client.id(),
+            &Call::SubscribeConversation(records::Subscribe {
+                session: id.clone(),
+                subscription: Uuid::new_v4(),
+                after_sequence: None,
+            }),
+        )
+        .await;
+        let interrupted =
+            setup_until(&mut updates, |setup| setup.phase != SetupPhase::Running).await;
+        assert!(interrupted.error.is_some());
+        assert_eq!(
+            std::fs::read_to_string(checkout.join(".script-history")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("uncommitted.txt")).unwrap(),
+            "keep local work"
+        );
+        let state = host
+            .inner
+            .conversation
+            .storage
+            .thread_state(&id.application_id(), &[])
+            .unwrap();
+        assert_eq!(state.runs.len(), usize::from(initial));
+        assert!(state.provider_turns.is_empty());
+        assert!(state.effects.is_empty());
+        if initial {
+            assert!(
+                state
+                    .runs
+                    .values()
+                    .all(|run| run.status == agent_protocol::orchestration::RunStatus::Cancelled)
+            );
+        }
+        assert_eq!(agent.next.load(Ordering::SeqCst), 0);
+        assert!(agent.inputs.lock().unwrap().is_empty());
+        let request = if initial {
+            retry(id.clone(), false)
+        } else {
+            let operation = Uuid::new_v4();
+            Call::ChangeConversation(records::Change {
+                session: id.clone(),
+                operation,
+                command: Command::Submit {
+                    id: operation.to_string().into(),
+                    content: InputContent {
+                        parts: vec![op::Input::Text {
+                            text: "after restart".into(),
+                        }],
+                        model: None,
+                        effort: None,
+                        service_tier: None,
+                        follow_up: Default::default(),
+                    },
+                },
+            })
+        };
+        let ack: records::Acknowledged = call(&host, client.id(), request).await.unwrap();
+        ack.accepted().unwrap();
+        until(&mut updates, |thread| {
+            thread.preparations.is_empty()
+                && thread.turns.as_ref().is_some_and(|turns| {
+                    turns.last().is_some_and(|turn| {
+                        turn.status == agent_protocol::execution::TurnStatus::Completed
+                    })
+                })
+        })
+        .await;
+        setup_until(&mut updates, |setup| setup.phase != SetupPhase::Running).await;
+        assert_eq!(agent.inputs.lock().unwrap().len(), 1);
+        assert_eq!(agent.next.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            std::fs::read_to_string(checkout.join(".script-history")).unwrap(),
+            if async_ready {
+                "before\n"
+            } else {
+                "before\nafter\n"
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("uncommitted.txt")).unwrap(),
+            "keep local work"
+        );
+        assert_eq!(
+            interrupted.phase,
+            if async_ready {
+                SetupPhase::Done
+            } else {
+                SetupPhase::Failed
+            }
+        );
+        if async_ready {
+            let script = interrupted
+                .stages
+                .iter()
+                .find(|stage| stage.id == SetupStageId::SetupScript)
+                .unwrap();
+            assert_eq!(script.status, SetupStageStatus::Warning);
+            assert!(script.exit_code.is_none());
+        }
+        let state = host
+            .inner
+            .conversation
+            .storage
+            .thread_state(&id.application_id(), &[])
+            .unwrap();
+        assert_eq!(
+            state.runs.len(),
+            1,
+            "empty launch has no synthetic startup run"
+        );
+        assert_eq!(state.thread.worktree_path.as_deref(), checkout.to_str());
+    }
 }
 
 #[tokio::test]
@@ -1138,7 +1450,6 @@ async fn retry_after_restart_restores_a_deleted_checkout_before_the_first_provid
 #[cfg(not(windows))]
 #[tokio::test]
 async fn cancellation_between_stages_stops_an_async_script_before_discarding_its_checkout() {
-    use agent_protocol::conversation::{self as decision, Event, OperationId};
     use agent_protocol::workspace::WorkspaceSetup;
     tokio::time::timeout(Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
@@ -1153,6 +1464,7 @@ async fn cancellation_between_stages_stops_an_async_script_before_discarding_its
             crate::git::text(&repository, args).unwrap();
         }
         let host = HostRpcService::new([], directory.path().join("projects.json"));
+        host.start().unwrap();
         let checkout = host
             .inner
             .worktrees
@@ -1174,62 +1486,13 @@ async fn cancellation_between_stages_stops_an_async_script_before_discarding_its
         setup.worktree_path = Some(checkout.to_str().unwrap().into());
         setup.branch = Some(branch.clone());
         setup.can_cancel = true;
-        let header = records::Header {
-            state: decision::Thread {
-                name: String::new(),
-                workspace: decision::Workspace::Ready(checkout.to_str().unwrap().into()),
-                provider: ProviderKind::Codex,
-                queue_held: false,
-            },
-            details: records::Details {
-                workspace: Some(Box::new(records::WorkspacePreparation {
-                    project_cwd: repository.to_str().unwrap().into(),
-                    strategy: Some(WorkspaceStrategy::Worktree {
-                        base_ref: "main".into(),
-                        start_from_origin: false,
-                    }),
-                    generation,
-                    created_worktree: true,
-                    setup: Some(setup),
-                    visible: true,
-                })),
-                ..Default::default()
-            },
-        };
-        host.inner
-            .conversation
-            .storage
-            .create(&target, &header)
-            .unwrap();
-        crate::host_rpc::runtime::Runtime::recover(&host, &target, ProviderKind::Codex)
-            .await
-            .unwrap();
-        let input: agent_protocol::ids::ClientInputId = Uuid::new_v4().to_string().into();
-        host.inner
-            .conversation
-            .storage
-            .decide(
-                &target,
-                Event::Command {
-                    id: OperationId::Client(Uuid::parse_str(input.as_str()).unwrap()),
-                    receipt: None,
-                    command: Command::Submit {
-                        id: input.clone(),
-                        content: InputContent {
-                            parts: vec![op::Input::Text {
-                                text: "do work".into(),
-                            }],
-                            model: None,
-                            effort: None,
-                            service_tier: None,
-                            follow_up: Default::default(),
-                        },
-                    },
-                },
-                decision::Context {preparation:None,rewind_binding:None,imported_turns:&[],external_busy:false,now:100,seed:Uuid::new_v4(),steers:false,steer_ready:true},
-                None,
-            )
-            .unwrap();
+        let input:agent_protocol::ids::ClientInputId=Uuid::new_v4().to_string().into();
+        save_launch(&host,&target,WorkspacePreparation {
+            run_id: None,
+            project_cwd:repository.to_str().unwrap().into(),strategy:Some(WorkspaceStrategy::Worktree{base_ref:"main".into(),start_from_origin:false}),
+            generation,created_worktree:true,setup:Some(setup),visible:true,
+        },Some(input.as_str()));
+        let generation=host.inner.conversation.storage.thread_header(&target).unwrap().unwrap().workspace_launch.unwrap().generation;
         host.run_setup_script(
             &target,
             generation,
@@ -1247,10 +1510,10 @@ async fn cancellation_between_stages_stops_an_async_script_before_discarding_its
             .inner
             .conversation
             .storage
-            .header(&target)
+            .thread_header(&target)
             .unwrap()
-            .details
-            .workspace
+            .unwrap()
+            .workspace_launch
             .unwrap()
             .setup
             .unwrap()
@@ -1278,10 +1541,10 @@ async fn cancellation_between_stages_stops_an_async_script_before_discarding_its
                 .inner
                 .conversation
                 .storage
-                .header(&target)
+                .thread_header(&target)
                 .unwrap()
-                .details
-                .workspace
+                .unwrap()
+                .workspace_launch
                 .unwrap();
             if !workspace.created_worktree {
                 break;
@@ -1305,15 +1568,10 @@ async fn cancellation_between_stages_stops_an_async_script_before_discarding_its
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            host.inner
-                .conversation
-                .storage
-                .state(&target)
-                .unwrap()
-                .attempts
-                .is_empty()
-        );
+        let state=host.inner.conversation.storage.thread_state(&target.application_id(),&[]).unwrap();
+        assert!(state.provider_turns.is_empty());
+        assert!(state.run_attempts.values().all(|attempt|attempt.native_thread_ref.is_none() && attempt.status==agent_protocol::orchestration::RunAttemptStatus::Cancelled));
+        assert!(state.effects.is_empty(),"no SDK start operation exists between workspace stages");
     })
     .await
     .unwrap();

@@ -118,10 +118,10 @@ async fn first_host_results_persist_the_complete_list_cursor_for_offline_local_p
     restored.connection.storage_scope = "volume".into();
     restore(directory.path(), &mut restored);
     assert_eq!(
-        restored.lists.replica.as_ref().unwrap().cursor(),
-        source.lists.replica.as_ref().unwrap().cursor()
+        restored.lists.shell.as_ref().unwrap().snapshot_sequence,
+        source.lists.shell.as_ref().unwrap().snapshot_sequence
     );
-    assert_eq!(restored.lists.replica.as_ref().unwrap().rows().len(), 24);
+    assert_eq!(restored.lists.shell.as_ref().unwrap().threads.len(), 24);
     assert_eq!(restored.lists.threads.as_ref().unwrap().data.len(), 5);
     assert!(
         restored
@@ -142,14 +142,14 @@ async fn first_host_results_persist_the_complete_list_cursor_for_offline_local_p
     assert!(effects.is_empty());
     assert_eq!(expanded.lists.threads.as_ref().unwrap().data.len(), 15);
     assert_eq!(
-        expanded.lists.replica.as_ref().unwrap().cursor(),
-        restored.lists.replica.as_ref().unwrap().cursor()
+        expanded.lists.shell.as_ref().unwrap().snapshot_sequence,
+        restored.lists.shell.as_ref().unwrap().snapshot_sequence
     );
     assert!(!saved.write_changes(directory.path(), &expanded).await);
     let mut other = Snapshot::default();
     other.connection.storage_scope = "another-volume".into();
     restore(directory.path(), &mut other);
-    assert!(other.lists.replica.is_none());
+    assert!(other.lists.shell.is_none());
 }
 
 #[tokio::test]
@@ -160,23 +160,12 @@ async fn cached_project_disclosure_keeps_its_choice_but_restarts_at_five_rows() 
     // Seed all canonical rows, not the initial five-row presentation.
     list.data = source
         .lists
-        .replica
+        .shell
         .as_ref()
         .unwrap()
-        .rows()
-        .values()
-        .filter_map(|row| {
-            let value = match &row.content {
-                agent_protocol::sync::Content::Full(value)
-                | agent_protocol::sync::Content::Summary(value) => value,
-            };
-            match (&row.key, value.as_ref()) {
-                (agent_protocol::sync::Key::Thread(id), records::Record::Thread(header)) => {
-                    Some(records::summary(id, header))
-                }
-                _ => None,
-            }
-        })
+        .threads
+        .iter()
+        .map(|thread| agent_protocol::orchestration::shell::summary(thread, None).unwrap())
         .collect();
     for thread in &mut list.data {
         thread.project_id = crate::models::ProjectMembership::Assigned("project".into());
@@ -231,7 +220,7 @@ async fn search_results_never_replace_the_saved_canonical_list_and_damage_is_dis
     let mut empty = Snapshot::default();
     empty.connection.storage_scope = "volume".into();
     restore(directory.path(), &mut empty);
-    assert!(empty.lists.replica.is_none());
+    assert!(empty.lists.shell.is_none());
     assert!(!directory.path().join("list.cache").exists());
 }
 

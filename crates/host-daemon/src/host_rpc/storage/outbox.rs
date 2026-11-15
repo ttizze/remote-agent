@@ -36,8 +36,6 @@ pub(in crate::host_rpc) enum Settlement<'a> {
         available_at: &'a str,
         error: &'a str,
     },
-    /// Keep the lane occupied until native evidence or explicit resolution.
-    DeliveryUnknown(&'a str),
 }
 
 impl Storage {
@@ -110,11 +108,20 @@ impl Storage {
         self.with(|connection| projections::load(connection, thread_id, item_ids))
     }
 
+    pub(in crate::host_rpc) fn attempt_thread_id(
+        &self,
+        attempt: &str,
+    ) -> Result<Option<String>, String> {
+        self.with(|db|db.query_row("SELECT thread_id FROM orchestration_v2_projection_run_attempts WHERE attempt_id=?1",[attempt],|row|row.get(0)).optional().map_err(failure))
+    }
+
     pub(in crate::host_rpc) fn attempt_owner(
         &self,
         attempt_id: &str,
+        native: &SessionRef,
     ) -> Result<Option<SessionRef>, String> {
-        self.with(|connection|connection.query_row("SELECT thread_id FROM orchestration_v2_projection_run_attempts WHERE attempt_id=?1",[attempt_id],|row|row.get::<_,String>(0))
+        let provider = native.native_provider().map_err(str::to_owned)?;
+        self.with(|connection|connection.query_row("SELECT thread_id FROM orchestration_v2_projection_run_attempts WHERE attempt_id=?1 AND provider_instance_id=?2 AND json_extract(payload_json,'$.nativeThreadRef.driver')=?3 AND json_extract(payload_json,'$.nativeThreadRef.nativeId')=?4",params![attempt_id,provider.key(),provider.driver(),native.id],|row|row.get::<_,String>(0))
             .optional().map_err(failure)?.map(|id|SessionRef::new(None,id).map_err(str::to_owned)).transpose())
     }
 }
@@ -133,7 +140,6 @@ pub(super) fn finish(
             available_at,
             error,
         } => ("pending", Some(error), Some(available_at)),
-        Settlement::DeliveryUnknown(error) => ("running", Some(error), None),
     };
     connection
         .execute(
@@ -279,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_claiming_worker_can_settle_and_unknown_delivery_never_releases_the_lane() {
+    fn only_the_claiming_worker_can_settle_the_occupied_lane() {
         let mut db = database();
         enqueue(&mut db, "first", "thread");
         enqueue(&mut db, "second", "thread");
@@ -291,32 +297,16 @@ mod tests {
                 available_at: NOW,
                 error: "retry",
             },
-            Settlement::DeliveryUnknown("unknown"),
         ] {
             assert!(!finish(&db, "first", Some("stale"), NOW, result).unwrap());
         }
-        assert!(
-            finish(
-                &db,
-                "first",
-                Some("owner"),
-                NOW,
-                Settlement::DeliveryUnknown("write acknowledgement lost")
-            )
-            .unwrap()
-        );
-        assert!(claim(&db, "new-process", LATER).unwrap().is_none());
-        assert!(!finish(&db, "first", Some("owner"), LATER, Settlement::Succeeded).unwrap());
+        assert!(claim(&db, "other-worker", LATER).unwrap().is_none());
         let pending = event_store::effects(&db, "thread").unwrap();
         assert_eq!(pending["first"].status, model::EffectStatus::Running);
-        assert_eq!(
-            pending["first"].last_error.as_deref(),
-            Some("write acknowledgement lost")
-        );
-        assert!(finish(&db, "first", None, LATER, Settlement::Failed("resolved")).unwrap());
+        assert!(finish(&db, "first", Some("owner"), LATER, Settlement::Succeeded).unwrap());
         assert!(!finish(&db, "first", Some("owner"), LATER, Settlement::Succeeded).unwrap());
         assert_eq!(
-            claim(&db, "new-process", LATER).unwrap().unwrap().id,
+            claim(&db, "other-worker", LATER).unwrap().unwrap().id,
             "second"
         );
     }

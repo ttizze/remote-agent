@@ -11,7 +11,7 @@ use std::{collections::VecDeque, sync::atomic::AtomicUsize};
 pub struct Subscription {
     storage: Arc<Storage>,
     target: SessionRef,
-    changed: tokio::sync::watch::Receiver<Option<Cursor>>,
+    changed: tokio::sync::watch::Receiver<()>,
     sequence: u64,
     bytes: Arc<AtomicUsize>,
     queued_bytes: Arc<AtomicUsize>,

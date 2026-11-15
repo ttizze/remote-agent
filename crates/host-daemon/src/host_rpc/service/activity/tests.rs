@@ -11,11 +11,10 @@ use agent_protocol::{
     conversation::records,
     live_activity::{MarkSessionRead, TaskActivityState},
     session::SessionRef,
-    sync::Scope,
 };
 struct ListReader {
     updates: crate::host_rpc::routing::HostSubscription,
-    replica: records::Replica,
+    shell: agent_protocol::orchestration::shell::ShellSnapshot,
 }
 async fn open_list(service: &HostRpcService, connection: u64) -> ListReader {
     let reply = service
@@ -24,7 +23,7 @@ async fn open_list(service: &HostRpcService, connection: u64) -> ListReader {
             &Call::SubscribeList(records::SubscribeList {
                 refresh: false,
                 subscription: uuid::Uuid::new_v4(),
-                cached: None,
+                after_sequence: None,
             }),
         )
         .await
@@ -34,21 +33,27 @@ async fn open_list(service: &HostRpcService, connection: u64) -> ListReader {
     else {
         panic!("list subscription failed")
     };
+    let mut shell = None;
+    for item in result.initial {
+        shell = agent_core::orchestration::shell::receive(shell.as_ref(), item, true).unwrap();
+    }
     ListReader {
         updates: reply.updates.unwrap(),
-        replica: records::Replica::new(Scope::List, 1)
-            .apply(1, result.initial)
-            .unwrap(),
+        shell: shell.unwrap(),
     }
 }
 async fn next_activity(reader: &mut ListReader) -> TaskActivityState {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let message = agent_protocol::protocol::decode::<records::Message>(
-            &reader.updates.recv().await.unwrap(),
+        let message =
+            agent_protocol::protocol::decode(&reader.updates.recv().await.unwrap()).unwrap();
+        reader.shell =
+            agent_core::orchestration::shell::receive(Some(&reader.shell), message, false)
+                .unwrap()
+                .unwrap();
+        agent_protocol::orchestration::shell::activity(
+            reader.shell.threads.iter().map(AsRef::as_ref),
         )
-        .unwrap();
-        reader.replica = reader.replica.apply(1, message).unwrap();
-        records::list_rows_activity(reader.replica.rows().values())
+        .unwrap()
     })
     .await
     .expect("committed list update arrives")
@@ -57,136 +62,93 @@ async fn next_activity(reader: &mut ListReader) -> TaskActivityState {
 #[cfg(unix)]
 #[tokio::test]
 async fn activity_uses_only_normal_conversations_even_with_saved_subagent_completions() {
-    use std::os::unix::fs::PermissionsExt;
+    use crate::{
+        host_rpc::runtime::{Runtime, native_fixture::NativeAgent, t3_contract::running},
+        providers::AgentChange,
+    };
+    use agent_protocol::{
+        models::{SessionStatus, Turn, TurnStatus},
+        session::SessionChange,
+    };
     let directory = tempfile::tempdir().unwrap();
-    let session = |id: &str| SessionRef::new(ProviderKind::Codex, id.into()).unwrap();
-    let root = session("public-root");
-    let program = directory.path().join("codex-fixture");
-    std::fs::write(&program, r##"#!/usr/bin/env node
-const rl = require('node:readline').createInterface({input:process.stdin});
-const send = value => process.stdout.write(JSON.stringify(value) + '\n');
-const reads = [];
-rl.on('line', line => {
-  const m = JSON.parse(line), p = m.params;
-  if (m.id === undefined) return;
-  let result = {};
-  if (m.method === 'initialize') result = {userAgent:'activity-fixture',codexHome:process.env.CODEX_HOME};
-  if (m.method === 'fixture/reads') result = reads;
-  if (m.method === 'thread/loaded/list') result = {data:['running','child','grandchild'],nextCursor:null};
-  if (m.method === 'thread/read') {
-reads.push(p.threadId);
-result = {thread:{id:p.threadId,parentThreadId:{child:'native-root',grandchild:'child'}[p.threadId],
-  cwd:process.env.CODEX_HOME,status:{type:'active'}}};
-  }
-  if (m.method === 'thread/list') {
-result = {data:['native-root'].map(id => ({id,name:id,cwd:process.env.CODEX_HOME,
-  status:{type:'idle'}})),nextCursor:null};
-  }
-  send({id:m.id,result});
-});
-"##).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let server = Arc::new(
-        codex_app_server::CodexAppServer::spawn(crate::providers::codex::Config {
-            program,
-            codex_home: Some(directory.path().to_owned()),
-            ..Default::default()
-        })
-        .await
-        .unwrap(),
-    );
-    let service = HostRpcService::new(
-        [crate::providers::codex::Codex::new(Ok(server.clone())).into()],
-        directory.path().join("projects.json"),
-    );
-    let storage = &service.inner.conversation.storage;
-    for (id, source, parent) in [
-        (root.clone(), session("native-root"), None),
-        (
-            session("child"),
-            session("child"),
-            Some(session("native-root")),
-        ),
-        (
-            session("grandchild"),
-            session("grandchild"),
-            Some(session("child")),
-        ),
-    ] {
-        let response = agent_protocol::models::ThreadResponse {
-            thread: Thread {
-                id: Some(id.clone()),
-                parent_id: parent,
-                cwd: Some(directory.path().to_str().unwrap().into()),
-                turns: Some(vec![Arc::new(agent_protocol::models::Turn {
-                    id: "completed".into(),
-                    status: agent_protocol::execution::TurnStatus::Completed,
-                    items: Some(vec![]),
-                    ..Default::default()
-                })]),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        storage.import(&id, &response, Some(&source), 0).unwrap();
-    }
-    storage.queue_catalog(ProviderKind::Codex, 0).unwrap();
-    let claim = storage.claim(0, 1).unwrap().remove(0);
-    let mut stale = super::super::super::storage::history::header(
-        &agent_protocol::models::ThreadResponse {
-            thread: Thread {
-                id: Some(session("running")),
-                status: agent_protocol::models::SessionStatus::Running,
-                ..Default::default()
-            },
-            ..Default::default()
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let (root, native, execution) =
+        running(&service, &agent, directory.path().to_str().unwrap()).await;
+    let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+    Runtime::observe(
+        &service,
+        AgentChange::TaskParent {
+            session: child.clone(),
+            parent: native.clone(),
         },
-        0,
+        Some(execution),
+    )
+    .await
+    .unwrap();
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: child.clone(),
+            change: SessionChange::Turn {
+                turn: Turn {
+                    id: "child-turn".into(),
+                    status: TurnStatus::Completed,
+                    ..Default::default()
+                },
+                completed: true,
+            },
+        },
+        Some(execution),
+    )
+    .await
+    .unwrap();
+    let activity = service.inner.conversation.storage.activity().unwrap();
+    assert_eq!(
+        activity.statuses,
+        vec![(root.clone(), SessionStatus::Running)]
     );
-    stale.details.activity.stale = true;
-    storage
-        .catalog_page(
-            &claim,
-            &[(session("running"), stale)],
-            None,
-            i64::MAX - 60_000,
-        )
-        .unwrap();
-    service.start().unwrap();
-
-    let bootstrap = service.update_task_snapshot().await.unwrap();
-    assert_eq!(bootstrap.unread, [(root.clone(), "completed".into())]);
-    assert_eq!(bootstrap.display.current.label, "実行中 1件 · 完了 1件");
-    let listed = service
-        .search_list(&agent_protocol::conversation::records::SearchList {
-            term: String::new(),
-            limit: Some(10_000),
-        })
-        .await
-        .unwrap();
+    assert!(activity.unread.is_empty());
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native,
+            change: SessionChange::Turn {
+                turn: Turn {
+                    id: "observed-turn".into(),
+                    status: TurnStatus::Completed,
+                    ..Default::default()
+                },
+                completed: true,
+            },
+        },
+        Some(execution),
+    )
+    .await
+    .unwrap();
+    let activity = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let activity = service.inner.conversation.storage.activity().unwrap();
+            if activity.statuses == vec![(root.clone(), SessionStatus::Idle)] {
+                break activity;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(activity.statuses, vec![(root.clone(), SessionStatus::Idle)]);
+    assert_eq!(activity.unread.len(), 1);
+    assert_eq!(activity.unread[0].0, root);
     assert!(
-        listed
-            .data
-            .iter()
-            .any(|thread| thread.id.as_ref() == Some(&root))
+        service
+            .inner
+            .conversation
+            .storage
+            .thread_header(&child)
+            .unwrap()
+            .is_some()
     );
-    let first = service.update_task_snapshot().await.unwrap();
-    assert_eq!(first.unread, [(root, "completed".into())]);
-    assert_eq!(first.display.current.label, "実行中 1件 · 完了 1件");
-    let repeated = service.update_task_snapshot().await.unwrap();
-    assert_eq!(repeated, first);
-    let reads = server
-        .request::<_, Vec<String>>("fixture/reads", &serde_json::json!({}))
-        .await
-        .unwrap()
-        .outcome
-        .unwrap();
-    assert!(
-        !reads.iter().any(|id| id == "native-root"),
-        "saved completions need no extra native reads"
-    );
-    drop(service);
-    server.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -272,12 +234,14 @@ async fn reading_on_either_device_broadcasts_to_both_and_reconnect_reads_the_sha
     let reconnected = restarted.open_session();
     let list = open_list(&restarted, reconnected.id()).await;
     let state = restarted.inner.conversation.storage.activity().unwrap();
-    let records::Message::Snapshot { cursor, .. } =
-        restarted.inner.conversation.storage.list(None).unwrap()
-    else {
-        panic!("initial list")
-    };
-    assert_eq!(list.replica.cursor(), Some(cursor));
+    let cursor = restarted
+        .inner
+        .conversation
+        .storage
+        .shell_snapshot()
+        .unwrap()
+        .snapshot_sequence;
+    assert_eq!(list.shell.snapshot_sequence, cursor);
     assert!(state.unread.is_empty());
 }
 fn session_uuid() -> SessionRef {
@@ -346,29 +310,14 @@ async fn live_activity_tracks_committed_work_after_disconnect_and_revocation_pre
         LiveActivityRegistration, PushEnvironment, RegisterLiveActivity,
     };
     let directory = tempfile::tempdir().unwrap();
-    let service = HostRpcService::new([], directory.path().join("projects.json"));
+    use crate::host_rpc::runtime::{Runtime, native_fixture::NativeAgent, t3_contract::running};
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let apns = crate::apns::Apns::testing();
     service.inner.router.set_apns(Some(apns.clone()));
-    let id = SessionRef::new(ProviderKind::Codex, "running-native".into()).unwrap();
-    service
-        .inner
-        .conversation
-        .storage
-        .import(
-            &id,
-            &agent_protocol::models::ThreadResponse {
-                thread: Thread {
-                    id: Some(id.clone()),
-                    status: agent_protocol::models::SessionStatus::Running,
-                    turns: Some(Vec::new()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            Some(&id),
-            super::super::super::runtime::now(),
-        )
-        .unwrap();
+    let (_id, native, execution) =
+        running(&service, &agent, directory.path().to_str().unwrap()).await;
+    service.start().unwrap();
     apns.activate(
         service
             .inner
@@ -400,14 +349,20 @@ async fn live_activity_tracks_committed_work_after_disconnect_and_revocation_pre
     );
     service.close_session(phone.id());
     assert_eq!(apns.test_payloads(crate::apns::now()).len(), 1);
-    super::super::super::runtime::Runtime::event(
+    Runtime::observe(
         &service,
-        &id,
-        agent_protocol::conversation::Event::NativeStatus {
-            provider: ProviderKind::Codex,
-            source: id.id.clone(),
-            status: agent_protocol::models::SessionStatus::Idle,
+        crate::providers::AgentChange::Session {
+            session: native,
+            change: agent_protocol::session::SessionChange::Turn {
+                turn: agent_protocol::models::Turn {
+                    id: "observed-turn".into(),
+                    status: agent_protocol::models::TurnStatus::Completed,
+                    ..Default::default()
+                },
+                completed: true,
+            },
         },
+        Some(execution),
     )
     .await
     .unwrap();

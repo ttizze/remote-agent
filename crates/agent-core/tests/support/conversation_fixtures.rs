@@ -1,7 +1,7 @@
 //! Canonical conversation fixtures for core's colocated tests.
 use crate::test_host::rows;
-pub use rows::catalog;
 pub use rows::orchestration::snapshot as projection;
+pub use rows::{shell, shell_thread};
 #[path = "conversation_open.rs"]
 mod opening;
 pub use opening::opened;

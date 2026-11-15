@@ -1,10 +1,11 @@
-//! One list replica supplies local pages and activity. Page limits never alter
+//! One shell supplies local pages and activity. Page limits never alter
 //! the replicated scope or send another native catalog read.
 use super::*;
 use crate::{peer::PeerError, store::Execution};
 use agent_protocol::{
     conversation::records,
-    sync::{Content, Key, Scope},
+    orchestration::shell::{self, ShellSnapshot, ShellStreamItem},
+    sync::Scope,
 };
 use op::Operation;
 
@@ -174,45 +175,41 @@ impl Operation for SubscribeCatalog {
     fn subscription_scope(&self) -> Option<Scope<crate::session::SessionRef>> {
         Some(Scope::List)
     }
-    type Input = Arc<records::Replica>;
+    type Input = (u64, Option<Arc<ShellSnapshot>>);
     fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
-        snapshot
-            .lists
-            .replica
-            .clone()
-            .ok_or_else(|| PeerError::InvalidMessage("list scope is missing".into()))
+        Ok((snapshot.lists.generation, snapshot.lists.shell.clone()))
     }
     type Output = (
-        records::Replica,
+        u64,
+        Option<u64>,
+        ShellSnapshot,
         uuid::Uuid,
-        serde_json::Map<String, serde_json::Value>,
+        serde_json::Map<String, Value>,
     );
     async fn run(
         &self,
-        base: Self::Input,
+        (generation, base): Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
+        let after = base.as_ref().map(|base| base.snapshot_sequence);
         let response = context
             .call(&records::SubscribeList {
                 refresh: self.refresh,
                 subscription: uuid::Uuid::nil(),
-                cached: base.cursor(),
+                after_sequence: after,
             })
             .await?;
-        records::validate_list(&response.initial)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        if let records::Message::Snapshot { cursor, .. } = &response.initial
-            && base
-                .cursor()
-                .is_some_and(|current| cursor.precedes(current))
-        {
-            return Err(PeerError::InvalidMessage(
-                "list snapshot precedes its cached cursor".into(),
-            ));
+        let mut opened = base.as_deref().cloned();
+        for item in response.initial {
+            opened = crate::orchestration::shell::receive(opened.as_ref(), item, true)
+                .map_err(PeerError::InvalidMessage)?;
         }
         Ok((
-            base.apply(base.subscription(), response.initial)
-                .map_err(|error| PeerError::InvalidMessage(error.to_string()))?,
+            generation,
+            after,
+            opened.ok_or_else(|| {
+                PeerError::InvalidMessage("list bootstrap has no snapshot".into())
+            })?,
             response.subscription_id,
             response.provider_errors,
         ))
@@ -221,24 +218,22 @@ impl Operation for SubscribeCatalog {
         self,
         snapshot: &mut Snapshot,
         _: &str,
-        (opened, subscription, provider_errors): Self::Output,
+        (generation, base_sequence, opened, subscription, provider_errors): Self::Output,
     ) -> Vec<Effect> {
-        let Some(current) = &snapshot.lists.replica else {
-            return Vec::new();
-        };
-        if current.subscription() != opened.subscription() {
+        if snapshot.lists.generation != generation {
             return Vec::new();
         }
-        let replica = match (current.cursor(), opened.cursor()) {
-            (Some(current_cursor), Some(opened_cursor))
-                if opened_cursor.precedes(current_cursor) =>
+        let shell = match &snapshot.lists.shell {
+            Some(current)
+                if base_sequence.is_some_and(|base| current.snapshot_sequence > base)
+                    && opened.snapshot_sequence < current.snapshot_sequence =>
             {
-                current.as_ref().clone()
+                current.clone()
             }
-            _ => opened,
+            _ => Arc::new(opened),
         };
-        let mut effects = discovered_children(snapshot, &replica);
-        snapshot.lists.replica = Some(Arc::new(replica));
+        let mut effects = discovered_children(snapshot, &shell);
+        snapshot.lists.shell = Some(shell);
         snapshot.lists.subscription = Some(subscription);
         snapshot.lists.provider_errors = Arc::new(provider_errors);
         effects.extend(project(snapshot, false));
@@ -246,30 +241,29 @@ impl Operation for SubscribeCatalog {
     }
 }
 
-fn discovered_children(snapshot: &Snapshot, incoming: &records::Replica) -> Vec<Effect> {
+fn discovered_children(snapshot: &Snapshot, incoming: &ShellSnapshot) -> Vec<Effect> {
     let roots = incoming
-        .rows()
+        .threads
         .iter()
-        .filter_map(|(key, row)| {
-            if snapshot
-                .lists
-                .replica
-                .as_ref()
-                .is_some_and(|previous| previous.rows().contains_key(key))
-            {
+        .filter_map(|shell| {
+            if snapshot.lists.shell.as_ref().is_some_and(|previous| {
+                previous
+                    .threads
+                    .iter()
+                    .any(|old| old.thread.id == shell.thread.id)
+            }) {
                 return None;
             }
-            let (Content::Full(record) | Content::Summary(record)) = &row.content;
-            let records::Record::Thread(header) = record.as_ref() else {
+            if shell.thread.lineage.relationship_to_parent.as_deref() != Some("subagent") {
                 return None;
-            };
-            let parent = header.details.parent.as_ref()?;
+            }
+            let parent = shell.thread.lineage.parent_thread_id.as_deref()?;
             snapshot
                 .panes
                 .0
                 .values()
-                .any(|pane| pane.observed_agents.as_ref() == Some(parent))
-                .then_some(parent)
+                .filter_map(|pane| pane.observed_agents.as_ref())
+                .find(|observed| observed.application_id() == parent)
         })
         .collect::<BTreeSet<_>>();
     roots
@@ -281,36 +275,26 @@ fn discovered_children(snapshot: &Snapshot, incoming: &records::Replica) -> Vec<
 pub(crate) fn received(
     previous: &Snapshot,
     subscription: uuid::Uuid,
-    message: records::Message,
+    message: ShellStreamItem,
 ) -> (Snapshot, Vec<Effect>) {
     if previous.lists.subscription != Some(subscription) {
         return (previous.clone(), Vec::new());
     }
-    let Some(replica) = &previous.lists.replica else {
-        return (previous.clone(), Vec::new());
-    };
-    let apply = records::validate_list(&message).and_then(|()| {
-        if let records::Message::Snapshot { cursor, .. } = &message
-            && replica
-                .cursor()
-                .is_some_and(|current| cursor.precedes(current))
-        {
-            return Err(agent_protocol::sync::ApplyError::Version);
-        }
-        replica.apply(replica.subscription(), message)
-    });
+    let apply =
+        crate::orchestration::shell::receive(previous.lists.shell.as_deref(), message, false);
     let mut next = previous.clone();
     match apply {
-        Ok(replica) => {
-            if &replica == previous.lists.replica.as_ref().unwrap().as_ref() {
+        Ok(Some(shell)) => {
+            if previous.lists.shell.as_deref() == Some(&shell) {
                 return (next, Vec::new());
             }
-            let mut effects = discovered_children(previous, &replica);
-            next.lists.replica = Some(Arc::new(replica));
+            let mut effects = discovered_children(previous, &shell);
+            next.lists.shell = Some(Arc::new(shell));
             effects.extend(project(&mut next, false));
             (next, effects)
         }
-        Err(_) => {
+        Ok(None) | Err(_) => {
+            next.lists.shell = None;
             next.lists.subscription = None;
             (
                 next,
@@ -321,39 +305,31 @@ pub(crate) fn received(
 }
 
 pub(crate) fn project(snapshot: &mut Snapshot, refresh: bool) -> Vec<Effect> {
-    let Some(replica) = &snapshot.lists.replica else {
+    let Some(shell) = &snapshot.lists.shell else {
         return Vec::new();
     };
-    let mut projects = Vec::new();
+    let mut projects = shell
+        .projects
+        .iter()
+        .map(|project| crate::orchestration::shell::project(project))
+        .collect();
     let mut summaries = Vec::new();
-    let mut headers = Vec::new();
     let mut errors = snapshot.lists.provider_errors.as_ref().clone();
-    for row in replica.rows().values() {
-        let record = match &row.content {
-            Content::Full(record) | Content::Summary(record) => record,
-        };
-        match (&row.key, record.as_ref()) {
-            (Key::Project(_), records::Record::Project(project)) => {
-                if let agent_protocol::sync::Position::Project { position } = row.position {
-                    projects.push((position, project.clone()));
-                }
-            }
-            (Key::Catalog(provider), records::Record::Catalog(records::Catalog::Failed(error))) => {
-                errors.insert(provider.key().into(), serde_json::json!({"message":error}));
-            }
-            (Key::Thread(id), records::Record::Thread(header)) => {
-                if header.details.activity.stale {
-                    errors.insert(
-                        header.state.provider.key().into(),
-                        serde_json::json!({"message":"会話一覧を確認できません。"}),
-                    );
-                }
-                let mut summary = records::summary(id, header);
+    for thread in &shell.threads {
+        let root = thread
+            .thread
+            .project_id
+            .as_ref()
+            .and_then(|id| shell.projects.iter().find(|project| &project.id == id))
+            .map(|project| project.workspace_root.as_str());
+        match agent_protocol::orchestration::shell::summary(thread, root) {
+            Ok(mut summary) => {
                 if let Some(error) = snapshot
                     .lists
                     .provider_errors
-                    .get(header.state.provider.key())
+                    .get(&thread.thread.provider_instance_id)
                 {
+                    summary.list_stale = Some(true);
                     summary = records::unavailable(
                         summary,
                         error
@@ -363,14 +339,18 @@ pub(crate) fn project(snapshot: &mut Snapshot, refresh: bool) -> Vec<Effect> {
                     );
                 }
                 summaries.push(summary);
-                headers.push((id, header));
             }
-            _ => {}
+            Err(error) => {
+                errors.insert(
+                    thread.thread.provider_instance_id.clone(),
+                    serde_json::json!({"message":error}),
+                );
+            }
         }
     }
-    projects.sort_by_key(|(position, _)| *position);
-    let mut projects = projects.into_iter().map(|(_, project)| project).collect();
-    let mut activity = records::list_activity(headers);
+    let Ok(mut activity) = shell::activity(shell.threads.iter().map(AsRef::as_ref)) else {
+        return Vec::new();
+    };
     if snapshot.lists.subscription.is_none() {
         for (_, status) in &mut activity.statuses {
             *status = crate::models::SessionStatus::Unknown;
@@ -628,29 +608,30 @@ fn pages(
 
 #[cfg(test)]
 pub(crate) fn seed(snapshot: &mut Snapshot, list: ThreadList) -> Vec<Effect> {
-    use agent_protocol::sync::Cursor;
+    let mut errors = list
+        .provider_errors
+        .clone()
+        .unwrap_or_else(|| snapshot.lists.provider_errors.as_ref().clone());
+    for thread in &list.data {
+        if thread.list_stale == Some(true)
+            && let Some(provider) = thread
+                .active_provider
+                .or_else(|| thread.id.as_ref().and_then(|id| id.provider))
+        {
+            errors.insert(
+                provider.key().into(),
+                serde_json::json!({"message":"会話一覧を確認できません。"}),
+            );
+        }
+    }
+    snapshot.lists.provider_errors = Arc::new(errors);
     let sequence = snapshot
         .lists
-        .replica
+        .shell
         .as_ref()
-        .and_then(|replica| replica.cursor())
-        .map_or(1, |cursor| cursor.sequence + 1);
-    let generation = snapshot
-        .lists
-        .replica
-        .as_ref()
-        .map_or(1, |replica| replica.subscription());
-    let message = crate::test_conversations::catalog(
-        list,
-        Cursor {
-            store: uuid::Uuid::from_u128(1),
-            sequence,
-        },
-    );
-    let replica = records::Replica::new(Scope::List, generation)
-        .apply(generation, message)
-        .unwrap();
-    snapshot.lists.replica = Some(Arc::new(replica));
+        .map_or(1, |shell| shell.snapshot_sequence + 1);
+    snapshot.lists.shell = Some(Arc::new(crate::test_conversations::shell(list, sequence)));
+    snapshot.lists.generation = snapshot.lists.generation.max(1);
     snapshot
         .lists
         .subscription
@@ -659,11 +640,59 @@ pub(crate) fn seed(snapshot: &mut Snapshot, list: ThreadList) -> Vec<Effect> {
 }
 
 #[cfg(test)]
+pub(crate) fn activity_fixture(shell: &mut shell::ThreadShell, facts: ActivityFacts) {
+    use agent_protocol::{
+        execution::{SessionStatus, TurnStatus},
+        orchestration::RunStatus,
+    };
+    let active = match facts.status {
+        SessionStatus::Preparing => Some(RunStatus::Preparing),
+        SessionStatus::Running => Some(RunStatus::Running),
+        _ => None,
+    };
+    shell.activity_run_status = active;
+    shell.active_run_id = active.map(|_| "fixture-active".into());
+    shell.status = active
+        .map(Into::into)
+        .unwrap_or_else(|| match facts.latest {
+            Some(TurnStatus::Completed) => shell::ShellStatus::Completed,
+            Some(TurnStatus::Failed) => shell::ShellStatus::Failed,
+            Some(TurnStatus::Interrupted) => shell::ShellStatus::Interrupted,
+            _ => shell::ShellStatus::Idle,
+        });
+    shell.latest_run_id = facts.completion.as_ref().map(ToString::to_string);
+    shell.latest_run_completed_at = facts
+        .completion
+        .as_ref()
+        .map(|_| "2026-11-14T00:00:00Z".into());
+    shell.thread.last_visited_at = None;
+    shell.pending_runtime_request =
+        (facts.waiting || facts.approval).then(|| shell::PendingRequestSummary {
+            id: "fixture-request".into(),
+            kind: if facts.approval {
+                "approval"
+            } else {
+                "user_input"
+            }
+            .into(),
+            created_at: "2026-11-14T00:00:00Z".into(),
+            blocking: Some(facts.waiting),
+            user_only: None,
+        });
+    shell.pending_background_tasks = facts.background.into_iter().map(|task| serde_json::from_value(serde_json::json!({
+        "taskId":task.id, "kind":match task.kind {
+            agent_protocol::execution::BackgroundTaskKind::Command=>"command", agent_protocol::execution::BackgroundTaskKind::Subagent=>"subagent",
+            agent_protocol::execution::BackgroundTaskKind::Monitor=>"monitor", agent_protocol::execution::BackgroundTaskKind::BackgroundTask=>"background_task"},
+        "description":task.description
+    })).unwrap()).collect();
+}
+
+#[cfg(test)]
 pub(crate) fn set_activity(
     snapshot: &mut Snapshot,
-    facts: Vec<(crate::session::SessionRef, records::Activity)>,
-) -> records::Message {
-    if snapshot.lists.replica.is_none() {
+    facts: Vec<(crate::session::SessionRef, ActivityFacts)>,
+) -> ShellStreamItem {
+    if snapshot.lists.shell.is_none() {
         let mut list = snapshot
             .lists
             .threads
@@ -679,29 +708,19 @@ pub(crate) fn set_activity(
         );
         seed(snapshot, list);
     }
-    let replica = snapshot.lists.replica.as_ref().unwrap();
-    let from = replica.cursor().unwrap();
-    let sequence = from.sequence + 1;
-    let mut rows = Vec::new();
+    let mut shell = snapshot.lists.shell.as_ref().unwrap().as_ref().clone();
+    shell.snapshot_sequence += 1;
     for (id, facts) in facts {
-        let mut row = replica.rows()[&Key::Thread(id)].clone();
-        let Content::Full(record) = &mut row.content else {
-            unreachable!()
-        };
-        let records::Record::Thread(header) = Arc::make_mut(record) else {
-            unreachable!()
-        };
-        header.details.activity = facts;
-        row.version = sequence;
-        rows.push(row);
+        let saved = shell
+            .threads
+            .iter_mut()
+            .find(|thread| thread.thread.id == id.application_id())
+            .unwrap();
+        activity_fixture(Arc::make_mut(saved), facts);
     }
-    let message = records::Message::Events {
-        through: agent_protocol::sync::Cursor { sequence, ..from },
-        events: vec![agent_protocol::sync::Event {
-            sequence,
-            rows,
-            removed: Vec::new(),
-        }],
+    let message = ShellStreamItem::Snapshot {
+        snapshot: shell,
+        resolved_repository_identity_roots: None,
     };
     let (next, _) = received(
         snapshot,
@@ -710,4 +729,30 @@ pub(crate) fn set_activity(
     );
     *snapshot = next;
     message
+}
+
+#[cfg(test)]
+/// Covers work outside the loaded history window as well.
+#[derive(Debug, Clone)]
+pub(crate) struct ActivityFacts {
+    pub status: agent_protocol::execution::SessionStatus,
+    pub waiting: bool,
+    pub approval: bool,
+    pub latest: Option<agent_protocol::execution::TurnStatus>,
+    pub completion: Option<agent_protocol::ids::TurnId>,
+    pub background: Vec<agent_protocol::execution::BackgroundTask>,
+}
+
+#[cfg(test)]
+impl Default for ActivityFacts {
+    fn default() -> Self {
+        Self {
+            status: agent_protocol::execution::SessionStatus::Idle,
+            waiting: false,
+            approval: false,
+            latest: None,
+            completion: None,
+            background: Vec::new(),
+        }
+    }
 }
