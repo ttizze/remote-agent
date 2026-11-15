@@ -306,26 +306,16 @@ fn inherited_success_waits_for_the_root_checkpoint_and_ignores_later_background_
     late.id = "late-tool".into();
     late.ordinal = 3;
     late.completed_at = Some("1970-01-01T00:00:09.000Z".into());
-    snapshot.projection.provider_turns.push(ProviderTurn {
-        id: "native-turn".into(),
-        provider_thread_id: "source-native".into(),
-        node_id: "source-root".into(),
-        run_attempt_id: Some("actual-source-attempt".into()),
-        native_thread_ref: None,
-        native_turn_ref: Some(ProviderRef {
-            driver: "codex".into(),
-            native_id: Some("raw-turn".into()),
-            strength: NativeRefStrength::Strong,
-            fingerprint: None,
-            ordinal: None,
-        }),
-        ordinal: 1,
-        status: ProviderTurnStatus::Completed,
-        started_at: Some("1970-01-01T00:00:01.000Z".into()),
-        completed_at: Some("1970-01-01T00:00:02.000Z".into()),
-        token_usage: None,
-        model: None,
-    });
+    snapshot.projection.provider_turns.push(
+        serde_json::from_value(json!({
+            "id":"native-turn","providerThreadId":"source-native","nodeId":"source-root",
+            "runAttemptId":"actual-source-attempt","nativeThreadRef":null,
+            "nativeTurnRef":{"driver":"codex","nativeId":"raw-turn","strength":"strong"},
+            "ordinal":1,"status":"completed","startedAt":"1970-01-01T00:00:01.000Z",
+            "completedAt":"1970-01-01T00:00:02.000Z"
+        }))
+        .unwrap(),
+    );
     snapshot.projection.visible_turn_items = vec![
         row(answer, Visibility::Inherited, 0),
         row(checkpoint, Visibility::Inherited, 1),

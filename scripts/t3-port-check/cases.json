@@ -1,28 +1,8 @@
 {
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
-    "agent-core": [
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_02",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_03",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_04",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_05",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_06",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_08",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_10",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_11",
-      "state::conversations::tests::provider_switch_projects_only_the_active_provider_sessions_capabilities"
-    ],
-    "agent-core::state": [
-      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_1",
-      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_2",
-      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_3",
-      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_4"
-    ],
-    "agent-protocol": [
-      "orchestration::tests::a_missing_retained_attempt_cannot_borrow_a_runless_native_turn"
-    ],
     "host-daemon": [
-      "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources"
+      "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer"
     ]
   },
   "guards": {
@@ -136,8 +116,16 @@
       "orchestration::tests::an_older_page_deduplicates_by_both_source_thread_and_item",
       "orchestration::tests::an_uncertain_steer_is_answerable_as_its_own_input_without_replacing_the_running_turn",
       "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_01",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_02",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_03",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_04",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_05",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_06",
       "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_07",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_08",
       "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_09",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_10",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_11",
       "orchestration::tests::canonical_subagents_keep_public_child_links_models_and_status_without_opening_the_child",
       "orchestration::tests::content_events_update_the_thread_clock_without_rewriting_explicit_metadata_or_foreign_threads",
       "orchestration::tests::delayed_history_preserves_live_bodies_and_does_not_revive_rolled_back_items",
@@ -922,6 +910,7 @@
       "state::conversations::tests::durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_edits",
       "state::conversations::tests::new_chat_after_admitting_the_first_input_allocates_an_independent_draft",
       "state::conversations::tests::only_finished_workspace_tools_refresh_the_tree_during_a_turn",
+      "state::conversations::tests::provider_switch_projects_only_the_active_provider_sessions_capabilities",
       "state::conversations::tests::receipt_from_a_replaced_subscription_cannot_restore_or_discard_new_input",
       "state::conversations::tests::stale_settled_details_keep_the_original_read_pending_until_refetched",
       "state::conversations::tests::stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed::moved_project_1_false",
@@ -1230,6 +1219,10 @@
       "new_chat_selects_catalog_defaults_in_either_load_order",
       "pending_submission_reconciles_both_reply_and_echo_orders",
       "project_registration_navigates_only_while_current",
+      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_1",
+      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_2",
+      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_3",
+      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_4",
       "selected_folder_preserves_explicit_scope_without_losing_the_execution_directory",
       "serialized_events_preserve_operation_inputs_and_replay_state",
       "snapshot_preserves_history_drafts_and_navigation",
@@ -1437,6 +1430,7 @@
       "orchestration::tests::a_fork_does_not_inherit_its_parents_rollback_request_or_failure",
       "orchestration::tests::a_late_native_allocation_keeps_only_its_resource_and_cannot_replace_a_new_binding",
       "orchestration::tests::a_lost_approval_callback_expires_without_making_it_answerable_again",
+      "orchestration::tests::a_missing_retained_attempt_cannot_borrow_a_runless_native_turn",
       "orchestration::tests::a_native_start_can_fail_before_session_attachment_and_cannot_overwrite_cancellation",
       "orchestration::tests::a_provider_exit_during_rollback_publishes_only_the_matching_failure",
       "orchestration::tests::a_recorded_answer_survives_a_failed_callback_without_reopening_the_question",
@@ -1709,7 +1703,6 @@
       "host_rpc::runtime::output::tests::fast_and_lagging_appends_fold_to_the_same_terminal",
       "host_rpc::runtime::output::tests::late_and_once_lagging_viewers_return_to_append_cadence",
       "host_rpc::runtime::output::tests::live_limit_evicts_the_tail_and_resynchronizes_its_existing_viewer",
-      "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer",
       "host_rpc::runtime::replay::recorded_codex_frames_cross_the_native_adapter_and_conversation_writer",
       "host_rpc::runtime::replay::recorded_deepseek_acp_conversation_crosses_the_process_and_conversation_writer",
       "host_rpc::runtime::replay::reference_recordings_keep_their_original_digests",
@@ -1833,6 +1826,7 @@
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_4___busy__",
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_5___state_error__",
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_6___injection_unknown__",
+      "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources",
       "host_rpc::runtime::tests::stopping_a_running_turn_saves_live_output_and_ends_its_subscription",
       "host_rpc::runtime::tests::stopping_root_provider_creation_keeps_one_native_session_for_retry",
       "host_rpc::runtime::tests::text_streams_commit_at_paragraphs_and_within_the_streaming_interval",
@@ -2631,6 +2625,10 @@
     "inherited-prefix-editability": {
       "reason": "T3 derives rewind counts from local AppRuns, so inherited source text keeps all transcript/fork facts but cannot rewind the child. Preserve original full DTO equality except that new derived eligibility and independently assert visible actions in both threads.",
       "replacement": "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources"
+    },
+    "claude-sdk-native-cursor": {
+      "reason": "Extend existing real recorded SDK-reader/Worker/Runtime/writer check with T3 actual assistant envelope UUID and durable DB cursor; preserve all existing output/background assertions. User/control turn UUID and API message.id are not valid SDK resumeSessionAt cursors.",
+      "replacement": "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer"
     }
   }
 }

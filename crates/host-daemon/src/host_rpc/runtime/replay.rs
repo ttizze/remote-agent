@@ -262,6 +262,53 @@ async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_w
         stop.cancel();
         running.await.unwrap();
         observing.await.unwrap();
+        // T3 ClaudeAdapterV2.claudeTurnCursor uses the real root assistant
+        // envelope UUID, independently of the API message ID or user handle.
+        let expected_head = frames(&recording)
+            .into_iter()
+            .filter_map(|row| {
+                let frame = &row["frame"];
+                (row["type"] == "emit_inbound"
+                    && frame["type"] == "assistant"
+                    && frame["parent_tool_use_id"].is_null())
+                .then(|| frame["uuid"].as_str().map(str::to_owned))
+                .flatten()
+            })
+            .last()
+            .expect("the reference has a real root assistant UUID");
+        let stored = service
+            .inner
+            .conversation
+            .storage
+            .thread_state(&session.application_id(), &[])
+            .unwrap();
+        let turn = stored
+            .provider_turns
+            .values()
+            .max_by_key(|turn| turn.ordinal)
+            .unwrap();
+        assert_eq!(
+            turn.native_turn_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_deref()),
+            Some(expected_head.as_str()),
+            "{scenario}: persist the actual SDK resume cursor"
+        );
+        let reopened = super::super::storage::Storage::open(
+            &directory.path().join(crate::CONVERSATION_DATABASE_FILE),
+        );
+        let durable = reopened
+            .thread_state(&session.application_id(), &[])
+            .unwrap();
+        assert_eq!(
+            durable
+                .provider_turns
+                .get(&turn.id)
+                .unwrap()
+                .native_turn_ref,
+            turn.native_turn_ref,
+            "cursor survives an independent DB connection without provider reads"
+        );
         if scenario.starts_with("claude_background") {
             let rosters = rosters.lock().unwrap();
             let first = rosters

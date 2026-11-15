@@ -2397,20 +2397,13 @@ mod fork_tests {
             provider_thread_ref: provider.native_thread_ref.clone(),
             provider_turn_ref: Some(native("actual-raw-turn", None)),
         };
-        let turn = ProviderTurn {
-            id: "observed-native-turn".into(),
-            provider_thread_id: provider.id.clone(),
-            node_id: "real-root".into(),
-            run_attempt_id: None,
-            native_thread_ref: point.provider_thread_ref.clone(),
-            native_turn_ref: point.provider_turn_ref.clone(),
-            ordinal: 1,
-            status: ProviderTurnStatus::Completed,
-            started_at: Some(NOW.into()),
-            completed_at: Some(NOW.into()),
-            token_usage: None,
-            model: None,
-        };
+        let turn: ProviderTurn = serde_json::from_value(serde_json::json!({
+            "id":"observed-native-turn","providerThreadId":provider.id,"nodeId":"real-root",
+            "runAttemptId":null,"nativeThreadRef":point.provider_thread_ref,
+            "nativeTurnRef":point.provider_turn_ref,"ordinal":1,"status":"completed",
+            "startedAt":NOW,"completedAt":NOW
+        }))
+        .unwrap();
         for (status, allowed) in [
             (ProviderTurnStatus::Pending, false),
             (ProviderTurnStatus::Running, false),
