@@ -1,18 +1,17 @@
 {
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
-    "agent-protocol": [
-      "orchestration::tests::rewind_holds_unsent_runs_without_rolling_back_or_deleting_their_messages",
-      "orchestration::tests::rewind_without_native_rollback_selects_a_new_thread_and_forbids_the_old_head",
-      "orchestration::tests::rolled_back_runs_remain_addressable_and_their_ordinals_are_not_reused"
-    ],
     "host-daemon": [
-      "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_2",
-      "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_4",
-      "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_6",
       "host_rpc::runtime::t3_contract::codex_rewind_continues_from_the_retained_head_in_the_same_native_thread",
-      "host_rpc::service::titles::tests::search_reads_saved_message_bodies_without_discovering_native_threads",
-      "host_rpc::service::workspace_setup::tests::remote_start_fetches_before_checkout_and_retains_the_completed_card"
+      "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources",
+      "host_rpc::service::workspace_setup::tests::remote_start_fetches_before_checkout_and_retains_the_completed_card",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_1",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_2",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_3",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_4",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_5",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_6",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_7"
     ]
   },
   "guards": {
@@ -1478,6 +1477,9 @@
       "orchestration::tests::recovery::provider_failure_preserves_other_processes_and_holds_queued_work",
       "orchestration::tests::recovery::restart_preserves_native_identity_and_admits_one_continuation_without_replaying_input",
       "orchestration::tests::removing_an_unsent_stopped_input_preserves_the_queue_and_cannot_remove_real_native_work",
+      "orchestration::tests::rewind_holds_unsent_runs_without_rolling_back_or_deleting_their_messages",
+      "orchestration::tests::rewind_without_native_rollback_is_rejected_without_mutating_history",
+      "orchestration::tests::rolled_back_runs_remain_addressable_and_their_ordinals_are_not_reused",
       "orchestration::tests::shared_provider_sessions_do_not_allow_another_native_thread_to_own_a_callback",
       "orchestration::tests::steer_appends_a_message_to_the_existing_run_without_allocating_a_run",
       "orchestration::tests::steer_before_native_turn_is_ready_queues_with_the_target_run",
@@ -1665,8 +1667,11 @@
       "host_rpc::routing::connections::tests::byte_budget_disconnects_only_the_slow_connection",
       "host_rpc::routing::credit::tests::streams_share_connection_credit_and_release_it_only_when_the_frame_is_dropped",
       "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_1",
+      "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_2",
       "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_3",
+      "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_4",
       "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_5",
+      "host_rpc::runtime::bodies::tests::saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source::case_6",
       "host_rpc::runtime::bodies::tests::unreadable_message_history_is_atomic_and_can_be_retried_without_importing_native_tool_cards",
       "host_rpc::runtime::bodies::tests::unreadable_native_messages_block_handoff_and_switch_until_atomic_import_succeeds",
       "host_rpc::runtime::imports::tests::incomplete_native_reads_can_retry_and_text_import_does_not_require_old_image_files::case_1",
@@ -1814,7 +1819,6 @@
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_4___busy__",
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_5___state_error__",
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_6___injection_unknown__",
-      "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources",
       "host_rpc::runtime::tests::stopping_a_running_turn_saves_live_output_and_ends_its_subscription",
       "host_rpc::runtime::tests::stopping_root_provider_creation_keeps_one_native_session_for_retry",
       "host_rpc::runtime::tests::text_streams_commit_at_paragraphs_and_within_the_streaming_interval",
@@ -1846,6 +1850,7 @@
       "host_rpc::service::titles::tests::registered_roots_determine_membership_for_both_providers",
       "host_rpc::service::titles::tests::sdk_reviews_stay_out_of_titles_and_search_after_host_restart",
       "host_rpc::service::titles::tests::search_defaults_to_the_t3_bound_and_accepts_an_explicit_limit",
+      "host_rpc::service::titles::tests::search_reads_saved_message_bodies_without_discovering_native_threads",
       "host_rpc::service::titles::tests::task_list_refreshes_branding_for_all_project_headers",
       "host_rpc::service::update::tests::a_report_write_failure_rolls_back_both_update_gates_and_preserves_existing_contents",
       "host_rpc::service::update::tests::an_uncertain_update_continuation_is_reported_without_resending",

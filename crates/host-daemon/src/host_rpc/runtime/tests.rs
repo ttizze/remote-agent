@@ -1165,7 +1165,21 @@ async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resour
         .await
         .unwrap();
     ack.accepted().unwrap();
+    // Two old turns already satisfy completed(count=2) before rollback. Wait
+    // for the fifth actual prompt (two source + two sibling + this continuation)
+    // so the old snapshot cannot make an unexecuted rewind appear successful.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if agent.inputs.lock().unwrap().len() == 5 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("post-rewind input reaches native execution");
     let resumed = completed(&service, &target, 2).await;
+    assert_eq!(storage.active_source(&target).unwrap(), Some(source));
     assert_eq!(
         resumed.thread.turns.as_ref().unwrap()[0],
         original.thread.turns.as_ref().unwrap()[0]

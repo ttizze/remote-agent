@@ -692,6 +692,9 @@ impl Agent for NativeAgent {
                 return Err(unsupported());
             }
         }
+        // A confirmed SDK rollback returns a fresh snapshot. The artificial
+        // read failure used before the operation no longer describes it.
+        response.thread.history_read_state = None;
         Ok(crate::providers::RollbackResult {
             native_id: id.into(),
             head_id: retained.map(str::to_owned),

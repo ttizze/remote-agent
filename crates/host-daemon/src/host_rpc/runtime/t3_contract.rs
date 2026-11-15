@@ -1919,7 +1919,7 @@ async fn codex_rewind_continues_from_the_retained_head_in_the_same_native_thread
     let inputs = agent.inputs.lock().unwrap();
     assert_eq!(inputs.len(), 3);
     // CodexAdapterV2.canRollbackThread and CheckpointRollbackService use
-    // provider-thread.rollback; native fork is the unsupported-provider fallback.
+    // provider-thread.rollback on this same native resource.
     assert_eq!(inputs[1].thread_id, inputs[2].thread_id);
     let records = agent.records.lock().unwrap();
     let native = records.get(&inputs[2].thread_id.id).unwrap();
@@ -4551,4 +4551,9 @@ async fn failed_recovery_allocation_keeps_the_existing_native_reference_and_unco
         1,
         "the failed input never reached a native thread"
     );
+}
+
+#[cfg(unix)]
+mod codex_rollback {
+    include!("codex_rollback_tests.rs");
 }

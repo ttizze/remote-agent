@@ -1069,23 +1069,102 @@ fn detaching_the_process_fences_its_callbacks_without_deleting_native_history() 
     assert_eq!(next.provider_turns, state.provider_turns);
 }
 
+// T3 checkpoint.rollback accepts a request first; the native result owns the
+// visible cut. These fixtures contain the capabilities and checkpoint records
+// that Host normally saves, rather than assuming rewind can skip those checks.
+fn rewind_ready(mut state: State) -> State {
+    let capabilities = &mut state
+        .provider_sessions
+        .get_mut("session")
+        .unwrap()
+        .capabilities;
+    capabilities.threads.can_rollback_thread = true;
+    capabilities
+        .checkpointing
+        .provider_can_rollback_conversation = true;
+    capabilities
+        .checkpointing
+        .provider_rollback_returns_snapshot = true;
+    let runs: Vec<_> = state
+        .runs
+        .values()
+        .filter(|run| run.status != RunStatus::Queued)
+        .cloned()
+        .collect();
+    for run in &runs {
+        state = state.apply(&prepare_checkpoint_scope(&state, &run.id, "/project", NOW).unwrap());
+    }
+    let scope = state.checkpoint_scopes.values().next().unwrap().clone();
+    for ordinal in std::iter::once(0).chain(runs.iter().map(|run| run.ordinal)) {
+        let checkpoint = Checkpoint {
+            id: format!("checkpoint:{ordinal}"),
+            thread_id: "thread".into(),
+            scope_id: scope.id.clone(),
+            run_id: runs
+                .iter()
+                .find(|run| run.ordinal == ordinal)
+                .map(|run| run.id.clone()),
+            node_id: scope.node_id.clone(),
+            parent_checkpoint_id: None,
+            ordinal_within_scope: ordinal,
+            app_run_ordinal: (ordinal != 0).then_some(ordinal),
+            reference: format!("checkpoint-ref:{ordinal}"),
+            status: CheckpointStatus::Missing,
+            files: Vec::new(),
+            files_total: None,
+            captured_at: NOW.into(),
+        };
+        state.checkpoints.insert(checkpoint.id.clone(), checkpoint);
+    }
+    state
+}
+
+fn confirmed_rewind(state: &State) -> State {
+    let effect = state
+        .effects
+        .values()
+        .find(|effect| {
+            matches!(effect.request, EffectRequest::ProviderThreadRollback { .. })
+                && effect.status == EffectStatus::Pending
+        })
+        .unwrap();
+    state.apply(
+        &rollback_completed(
+            state,
+            &effect.id,
+            native("native", None),
+            None,
+            context("confirmed", state),
+        )
+        .unwrap(),
+    )
+}
+
 #[test]
 fn rolled_back_runs_remain_addressable_and_their_ordinals_are_not_reused() {
     let (state, run, attempt) = running();
-    let state = state.apply(
-        &complete(
-            &state,
-            &attempt,
-            "session",
-            Completion::Completed,
-            context("4", &state),
-        )
-        .unwrap(),
+    let state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("4", &state),
+            )
+            .unwrap(),
+        ),
     );
-    let next = state.apply(&rewind(&state, &run, context("5", &state)).unwrap());
+    let requested = state.apply(&rewind(&state, &run, context("5", &state)).unwrap());
+    assert_eq!(
+        requested.runs[&run].status,
+        RunStatus::Completed,
+        "acceptance is not native confirmation"
+    );
+    let next = confirmed_rewind(&requested);
     assert_eq!(next.runs[&run].status, RunStatus::RolledBack);
     assert_eq!(next.turn_items, state.turn_items);
-    let next = accepted(&next, 5, Admission::Queue);
+    let next = accepted(&next, 6, Admission::Queue);
     assert_eq!(next.active_run().unwrap().ordinal, 2);
 }
 
@@ -1093,48 +1172,49 @@ fn rolled_back_runs_remain_addressable_and_their_ordinals_are_not_reused() {
 fn rewind_holds_unsent_runs_without_rolling_back_or_deleting_their_messages() {
     let (state, run, attempt) = running();
     let state = accepted(&accepted(&state, 4, Admission::Queue), 5, Admission::Queue);
-    let state = state.apply(
-        &complete(
-            &state,
-            &attempt,
-            "session",
-            Completion::Interrupted,
-            context("6", &state),
-        )
-        .unwrap(),
+    let state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Interrupted,
+                context("6", &state),
+            )
+            .unwrap(),
+        ),
     );
-    let queued = state
+    let queued: Vec<_> = state
         .runs
         .values()
         .filter(|run| run.status == RunStatus::Queued)
         .map(|run| run.id.clone())
-        .collect::<Vec<_>>();
-    let items = state.turn_items.clone();
-    let rewound = state.apply(&rewind(&state, &run, context("7", &state)).unwrap());
+        .collect();
+    let requested = state.apply(&rewind(&state, &run, context("7", &state)).unwrap());
+    assert_eq!(requested.runs[&run].status, RunStatus::Interrupted);
+    let unheld = requested.apply(&hold_queue(&requested, false));
+    assert!(
+        activate_queued(&unheld, &queued[0], context("early", &unheld)).is_err(),
+        "native rollback still owns the lane"
+    );
+    let rewound = confirmed_rewind(&requested);
     assert_eq!(rewound.runs[&run].status, RunStatus::RolledBack);
-    for id in queued {
-        assert_eq!(rewound.runs[&id].status, RunStatus::Queued);
-        assert!(rewound.runs[&id].queue_held);
+    for id in &queued {
+        assert_eq!(rewound.runs[id].status, RunStatus::Queued);
+        assert!(rewound.runs[id].queue_held);
     }
-    assert_eq!(rewound.turn_items, items);
+    assert_eq!(rewound.turn_items, state.turn_items);
     let ready = rewound.apply(&hold_queue(&rewound, false));
-    let run_id = ready.next_queued_run().unwrap().id.clone();
-    let activation = activate_queued(&ready, &run_id, context("8", &ready)).unwrap();
-    let message = activation
-        .changes
-        .iter()
-        .position(
-            |change| matches!(change,Change::TurnItem(item) if item.run_id.as_ref()==Some(&run_id)),
-        )
-        .unwrap();
+    let activation = activate_queued(&ready, &queued[0], context("8", &ready)).unwrap();
+    let message=activation.changes.iter().position(|change|matches!(change,Change::TurnItem(item) if item.run_id.as_ref()==Some(&queued[0]))).unwrap();
     let run = activation
         .changes
         .iter()
-        .position(|change| matches!(change,Change::Run(run) if run.id==run_id))
+        .position(|change| matches!(change,Change::Run(run) if run.id==queued[0]))
         .unwrap();
     assert!(message < run);
     let active = ready.apply(&activation);
-    let run = &active.runs[&run_id];
+    let run = &active.runs[&queued[0]];
     assert_eq!(
         active.nodes[run.root_node_id.as_ref().unwrap()].provider_thread_id,
         run.provider_thread_id
@@ -1146,76 +1226,33 @@ fn rewind_holds_unsent_runs_without_rolling_back_or_deleting_their_messages() {
 }
 
 #[test]
-fn rewind_without_native_rollback_selects_a_new_thread_and_forbids_the_old_head() {
-    let (state, first, attempt) = running();
-    assert!(
-        !state.provider_sessions["session"]
-            .capabilities
-            .threads
-            .can_rollback_thread
+fn rewind_without_native_rollback_is_rejected_without_mutating_history() {
+    let (state, run, attempt) = running();
+    let mut state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("4", &state),
+            )
+            .unwrap(),
+        ),
     );
-    let first_native = state.run_attempts[&attempt]
-        .provider_turn_id
-        .clone()
-        .unwrap();
-    let state = state.apply(
-        &complete(
-            &state,
-            &attempt,
-            "session",
-            Completion::Completed,
-            context("4", &state),
-        )
-        .unwrap(),
-    );
-    let state = accepted(&state, 5, Admission::Queue);
-    let removed = state.active_run().unwrap().id.clone();
-    let attempt = state.runs[&removed].active_attempt_id.clone().unwrap();
-    let state = state.apply(
-        &started(
-            &state,
-            &attempt,
-            "session",
-            native("turn-2", None),
-            context("7", &state),
-        )
-        .unwrap(),
-    );
-    let state = state.apply(
-        &complete(
-            &state,
-            &attempt,
-            "session",
-            Completion::Completed,
-            context("8", &state),
-        )
-        .unwrap(),
-    );
-    let rewound = state.apply(&rewind(&state, &removed, context("9", &state)).unwrap());
-    assert_eq!(rewound.runs[&first].status, RunStatus::Completed);
-    let target =
-        &rewound.provider_threads[rewound.thread.active_provider_thread_id.as_ref().unwrap()];
-    assert_ne!(target.id, "native-thread");
-    assert_eq!(target.status, ProviderThreadStatus::NotLoaded);
-    assert!(target.native_thread_ref.is_none());
-    let fork = target.forked_from.as_ref().unwrap();
-    assert_eq!(fork.provider_thread_id, "native-thread");
-    assert_eq!(fork.provider_turn_id.as_ref(), Some(&first_native));
-    let next = accepted(&rewound, 10, Admission::Queue);
-    let next_run = next.active_run().unwrap();
-    assert_eq!(next_run.provider_thread_id.as_ref(), Some(&target.id));
-    assert!(
-        started(
-            &next,
-            next_run.active_attempt_id.as_deref().unwrap(),
-            "session",
-            native("late-old-turn", None),
-            context("11", &next)
-        )
+    state
+        .provider_sessions
+        .get_mut("session")
         .unwrap()
-        .changes
-        .is_empty()
+        .capabilities
+        .threads
+        .can_rollback_thread = false;
+    let before = state.clone();
+    assert_eq!(
+        rewind(&state, &run, context("5", &state)).unwrap_err(),
+        "provider conversation rollback is unavailable"
     );
+    assert_eq!(state, before);
 }
 
 #[test]
