@@ -808,24 +808,7 @@ fn context_budget(
     let used = if let Some(usage) = usage {
         usage.used_tokens
     } else if let Some(native) = native {
-        let accepted: std::collections::BTreeSet<_> = state
-            .provider_turns
-            .values()
-            .filter_map(|turn| {
-                turn.run_attempt_id
-                    .as_ref()
-                    .and_then(|id| state.run_attempts.get(id))
-            })
-            .filter(|attempt| {
-                attempt.provider_thread_id == thread.id
-                    && attempt
-                        .native_thread_ref
-                        .as_ref()
-                        .and_then(|reference| reference.native_id.as_deref())
-                        == Some(native)
-            })
-            .map(|attempt| attempt.run_id.as_str())
-            .collect();
+        let accepted = state.accepted_native_run_ids(&thread.id, native);
         let delivered: std::collections::BTreeSet<_> = state
             .context_handoffs
             .values()

@@ -316,6 +316,33 @@ impl State {
         id.and_then(|id| self.run_attempts.get(id))
     }
 
+    /// Actual native admission is witnessed by a provider turn, not merely a
+    /// queued/allocated attempt. A rebound physical resource starts separately.
+    pub fn accepted_native_run_ids(
+        &self,
+        provider_thread_id: &str,
+        native_id: &str,
+    ) -> BTreeSet<&str> {
+        self.provider_turns
+            .values()
+            .filter(|turn| turn.provider_thread_id == provider_thread_id)
+            .filter_map(|turn| {
+                turn.run_attempt_id
+                    .as_ref()
+                    .and_then(|id| self.run_attempts.get(id))
+            })
+            .filter(|attempt| {
+                attempt.provider_thread_id == provider_thread_id
+                    && attempt
+                        .native_thread_ref
+                        .as_ref()
+                        .and_then(|reference| reference.native_id.as_deref())
+                        == Some(native_id)
+            })
+            .map(|attempt| attempt.run_id.as_str())
+            .collect()
+    }
+
     pub fn provider_session(&self, provider_thread_id: &str) -> Option<&ProviderSession> {
         self.provider_threads
             .get(provider_thread_id)

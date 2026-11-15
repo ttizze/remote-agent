@@ -489,6 +489,23 @@ pub struct ProviderRef {
     pub ordinal: Option<u64>,
 }
 
+pub fn native_head_id<'a>(
+    driver: &str,
+    head: Option<&'a ProviderRef>,
+) -> Result<Option<&'a str>, String> {
+    let Some(head) = head else {
+        return Ok(None);
+    };
+    if head.driver != driver {
+        return Err("native conversation head belongs to another driver".into());
+    }
+    head.native_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(Some)
+        .ok_or_else(|| "native conversation head has no identity".into())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSession {

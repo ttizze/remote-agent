@@ -147,6 +147,13 @@ pub fn observe_external_turn(
         Change::Node(node),
         Change::ProviderThread(ProviderThread {
             status: provider_status,
+            native_conversation_head_ref: if provider.driver == "claudeAgent"
+                && status == ProviderTurnStatus::Completed
+            {
+                None
+            } else {
+                provider.native_conversation_head_ref.clone()
+            },
             updated_at: now.into(),
             ..provider.clone()
         }),

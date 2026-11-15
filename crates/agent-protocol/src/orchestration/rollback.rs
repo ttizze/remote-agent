@@ -275,10 +275,7 @@ pub fn rollback_completed(
     if state.thread.rollback_request_id.as_deref() != Some(action.command_id.as_str()) {
         return Err("rollback request is no longer current".into());
     }
-    if native_head.as_ref().is_some_and(|head| {
-        head.driver != native_thread.driver
-            || head.native_id.as_ref().is_none_or(|id| id.is_empty())
-    }) {
+    if native_head_id(&native_thread.driver, native_head.as_ref()).is_err() {
         return Err("rewind returned an invalid native cursor".into());
     }
     let target = rollback_target(state, provider_thread_id, checkpoint_id, scope_id)?;

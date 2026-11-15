@@ -141,16 +141,23 @@ pub(crate) struct RequestOrigin {
 #[derive(Debug, PartialEq)]
 pub(crate) enum SubmissionTarget<'a> {
     Steer(&'a str),
-    Start { cwd: &'a str },
+    Start(NativeStart<'a>),
 }
 
+/// Values for this native query, frozen from the canonical physical binding.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct NativeStart<'a> {
+    pub cwd: &'a str,
+    pub resume_at: Option<&'a str>,
+    pub native_has_turns: bool,
+}
 impl<'a> SubmissionTarget<'a> {
-    pub(crate) fn start(
-        cwd: &'a str,
-        _resume_at: Option<&'a str>,
-        _native_has_turns: bool,
-    ) -> Self {
-        Self::Start { cwd }
+    pub(crate) fn start(cwd: &'a str, resume_at: Option<&'a str>, native_has_turns: bool) -> Self {
+        Self::Start(NativeStart {
+            cwd,
+            resume_at,
+            native_has_turns,
+        })
     }
 }
 

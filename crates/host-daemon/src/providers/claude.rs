@@ -119,6 +119,19 @@ struct Record {
     idle: Option<Idle>,
 }
 
+impl Record {
+    fn new(cwd: &str, model: &str, session_id: Uuid, resumable: bool) -> Self {
+        Self {
+            cwd: cwd.into(),
+            model: model.into(),
+            session_id,
+            resumable,
+            running: None,
+            idle: None,
+        }
+    }
+}
+
 struct Idle {
     process: Process,
     auth_revision: u64,
@@ -269,17 +282,42 @@ impl Claude {
             }),
             ..Default::default()
         };
-        let record = Record {
-            cwd: cwd.into(),
-            model: model.into(),
-            session_id,
-            resumable: false,
-            running: None,
-            idle: None,
-        };
+        let record = Record::new(cwd, model, session_id, false);
         self.retain_record(session_id.to_string(), Arc::new(AsyncMutex::new(record)))
             .await?;
         Ok(response)
+    }
+
+    /// A start owns its canonical cwd/model. It can reconstruct an allocated
+    /// UUID after restart without a transcript or another display-history read.
+    async fn start_record(
+        &self,
+        id: &str,
+        cwd: &str,
+        model: &str,
+    ) -> anyhow::Result<Arc<AsyncMutex<Record>>> {
+        if let Some(record) = self.records.lock().await.get(id).cloned() {
+            return Ok(record);
+        }
+        let native = Uuid::parse_str(id)?;
+        let home = self.native_home.clone();
+        let transcript =
+            tokio::task::spawn_blocking(move || history::resume_state(&home, native)).await?;
+        if matches!(transcript, history::ResumeState::Empty) {
+            return Err(anyhow::anyhow!(
+                "Claude native transcript has no conversation to resume"
+            ));
+        }
+        self.retain_record(
+            id.into(),
+            Arc::new(AsyncMutex::new(Record::new(
+                cwd,
+                model,
+                native,
+                matches!(transcript, history::ResumeState::Conversation),
+            ))),
+        )
+        .await
     }
 
     async fn record(&self, id: &str) -> anyhow::Result<Arc<AsyncMutex<Record>>> {
@@ -293,17 +331,15 @@ impl Claude {
             history::summary(&path)
         })
         .await??;
-        let record = Arc::new(AsyncMutex::new(Record {
-            cwd: summary
+        let record = Arc::new(AsyncMutex::new(Record::new(
+            &summary
                 .thread
                 .cwd
                 .context("Claude working directory is unavailable")?,
-            model: "default".into(),
-            session_id: native_id,
-            resumable: true,
-            running: None,
-            idle: None,
-        }));
+            "default",
+            native_id,
+            true,
+        )));
         self.retain_record(id.into(), record).await
     }
 
@@ -387,18 +423,12 @@ impl Claude {
         threads
     }
 
-    /// A missing limit reads metadata only; opening history overlays owned execution later.
-    async fn read(&self, id: &str, requested: Option<usize>) -> anyhow::Result<ThreadResponse> {
+    /// Native history is read for the first canonical import.
+    async fn read(&self, id: &str, requested: usize) -> anyhow::Result<ThreadResponse> {
         let native = Uuid::parse_str(id)?;
         let home = self.native_home.clone();
         let history: anyhow::Result<ThreadResponse> = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
-            let Some(requested) = requested else {
-                return Ok(ThreadResponse {
-                    thread: history::summary(&path)?.thread,
-                    ..Default::default()
-                });
-            };
             match history::read(&path, requested) {
                 Ok(response) => Ok(response),
                 Err(error) => {
@@ -675,10 +705,20 @@ impl Claude {
     async fn start_turn(
         &self,
         params: &op::Submission,
+        start: crate::providers::NativeStart<'_>,
         browser: Option<Value>,
         execution: Uuid,
     ) -> Result<agent_protocol::ids::TurnId, OperationError> {
-        let record = self.record(&params.thread_id.id).await?;
+        let record = self
+            .start_record(
+                &params.thread_id.id,
+                start.cwd,
+                params
+                    .model
+                    .as_ref()
+                    .map_or("default", |model| model.id.as_str()),
+            )
+            .await?;
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
@@ -704,7 +744,10 @@ impl Claude {
             return Err("ClaudeではCodexのサービス階層を指定できません。".into());
         }
         let session = state.session_id.to_string();
+        let moved = state.cwd != start.cwd;
+        state.cwd = start.cwd.into();
         let cwd = state.cwd.clone();
+        let should_resume = start.resume_at.is_some() || start.native_has_turns || state.resumable;
         let (auth_home, auth_revision) = {
             let accounts = self.accounts.lock().await;
             (
@@ -716,7 +759,9 @@ impl Claude {
         };
         let idle = state.idle.take();
         let mut process = if idle.as_ref().is_some_and(|idle| {
-            idle.auth_revision == auth_revision
+            !moved
+                && start.resume_at.is_none()
+                && idle.auth_revision == auth_revision
                 && idle.model == model
                 && idle.effort.as_deref() == effort
         }) {
@@ -734,7 +779,7 @@ impl Claude {
                 &self.program,
                 process::homes(&self.native_home, self.native_inherited, &auth_home),
                 Path::new(&cwd),
-                Some((&session, state.resumable)),
+                Some((&session, should_resume, start.resume_at)),
                 Some((&model, effort)),
                 browser,
             )
@@ -2336,7 +2381,7 @@ impl crate::providers::Discovery for Claude {
         limit: usize,
         _include_activity: bool,
     ) -> Result<ThreadResponse, Failure> {
-        self.read(id, Some(limit))
+        self.read(id, limit)
             .await
             .map_err(|e| Failure::new("session_read_failed", e))
     }
@@ -2404,41 +2449,58 @@ impl Agent for Claude {
             .map_err(|e| Failure::new("provider_unavailable", e))
     }
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
-        // Queued input needs the owned runtime and current titles, not a replay
-        // of its transcript. Idle sessions still observe native history changes.
+        let native =
+            Uuid::parse_str(id).map_err(|error| Failure::new("session_read_failed", error))?;
         let record = self.records.lock().await.get(id).cloned();
-        let running_model = if let Some(record) = record {
+        let owned = if let Some(record) = record {
             let record = record.lock().await;
-            record.running.as_ref().map(|_| record.model.clone())
+            Some((
+                record.cwd.clone(),
+                record.model.clone(),
+                record
+                    .running
+                    .as_ref()
+                    .is_some_and(|running| !running.work.borrow().settled),
+                record.running.is_some() || record.idle.is_some(),
+            ))
         } else {
             None
         };
-        let mut response = self
-            .read(id, running_model.is_none().then_some(1))
-            .await
-            .map_err(|e| Failure::new("session_read_failed", e))?;
-        if let Some(model) = running_model {
+        if !owned.as_ref().is_some_and(|(_, _, _, live)| *live) {
+            let home = self.native_home.clone();
+            let transcript =
+                tokio::task::spawn_blocking(move || history::resume_state(&home, native))
+                    .await
+                    .map_err(|error| Failure::new("session_read_failed", error))?;
+            if matches!(transcript, history::ResumeState::Empty) {
+                return Err(Failure::new(
+                    "session_read_failed",
+                    "Claude native transcript has no conversation to resume",
+                ));
+            }
+        }
+        let mut response = ThreadResponse {
+            thread: Thread {
+                id: Some(SessionRef {
+                    provider: Some(ProviderKind::Claude),
+                    id: id.into(),
+                }),
+                status: SessionStatus::Idle,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        if let Some((cwd, model, running, _)) = owned {
+            response.thread.cwd = Some(cwd);
+            response.thread.status = if running {
+                SessionStatus::Running
+            } else {
+                SessionStatus::Idle
+            };
             response.model = Some(agent_protocol::models::ModelRef {
                 provider: ProviderKind::Claude,
                 id: model,
             });
-        }
-        let record = self.records.lock().await.get(id).cloned();
-        if let Some(record) = record {
-            let record = record.lock().await;
-            // A settled answer waits on background work without a running turn.
-            if let Some(running) = record
-                .running
-                .as_ref()
-                .filter(|running| !running.work.borrow().settled)
-            {
-                response.thread.status = SessionStatus::Running;
-                response.thread.turns = Some(vec![Arc::new(Turn {
-                    id: running.turn_id.clone(),
-                    status: TurnStatus::Running,
-                    ..Default::default()
-                })]);
-            }
         }
         Ok(SubmissionState {
             response,
@@ -2460,11 +2522,13 @@ impl Agent for Claude {
             }
             // Claude waiting on background work after its answer runs the
             // input as its next turn.
-            SubmissionTarget::Start { .. } if self.takes_input(&input.thread_id.id).await => {
+            SubmissionTarget::Start(start)
+                if start.resume_at.is_none() && self.takes_input(&input.thread_id.id).await =>
+            {
                 self.send_running(input, None, execution).await?
             }
-            SubmissionTarget::Start { .. } => {
-                Some(self.start_turn(input, browser, execution).await?)
+            SubmissionTarget::Start(start) => {
+                Some(self.start_turn(input, start, browser, execution).await?)
             }
         };
         Ok(op::SubmissionReceipt { turn_id })
@@ -2606,14 +2670,7 @@ impl Agent for Claude {
         drop(record);
         self.retain_record(
             forked.clone(),
-            Arc::new(AsyncMutex::new(Record {
-                cwd: cwd.clone(),
-                model: model.clone(),
-                session_id: native,
-                resumable: true,
-                running: None,
-                idle: None,
-            })),
+            Arc::new(AsyncMutex::new(Record::new(&cwd, &model, native, true))),
         )
         .await
         .map_err(|error| failure(format!("{error:#}")))?;

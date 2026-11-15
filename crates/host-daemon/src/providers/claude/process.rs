@@ -338,7 +338,7 @@ impl Process {
         program: &Path,
         homes: Option<(&Path, &Path)>,
         cwd: &Path,
-        session: Option<(&str, bool)>,
+        session: Option<(&str, bool, Option<&str>)>,
         model: Option<(&str, Option<&str>)>,
         browser: Option<Value>,
     ) -> Result<(Self, Value), String> {
@@ -347,7 +347,7 @@ impl Process {
         let mut process = Self::spawn(homes, cwd)?;
         let initialized: Result<Value, String> = tokio::time::timeout(Duration::from_secs(30), async {
             process.input.write_line(&json!({"type":"initialize", "program":program,"cwd":cwd,
-                "sessionId":session.map(|(id,_)|id),"resume":session.is_some_and(|(_,resume)|resume),
+                "sessionId":session.map(|(id,_,_)|id),"resume":session.is_some_and(|(_,resume,_)|resume),"resumeSessionAt":session.and_then(|(_,_,at)|at),
                 "model":model.map(|(model,_)|model),"effort":model.and_then(|(_,effort)|effort),"browser":browser,
                 "probe":session.is_none()}).to_string())
                 .await.map_err(|error|error.to_string())?;

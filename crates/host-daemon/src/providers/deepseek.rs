@@ -1187,7 +1187,7 @@ impl Agent for DeepSeek {
         _: Option<Value>,
         execution: uuid::Uuid,
     ) -> Result<op::SubmissionReceipt, Failure> {
-        if !matches!(route, SubmissionTarget::Start { .. }) {
+        if !matches!(route, SubmissionTarget::Start(_)) {
             return Err(Failure::new(
                 "unsupported_operation",
                 "Harness cannot steer a running task",

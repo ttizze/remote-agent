@@ -772,7 +772,19 @@ impl Runtime {
         let submitted = agent
             .submit(
                 &input,
-                SubmissionTarget::start(&cwd, None, false),
+                SubmissionTarget::start(
+                    &cwd,
+                    model::native_head_id(
+                        provider.driver(),
+                        current.provider_threads[&attempt.provider_thread_id]
+                            .native_conversation_head_ref
+                            .as_ref(),
+                    )
+                    .map_err(storage_failure)?,
+                    !current
+                        .accepted_native_run_ids(&attempt.provider_thread_id, &native.id)
+                        .is_empty(),
+                ),
                 reload,
                 service.browser_config(&target.to_string())?,
                 execution,

@@ -1054,6 +1054,14 @@ pub(super) fn finish_run(
     if let Some(thread) = state.provider_threads.get(&attempt.provider_thread_id) {
         changes.push(Change::ProviderThread(ProviderThread {
             status: ProviderThreadStatus::Idle,
+            native_conversation_head_ref: if thread.driver == "claudeAgent"
+                && run_status == RunStatus::Completed
+                && attempt.native_thread_ref == thread.native_thread_ref
+            {
+                None
+            } else {
+                thread.native_conversation_head_ref.clone()
+            },
             updated_at: context.now.into(),
             ..thread.clone()
         }));

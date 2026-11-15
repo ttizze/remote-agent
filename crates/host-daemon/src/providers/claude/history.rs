@@ -24,6 +24,68 @@ const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
 const SUMMARY_WINDOW_BYTES: usize = 128 * 1024;
 
+/// The resume probe follows T3's user/assistant classification only. It does
+/// not parse a display history or let a duplicate empty copy mask real content.
+pub(super) enum ResumeState {
+    Missing,
+    Empty,
+    Conversation,
+}
+fn has_conversation(path: &Path) -> std::io::Result<bool> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+    use std::io::Read;
+    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader
+            .by_ref()
+            .take(MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
+            return Ok(false);
+        }
+        if line.len() > MAX_LINE_BYTES {
+            return Err(std::io::Error::other(
+                "native resume line exceeds read budget",
+            ));
+        }
+        if serde_json::from_slice::<Entry>(&line)
+            .is_ok_and(|entry| matches!(entry.kind.as_str(), "user" | "assistant"))
+        {
+            return Ok(true);
+        }
+    }
+}
+pub(super) fn resume_state(home: &Path, id: Uuid) -> ResumeState {
+    let Ok(projects) = fs::read_dir(home.join("projects")) else {
+        return ResumeState::Missing;
+    };
+    let mut found = false;
+    let mut unreadable = false;
+    for project in projects.flatten() {
+        let path = project.path().join(format!("{id}.jsonl"));
+        if !path.try_exists().unwrap_or(false) {
+            continue;
+        }
+        match has_conversation(&path) {
+            Ok(true) => return ResumeState::Conversation,
+            Ok(false) => found = true,
+            Err(_) => unreadable = true,
+        }
+    }
+    if found && !unreadable {
+        ResumeState::Empty
+    } else {
+        ResumeState::Missing
+    }
+}
+
 pub(super) fn home() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return dunce::canonicalize(path).context("Claude storage is unavailable");

@@ -1094,7 +1094,8 @@ impl Agent for Codex {
                 .await?;
                 Some(turn.into())
             }
-            SubmissionTarget::Start { cwd, .. } => {
+            SubmissionTarget::Start(start) => {
+                let cwd = start.cwd;
                 self.resume(&input.thread_id.id, Some(cwd), browser, reload)
                     .await?;
                 self.scopes.reserve(&input.thread_id.id, execution);
