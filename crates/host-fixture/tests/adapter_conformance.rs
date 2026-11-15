@@ -1474,7 +1474,8 @@ async fn claude_native_rewind_resumes_the_kept_assistant_through_rpc_and_the_rea
     // exclude the discarded input; a canonical-only cut cannot satisfy this.
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
-    let host = start(&root, Arc::new(Memory::default())).await;
+    let memory = Arc::new(Memory::default());
+    let host = start(&root, memory.clone()).await;
     let local = host.local().await.unwrap();
     let session = create(&local.peer, ProviderKind::Claude, &root).await;
     let (_, mut events) = open(&local.peer, &session).await;
@@ -1587,6 +1588,219 @@ async fn claude_native_rewind_resumes_the_kept_assistant_through_rpc_and_the_rea
     assert_eq!(
         conversations::native_source(&root, &session, ProviderKind::Claude),
         native
+    );
+    let rows = claude_native_rows(&root, &native);
+    assert!(
+        rows.iter().any(|row| row["message"]["content"]
+            .to_string()
+            .contains("discard-tail")),
+        "rewind retains the native audit tail"
+    );
+    let resumed_user = rows
+        .iter()
+        .find(|row| {
+            row["message"]["content"]
+                .to_string()
+                .contains("after-rewind")
+                && row["type"] == "user"
+        })
+        .unwrap();
+    assert_eq!(
+        resumed_user["parentUuid"], kept_cursor,
+        "the new branch links to the retained assistant"
+    );
+    local.close().await;
+    host.close().await.unwrap();
+    let host = start(&root, memory).await;
+    let local = host.local().await.unwrap();
+    let (_, mut events) = open(&local.peer, &session).await;
+    let next = submission(&session, "after-restart");
+    submit(&local.peer, &next).await.unwrap();
+    let answer = events.input_turn(&next.client_user_message_id, true).await;
+    assert_eq!(
+        claude_answer(&answer),
+        "reply 3: after-restart",
+        "restart without a resume pin follows the selected native branch"
+    );
+    assert_eq!(
+        conversations::native_source(&root, &session, ProviderKind::Claude),
+        native
+    );
+    local.close().await;
+    host.close().await.unwrap();
+}
+
+fn claude_answer(turn: &Turn) -> String {
+    turn.items
+        .iter()
+        .flatten()
+        .filter_map(|item| match item.body() {
+            ItemBody::AssistantText { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn claude_native_rows(root: &Path, native: &str) -> Vec<serde_json::Value> {
+    let path = std::fs::read_dir(root.join("claude-native/projects"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join(format!("{native}.jsonl")))
+        .find(|path| path.is_file())
+        .expect("actual CLI transcript exists");
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[rstest::rstest]
+#[case::empty(false)]
+#[case::fork(true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_native_baseline_rewind_preserves_only_the_inherited_prefix(#[case] fork: bool) {
+    // Pinned ClaudeAdapterV2 uses forkHeadMessageId at a fork baseline, while
+    // a genuinely empty baseline allocates a fresh native/logical owner.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let host = start(&root, Arc::new(Memory::default())).await;
+    let local = host.local().await.unwrap();
+    let source = create(&local.peer, ProviderKind::Claude, &root).await;
+    let (_, mut source_events) = open(&local.peer, &source).await;
+    let input = submission(&source, "inherited-prefix");
+    submit(&local.peer, &input).await.unwrap();
+    let first = source_events
+        .input_turn(&input.client_user_message_id, true)
+        .await;
+    assert_eq!(claude_answer(&first), "reply 1: inherited-prefix");
+    let session = if fork {
+        let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+        let returned: SessionRef = local
+            .peer
+            .request(&Call::ForkConversation(
+                agent_protocol::conversation::records::Fork {
+                    source: source.clone(),
+                    target: target.clone(),
+                    through: agent_protocol::conversation::records::ForkPoint::Run {
+                        run_id: first.id.to_string(),
+                    },
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(returned, target);
+        target
+    } else {
+        source.clone()
+    };
+    let (_, mut events) = open(&local.peer, &session).await;
+    let discarded = if fork {
+        let input = submission(&session, "discard-child");
+        submit(&local.peer, &input).await.unwrap();
+        let turn = events.input_turn(&input.client_user_message_id, true).await;
+        assert_eq!(
+            claude_answer(&turn),
+            "reply 2: discard-child",
+            "native fork inherits its selected prefix"
+        );
+        turn.id
+    } else {
+        first.id.clone()
+    };
+    let before = conversations::native_source(&root, &session, ProviderKind::Claude);
+    let fork_head = events
+        .projection
+        .snapshot
+        .projection
+        .provider_threads
+        .iter()
+        .find(|thread| {
+            Some(&thread.id)
+                == events
+                    .projection
+                    .snapshot
+                    .projection
+                    .thread
+                    .active_provider_thread_id
+                    .as_ref()
+        })
+        .unwrap()
+        .native_metadata
+        .as_ref()
+        .and_then(|meta| meta.fork_head_message_id.clone());
+    if fork {
+        assert!(
+            fork_head.is_some(),
+            "the actual SDK fork supplies its remapped baseline head"
+        );
+    }
+    conversations::command(
+        &local.peer,
+        &session,
+        uuid::Uuid::new_v4(),
+        Command::Rewind(discarded.clone()),
+    )
+    .await
+    .unwrap();
+    while events
+        .view()
+        .thread
+        .turns
+        .iter()
+        .flatten()
+        .any(|turn| turn.id == discarded)
+    {
+        events.next().await;
+    }
+    let after = conversations::native_source(&root, &session, ProviderKind::Claude);
+    if fork {
+        assert_eq!(
+            after, before,
+            "fork baseline must keep the native inherited prefix"
+        );
+        let snapshot = &events.projection.snapshot.projection;
+        let selected = snapshot
+            .provider_threads
+            .iter()
+            .find(|thread| Some(&thread.id) == snapshot.thread.active_provider_thread_id.as_ref())
+            .unwrap();
+        assert_eq!(
+            selected
+                .native_conversation_head_ref
+                .as_ref()
+                .and_then(|head| head.native_id.as_ref()),
+            fork_head.as_ref()
+        );
+        assert!(
+            events
+                .view()
+                .thread
+                .turns
+                .iter()
+                .flatten()
+                .any(|turn| turn.id == first.id),
+            "inherited display survives the child's rewind"
+        );
+    } else {
+        assert_ne!(after, before, "an empty baseline gets a new native owner");
+    }
+    let input = submission(&session, "after-baseline");
+    submit(&local.peer, &input).await.unwrap();
+    let answer = events.input_turn(&input.client_user_message_id, true).await;
+    assert_eq!(
+        claude_answer(&answer),
+        if fork {
+            "reply 2: after-baseline"
+        } else {
+            "reply 1: after-baseline"
+        }
+    );
+    assert!(
+        claude_native_rows(&root, &before)
+            .iter()
+            .any(|row| row["type"] == "user"),
+        "old native audit remains readable"
     );
     local.close().await;
     host.close().await.unwrap();

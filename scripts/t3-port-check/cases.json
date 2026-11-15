@@ -2673,7 +2673,9 @@
   ],
   "native_contracts": {
     "host-fixture::adapter_conformance": [
-      "claude_native_rewind_resumes_the_kept_assistant_through_rpc_and_the_real_sdk"
+      "claude_native_rewind_resumes_the_kept_assistant_through_rpc_and_the_real_sdk",
+      "claude_native_baseline_rewind_preserves_only_the_inherited_prefix::case_1_empty",
+      "claude_native_baseline_rewind_preserves_only_the_inherited_prefix::case_2_fork"
     ]
   }
 }
