@@ -120,9 +120,25 @@ pub fn rollback_target(
                     .is_none_or(|run| run.status != RunStatus::RolledBack)
         })
         .min_by_key(|turn| turn.ordinal);
+    let retained_turn = if ordinal == 0 && thread.driver == "claudeAgent" {
+        thread
+            .native_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fork_head_message_id.as_ref())
+            .map(|head| ProviderRef {
+                driver: thread.driver.clone(),
+                native_id: Some(head.clone()),
+                strength: NativeRefStrength::Strong,
+                fingerprint: None,
+                ordinal: None,
+            })
+    } else {
+        retained.map(|(_, reference)| reference)
+    };
+    native_head_id(&thread.driver, retained_turn.as_ref())?;
     Ok(RollbackTarget {
         ordinal,
-        retained_turn: retained.map(|(_, reference)| reference),
+        retained_turn,
         first_removed_turn: first_removed
             .map(|turn| native_boundary(thread, turn))
             .transpose()?,
@@ -294,7 +310,10 @@ pub fn rollback_completed(
         .and_then(|reference| reference.native_id.as_ref())
         != native_thread.native_id.as_ref();
     if replaced
-        && (provider.driver != "claudeAgent" || target.ordinal != 0 || native_head.is_some())
+        && (provider.driver != "claudeAgent"
+            || target.ordinal != 0
+            || target.retained_turn.is_some()
+            || native_head.is_some())
     {
         return Err(
             "only an empty Claude baseline can allocate a different native conversation".into(),

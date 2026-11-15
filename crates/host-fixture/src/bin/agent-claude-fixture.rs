@@ -68,7 +68,16 @@ fn native_inputs(path: &Path, head: Option<&str>) -> Vec<Value> {
         .iter()
         .filter_map(|row| row["uuid"].as_str().map(|id| (id, row)))
         .collect();
-    let mut cursor = head.or_else(|| rows.last().and_then(|row| row["uuid"].as_str()));
+    let mut cursor = head.or_else(|| {
+        rows.iter().rev().find_map(|row| {
+            matches!(
+                row["type"].as_str(),
+                Some("user" | "assistant" | "attachment")
+            )
+            .then(|| row["uuid"].as_str())
+            .flatten()
+        })
+    });
     let mut visited = std::collections::HashSet::new();
     let mut inputs = Vec::new();
     while let Some(id) = cursor {
@@ -134,16 +143,10 @@ fn native(session: &str, mut value: Value, parent: Option<&str>) {
         .map(Value::from)
         .or_else(|| previous.map(|value| value["uuid"].clone()))
         .unwrap_or(Value::Null);
-    value["uuid"] = value.get("uuid").cloned().unwrap_or_else(|| {
-        format!(
-            "fixture-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
-        .into()
-    });
+    value["uuid"] = value
+        .get("uuid")
+        .cloned()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string().into());
     value["sessionId"] = session.into();
     value["cwd"] = std::env::current_dir()
         .unwrap()
@@ -202,7 +205,7 @@ fn block(
         session,
         json!({"type":"stream_event","session_id":session,"event":{"type":"content_block_delta","index":index,"delta":{"type":delta,field:text}}}),
     );
-    let envelope = json!({"type":"assistant","apiBlockIndex":index,"uuid":format!("envelope-{message}-{index}"),"session_id":session,"message":{"id":message,"role":"assistant","stop_reason":null,"content":[{"type":kind,field:text}]}});
+    let envelope = json!({"type":"assistant","apiBlockIndex":index,"uuid":uuid::Uuid::new_v4().to_string(),"session_id":session,"message":{"id":message,"role":"assistant","stop_reason":null,"content":[{"type":kind,field:text}]}});
     let mut saved = envelope.clone();
     saved["message"]["stop_reason"] = stop_reason.into();
     native(session, saved, None);
@@ -418,7 +421,7 @@ impl Fixture {
         if prompted {
             emit(
                 &self.session,
-                json!({"type":"user","uuid":format!("tool-result-{}", self.message_id()),
+                json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),
                     "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"The user doesn't want to proceed with this tool use.","is_error":true}]}}),
             );
         }
@@ -604,7 +607,7 @@ impl Fixture {
                 };
                 emit(
                     &self.session,
-                    json!({"type":"user","uuid":format!("tool-result-{}", self.message_id()),
+                    json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),
                         "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":text,"is_error":!allowed}]},
                         "tool_use_result":if allowed && self.waiting == Some(Waiting::Background) { json!({"backgroundTaskId":"background-1"}) }
                             else if allowed && self.waiting != Some(Waiting::Question) { json!({"exitCode":0}) } else { json!({}) }}),
@@ -754,7 +757,7 @@ impl Fixture {
                 let (tool, input) = permission.tool();
                 emit(
                     &self.session,
-                    json!({"type":"assistant","uuid":format!("tool-{}", self.message_id()),"message":{"id":format!("tool-{}", self.message_id()),"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":tool,"input":input}]}}),
+                    json!({"type":"assistant","uuid":uuid::Uuid::new_v4().to_string(),"message":{"id":format!("tool-{}", self.message_id()),"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":tool,"input":input}]}}),
                 );
                 emit(
                     &self.session,
@@ -805,7 +808,7 @@ impl Fixture {
         let message = self.message_id();
         emit(
             &session,
-            json!({"type":"assistant","uuid":format!("{message}-calls"),"session_id":session,"message":{"id":format!("{message}-calls"),"role":"assistant","stop_reason":"tool_use",
+            json!({"type":"assistant","uuid":uuid::Uuid::new_v4().to_string(),"session_id":session,"message":{"id":format!("{message}-calls"),"role":"assistant","stop_reason":"tool_use",
                 "content":ROSTER.iter().map(|(call, tool, _, _, description)| json!({"type":"tool_use","id":call,"name":tool,
                     "input":{"command":"fixture background work","description":description,"prompt":description,"run_in_background":true}})).collect::<Vec<_>>()}}),
         );
@@ -816,7 +819,7 @@ impl Fixture {
             );
             emit(
                 &session,
-                json!({"type":"user","uuid":format!("{message}-{call}"),"session_id":session,
+                json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),"session_id":session,
                     "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":call,"content":format!("{tool} started in the background")}]},
                     "tool_use_result":if tool == "Agent" { json!({"status":"async_launched"}) } else { json!({"backgroundTaskId":task}) }}),
             );
