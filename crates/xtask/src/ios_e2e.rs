@@ -164,8 +164,8 @@ fn needs_file_preview_fixtures(tests: &[String]) -> bool {
         .any(|test| test == "testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening")
 }
 
-/// Select the newest stable iOS 26 runtime: its identifier and root file system.
-fn runtime(runtimes: &Value) -> Result<(String, PathBuf)> {
+/// Select the newest stable iOS 26 runtime.
+fn runtime(runtimes: &Value) -> Result<String> {
     let mut selected = None;
     for entry in runtimes["runtimes"]
         .as_array()
@@ -185,18 +185,15 @@ fn runtime(runtimes: &Value) -> Result<(String, PathBuf)> {
         let identifier = entry["identifier"]
             .as_str()
             .ok_or("missing Simulator runtime identifier")?;
-        let root = entry["runtimeRoot"]
-            .as_str()
-            .ok_or("missing Simulator runtime root")?;
         if selected
             .as_ref()
-            .is_none_or(|(current, _, _)| &version > current)
+            .is_none_or(|(current, _)| &version > current)
         {
-            selected = Some((version, identifier.to_owned(), PathBuf::from(root)));
+            selected = Some((version, identifier.to_owned()));
         }
     }
-    let (_, identifier, root) = selected.ok_or("Install a stable iOS 26 Simulator runtime")?;
-    Ok((identifier, root))
+    let (_, identifier) = selected.ok_or("Install a stable iOS 26 Simulator runtime")?;
+    Ok(identifier)
 }
 
 use crate::{
@@ -218,161 +215,8 @@ use tokio::{process::Command, sync::watch, task::JoinSet};
 const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(300);
 const SIMULATOR_DEVICE_TYPE: &str = "com.apple.CoreSimulator.SimDeviceType.iPhone-17";
-/// A fresh Simulator starts about 270 processes; on a 7 GiB CI Mac their
-/// first-boot work compresses memory until Host replies take 10-20 seconds.
-/// Bex uses only AVFoundation, Photos and QuickLook, so stop the system
-/// services for widgets, mail, maps, watch, health, Siri, Spotlight and stores.
-/// Paths are relative to the runtime root.
-const IDLE_SIMULATOR_SERVICES: &[&str] = &[
-    "System/Library/LaunchDaemons/com.apple.GameController.gamecontrollerd.plist",
-    "System/Library/LaunchDaemons/com.apple.Maps.mapssyncd.plist",
-    "System/Library/LaunchDaemons/com.apple.SafariBookmarksSyncAgent.plist",
-    "System/Library/LaunchDaemons/com.apple.ScreenTimeAgent.plist",
-    "System/Library/LaunchDaemons/com.apple.WebBookmarks.webbookmarksd.plist",
-    "System/Library/LaunchDaemons/com.apple.activityawardsd.plist",
-    "System/Library/LaunchDaemons/com.apple.activitysharingd.plist",
-    "System/Library/LaunchDaemons/com.apple.amsengagementd.plist",
-    "System/Library/LaunchDaemons/com.apple.ap.adprivacyd.plist",
-    "System/Library/LaunchDaemons/com.apple.ap.promotedcontentd.plist",
-    "System/Library/LaunchDaemons/com.apple.appstored.plist",
-    "System/Library/LaunchDaemons/com.apple.askpermissiond.plist",
-    "System/Library/LaunchDaemons/com.apple.assistant_cdmd.plist",
-    "System/Library/LaunchDaemons/com.apple.assistant_service.plist",
-    "System/Library/LaunchDaemons/com.apple.assistantd.plist",
-    "System/Library/LaunchDaemons/com.apple.avatarsd.plist",
-    "System/Library/LaunchDaemons/com.apple.chronod.plist",
-    "System/Library/LaunchDaemons/com.apple.contacts.postersyncd.plist",
-    "System/Library/LaunchDaemons/com.apple.dataaccess.dataaccessd.plist",
-    "System/Library/LaunchDaemons/com.apple.email.maild.plist",
-    "System/Library/LaunchDaemons/com.apple.familycircled.plist",
-    "System/Library/LaunchDaemons/com.apple.financed.plist",
-    "System/Library/LaunchDaemons/com.apple.findmy.findmylocated.plist",
-    "System/Library/LaunchDaemons/com.apple.fitcore.plist",
-    "System/Library/LaunchDaemons/com.apple.fitnesscoachingd.plist",
-    "System/Library/LaunchDaemons/com.apple.fitnessintelligenced.plist",
-    "System/Library/LaunchDaemons/com.apple.generativeexperiencesd.plist",
-    "System/Library/LaunchDaemons/com.apple.geoanalyticsd.plist",
-    "System/Library/LaunchDaemons/com.apple.healthappd.plist",
-    "System/Library/LaunchDaemons/com.apple.healthd.plist",
-    "System/Library/LaunchDaemons/com.apple.homed.plist",
-    "System/Library/LaunchDaemons/com.apple.icloudmailagent.plist",
-    "System/Library/LaunchDaemons/com.apple.intelligenceplatformd.plist",
-    "System/Library/LaunchDaemons/com.apple.itunescloudd.plist",
-    "System/Library/LaunchDaemons/com.apple.itunesstored.plist",
-    "System/Library/LaunchDaemons/com.apple.mediaanalysisd.plist",
-    "System/Library/LaunchDaemons/com.apple.mobiletimerd.plist",
-    "System/Library/LaunchDaemons/com.apple.modelcatalogd.plist",
-    "System/Library/LaunchDaemons/com.apple.modelmanagerd.plist",
-    "System/Library/LaunchDaemons/com.apple.nanotimekitcompaniond.plist",
-    "System/Library/LaunchDaemons/com.apple.navd.plist",
-    "System/Library/LaunchDaemons/com.apple.newsd.plist",
-    "System/Library/LaunchDaemons/com.apple.parsec-fbf.plist",
-    "System/Library/LaunchDaemons/com.apple.parsecd.plist",
-    "System/Library/LaunchDaemons/com.apple.passd.plist",
-    "System/Library/LaunchDaemons/com.apple.photoanalysisd.plist",
-    "System/Library/LaunchDaemons/com.apple.remindd.plist",
-    "System/Library/LaunchDaemons/com.apple.routined.plist",
-    "System/Library/LaunchDaemons/com.apple.searchd.plist",
-    "System/Library/LaunchDaemons/com.apple.siriactionsd.plist",
-    "System/Library/LaunchDaemons/com.apple.siriinferenced.plist",
-    "System/Library/LaunchDaemons/com.apple.siriknowledged.plist",
-    "System/Library/LaunchDaemons/com.apple.sirittsd.plist",
-    "System/Library/LaunchDaemons/com.apple.sleepd.plist",
-    "System/Library/LaunchDaemons/com.apple.spotlightknowledged.updater.plist",
-    "System/Library/LaunchDaemons/com.apple.suggestd.plist",
-    "System/Library/LaunchDaemons/com.apple.textunderstandingd.plist",
-    "System/Library/LaunchDaemons/com.apple.translationd.plist",
-    "System/Library/LaunchDaemons/com.apple.triald.plist",
-    "System/Library/LaunchDaemons/com.apple.tvremoted.plist",
-    "System/Library/LaunchDaemons/com.apple.voicebankingd.plist",
-    "System/Library/LaunchDaemons/com.apple.wcd.plist",
-    "System/Library/LaunchDaemons/com.apple.weatherd.plist",
-    "System/Library/NanoLaunchDaemons/com.apple.addressbooksyncd.plist",
-    "System/Library/NanoLaunchDaemons/com.apple.appconduitd.plist",
-    "System/Library/NanoLaunchDaemons/com.apple.brook.brookcompaniond.plist",
-    "System/Library/NanoLaunchDaemons/com.apple.companionappd.plist",
-    "System/Library/NanoLaunchDaemons/com.apple.eventkitsyncd.plist",
-    "System/Library/NanoLaunchDaemons/com.apple.nanoappregistryd.plist",
-    "System/Library/NanoLaunchDaemons/com.apple.nanomapscd.plist",
-];
-/// System apps that the first boot opens in the background.
-const IDLE_SIMULATOR_APPS: &[&str] = &[
-    "com.apple.PosterBoard",
-    "com.apple.Spotlight",
-    "com.apple.mobilecal",
-    "com.apple.family",
-];
-
-fn service_label(path: &str) -> &str {
-    path.rsplit('/')
-        .next()
-        .and_then(|name| name.strip_suffix(".plist"))
-        .unwrap_or(path)
-}
-
-/// Stop unused system services and return how many of the runtime's services stopped.
-async fn quiet_simulator(
-    simulator: &str,
-    runtime_root: &Path,
-    cwd: &Path,
-    log: &File,
-    cancel: &watch::Receiver<bool>,
-) -> Result<(usize, usize)> {
-    let timeout = Duration::from_secs(60);
-    let services = IDLE_SIMULATOR_SERVICES
-        .iter()
-        .filter(|path| runtime_root.join(path).is_file())
-        .collect::<Vec<_>>();
-    // Independent app terminations need not wait for every service to exit.
-    // Keep at most ten CoreSimulator requests active on a loaded CI Mac.
-    let commands = services
-        .chunks(services.len().div_ceil(10).max(1))
-        .map(|chunk| {
-            let mut arguments =
-                args![vec; "xcrun", "simctl", "spawn", simulator, "launchctl", "bootout", "system"];
-            arguments.extend(
-                chunk
-                    .iter()
-                    .map(|path| runtime_root.join(path).into_os_string()),
-            );
-            (arguments, SETUP_TIMEOUT)
-        })
-        .chain(IDLE_SIMULATOR_APPS.iter().map(|app| {
-            (
-                args![vec; "xcrun", "simctl", "terminate", simulator, *app],
-                timeout,
-            )
-        }));
-    let mut pending = JoinSet::new();
-    for (arguments, limit) in commands {
-        let (cwd, log, cancel) = (cwd.to_owned(), log.try_clone()?, cancel.clone());
-        // Services/apps that never started may fail; inspect the final listing below.
-        pending.spawn(async move {
-            let _ = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, limit).await;
-        });
-        if pending.len() == 10 {
-            pending.join_next().await;
-        }
-    }
-    while pending.join_next().await.is_some() {}
-    let listed = supervision::run(
-        &args!["xcrun", "simctl", "spawn", simulator, "launchctl", "list"],
-        cwd,
-        Io::Capture,
-        cancel,
-        timeout,
-    )
-    .await?;
-    let listed = std::str::from_utf8(&listed.stdout)?
-        .lines()
-        .filter_map(|line| line.split_whitespace().nth(2))
-        .collect::<BTreeSet<_>>();
-    let running = services
-        .iter()
-        .filter(|path| listed.contains(service_label(path)))
-        .count();
-    Ok((services.len() - running, services.len()))
-}
+// Apply before boot, including after cloning: simctl clone drops launchd overrides.
+const SIMULATOR_PROFILE: &str = "tools/simslim/ios-e2e.json";
 
 fn simulator_app_pid(processes: &str, simulator: &str) -> Option<u32> {
     let device = format!("/Devices/{simulator}/");
@@ -598,8 +442,7 @@ async fn template(
         .await?;
         let id = std::str::from_utf8(&created.stdout)?.trim().to_owned();
         for arguments in [
-            args![vec; "xcrun", "simctl", "boot", &id],
-            args![vec; "xcrun", "simctl", "bootstatus", &id, "-b"],
+            args![vec; "simslim", "on", &id, "--profile", SIMULATOR_PROFILE],
             args![vec; "xcrun", "simctl", "shutdown", &id],
             args![vec; "xcrun", "simctl", "rename", &id, &name],
         ] {
@@ -624,7 +467,6 @@ async fn worker(
     target: PathBuf,
     products_ready: watch::Receiver<Option<PathBuf>>,
     simulator_source: SimulatorSource,
-    runtime_root: PathBuf,
     prefix: PathBuf,
     without_codex: bool,
     driver: TestDriver,
@@ -688,17 +530,11 @@ async fn worker(
             };
             let simulator = supervision::run(&create, &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let simulator = std::str::from_utf8(&simulator.stdout)?.trim();
-            for (phase, arguments) in [
-                ("boot", args![vec; "xcrun", "simctl", "boot", simulator]),
-                ("bootstatus", args![vec; "xcrun", "simctl", "bootstatus", simulator, "-b"]),
-            ] {
-                println!("{label}: {phase}");
-                supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await
-                    .map_err(|error| format!("{label}: {phase} failed: {error}"))?;
-            }
-            let quiet_started = Instant::now();
-            let (stopped, present) = quiet_simulator(simulator, &runtime_root, &cwd, &log, &cancel).await?;
-            println!("{label}: stopped {stopped}/{present} unused system services in {:.2}s", quiet_started.elapsed().as_secs_f64());
+            println!("{label}: booting slim Simulator");
+            supervision::run(
+                &args!["simslim", "on", simulator, "--profile", SIMULATOR_PROFILE],
+                &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT,
+            ).await.map_err(|error| format!("{label}: slim boot failed: {error}"))?;
             println!("{label}: Simulator ready in {:.2}s; waiting for test products", started.elapsed().as_secs_f64());
             let source = wait_for_test_products(products_ready, &cancel).await?;
             host = Some(Child::spawn(command)?);
@@ -1320,7 +1156,7 @@ pub async fn run(
         SETUP_TIMEOUT,
     )
     .await?;
-    let (runtime, runtime_root) = runtime(&serde_json::from_slice(&runtimes.stdout)?)?;
+    let runtime = runtime(&serde_json::from_slice(&runtimes.stdout)?)?;
     println!("Preparing the iOS Simulator runtime");
     let template_started = Instant::now();
     // Hosted CI devices disappear with the runner. Migrate the worker's own
@@ -1366,7 +1202,6 @@ pub async fn run(
                     target.clone(),
                     products_ready.clone(),
                     simulator_source.clone(),
-                    runtime_root.clone(),
                     records.join(label),
                     without_codex,
                     driver,
@@ -1582,6 +1417,9 @@ case ${0##*/} in
       previous=$argument
     done ;;
   node) touch "$root/target/debug/agent-claude-sdk.mjs" "$root/target/debug/Claude-Agent-SDK-LICENSE.md" ;;
+  simslim)
+    [[ "$*" == 'on owned-device --profile tools/simslim/ios-e2e.json' ]]
+    [[ $AGENT_IOS_BUILD_TEST_MODE != *slim-failure ]] || exit 17 ;;
   xcodebuild)
     test -e "$root/ios-ready"
     touch "$root/target/qa/ios-derived-data/Build/Products/Bex.xctestrun" ;;
@@ -1595,6 +1433,7 @@ esac
             "bin/node",
             "bin/xcodebuild",
             "bin/xcrun",
+            "bin/simslim",
             "bin/git",
         ] {
             let path = root.join(executable);
@@ -1703,8 +1542,11 @@ esac
                 vec!["testSimulatorExample".into()],
                 root.join("target"),
                 products,
-                SimulatorSource::Runtime("runtime".into()),
-                root.join("runtime"),
+                if mode.starts_with("clone-") {
+                    SimulatorSource::Template("template-device".into())
+                } else {
+                    SimulatorSource::Runtime("runtime".into())
+                },
                 records.join("worker-1"),
                 false,
                 TestDriver::XCTest,
@@ -1713,14 +1555,23 @@ esac
             .await
             .err()
             .unwrap();
-            assert!(error.to_string().contains(if mode == "boot-failure" {
-                "boot failed"
-            } else {
-                "did not become available"
-            }));
+            assert!(
+                error
+                    .to_string()
+                    .contains(if mode.ends_with("slim-failure") {
+                        "slim boot failed"
+                    } else {
+                        "did not become available"
+                    })
+            );
             return;
         }
-        for mode in ["missing-products", "boot-failure"] {
+        for mode in [
+            "missing-products",
+            "slim-failure",
+            "clone-missing-products",
+            "clone-slim-failure",
+        ] {
             let temporary = build_fixture();
             let root = temporary.path().canonicalize().unwrap();
             fs::write(
@@ -1731,7 +1582,7 @@ root=$AGENT_IOS_BUILD_TEST_ROOT
 printf 'xcrun %s\n' "$*" >> "$root/commands"
 case "$2" in
   create) printf '%s' "$3" > "$root/device-name"; echo owned-device ;;
-  boot) if [[ $AGENT_IOS_BUILD_TEST_MODE == boot-failure ]]; then exit 17; fi ;;
+  clone) printf '%s' "$4" > "$root/device-name"; echo owned-device ;;
   list)
     if [[ -e $root/device-name ]]; then
       printf '{"devices":{"runtime":[{"name":"%s","udid":"owned-device"},{"name":"unrelated","udid":"external-device"}]}}\n' "$(cat "$root/device-name")"
@@ -1758,12 +1609,20 @@ esac
                 String::from_utf8_lossy(&output.stderr)
             );
             let commands = fs::read_to_string(root.join("commands")).unwrap();
-            assert!(commands.contains("simctl create Bex isolated E2E records-worker-1"));
-            assert_eq!(
-                commands.contains("simctl bootstatus owned-device -b"),
-                mode == "missing-products"
-            );
-            assert!(commands.contains("simctl delete owned-device"));
+            let create = if mode.starts_with("clone-") {
+                "simctl clone template-device"
+            } else {
+                "simctl create"
+            };
+            let created = commands
+                .find(&format!("{create} Bex isolated E2E records-worker-1"))
+                .unwrap();
+            let slimmed = commands
+                .find("simslim on owned-device --profile tools/simslim/ios-e2e.json")
+                .unwrap();
+            let deleted = commands.find("simctl delete owned-device").unwrap();
+            assert!(created < slimmed && slimmed < deleted);
+            assert!(!commands.contains("simctl boot"));
             assert!(!commands.contains("simctl delete external-device"));
             assert!(!commands.contains("simctl install"));
             assert!(!root.join("device-name").exists());
@@ -2161,8 +2020,8 @@ esac
 
     #[test]
     fn newest_available_ios_runtime_is_selected_numerically() {
-        let entry = |version: &str, platform, available| json!({"version": version, "platform": platform, "isAvailable": available, "identifier": version, "runtimeRoot": format!("/runtimes/{version}")});
-        assert_eq!(runtime(&json!({"runtimes": [entry("26.9", "iOS", true), entry("26.10", "iOS", true), entry("26.11", "iOS", false), entry("27.1", "iOS", true), entry("26.12", "tvOS", true)]})).unwrap(), ("26.10".to_owned(), PathBuf::from("/runtimes/26.10")));
+        let entry = |version: &str, platform, available| json!({"version": version, "platform": platform, "isAvailable": available, "identifier": version});
+        assert_eq!(runtime(&json!({"runtimes": [entry("26.9", "iOS", true), entry("26.10", "iOS", true), entry("26.11", "iOS", false), entry("27.1", "iOS", true), entry("26.12", "tvOS", true)]})).unwrap(), "26.10");
         assert!(runtime(&json!({"runtimes": [entry("26.1", "iOS", false)]})).is_err());
     }
 
@@ -2215,128 +2074,25 @@ esac
     }
 
     #[test]
-    fn quiet_simulator_keeps_services_used_by_the_app_and_ui_tests() {
-        let services = IDLE_SIMULATOR_SERVICES
-            .iter()
-            .map(|path| service_label(path))
-            .collect::<BTreeSet<_>>();
-        assert_eq!(services.len(), IDLE_SIMULATOR_SERVICES.len());
-        // Each entry is a launchd plist under the runtime root, named by its label.
-        assert!(
-            IDLE_SIMULATOR_SERVICES.iter().all(|path| {
-                path.starts_with("System/Library/") && service_label(path) != *path
-            })
-        );
-        for required in [
-            "com.apple.SpringBoard",
-            "com.apple.springboard",
-            "com.apple.backboardd",
-            "com.apple.runningboardd",
-            "com.apple.AccessibilityUIServer",
-            "com.apple.assetsd",
-            "com.apple.nsurlsessiond",
-            "com.apple.tccd",
-            "com.apple.pluginkit.pkd",
-            "com.apple.sharingd",
-            "com.apple.mediaremoted",
-            "com.apple.corespeechd",
-        ] {
+    fn slim_profile_keeps_native_media_browser_and_picker_capabilities() {
+        let profile: Value =
+            serde_json::from_str(include_str!("../../../tools/simslim/ios-e2e.json")).unwrap();
+        for category in ["photos", "web", "search"] {
             assert!(
-                !services.contains(required) && !IDLE_SIMULATOR_APPS.contains(&required),
-                "{required} must keep running"
+                profile["except"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(category))
             );
         }
-    }
-
-    #[tokio::test]
-    async fn simulator_cleanup_overlaps_independent_stops_and_checks_the_final_state() {
-        const ROOT: &str = "AGENT_IOS_QUIET_TEST_ROOT";
-        if let Some(root) = std::env::var_os(ROOT) {
-            let root = PathBuf::from(root);
-            let (_sender, cancel) = watch::channel(false);
-            let log = File::create(root.join("cleanup.log")).unwrap();
-            let result = quiet_simulator("isolated-fixture", &root, &root, &log, &cancel)
-                .await
-                .unwrap();
-            assert_eq!(result, (1, 2));
-            assert!(!root.join("timed-out").exists());
-            return;
+        for service in ["com.apple.accessibility.axassetsd", "com.apple.corespeechd"] {
+            assert!(
+                profile["keep"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(service))
+            );
         }
-        use std::os::unix::fs::PermissionsExt;
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().canonicalize().unwrap();
-        for path in &IDLE_SIMULATOR_SERVICES[..2] {
-            let path = root.join(path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, "fixture service").unwrap();
-        }
-        let bin = root.join("bin");
-        fs::create_dir(&bin).unwrap();
-        let program = bin.join("xcrun");
-        fs::write(
-            &program,
-            r#"#!/usr/bin/env bash
-set -eu
-root=$AGENT_IOS_QUIET_TEST_ROOT
-[[ "$1 $3" == 'simctl isolated-fixture' ]] || exit 17
-wait_for_apps() {
-  for ((i=0;i<200;i++)); do
-    ready=true
-    for app in $AGENT_IOS_QUIET_TEST_APPS; do
-      [[ -f "$root/$app.started" ]] || ready=false
-    done
-    $ready && return
-    sleep .01
-  done
-  touch "$root/timed-out"
-  exit 23
-}
-if [[ $2 == terminate ]]; then
-  touch "$root/$4.started"
-  wait_for_apps
-  touch "$root/$4.finished"
-  exit 3 # An app that already exited does not invalidate cleanup.
-elif [[ $5 == bootout ]]; then
-  wait_for_apps
-  touch "$root/${7##*/}.finished"
-  exit 7 # Final state, rather than bootout's exit code, determines the count.
-else
-  for app in $AGENT_IOS_QUIET_TEST_APPS; do test -f "$root/$app.finished"; done
-  for path in "$root"/System/Library/LaunchDaemons/*; do
-    test -f "$root/${path##*/}.finished"
-  done
-  printf '42 - com.apple.Maps.mapssyncd\n'
-fi
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "ios_e2e::tests::simulator_cleanup_overlaps_independent_stops_and_checks_the_final_state",
-                "--nocapture",
-            ])
-            .env(ROOT, &root)
-            .env("AGENT_IOS_QUIET_TEST_APPS", IDLE_SIMULATOR_APPS.join(" "))
-            .env(
-                "PATH",
-                std::env::join_paths(
-                    std::iter::once(bin)
-                        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-                )
-                .unwrap(),
-            )
-            .output()
-            .await
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-            fs::read_to_string(root.join("cleanup.log")).unwrap()
-        );
     }
 
     #[test]

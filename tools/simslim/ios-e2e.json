@@ -1,0 +1,6 @@
+{
+  "name": "Bex iOS acceptance",
+  "description": "Keep Photos, Web services, Files Recents, accessibility assets and speech services used by native UI tests.",
+  "except": ["photos", "web", "search"],
+  "keep": ["com.apple.accessibility.axassetsd", "com.apple.corespeechd"]
+}
