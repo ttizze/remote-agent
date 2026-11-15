@@ -572,14 +572,14 @@ async fn search_reads_saved_message_bodies_without_discovering_native_threads() 
         ThreadResponse {
             thread: Thread {
                 id: Some(SessionRef::new(ProviderKind::Codex, "unimported".into()).unwrap()),
-                preview: Some("Needle in an unimported native thread".into()),
+                preview: Some("Needle persisted in an unimported native thread".into()),
                 ..Default::default()
             },
             ..Default::default()
         },
     );
     let request = agent_protocol::conversation::records::SearchList {
-        term: "needle".into(),
+        term: "needle persisted".into(),
         limit: None,
     };
     let result = service.search_list(&request).await.unwrap();

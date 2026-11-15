@@ -1974,12 +1974,13 @@ async fn discovery_cannot_publish_a_private_source_before_its_creation_receipt()
                 .inner
                 .conversation
                 .storage
-                .summaries("", false)
+                .shell_snapshot()
                 .unwrap()
+                .threads
                 .into_iter()
-                .filter_map(|thread| thread.id)
+                .map(|thread| thread.thread.id.clone())
                 .collect::<Vec<_>>(),
-            vec![target]
+            vec![target.application_id()]
         );
     })
     .await
