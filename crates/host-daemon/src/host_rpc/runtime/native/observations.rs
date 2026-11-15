@@ -18,16 +18,14 @@ pub(super) fn native_context(
         .filter(|turn| {
             turn.run_attempt_id.as_deref() == Some(attempt_id)
                 && turn
-                    .native_turn_ref
-                    .as_ref()
+                    .control_ref()
                     .and_then(|reference| reference.native_id.as_deref())
                     == Some(native_turn.as_str())
         })
         .max_by_key(|turn| turn.ordinal)
         .ok_or("native turn has not started")?;
     let native_turn_id = turn
-        .native_turn_ref
-        .as_ref()
+        .control_ref()
         .and_then(|reference| reference.native_id.clone())
         .ok_or("native turn has no reference")?;
     Ok(Context {
@@ -77,6 +75,22 @@ impl Runtime {
                 let _updates = source.updates.lock().await;
                 Self::execution_change(service, &source, &session, change, execution).await
             }
+            AgentChange::Head {
+                session,
+                turn,
+                head,
+            } => {
+                let source = service.inner.conversation.register_native(target, &session);
+                Self::observe_native_cursor(
+                    service,
+                    &source,
+                    &session,
+                    &turn,
+                    &head,
+                    Some(execution),
+                )
+                .await
+            }
             AgentChange::Request {
                 session,
                 origin,
@@ -102,21 +116,10 @@ impl Runtime {
         let command_id = Uuid::new_v4().to_string();
         let driver = native.native_provider().map_err(str::to_owned)?.driver();
         if let Some(turn) = change.turn_id() {
-            let reference = model::ProviderRef {
-                driver: native
-                    .native_provider()
-                    .map_err(str::to_owned)?
-                    .driver()
-                    .into(),
-                native_id: Some(turn.to_string()),
-                strength: if native.provider == Some(ProviderKind::DeepSeek) {
-                    model::NativeRefStrength::Weak
-                } else {
-                    model::NativeRefStrength::Strong
-                },
-                fingerprint: None,
-                ordinal: None,
-            };
+            let reference = control_reference(
+                native.native_provider().map_err(str::to_owned)?,
+                turn.as_str(),
+            );
             let events = storage.observe_thread(&source.target.id, &[], &now, |state| {
                 if !state.native_thread_matches(&attempt_id, driver, &native.id) {
                     return Ok(model::Decision::default());

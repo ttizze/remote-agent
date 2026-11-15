@@ -76,8 +76,8 @@ export async function runBridge(lines: AsyncIterable<string>, emit: (event: Reco
   const config = JSON.parse(first.value) as Initialize | { type: "fork"; sessionId: string; cwd: string; upToMessageId?: string };
   if (config.type === "fork") {
     // Forking copies the native transcript; it starts no model request.
-    const { sessionId } = await fork(config.sessionId, { dir: config.cwd, upToMessageId: config.upToMessageId });
-    emit({ type: "forked", sessionId });
+    const { sessionId, headMessageId } = await fork(config.sessionId, { dir: config.cwd, upToMessageId: config.upToMessageId });
+    emit({ type: "forked", sessionId, ...(headMessageId === undefined ? {} : { headMessageId }) });
     return;
   }
   if (config.type !== "initialize") throw new Error("Expected SDK initialization");

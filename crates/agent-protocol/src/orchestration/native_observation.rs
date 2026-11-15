@@ -40,7 +40,7 @@ pub fn observe_external_turn(
     let existing = state.provider_turns.values().find(|turn| {
         turn.provider_thread_id == provider_thread_id
             && turn.native_thread_ref == provider.native_thread_ref
-            && turn.native_turn_ref.as_ref() == Some(&native_turn_ref)
+            && turn.control_ref() == Some(&native_turn_ref)
     });
     // A callback with no owned attempt cannot adopt an application's write or
     // convert its unknown delivery receipt into a fresh external execution.
@@ -75,6 +75,7 @@ pub fn observe_external_turn(
             ],
         );
         let node_id = derived_id("node", &[&id, "root"]);
+        let (native_turn_ref, native_control_ref) = turn_references(native_turn_ref);
         ProviderTurn {
             id,
             provider_thread_id: provider.id.clone(),
@@ -82,7 +83,7 @@ pub fn observe_external_turn(
             run_attempt_id: None,
             native_thread_ref: provider.native_thread_ref.clone(),
             native_turn_ref: Some(native_turn_ref),
-            native_control_ref: None,
+            native_control_ref,
             ordinal: state
                 .provider_turns
                 .values()
@@ -286,4 +287,95 @@ fn finish_items(state: &State, turn: &ProviderTurn, now: &str) -> Vec<Change> {
             }),
     );
     changes
+}
+
+// Claude's echoed user handle identifies the running query. Its eventual
+// assistant UUID addresses the persisted transcript and may change per block.
+pub(super) fn turn_references(control: ProviderRef) -> (ProviderRef, Option<ProviderRef>) {
+    if control.driver != "claudeAgent" {
+        return (control, None);
+    }
+    (
+        ProviderRef {
+            native_id: control.native_id.as_ref().map(|id| format!("turn:{id}")),
+            strength: NativeRefStrength::Weak,
+            ..control.clone()
+        },
+        Some(control),
+    )
+}
+
+impl ProviderTurn {
+    pub fn control_ref(&self) -> Option<&ProviderRef> {
+        self.native_control_ref.as_ref().or_else(|| {
+            self.native_turn_ref
+                .as_ref()
+                .filter(|reference| reference.driver != "claudeAgent")
+        })
+    }
+    pub fn control_id(&self) -> Option<&str> {
+        self.control_ref()?.native_id.as_deref()
+    }
+}
+
+/// Only real transcript output certifies the write before its SDK ACK. This
+/// releases the FIFO start lane so Stop can reach the running query.
+pub fn observe_native_cursor(
+    state: &State,
+    turn_id: &str,
+    native_thread_id: &str,
+    cursor: &str,
+    now: &str,
+) -> Decision {
+    let Some(turn) = state
+        .provider_turns
+        .get(turn_id)
+        .filter(|turn| turn.status == ProviderTurnStatus::Running)
+    else {
+        return Decision::default();
+    };
+    let Some(provider) =
+        selected(state, &turn.provider_thread_id, native_thread_id).filter(|provider| {
+            provider.driver == "claudeAgent" && turn.native_thread_ref == provider.native_thread_ref
+        })
+    else {
+        return Decision::default();
+    };
+    if cursor.trim().is_empty() || cursor.starts_with("turn:") {
+        return Decision::default();
+    }
+    let reference = ProviderRef {
+        driver: provider.driver.clone(),
+        native_id: Some(cursor.into()),
+        strength: NativeRefStrength::Weak,
+        fingerprint: None,
+        ordinal: None,
+    };
+    let mut decision = Decision::default();
+    if turn.native_turn_ref.as_ref() != Some(&reference) {
+        decision.changes.push(Change::ProviderTurn(ProviderTurn {
+            native_turn_ref: Some(reference),
+            ..turn.clone()
+        }));
+    }
+    if provider.native_conversation_head_ref.is_some() {
+        decision
+            .changes
+            .push(Change::ProviderThread(ProviderThread {
+                native_conversation_head_ref: None,
+                updated_at: now.into(),
+                ..provider.clone()
+            }));
+    }
+    if let Some(attempt) = turn
+        .run_attempt_id
+        .as_ref()
+        .and_then(|id| state.run_attempts.get(id))
+    {
+        decision.effects.extend(state.effects.values().filter(|effect| effect.status==EffectStatus::Running && matches!(&effect.request,EffectRequest::ProviderTurnStart {run_id} if run_id==&attempt.run_id)).map(|effect|Effect {
+            status:EffectStatus::Succeeded,last_error:None,lease_owner:None,lease_expires_at:None,
+            completed_at:Some(now.into()),updated_at:now.into(),..effect.clone()
+        }));
+    }
+    decision
 }

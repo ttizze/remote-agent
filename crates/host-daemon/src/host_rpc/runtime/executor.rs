@@ -71,6 +71,7 @@ struct LoadedNative {
     needs_reload: bool,
     forked: bool,
     fork_failure: Option<String>,
+    fork_head: Option<String>,
 }
 
 /// Allocate native resources before publishing recovery. A busy native owner
@@ -125,6 +126,7 @@ async fn load_native_start(
                         || current.response.thread.cwd.as_deref() != Some(cwd),
                     forked: fork.is_some(),
                     fork_failure: None,
+                    fork_head: None,
                 });
             }
         }
@@ -169,12 +171,15 @@ async fn load_native_start(
         None
     };
     let native_fork = forked.is_some();
-    let response = match forked {
-        Some(result) => result.response,
-        None => agent
-            .create(cwd, Some(model), browser)
-            .await
-            .map_err(Failure::before_submission)?,
+    let (response, fork_head) = match forked {
+        Some(result) => (result.response, result.head_id),
+        None => (
+            agent
+                .create(cwd, Some(model), browser)
+                .await
+                .map_err(Failure::before_submission)?,
+            None,
+        ),
     };
     op::validate_thread(&response, None).map_err(|error| Failure::new("invalid_thread", error))?;
     let native = response
@@ -187,6 +192,7 @@ async fn load_native_start(
         needs_reload: false,
         forked: native_fork,
         fork_failure,
+        fork_head,
     })
 }
 
@@ -661,6 +667,7 @@ impl Runtime {
                 session.clone(),
                 native_ref(provider, &native.id),
                 loaded.forked,
+                loaded.fork_head.as_deref(),
                 loaded.fork_failure.as_deref(),
                 &now,
             )
@@ -678,6 +685,7 @@ impl Runtime {
                     session,
                     native_ref(provider, &native.id),
                     loaded.forked,
+                    loaded.fork_head.as_deref(),
                     &now,
                 )
                 .map_err(storage_failure)?;
@@ -1206,7 +1214,7 @@ impl Runtime {
         let turn = state
             .provider_turns
             .get(turn_id)
-            .and_then(|turn| turn.native_turn_ref.as_ref())
+            .and_then(|turn| turn.control_ref())
             .and_then(|reference| reference.native_id.as_ref())
             .ok_or("native turn is missing")?;
         let native_target = SessionRef::new(provider, native.clone()).map_err(str::to_owned)?;
@@ -1214,11 +1222,10 @@ impl Runtime {
         let _retire = scopeguard::guard(native_target.clone(), |native| {
             service.inner.conversation.retire_source(&native)
         });
-        let source = service
+        service
             .inner
             .conversation
             .register_native(&target, &native_target);
-        let _io = source.io.lock().await;
         if service
             .inner
             .conversation
@@ -1318,8 +1325,7 @@ impl Runtime {
             .get(&attempt.run_id)
             .ok_or_else(|| Failure::new("invalid_steer", "steer run is missing"))?;
         let native_turn = turn
-            .native_turn_ref
-            .as_ref()
+            .control_ref()
             .and_then(|reference| reference.native_id.as_ref())
             .ok_or_else(|| Failure::new("invalid_steer", "native turn is missing"))?;
         let item=state.turn_items.values().find(|item|matches!(&item.body,model::TurnItemBody::UserMessage {message_id:id,..} if id==message_id)).ok_or_else(|| Failure::new("invalid_steer", "steer message is missing"))?;
@@ -1341,8 +1347,7 @@ impl Runtime {
         let _retire = scopeguard::guard(native.clone(), |native| {
             service.inner.conversation.retire_source(&native)
         });
-        let source = service.inner.conversation.register_native(&target, &native);
-        let _io = source.io.lock().await;
+        service.inner.conversation.register_native(&target, &native);
         if service
             .inner
             .conversation

@@ -258,6 +258,7 @@ pub(super) enum Event {
     },
     Forked {
         session_id: String,
+        head_message_id: Option<String>,
     },
     Message {
         message: Value,
@@ -371,7 +372,7 @@ impl Process {
         cwd: &Path,
         session: &str,
         up_to: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Option<String>), String> {
         let mut process = Self::spawn(homes, cwd)?;
         let forked = tokio::time::timeout(Duration::from_secs(30), async {
             process
@@ -387,7 +388,10 @@ impl Process {
                 .await?
                 .ok_or("Claude SDK exited before forking")?
             {
-                Event::Forked { session_id } => Ok(session_id),
+                Event::Forked {
+                    session_id,
+                    head_message_id,
+                } => Ok((session_id, head_message_id)),
                 Event::Error { message } => Err(message),
                 _ => Err("Claude SDK emitted an unexpected fork event".into()),
             }

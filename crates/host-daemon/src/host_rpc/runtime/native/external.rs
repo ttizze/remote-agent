@@ -16,7 +16,7 @@ pub(in crate::host_rpc::runtime) fn provider<'a>(
     })
 }
 
-fn context(
+pub(super) fn context(
     state: &model::State,
     native: &SessionRef,
     turn: &agent_protocol::ids::TurnId,
@@ -29,8 +29,7 @@ fn context(
             && saved.provider_thread_id == provider_thread.id
             && saved.native_thread_ref.as_ref() == provider_thread.native_thread_ref.as_ref()
             && saved
-                .native_turn_ref
-                .as_ref()
+                .control_ref()
                 .and_then(|reference| reference.native_id.as_deref())
                 == Some(turn.as_str())
     })?;
@@ -40,7 +39,7 @@ fn context(
         root_node_id: turn.node_id.clone(),
         provider_thread_id: provider_thread.id.clone(),
         provider_turn_id: turn.id.clone(),
-        native_turn_id: turn.native_turn_ref.as_ref()?.native_id.clone()?,
+        native_turn_id: turn.control_ref()?.native_id.clone()?,
         native_thread_id: native.id.clone(),
         provider: native.provider?,
         now: now.into(),
@@ -69,17 +68,10 @@ impl Runtime {
                 state,
                 &provider_thread.id,
                 &native.id,
-                model::ProviderRef {
-                    driver: provider_thread.driver.clone(),
-                    native_id: Some(turn_id.to_string()),
-                    strength: if native.provider == Some(ProviderKind::DeepSeek) {
-                        model::NativeRefStrength::Weak
-                    } else {
-                        model::NativeRefStrength::Strong
-                    },
-                    fingerprint: None,
-                    ordinal: None,
-                },
+                control_reference(
+                    native.native_provider().map_err(str::to_owned)?,
+                    turn_id.as_str(),
+                ),
                 model::ProviderTurnStatus::Running,
                 &now,
             )
@@ -135,8 +127,8 @@ impl Runtime {
                             &context.provider_thread_id,
                             &native.id,
                             saved
-                                .native_turn_ref
-                                .clone()
+                                .control_ref()
+                                .cloned()
                                 .ok_or("native turn reference missing")?,
                             status,
                             &now,

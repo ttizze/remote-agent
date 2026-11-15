@@ -186,7 +186,7 @@ impl Storage {
             if header_source(&child.thread,provider)?!=*native {return Ok(());}
             let Some(turn)=child.provider_turns.values().filter(|turn|turn.provider_thread_id==provider.id
                 && turn.run_attempt_id.is_none()).max_by_key(|turn|turn.ordinal)
-                .filter(|turn|turn.native_turn_ref.as_ref().and_then(|reference|reference.native_id.as_deref())==Some(native_turn)) else {return Ok(());};
+                .filter(|turn|turn.control_id()==Some(native_turn)) else {return Ok(());};
             let Some(parent_id)=child.thread.lineage.parent_thread_id.as_ref() else {return Ok(());};
             let parent=projections::metadata(&tx,parent_id)?;
             if parent.thread.deleted_at.is_some() {return Ok(());}

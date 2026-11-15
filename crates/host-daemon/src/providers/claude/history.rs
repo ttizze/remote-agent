@@ -367,8 +367,6 @@ fn input_text(content: &Value) -> Option<String> {
 pub(super) struct NativeHistory {
     pub response: ThreadResponse,
     pub output_paths: BTreeMap<ItemId, String>,
-    /// The last assistant message of each turn, where a fork of that turn ends.
-    pub fork_points: HashMap<agent_protocol::ids::TurnId, String>,
 }
 pub(super) fn read_details(path: &Path) -> Result<NativeHistory> {
     read_with_summary(path, summary(path)?.thread, usize::MAX)
@@ -643,7 +641,6 @@ fn convert(
         transcript_chain(&nodes, &session.id, thread.agent_id.as_deref())?;
     warnings.extend(chain_warnings);
     let mut output_paths = BTreeMap::new();
-    let mut fork_points = HashMap::new();
     let mut turns: Vec<Arc<Turn>> = Vec::new();
     let mut model = None;
     let mut block_indices: HashMap<&str, usize> = HashMap::new();
@@ -702,9 +699,6 @@ fn convert(
         let time = node_time(node);
         turn.started_at_ms = turn.started_at_ms.or(time);
         turn.completed_at_ms = time.or(turn.completed_at_ms);
-        if kind == "assistant" && !id.is_empty() {
-            fork_points.insert(turn.id.clone(), id.to_owned());
-        }
         let items = turn.items.as_mut().unwrap();
         if let Some(item) = initial_item {
             item_positions.entry(item.id.clone()).or_insert(items.len());
@@ -766,7 +760,6 @@ fn convert(
             ..Default::default()
         },
         output_paths,
-        fork_points,
     })
 }
 
@@ -2030,7 +2023,5 @@ mod tests {
                 (Some(start + 60_000), Some(start + 63_000))
             ]
         );
-        assert_eq!(history.fork_points["first"], "answer");
-        assert_eq!(history.fork_points["second"], "reply");
     }
 }

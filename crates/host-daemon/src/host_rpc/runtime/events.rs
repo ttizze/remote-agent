@@ -30,6 +30,48 @@ pub(super) fn background(turn: &Turn) -> Vec<BackgroundTask> {
         .collect()
 }
 
+enum CallbackOwner {
+    Execution(SessionRef),
+    External,
+    Stale,
+}
+
+fn callback_owner(
+    storage: &Storage,
+    native: &SessionRef,
+    execution: Uuid,
+) -> Result<CallbackOwner, String> {
+    let execution = execution.to_string();
+    if let Some(target) = storage.attempt_owner(&execution, native)? {
+        return Ok(CallbackOwner::Execution(target));
+    }
+    let Some(owner) = storage.attempt_thread_id(&execution)? else {
+        return Ok(CallbackOwner::External);
+    };
+    // Native subagents can carry the parent execution token. A replaced source
+    // of that same application attempt cannot become a new external turn.
+    let child = storage
+        .native_owner(native)?
+        .as_ref()
+        .map(|target| storage.thread_header(target))
+        .transpose()?
+        .flatten();
+    let owner = SessionRef::new(None, owner).map_err(str::to_owned)?;
+    let root = storage
+        .thread_header(&owner)?
+        .map(|thread| thread.lineage.root_thread_id);
+    Ok(
+        if child.is_some_and(|thread| {
+            thread.lineage.relationship_to_parent.as_deref() == Some("subagent")
+                && Some(&thread.lineage.root_thread_id) == root.as_ref()
+        }) {
+            CallbackOwner::External
+        } else {
+            CallbackOwner::Stale
+        },
+    )
+}
+
 impl Runtime {
     pub(in crate::host_rpc) async fn observe(
         service: &HostRpcService,
@@ -38,7 +80,8 @@ impl Runtime {
     ) -> Result<(), String> {
         let runtime = &service.inner.conversation;
         let native = match &event {
-            AgentChange::Session { session, .. }
+            AgentChange::Head { session, .. }
+            | AgentChange::Session { session, .. }
             | AgentChange::Request { session, .. }
             | AgentChange::Renamed { session, .. }
             | AgentChange::TaskParent { session, .. } => Some(session.clone()),
@@ -76,51 +119,33 @@ impl Runtime {
         if let Some(execution) = execution
             && matches!(
                 &event,
-                AgentChange::Session { .. } | AgentChange::Request { .. }
+                AgentChange::Head { .. }
+                    | AgentChange::Session { .. }
+                    | AgentChange::Request { .. }
             )
             && let Some(native) = native.as_ref()
         {
-            if let Some(target) = runtime
-                .storage
-                .attempt_owner(&execution.to_string(), native)?
-            {
-                Self::observe_execution(service, &target, event, execution).await?;
-                if let Some((turn, new_turn)) = child_turn {
-                    runtime.storage.observe_native_child_turn(
-                        native,
-                        &turn,
-                        new_turn,
-                        &commands::at(),
-                    )?;
+            match callback_owner(&runtime.storage, native, execution)? {
+                CallbackOwner::Execution(target) => {
+                    Self::observe_execution(service, &target, event, execution).await?;
+                    if let Some((turn, new_turn)) = child_turn {
+                        runtime.storage.observe_native_child_turn(
+                            native,
+                            &turn,
+                            new_turn,
+                            &commands::at(),
+                        )?;
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            if let Some(owner) = runtime.storage.attempt_thread_id(&execution.to_string())? {
-                // A real SDK child may carry its parent's execution token.
-                // A known attempt on a replaced physical source must never be
-                // reinterpreted as a fresh run-less turn on that same app row.
-                let target = runtime.storage.native_owner(native)?;
-                let child = target
-                    .as_ref()
-                    .map(|id| runtime.storage.thread_header(id))
-                    .transpose()?
-                    .flatten();
-                let owner = SessionRef::new(None, owner).map_err(str::to_owned)?;
-                let root = runtime
-                    .storage
-                    .thread_header(&owner)?
-                    .map(|thread| thread.lineage.root_thread_id);
-                let allowed = child.as_ref().is_some_and(|thread| {
-                    thread.lineage.relationship_to_parent.as_deref() == Some("subagent")
-                        && Some(&thread.lineage.root_thread_id) == root.as_ref()
-                });
-                if !allowed {
+                CallbackOwner::Stale => {
                     return if matches!(event, AgentChange::Request { .. }) {
                         Err("native request does not belong to this execution source".into())
                     } else {
                         Ok(())
                     };
                 }
+                CallbackOwner::External => {}
             }
         }
         match event {
@@ -273,7 +298,17 @@ impl Runtime {
                 Self::native_parent(service, &parent, &session, execution, None).await?;
             }
             AgentChange::Renamed { name: None, .. } => {}
-            AgentChange::Head { .. } => {}
+            AgentChange::Head {
+                session,
+                turn,
+                head,
+            } => {
+                let source = runtime.resources.lock().unwrap().get(&session).cloned();
+                if let Some(source) = source {
+                    Self::observe_native_cursor(service, &source, &session, &turn, &head, None)
+                        .await?;
+                }
+            }
         }
         Ok(())
     }

@@ -8,6 +8,7 @@ use agent_protocol::{
 };
 use serde_json::json;
 
+mod cursors;
 pub(super) mod external;
 mod observations;
 mod requests;
@@ -471,3 +472,17 @@ impl Context {
 
 #[cfg(test)]
 mod tests;
+
+fn control_reference(provider: ProviderKind, turn: &str) -> model::ProviderRef {
+    model::ProviderRef {
+        driver: provider.driver().into(),
+        native_id: Some(turn.into()),
+        strength: if provider == ProviderKind::DeepSeek {
+            model::NativeRefStrength::Weak
+        } else {
+            model::NativeRefStrength::Strong
+        },
+        fingerprint: None,
+        ordinal: None,
+    }
+}

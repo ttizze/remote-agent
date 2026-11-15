@@ -15,6 +15,7 @@ impl Storage {
         mut session: model::ProviderSession,
         native: model::ProviderRef,
         native_fork: bool,
+        fork_head: Option<&str>,
         now: &str,
     ) -> Result<(), String> {
         self.with(|connection| {
@@ -29,6 +30,7 @@ impl Storage {
                 session.status=model::ProviderSessionStatus::Error;
             }
             let decision = model::native_resource_loaded(&state,provider_thread_id,expected,session,native,native_fork,now)?;
+            let decision=with_native_fork_head(decision,provider_thread_id,fork_head);
             commands::append_decision(&tx,&state,decision,None,now)?;
             tx.commit().map_err(failure)
         })
@@ -125,6 +127,7 @@ impl Storage {
         session: model::ProviderSession,
         native: model::ProviderRef,
         native_fork: bool,
+        fork_head: Option<&str>,
         fork_failure: Option<&str>,
         now: &str,
     ) -> Result<bool, String> {
@@ -162,7 +165,7 @@ impl Storage {
             let prepared=state.apply(&model::Decision{changes:changes.clone(),effects:Vec::new()});
             let loaded=model::native_resource_loaded(&prepared,&thread.id,prepared_thread.native_thread_ref.as_ref(),session,native.clone(),native_fork,now)?;
             if loaded.changes.is_empty(){return Ok(false);}
-            changes.extend(loaded.changes);
+            changes.extend(with_native_fork_head(loaded,&thread.id,fork_head).changes);
             changes.push(model::Change::RunAttempt(model::RunAttempt{native_thread_ref:Some(native),..attempt.clone()}));
             let mut decision=model::Decision{changes,effects:Vec::new()};
             if let Some(error) = fork_failure {
@@ -1020,4 +1023,24 @@ pub(super) fn prepare_admission(
         changes.extend(prepare(connection, state, run, &thread, fork, false, now)?);
     }
     Ok(changes)
+}
+
+fn with_native_fork_head(
+    mut decision: model::Decision,
+    thread_id: &str,
+    head: Option<&str>,
+) -> model::Decision {
+    if let Some(head) = head.filter(|head| !head.trim().is_empty() && !head.starts_with("turn:")) {
+        for change in &mut decision.changes {
+            if let model::Change::ProviderThread(thread) = change
+                && thread.id == thread_id
+            {
+                thread
+                    .native_metadata
+                    .get_or_insert_with(Default::default)
+                    .fork_head_message_id = Some(head.into());
+            }
+        }
+    }
+    decision
 }

@@ -1638,6 +1638,25 @@ impl Worker {
             })
             .await?;
         }
+        if kind == "assistant"
+            && let Some(head) = message["uuid"].as_str().filter(|head| !head.is_empty())
+        {
+            crate::providers::emit_for(
+                &self.events,
+                AgentChange::Head {
+                    session: self.session.clone(),
+                    turn: self.turn_id.clone(),
+                    head: head.into(),
+                },
+                Some(
+                    self.turn_scopes
+                        .get(&self.turn_id)
+                        .copied()
+                        .unwrap_or(self.execution),
+                ),
+            )
+            .await?;
+        }
         let blocks = native::message_blocks(&message["message"]["content"])
             .ok_or("Claude message content is missing")?;
         let message_id = message["message"]["id"].as_str();
@@ -2494,47 +2513,23 @@ impl Agent for Claude {
         _browser: Option<Value>,
     ) -> Result<crate::providers::ForkResult, Failure> {
         let failure = |error: String| Failure::new("fork_failed", error);
-        let native = Uuid::parse_str(id).map_err(|_| failure("invalid Claude ID".into()))?;
-        // Forking writes a new session and leaves the source untouched, so a
-        // retained or running CLI keeps a current view of it. A running turn
-        // only appends after the turns it follows; the SDK copies through the
-        // fork point and skips a line still being written. Only the turn still
-        // answering has no fork point yet.
-        let record = self.records.lock().await.get(id).cloned();
-        let running = match record {
-            Some(record) => record
-                .lock()
-                .await
-                .running
-                .as_ref()
-                .map(|running| running.turn_id.clone()),
-            None => None,
-        };
-        let home = self.native_home.clone();
-        let history = tokio::task::spawn_blocking(move || {
-            history::read_details(&history::resolve(&home, native)?)
-        })
-        .await
-        .map_err(|error| failure(error.to_string()))?
-        .map_err(|error| failure(format!("{error:#}")))?;
-        let turns = history.response.thread.turns.as_deref().unwrap_or_default();
-        let position = |id: &str| turns.iter().position(|turn| turn.id.as_str() == id);
-        if let Some(running) = running.and_then(|running| position(running.as_str()))
-            && position(turn).is_some_and(|turn| turn >= running)
-        {
+        Uuid::parse_str(id).map_err(|_| failure("invalid Claude ID".into()))?;
+        if turn.is_empty() || turn.starts_with("turn:") {
+            return Err(failure("Claude assistant cursor is unavailable".into()));
+        }
+        let record = self
+            .record(id)
+            .await
+            .map_err(|error| failure(format!("{error:#}")))?;
+        let mut record = record.lock().await;
+        if record.running.is_some() {
             return Err(failure(
                 "Claude がこの回答を生成中です。完了してから分岐してください。".into(),
             ));
         }
-        let up_to = history
-            .fork_points
-            .get(turn)
-            .ok_or_else(|| failure("Claude turn is unavailable in native history".into()))?;
-        let cwd = history
-            .response
-            .thread
-            .cwd
-            .ok_or_else(|| failure("Claude session workspace is unavailable".into()))?;
+        if let Some(idle) = record.idle.take() {
+            idle.close().await.map_err(failure)?;
+        }
         let auth_home = self
             .accounts
             .lock()
@@ -2542,19 +2537,53 @@ impl Agent for Claude {
             .selected_home()
             .map_err(failure)?
             .ok_or_else(|| failure("Claude アカウントを選択してください。".into()))?;
-        let forked = Process::fork(
+        let (forked, head_id) = Process::fork(
             process::homes(&self.native_home, self.native_inherited, &auth_home),
-            Path::new(&cwd),
+            Path::new(&record.cwd),
             id,
-            up_to,
+            turn,
         )
         .await
         .map_err(failure)?;
-        self.read(&forked, Some(usize::MAX))
-            .await
-            .map(Into::into)
-            .map_err(|error| failure(format!("{error:#}")))
+        let native = Uuid::parse_str(&forked)
+            .map_err(|_| failure("invalid forked Claude session ID".into()))?;
+        let cwd = record.cwd.clone();
+        let model = record.model.clone();
+        drop(record);
+        self.retain_record(
+            forked.clone(),
+            Arc::new(AsyncMutex::new(Record {
+                cwd: cwd.clone(),
+                model: model.clone(),
+                session_id: native,
+                resumable: true,
+                running: None,
+                idle: None,
+            })),
+        )
+        .await
+        .map_err(|error| failure(format!("{error:#}")))?;
+        Ok(crate::providers::ForkResult {
+            response: ThreadResponse {
+                thread: Thread {
+                    id: Some(SessionRef {
+                        provider: Some(ProviderKind::Claude),
+                        id: forked,
+                    }),
+                    cwd: Some(cwd),
+                    status: SessionStatus::Idle,
+                    ..Default::default()
+                },
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: ProviderKind::Claude,
+                    id: model,
+                }),
+                ..Default::default()
+            },
+            head_id,
+        })
     }
+
     fn event_stream(&self) -> Option<mpsc::Receiver<AgentEvent>> {
         self.event_receiver
             .lock()

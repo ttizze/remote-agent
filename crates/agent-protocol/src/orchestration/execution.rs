@@ -38,9 +38,16 @@ pub fn native_resource_loaded(
         .provider_sessions
         .get(&session.id)
         .map_or_else(|| now.into(), |saved| saved.created_at.clone());
+    let same_native = thread.native_thread_ref.as_ref() == Some(&native);
     let bound = ProviderThread {
         provider_session_id: ready.then(|| session.id.clone()),
         native_thread_ref: Some(native),
+        native_metadata: same_native
+            .then(|| thread.native_metadata.clone())
+            .flatten(),
+        native_conversation_head_ref: same_native
+            .then(|| thread.native_conversation_head_ref.clone())
+            .flatten(),
         status: if ready {
             ProviderThreadStatus::Idle
         } else {
@@ -260,7 +267,7 @@ pub fn started(
         .collect();
     if state.provider_turns.values().any(|turn| {
         turn.run_attempt_id.as_deref() == Some(attempt_id)
-            && turn.native_turn_ref.as_ref() == Some(&native_turn_ref)
+            && turn.control_ref() == Some(&native_turn_ref)
     }) {
         return Ok(Decision { changes, effects });
     }
@@ -269,6 +276,8 @@ pub fn started(
     if native_turn_ref.driver != provider_thread.driver {
         return Err("native turn uses another provider driver".into());
     }
+    let (native_turn_ref, native_control_ref) =
+        native_observation::turn_references(native_turn_ref);
     let turn = ProviderTurn {
         id: id(context.command_id, "provider-turn"),
         provider_thread_id: provider_thread.id.clone(),
@@ -276,7 +285,7 @@ pub fn started(
         run_attempt_id: Some(attempt.id.clone()),
         native_thread_ref: attempt.native_thread_ref.clone(),
         native_turn_ref: Some(native_turn_ref),
-        native_control_ref: None,
+        native_control_ref,
         ordinal: state
             .provider_turns
             .values()

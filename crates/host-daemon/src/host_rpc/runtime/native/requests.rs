@@ -163,8 +163,7 @@ fn request_artifact(
                     turn.provider_thread_id == provider.id
                         && turn.run_attempt_id.as_deref() == attempt_id
                         && turn
-                            .native_turn_ref
-                            .as_ref()
+                            .control_ref()
                             .and_then(|reference| reference.native_id.as_deref())
                             == Some(turn_id.as_str())
                 })

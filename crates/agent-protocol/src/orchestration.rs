@@ -48,6 +48,7 @@ mod execution;
 mod native_observation;
 pub use native_observation::{
     observe_external_item, observe_external_plan, observe_external_subagent, observe_external_turn,
+    observe_native_cursor,
 };
 mod forks;
 pub mod handoffs;
@@ -598,9 +599,8 @@ pub struct ProviderTurn {
     pub provider_thread_id: String,
     pub node_id: String,
     pub run_attempt_id: Option<String>,
-    /// Bex can expand native tool bodies after this logical provider thread is
-    /// rebound. An observed turn keeps the physical source it actually used,
-    /// including native work with no application attempt.
+    /// The physical source fences callbacks even after a logical thread is
+    /// rebound, including native work with no application attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_thread_ref: Option<ProviderRef>,
     pub native_turn_ref: Option<ProviderRef>,
