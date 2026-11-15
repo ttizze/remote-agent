@@ -1,28 +1,29 @@
 #[tokio::test]
 async fn search_defaults_to_the_t3_bound_and_accepts_an_explicit_limit() {
     use super::*;
-    use crate::host_rpc::runtime::native_fixture::NativeAgent;
+    use crate::host_rpc::runtime::native_fixture::{NativeAgent, own};
     use agent_protocol::{
         models::{Thread, ThreadResponse},
         session::SessionRef,
     };
     let directory = tempfile::tempdir().unwrap();
     let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
-    for index in 0..10_005 {
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    for index in 0..55 {
         let id = format!("conversation-{index}");
-        agent.records.lock().unwrap().insert(
-            id.clone(),
-            ThreadResponse {
-                thread: Thread {
-                    id: Some(SessionRef::new(ProviderKind::Codex, id).unwrap()),
-                    preview: Some("matches".into()),
-                    ..Default::default()
-                },
+        let public = SessionRef::new(ProviderKind::Codex, id.clone()).unwrap();
+        let response = ThreadResponse {
+            thread: Thread {
+                id: Some(public.clone()),
+                cwd: Some(directory.path().to_string_lossy().into()),
+                preview: Some("matches".into()),
                 ..Default::default()
             },
-        );
+            ..Default::default()
+        };
+        own(&service, &public, &response).await;
+        agent.records.lock().unwrap().insert(id, response);
     }
-    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let all = service
         .search_list(&agent_protocol::conversation::records::SearchList {
             term: "matches".into(),
@@ -514,4 +515,91 @@ async fn task_list_refreshes_branding_for_all_project_headers() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn search_reads_saved_message_bodies_without_discovering_native_threads() {
+    use super::*;
+    use crate::host_rpc::runtime::{
+        Runtime,
+        native_fixture::{NativeAgent, own},
+    };
+    use crate::providers::AgentChange;
+    use agent_protocol::{
+        execution::ItemStatus,
+        items::{AssistantPhase, Item, ItemBody},
+        models::{Thread, ThreadResponse},
+        session::{SessionChange, SessionRef},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let project_path = directory.path().join("projects.json");
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let native = SessionRef::new(ProviderKind::Codex, "saved-source".into()).unwrap();
+    let public = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+    let response = ThreadResponse {
+        thread: Thread {
+            id: Some(native.clone()),
+            cwd: Some(directory.path().to_string_lossy().into()),
+            name: Some("A conversation about storage".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let service = HostRpcService::new([agent.backend()], project_path.clone());
+    own(&service, &public, &response).await;
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native,
+            change: SessionChange::Item {
+                turn_id: "recorded-turn".into(),
+                item: Arc::new(Item::new(
+                    "recorded-answer".into(),
+                    ItemStatus::Completed,
+                    ItemBody::AssistantText {
+                        text: "A persisted Needle exists only in the message body".into(),
+                        phase: AssistantPhase::Final,
+                    },
+                )),
+            },
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    agent.records.lock().unwrap().insert(
+        "unimported".into(),
+        ThreadResponse {
+            thread: Thread {
+                id: Some(SessionRef::new(ProviderKind::Codex, "unimported".into()).unwrap()),
+                preview: Some("Needle in an unimported native thread".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let request = agent_protocol::conversation::records::SearchList {
+        term: "needle".into(),
+        limit: None,
+    };
+    let result = service.search_list(&request).await.unwrap();
+    assert_eq!(
+        result
+            .data
+            .iter()
+            .map(|thread| thread.id.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec![public.clone()]
+    );
+    // A new service has the saved DB, no provider backend, and no native files.
+    let reopened = HostRpcService::new([], project_path);
+    let result = reopened.search_list(&request).await.unwrap();
+    assert_eq!(
+        result
+            .data
+            .iter()
+            .map(|thread| thread.id.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec![public]
+    );
 }

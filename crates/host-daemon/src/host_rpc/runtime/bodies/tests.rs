@@ -9,12 +9,16 @@ use agent_protocol::{
 };
 
 #[rstest::rstest]
-#[case(ProviderKind::Codex)]
-#[case(ProviderKind::Claude)]
-#[case(ProviderKind::DeepSeek)]
+#[case(ProviderKind::Codex, true)]
+#[case(ProviderKind::Codex, false)]
+#[case(ProviderKind::Claude, true)]
+#[case(ProviderKind::Claude, false)]
+#[case(ProviderKind::DeepSeek, true)]
+#[case(ProviderKind::DeepSeek, false)]
 #[tokio::test]
-async fn a_missing_native_tool_body_keeps_later_work_and_detail_retry_does_not_rewrite_history(
+async fn saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source(
     #[case] provider: ProviderKind,
+    #[case] persisted: bool,
 ) {
     use agent_protocol::orchestration as model;
     let directory = tempfile::tempdir().unwrap();
@@ -56,8 +60,10 @@ async fn a_missing_native_tool_body_keeps_later_work_and_detail_retry_does_not_r
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     own(&service, &public, &response).await;
     let mut deferred = full;
-    deferred.defer();
-    assert!(deferred.is_deferred());
+    if !persisted {
+        deferred.defer();
+    }
+    assert_eq!(deferred.is_deferred(), !persisted);
     let native_change = |change| crate::providers::AgentChange::Session {
         session: native.clone(),
         change,
@@ -115,7 +121,7 @@ async fn a_missing_native_tool_body_keeps_later_work_and_detail_retry_does_not_r
         .find(|item| matches!(item.body, model::TurnItemBody::CommandExecution { .. }))
         .unwrap();
     let saved = storage.thread_item(&public, &command.id).unwrap().unwrap();
-    assert!(saved.body.has_omitted_detail());
+    assert_eq!(saved.body.has_omitted_detail(), !persisted);
     assert_eq!(saved.status, model::TurnItemStatus::Completed);
     assert!(snapshot.projection.runs.is_empty());
     assert!(snapshot.projection.turn_items.iter().any(|item|matches!(&item.body,model::TurnItemBody::AssistantMessage {text,..} if text=="later native work survived")));
@@ -126,21 +132,30 @@ async fn a_missing_native_tool_body_keeps_later_work_and_detail_retry_does_not_r
             item: saved.id.clone().into(),
         })
     };
-    let failed = call::<records::Hydrated>(&service, connection.id(), request())
-        .await
-        .unwrap_err();
-    assert_eq!(failed.code, "unreadable");
+    // T3 getTurnItem reads the saved projection. Availability or subsequent
+    // contents of a provider transcript cannot change a read-only detail query.
+    let result: records::Hydrated = call(&service, connection.id(), request()).await.unwrap();
+    let detail = result.item.unwrap();
+    assert_eq!(detail.body, saved.body);
     assert_eq!(before, storage.thread_stream(&public, None).unwrap());
     agent.unreadable.lock().unwrap().clear();
     let result: records::Hydrated = call(&service, connection.id(), request()).await.unwrap();
     let detail = result.item.unwrap();
+    assert_eq!(detail.body, saved.body);
     assert_eq!(detail.id, saved.id);
     assert_eq!(detail.updated_at, saved.updated_at);
     assert_eq!(detail.ordinal, saved.ordinal);
-    assert!(!detail.body.has_omitted_detail());
-    assert!(
-        matches!(detail.body,model::TurnItemBody::CommandExecution {output:Some(text),..} if text==full_output)
-    );
+    if persisted {
+        assert!(
+            matches!(&detail.body,model::TurnItemBody::CommandExecution {output:Some(text),..} if text==&full_output)
+        );
+    } else {
+        assert!(detail.body.has_omitted_detail());
+    }
+    let reopened = HostRpcService::new([], directory.path().join("projects.json"));
+    let offline = reopened.open_session();
+    let result: records::Hydrated = call(&reopened, offline.id(), request()).await.unwrap();
+    assert_eq!(result.item.unwrap().body, saved.body);
     assert_eq!(before, storage.thread_stream(&public, None).unwrap());
     assert!(agent.inputs.lock().unwrap().is_empty());
 
@@ -227,9 +242,7 @@ async fn a_missing_native_tool_body_keeps_later_work_and_detail_retry_does_not_r
     }
     let before_detail = storage.thread_stream(&public, None).unwrap();
     let reread: records::Hydrated = call(&service, connection.id(), request()).await.unwrap();
-    assert!(
-        matches!(reread.item.unwrap().body,model::TurnItemBody::CommandExecution {output:Some(text),..} if text==full_output)
-    );
+    assert_eq!(reread.item.unwrap().body, saved.body);
     assert_eq!(before_detail, storage.thread_stream(&public, None).unwrap());
     assert_eq!(
         storage.native_owner(&native).unwrap(),
