@@ -738,8 +738,7 @@ impl Agent for NativeAgent {
             .create(source.thread.cwd.as_deref().unwrap(), None, None)
             .await?;
         let mut turns = source.thread.turns.unwrap();
-        let point: Option<&str> = turn.into();
-        if let Some(turn) = point {
+        if let Some(turn) = turn {
             turns.truncate(
                 turns
                     .iter()

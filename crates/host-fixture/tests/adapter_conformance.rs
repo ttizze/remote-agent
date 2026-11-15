@@ -1891,3 +1891,266 @@ async fn claude_native_fork_retires_settled_background_queries_without_rewriting
     local.close().await;
     host.close().await.unwrap();
 }
+
+#[rstest::rstest]
+#[case::latest_fork("latest-fork")]
+#[case::compact_rewind_fork("compact-rewind-fork")]
+#[case::plain_retained_prompt("plain-retained-prompt")]
+#[case::missing_previous_cursor("missing-previous-cursor")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_no_assistant_boundaries_preserve_retained_user_prompts(#[case] mode: &str) {
+    // Pinned ClaudeAdapterV2 resolveForkUpToMessageId / resolveRollbackResumeSessionAt:
+    // latest missing cursor uses current head/whole-copy; compaction alone may
+    // fall back to its immediately preceding assistant, never past a user prompt.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let host = start(&root, Arc::new(Memory::default())).await;
+    let local = host.local().await.unwrap();
+    let source = create(&local.peer, ProviderKind::Claude, &root).await;
+    let (_, mut events) = open(&local.peer, &source).await;
+    let first = submission(&source, "keep-this-user-prompt");
+    submit(&local.peer, &first).await.unwrap();
+    let first_turn = events.input_turn(&first.client_user_message_id, true).await;
+    assert_eq!(claude_answer(&first_turn), "reply 1: keep-this-user-prompt");
+    let first_cursor = events.projection.snapshot.projection.provider_turns[0]
+        .native_turn_ref
+        .as_ref()
+        .unwrap()
+        .native_id
+        .clone()
+        .unwrap();
+    let mut inputs = 1;
+    if mode == "missing-previous-cursor" {
+        let user = submission(&source, "no-assistant");
+        submit(&local.peer, &user).await.unwrap();
+        let turn = events.input_turn(&user.client_user_message_id, true).await;
+        assert_eq!(turn.status, TurnStatus::Completed);
+        assert!(claude_answer(&turn).is_empty());
+        inputs += 1;
+    }
+    let text = if mode == "plain-retained-prompt" {
+        "no-assistant"
+    } else {
+        "/compact"
+    };
+    let boundary = submission(&source, text);
+    submit(&local.peer, &boundary).await.unwrap();
+    let boundary_turn = events
+        .input_turn(&boundary.client_user_message_id, true)
+        .await;
+    assert_eq!(boundary_turn.status, TurnStatus::Completed);
+    assert!(
+        claude_answer(&boundary_turn).is_empty(),
+        "the real SDK boundary emitted no assistant envelope"
+    );
+    inputs += 1;
+    let projection = &events.projection.snapshot.projection;
+    let attempt = projection
+        .runs
+        .iter()
+        .find(|run| run.id == boundary_turn.id.as_str())
+        .unwrap()
+        .active_attempt_id
+        .as_ref()
+        .unwrap();
+    let native_turn = projection
+        .provider_turns
+        .iter()
+        .find(|turn| turn.run_attempt_id.as_ref() == Some(attempt))
+        .unwrap();
+    assert!(
+        native_turn
+            .native_turn_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_deref()
+            .unwrap()
+            .starts_with("turn:"),
+        "no fabricated assistant cursor may stand in for this boundary"
+    );
+    let native = conversations::native_source(&root, &source, ProviderKind::Claude);
+    if mode != "latest-fork" {
+        let tail = submission(&source, "discard-tail");
+        submit(&local.peer, &tail).await.unwrap();
+        let removed = events.input_turn(&tail.client_user_message_id, true).await;
+        inputs += 1;
+        assert_eq!(
+            claude_answer(&removed),
+            format!("reply {inputs}: discard-tail")
+        );
+        let operation = uuid::Uuid::new_v4();
+        let outcome = conversations::command(
+            &local.peer,
+            &source,
+            operation,
+            Command::Rewind(removed.id.clone()),
+        )
+        .await;
+        let refused = matches!(mode, "plain-retained-prompt" | "missing-previous-cursor");
+        if refused {
+            if let Err(error) = outcome {
+                assert!(error.to_string().contains("cursor"), "{error}");
+            } else {
+                loop {
+                    assert!(
+                        events
+                            .view()
+                            .thread
+                            .turns
+                            .iter()
+                            .flatten()
+                            .any(|turn| turn.id == removed.id),
+                        "rewind cannot drop a retained user prompt with no assistant cursor"
+                    );
+                    if let Some(failure) = &events
+                        .projection
+                        .snapshot
+                        .projection
+                        .thread
+                        .rollback_failure
+                    {
+                        assert_eq!(failure.request_id, operation.to_string());
+                        assert!(failure.message.contains("cursor"), "{}", failure.message);
+                        break;
+                    }
+                    events.next().await;
+                }
+            }
+            assert!(
+                events
+                    .view()
+                    .thread
+                    .turns
+                    .iter()
+                    .flatten()
+                    .any(|turn| turn.id == boundary_turn.id)
+            );
+            assert_eq!(
+                conversations::native_source(&root, &source, ProviderKind::Claude),
+                native
+            );
+            let after = submission(&source, "after-rejection");
+            submit(&local.peer, &after).await.unwrap();
+            let answer = events.input_turn(&after.client_user_message_id, true).await;
+            assert_eq!(
+                claude_answer(&answer),
+                format!("reply {}: after-rejection", inputs + 1),
+                "native context also remains intact after refusing the cut"
+            );
+            local.close().await;
+            host.close().await.unwrap();
+            return;
+        }
+        outcome.expect("compaction can retain its immediately preceding real assistant");
+        while events
+            .view()
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .any(|turn| turn.id == removed.id)
+        {
+            assert!(
+                events
+                    .projection
+                    .snapshot
+                    .projection
+                    .thread
+                    .rollback_failure
+                    .is_none(),
+                "{:?}",
+                events
+                    .projection
+                    .snapshot
+                    .projection
+                    .thread
+                    .rollback_failure
+            );
+            events.next().await;
+        }
+        let projection = &events.projection.snapshot.projection;
+        let thread = projection
+            .provider_threads
+            .iter()
+            .find(|thread| Some(&thread.id) == projection.thread.active_provider_thread_id.as_ref())
+            .unwrap();
+        assert_eq!(
+            thread
+                .native_conversation_head_ref
+                .as_ref()
+                .unwrap()
+                .native_id
+                .as_deref(),
+            Some(first_cursor.as_str())
+        );
+        assert!(
+            events
+                .view()
+                .thread
+                .turns
+                .iter()
+                .flatten()
+                .any(|turn| turn.id == boundary_turn.id),
+            "the retained compaction remains in the canonical history"
+        );
+    }
+    let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+    let returned: SessionRef = local
+        .peer
+        .request(&Call::ForkConversation(
+            agent_protocol::conversation::records::Fork {
+                source: source.clone(),
+                target: target.clone(),
+                through: agent_protocol::conversation::records::ForkPoint::Run {
+                    run_id: boundary_turn.id.to_string(),
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(returned, target);
+    let (_, mut child) = open(&local.peer, &target).await;
+    let after = submission(&target, "after-no-cursor-fork");
+    submit(&local.peer, &after).await.unwrap();
+    let answer = child.input_turn(&after.client_user_message_id, true).await;
+    assert!(
+        child
+            .projection
+            .snapshot
+            .projection
+            .provider_threads
+            .iter()
+            .any(|thread| thread
+                .native_metadata
+                .as_ref()
+                .is_some_and(|meta| meta.fork_head_message_id.is_some())),
+        "the SDK copied the actual native boundary, rather than replaying a different context"
+    );
+    let expected = if mode == "latest-fork" {
+        "reply 3: after-no-cursor-fork"
+    } else {
+        "reply 2: after-no-cursor-fork"
+    };
+    assert_eq!(claude_answer(&answer), expected);
+    let child_native = conversations::native_source(&root, &target, ProviderKind::Claude);
+    let rows = claude_native_rows(&root, &child_native);
+    assert!(rows.iter().any(|row| {
+        row["message"]["content"]
+            .to_string()
+            .contains("keep-this-user-prompt")
+    }));
+    assert!(!rows.iter().any(|row| {
+        row["message"]["content"]
+            .to_string()
+            .contains("discard-tail")
+    }));
+    assert_eq!(
+        rows.iter().any(|row| row["type"] == "user"
+            && row["message"]["content"].to_string().contains("/compact")),
+        mode == "latest-fork",
+        "a pinned fork omits only the compaction command"
+    );
+    local.close().await;
+    host.close().await.unwrap();
+}
