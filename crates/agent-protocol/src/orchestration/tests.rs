@@ -3081,3 +3081,119 @@ fn native_resource_replacement_cannot_reuse_a_previous_physical_cursor_or_metada
         }
     }
 }
+
+#[test]
+fn claude_empty_baseline_replaces_the_logical_native_owner_and_fences_old_callbacks() {
+    // T3 ClaudeAdapterV2 allocates a new ProviderThread for an empty baseline,
+    // preserving the public conversation and historical physical ownership.
+    let mut state = initial();
+    state.thread.provider_instance_id = "claude".into();
+    state.thread.model_selection.instance_id = "claude".into();
+    let session = state.provider_sessions.get_mut("session").unwrap();
+    session.driver = "claudeAgent".into();
+    session.provider_instance_id = "claude".into();
+    let provider = state.provider_threads.get_mut("native-thread").unwrap();
+    provider.driver = "claudeAgent".into();
+    provider.provider_instance_id = "claude".into();
+    provider.native_thread_ref.as_mut().unwrap().driver = "claudeAgent".into();
+    let mut message = input(1);
+    message.driver = "claudeAgent".into();
+    message.model_selection.instance_id = "claude".into();
+    state = state.apply(
+        &admit(
+            &state,
+            message,
+            Admission::Queue,
+            context("admitted", &state),
+        )
+        .unwrap(),
+    );
+    let run = state.active_run().unwrap().id.clone();
+    let attempt = state.runs[&run].active_attempt_id.clone().unwrap();
+    let reference = ProviderRef {
+        driver: "claudeAgent".into(),
+        ..native("raw-control", None)
+    };
+    state = state.apply(
+        &started(
+            &state,
+            &attempt,
+            "session",
+            reference,
+            context("started", &state),
+        )
+        .unwrap(),
+    );
+    state = state.apply(&observe_native_cursor(
+        &state,
+        &state.run_attempts[&attempt]
+            .provider_turn_id
+            .clone()
+            .unwrap(),
+        "native",
+        "actual-assistant",
+        NOW,
+    ));
+    state = state.apply(
+        &complete(
+            &state,
+            &attempt,
+            "session",
+            Completion::Completed,
+            context("completed", &state),
+        )
+        .unwrap(),
+    );
+    state = rewind_ready(state);
+    let original = state.selected_native_thread().unwrap().clone();
+    state = state.apply(&rewind(&state, &run, context("rewind", &state)).unwrap());
+    let effect = state
+        .effects
+        .values()
+        .find(|effect| {
+            matches!(effect.request, EffectRequest::ProviderThreadRollback { .. })
+                && effect.status == EffectStatus::Pending
+        })
+        .unwrap();
+    let reset = ProviderRef {
+        driver: "claudeAgent".into(),
+        ..native("fresh-native", None)
+    };
+    let next = state.apply(
+        &rollback_completed(
+            &state,
+            &effect.id,
+            reset.clone(),
+            None,
+            context("confirmed", &state),
+        )
+        .unwrap(),
+    );
+    let selected = next.selected_native_thread().unwrap();
+    assert_eq!(next.thread.id, state.thread.id);
+    assert_ne!(
+        selected.id, original.id,
+        "a new physical session owns a new logical ProviderThread"
+    );
+    assert_eq!(selected.native_thread_ref.as_ref(), Some(&reset));
+    assert_eq!(selected.first_run_ordinal, None);
+    assert_eq!(selected.last_run_ordinal, None);
+    assert_eq!(
+        next.provider_threads[&original.id], original,
+        "historical physical ownership is retained"
+    );
+    assert_eq!(next.run_attempts[&attempt].provider_thread_id, original.id);
+    assert_eq!(next.runs[&run].status, RunStatus::RolledBack);
+    assert!(!next.accepts_observation(&attempt, "session"));
+    assert!(!next.accepts_background_observation(&attempt, "session"));
+    let mut message = input(2);
+    message.driver = "claudeAgent".into();
+    message.model_selection.instance_id = "claude".into();
+    let admitted =
+        next.apply(&admit(&next, message, Admission::Queue, context("next", &next)).unwrap());
+    assert_eq!(
+        admitted.active_run().unwrap().provider_thread_id.as_ref(),
+        Some(&selected.id),
+        "the next input belongs to the fresh native owner"
+    );
+}

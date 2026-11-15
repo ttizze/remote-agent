@@ -110,7 +110,7 @@ if not HOLDOUT:
         if not builder:
             sys.exit("SDK contract requires the configured builder; refusing a local fallback")
         sdk = subprocess.run([str(ROOT / "scripts/dev-env.sh"), str(ROOT / "scripts/remote-run.sh"), "--native", builder,
-            "node", "--test", "--test-reporter=tap", "--test-name-pattern", "native fork", "crates/host-daemon/src/providers/claude/sdk/bridge.test.mjs"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            "node", "--test", "--test-reporter=tap", "--test-name-pattern", "native (fork|resume)", "crates/host-daemon/src/providers/claude/sdk/bridge.test.mjs"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         (ROOT / ".hill-climb/t3-port/sdk-tests.txt").write_text(sdk.stdout)
         sdk_results = re.findall(r"^(ok|not ok) \d+ - (.+)$", sdk.stdout, re.MULTILINE)
         if sdk.returncode not in (0, 1) or {name for _, name in sdk_results} != sdk_expected:

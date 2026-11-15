@@ -2,12 +2,14 @@
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
     "agent-protocol": [
-      "orchestration::tests::native_resource_replacement_cannot_reuse_a_previous_physical_cursor_or_metadata"
+      "orchestration::tests::claude_empty_baseline_replaces_the_logical_native_owner_and_fences_old_callbacks"
     ],
     "host-daemon": [
-      "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer",
-      "host_rpc::runtime::t3_contract::claude_native_cursor_updates_keep_controls_callback_ownership_and_one_delivery",
-      "providers::claude::execution_tests::native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query"
+      "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_1",
+      "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_2",
+      "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_3",
+      "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_4",
+      "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_5"
     ]
   },
   "guards": {
@@ -1464,6 +1466,7 @@
       "orchestration::tests::io_owner_cancels_a_claimed_start_only_after_stop_and_late_native_evidence_cannot_revive_it",
       "orchestration::tests::late_native_acceptance_resolves_the_public_uncertainty_error_with_the_outbox",
       "orchestration::tests::native_evidence_before_an_unknown_ack_releases_the_start_lane",
+      "orchestration::tests::native_resource_replacement_cannot_reuse_a_previous_physical_cursor_or_metadata",
       "orchestration::tests::native_rollback_requires_all_three_conversation_capabilities",
       "orchestration::tests::native_status::a_native_status_change_releases_only_the_first_of_multiple_queued_messages",
       "orchestration::tests::native_status::a_native_turn_expires_only_its_pending_requests_while_session_and_other_turn_requests_remain_live",
@@ -1708,6 +1711,7 @@
       "host_rpc::runtime::output::tests::fast_and_lagging_appends_fold_to_the_same_terminal",
       "host_rpc::runtime::output::tests::late_and_once_lagging_viewers_return_to_append_cadence",
       "host_rpc::runtime::output::tests::live_limit_evicts_the_tail_and_resynchronizes_its_existing_viewer",
+      "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer",
       "host_rpc::runtime::replay::recorded_codex_frames_cross_the_native_adapter_and_conversation_writer",
       "host_rpc::runtime::replay::recorded_deepseek_acp_conversation_crosses_the_process_and_conversation_writer",
       "host_rpc::runtime::replay::reference_recordings_keep_their_original_digests",
@@ -1726,6 +1730,7 @@
       "host_rpc::runtime::t3_contract::an_empty_launch_honors_the_selected_existing_worktree_without_sending_input",
       "host_rpc::runtime::t3_contract::an_empty_worktree_launch_prepares_a_checkout_without_creating_a_run",
       "host_rpc::runtime::t3_contract::attached_provider_sessions_publish_the_native_model_switch_capability",
+      "host_rpc::runtime::t3_contract::claude_native_cursor_updates_keep_controls_callback_ownership_and_one_delivery",
       "host_rpc::runtime::t3_contract::codex_rewind_continues_from_the_retained_head_in_the_same_native_thread",
       "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_1",
       "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_2",
@@ -1991,6 +1996,7 @@
       "providers::claude::execution_tests::final_blocks_match_content_kind_and_native_message_before_falling_back",
       "providers::claude::execution_tests::late_blocks_and_api_retry_preserve_only_valid_stream_items",
       "providers::claude::execution_tests::native_error_evidence_distinguishes_quota_retry_auth_and_warning",
+      "providers::claude::execution_tests::native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query",
       "providers::claude::execution_tests::queued_input_reads_only_metadata_and_keeps_owned_execution",
       "providers::claude::execution_tests::recorded_claude_sdk_messages_cross_the_native_content_adapter",
       "providers::claude::execution_tests::repeated_stop_after_confirmation_acknowledges_without_another_sdk_write",
@@ -2653,6 +2659,7 @@
     }
   },
   "sdk_contracts": [
-    "native fork captures the remapped SDK head even when the project moved"
+    "native fork captures the remapped SDK head even when the project moved",
+    "native resume forwards the real assistant cursor into query options"
   ]
 }

@@ -55,3 +55,103 @@ async fn native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query() {
         error.message
     );
 }
+
+#[rstest::rstest]
+#[case("retained")]
+#[case("baseline")]
+#[case("no-cursor-latest")]
+#[case("no-cursor-with-later-turn")]
+#[case("busy")]
+#[tokio::test]
+async fn native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines(
+    #[case] mode: &str,
+) {
+    // Pinned ClaudeAdapterV2.rollbackThread and resolveRollbackResumeSessionAt:
+    // real assistant -> same native resource; empty baseline -> fresh UUID;
+    // missing cursor is a no-op only when there is no later native turn.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let claude = Claude::load(
+        root.join("unused"),
+        root.join("adapter"),
+        Some(root.join("native")),
+    )
+    .await
+    .unwrap();
+    let session = claude
+        .create(root.to_str().unwrap(), "default")
+        .await
+        .unwrap()
+        .thread
+        .id
+        .unwrap();
+    let record = claude.record(&session.id).await.unwrap();
+    let (_receiver, _watch) = if mode == "busy" {
+        let (input, receiver) = mpsc::channel(1);
+        let (watch, interrupt) = watch::channel(None);
+        record.lock().await.running = Some(Running {
+            turn_id: "raw-control".into(),
+            input,
+            interrupt,
+            effort: None,
+            work: watch::channel(Work::default()).1,
+        });
+        (Some(receiver), Some(watch))
+    } else {
+        (None, None)
+    };
+    let assistant = "01234567-89ab-4cde-8fab-0123456789ab";
+    let retained = match mode {
+        "retained" => Some(assistant),
+        "no-cursor-latest" | "no-cursor-with-later-turn" => Some("turn:raw-control"),
+        _ => None,
+    };
+    let removed =
+        matches!(mode, "retained" | "no-cursor-with-later-turn").then_some("later-assistant");
+    let result = Agent::rollback(
+        &claude,
+        &session.id,
+        retained,
+        removed,
+        root.to_str().unwrap(),
+        None,
+    )
+    .await;
+    if matches!(mode, "busy" | "no-cursor-with-later-turn") {
+        let error = result.err().expect("unsafe native rollback is refused");
+        assert_eq!(error.code, "rollback_failed");
+        assert!(
+            error
+                .message
+                .contains(if mode == "busy" { "running" } else { "cursor" }),
+            "{}",
+            error.message
+        );
+        assert_eq!(claude.records.lock().await.len(), 1);
+        return;
+    }
+    let result = result.unwrap_or_else(|error| panic!("{mode}: {error}"));
+    if mode == "baseline" {
+        assert_ne!(result.native_id, session.id);
+        Uuid::parse_str(&result.native_id).unwrap();
+        let reset = claude.record(&result.native_id).await.unwrap();
+        let reset = reset.lock().await;
+        assert!(
+            !reset.resumable,
+            "allocated UUID has never run a native query"
+        );
+        assert!(reset.running.is_none());
+        assert!(result.head_id.is_none());
+        assert!(
+            Arc::ptr_eq(&claude.record(&session.id).await.unwrap(), &record),
+            "previous native resource is retained for old callback ownership"
+        );
+    } else {
+        assert_eq!(result.native_id, session.id);
+        assert_eq!(
+            result.head_id.as_deref(),
+            (mode == "retained").then_some(assistant)
+        );
+        assert_eq!(claude.records.lock().await.len(), 1);
+    }
+}

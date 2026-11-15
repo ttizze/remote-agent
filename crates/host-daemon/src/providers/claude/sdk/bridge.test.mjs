@@ -68,6 +68,26 @@ function channel() {
   };
 }
 
+test("native resume forwards the real assistant cursor into query options", async () => {
+  for (const [resume, cursor] of [[true, "actual-assistant-uuid"], [false, undefined]]) {
+    const input = channel();
+    const output = channel();
+    const reader = output[Symbol.asyncIterator]();
+    let options;
+    input.push(JSON.stringify({ type: "initialize", cwd: "/fixture", sessionId: "native-session", resume, resumeSessionAt: cursor }));
+    const bridge = runBridge(input, () => {}, (configured) => {
+      options = configured.options;
+      return { async initializationResult() { return {}; }, next: reader.next.bind(reader), close() { output.close(); } };
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    input.close();
+    await bridge;
+    assert.equal(options.resume, resume ? "native-session" : undefined);
+    assert.equal(options.sessionId, resume ? undefined : "native-session");
+    assert.equal(options.resumeSessionAt, cursor, "a pinned native head reaches the SDK; fresh allocations have no resume position");
+  }
+});
+
 test("catalog probes cannot run user hooks, tools or automatic IDE connections", async () => {
   for (const probe of [true, false]) {
     const input = channel();
