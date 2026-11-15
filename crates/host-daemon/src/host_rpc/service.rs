@@ -77,7 +77,7 @@ impl HostRpcService {
     ) -> Self {
         let project_path = project_path.into();
         let storage = Arc::new(super::storage::Storage::open(
-            &project_path.with_file_name("bex-conversations.sqlite"),
+            &project_path.with_file_name(crate::host_rpc::storage::CONVERSATION_DATABASE_FILE),
         ));
         let updating_recovery = update::consume_restart_marker(
             &project_path.with_file_name(agent_local_host::update::RECOVERY_FILE),

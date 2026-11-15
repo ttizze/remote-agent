@@ -66,7 +66,7 @@ impl ProjectStore {
     pub(crate) fn fixture(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let storage = Arc::new(crate::host_rpc::storage::Storage::open(
-            &path.with_file_name("bex-conversations.sqlite"),
+            &path.with_file_name(crate::host_rpc::storage::CONVERSATION_DATABASE_FILE),
         ));
         Self::new(path, storage)
     }
@@ -260,8 +260,12 @@ mod tests {
     async fn corrupt_project_state_is_still_reported() {
         let directory = tempfile::tempdir().unwrap();
         let store = ProjectStore::fixture(directory.path().join("bex-worktrees.json"));
-        let connection =
-            rusqlite::Connection::open(directory.path().join("bex-conversations.sqlite")).unwrap();
+        let connection = rusqlite::Connection::open(
+            directory
+                .path()
+                .join(crate::host_rpc::storage::CONVERSATION_DATABASE_FILE),
+        )
+        .unwrap();
         connection
             .execute(
                 "INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES ('broken','Broken','/broken',?1,'2026-11-14T00:00:00.000Z','2026-11-14T00:00:00.000Z')",

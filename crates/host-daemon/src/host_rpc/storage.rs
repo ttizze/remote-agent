@@ -32,6 +32,9 @@ mod timeline;
 mod titles;
 pub(in crate::host_rpc) mod workspace;
 
+/// Host storage and offline fixture consumers address the same canonical file.
+pub const CONVERSATION_DATABASE_FILE: &str = "bex-conversations.sqlite";
+
 #[derive(Debug)]
 pub(crate) struct Storage {
     connection: Mutex<Result<Connection, String>>,

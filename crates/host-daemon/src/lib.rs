@@ -20,6 +20,8 @@ pub use host_runtime::HostRuntime;
 
 pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials};
 
+#[cfg(any(test, feature = "test-support"))]
+pub use host_rpc::storage::CONVERSATION_DATABASE_FILE;
 pub use host_rpc::{HostRpcService, HostSession, HostSubscription, SessionId};
 pub use projects::ProjectStore;
 
