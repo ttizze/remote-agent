@@ -529,5 +529,23 @@ pub fn provider_stopped(
                 ..effect.clone()
             }),
     );
+    let thread = decision
+        .changes
+        .iter()
+        .rev()
+        .find_map(|change| match change {
+            Change::Thread(thread) => Some(thread),
+            _ => None,
+        })
+        .unwrap_or(&state.thread);
+    let failures: Vec<_> = decision
+        .effects
+        .iter()
+        .filter(|effect| matches!(effect.request, EffectRequest::ProviderThreadRollback { .. }))
+        .filter_map(|effect| {
+            rollback::failure_metadata(thread, &effect.command_id, &failure.message, context.now)
+        })
+        .collect();
+    decision.changes.extend(failures);
     Ok(decision)
 }

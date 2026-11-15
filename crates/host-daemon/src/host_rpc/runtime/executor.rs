@@ -288,6 +288,25 @@ impl Runtime {
             .expect("system time is in chrono's range")
             + chrono::Duration::milliseconds(delay as i64))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if effect.attempt_count >= MAX_ATTEMPTS
+            && matches!(
+                effect.request,
+                model::EffectRequest::ProviderThreadRollback { .. }
+            )
+        {
+            if let Err(error) =
+                service
+                    .inner
+                    .conversation
+                    .storage
+                    .observe_effect(effect, worker, &now, |state| {
+                        Ok(model::rollback_failed(state, &effect.id, error, &now))
+                    })
+            {
+                tracing::error!(target:"agent",operation="outbox.rollback-failed",%error);
+            }
+            return;
+        }
         let result = if effect.attempt_count >= MAX_ATTEMPTS {
             Settlement::Failed(error)
         } else {

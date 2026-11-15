@@ -120,6 +120,8 @@ pub(in crate::host_rpc) fn records(
         archived_at: None,
         settled_override: Some("settled".into()),
         settled_at: Some(updated.clone()),
+        rollback_request_id: None,
+        rollback_failure: None,
         last_visited_at: None,
         deleted_at: None,
     };

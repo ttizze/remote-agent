@@ -139,6 +139,8 @@ fn plan_fork(
         archived_at: None,
         settled_override: None,
         settled_at: None,
+        rollback_request_id: None,
+        rollback_failure: None,
         last_visited_at: None,
         ..source.clone()
     };

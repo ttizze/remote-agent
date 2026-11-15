@@ -40,7 +40,7 @@ pub use commands::{
     promote_queued, remove_input, user_item_id,
 };
 mod rollback;
-pub use rollback::{RollbackTarget, rewind, rollback_completed, rollback_target};
+pub use rollback::{RollbackTarget, rewind, rollback_completed, rollback_failed, rollback_target};
 mod execution;
 mod native_observation;
 pub use native_observation::{
@@ -316,6 +316,13 @@ pub struct Lineage {
     pub side_chat: Option<bool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RollbackFailure {
+    pub request_id: String,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
@@ -343,6 +350,8 @@ pub struct Thread {
     pub archived_at: Option<String>,
     pub settled_override: Option<String>,
     pub settled_at: Option<String>,
+    pub rollback_request_id: Option<String>,
+    pub rollback_failure: Option<RollbackFailure>,
     pub last_visited_at: Option<String>,
     pub deleted_at: Option<String>,
 }

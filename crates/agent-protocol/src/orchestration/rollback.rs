@@ -31,11 +31,35 @@ pub fn rollback_target(
         .selected_native_thread()
         .filter(|thread| thread.id == provider_thread_id)
         .ok_or("active provider changed before rewind")?;
+    if thread.status == ProviderThreadStatus::Active
+        || !thread.pending_background_tasks.is_empty()
+        || state.nodes.values().any(|node| {
+            node.provider_thread_id.as_ref() == Some(&thread.id)
+                && node.kind != NodeKind::RootTurn
+                && matches!(
+                    node.status,
+                    NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+                )
+                && node
+                    .run_id
+                    .as_ref()
+                    .and_then(|id| state.runs.get(id))
+                    .is_none_or(|run| run.status != RunStatus::Queued)
+        })
+    {
+        return Err("native work is still running".into());
+    }
     let session = thread
         .provider_session_id
         .as_ref()
         .and_then(|id| state.provider_sessions.get(id))
         .ok_or("rewind provider session is unavailable")?;
+    if session.driver != thread.driver
+        || session.provider_instance_id != thread.provider_instance_id
+        || state.thread.model_selection.instance_id != thread.provider_instance_id
+    {
+        return Err("rewind provider selection is inconsistent".into());
+    }
     if !session.capabilities.threads.can_rollback_thread
         || !session
             .capabilities
@@ -95,7 +119,6 @@ pub fn rollback_target(
             turn.provider_thread_id == thread.id
                 && turn.ordinal > after
                 && terminal(turn)
-                && turn.native_thread_ref == thread.native_thread_ref
                 && turn
                     .run_attempt_id
                     .as_ref()
@@ -106,9 +129,30 @@ pub fn rollback_target(
         .min_by_key(|turn| turn.ordinal);
     Ok(RollbackTarget {
         ordinal,
-        retained_turn: retained.and_then(|turn| turn.native_turn_ref.clone()),
-        first_removed_turn: first_removed.and_then(|turn| turn.native_turn_ref.clone()),
+        retained_turn: retained
+            .map(|turn| native_boundary(thread, turn))
+            .transpose()?,
+        first_removed_turn: first_removed
+            .map(|turn| native_boundary(thread, turn))
+            .transpose()?,
     })
+}
+
+fn native_boundary(thread: &ProviderThread, turn: &ProviderTurn) -> Result<ProviderRef, String> {
+    if turn.native_thread_ref != thread.native_thread_ref {
+        return Err("rewind turn belongs to another physical native thread".into());
+    }
+    turn.native_turn_ref
+        .as_ref()
+        .filter(|reference| {
+            reference.driver == thread.driver
+                && reference
+                    .native_id
+                    .as_ref()
+                    .is_some_and(|id| !id.is_empty())
+        })
+        .cloned()
+        .ok_or_else(|| "rewind native turn reference is unavailable".into())
 }
 
 pub fn rewind(state: &State, run_id: &str, context: Context<'_>) -> Result<Decision, String> {
@@ -160,8 +204,15 @@ pub fn rewind(state: &State, run_id: &str, context: Context<'_>) -> Result<Decis
         .selected_native_thread()
         .ok_or("rewind provider thread is unavailable")?;
     rollback_target(state, &provider.id, &checkpoint.id, scope_id)?;
+    let mut changes = hold_queue(state, true).changes;
+    changes.push(Change::Thread(Thread {
+        rollback_request_id: Some(context.command_id.into()),
+        rollback_failure: None,
+        updated_at: context.now.into(),
+        ..state.thread.clone()
+    }));
     Ok(Decision {
-        changes: hold_queue(state, true).changes,
+        changes,
         effects: vec![effect(
             context,
             &state.thread.id,
@@ -197,6 +248,15 @@ pub fn rollback_completed(
     else {
         return Err("effect is not a rewind".into());
     };
+    if state.thread.rollback_request_id.as_deref() != Some(action.command_id.as_str()) {
+        return Err("rollback request is no longer current".into());
+    }
+    if native_head.as_ref().is_some_and(|head| {
+        head.driver != native_thread.driver
+            || head.native_id.as_ref().is_none_or(|id| id.is_empty())
+    }) {
+        return Err("rewind returned an invalid native cursor".into());
+    }
     let target = rollback_target(state, provider_thread_id, checkpoint_id, scope_id)?;
     let provider = &state.provider_threads[provider_thread_id];
     if native_thread.driver != provider.driver
@@ -266,4 +326,47 @@ pub fn rollback_completed(
         decision.effects.extend(activated.effects);
     }
     Ok(decision)
+}
+
+/// Both worker exhaustion and provider exit publish through this request fence.
+pub(super) fn failure_metadata(
+    thread: &Thread,
+    request_id: &str,
+    message: &str,
+    now: &str,
+) -> Option<Change> {
+    if thread.deleted_at.is_some() || thread.rollback_request_id.as_deref() != Some(request_id) {
+        return None;
+    }
+    Some(Change::Thread(Thread {
+        rollback_failure: Some(RollbackFailure {
+            request_id: request_id.into(),
+            message: message.into(),
+        }),
+        updated_at: now.into(),
+        ..thread.clone()
+    }))
+}
+
+pub fn rollback_failed(state: &State, effect_id: &str, message: &str, now: &str) -> Decision {
+    let Some(effect) = state.effects.get(effect_id).filter(|effect| {
+        matches!(effect.request, EffectRequest::ProviderThreadRollback { .. })
+            && matches!(effect.status, EffectStatus::Pending | EffectStatus::Running)
+    }) else {
+        return Decision::default();
+    };
+    Decision {
+        changes: failure_metadata(&state.thread, &effect.command_id, message, now)
+            .into_iter()
+            .collect(),
+        effects: vec![Effect {
+            status: EffectStatus::Failed,
+            lease_owner: None,
+            lease_expires_at: None,
+            completed_at: Some(now.into()),
+            updated_at: now.into(),
+            last_error: Some(message.into()),
+            ..effect.clone()
+        }],
+    }
 }
