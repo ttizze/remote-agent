@@ -424,3 +424,6 @@ impl Context {
         Ok(vec![self.artifact(id, Some(id), status, kind, body)])
     }
 }
+
+#[cfg(test)]
+mod tests;
