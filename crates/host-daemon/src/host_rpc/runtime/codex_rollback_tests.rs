@@ -77,17 +77,18 @@ rl.on('line',line=>{
         .unwrap(),
     );
     let agent = Codex::new(Ok(server));
-    let mut result = agent
-        .rollback("source", Some("kept"), Some("removed"), "/fixture", None)
-        .await;
+    // Production Host starts this pump before any request: Codex waits for
+    // notifications preceding a response to be fully processed.
+    let _events = agent.event_stream().unwrap();
+    let mut result = tokio::time::timeout(std::time::Duration::from_secs(5), agent
+        .rollback("source", Some("kept"), Some("removed"), "/fixture", None)).await.expect("native rollback response and event pump settle");
     if mode == "lost_ack" {
         assert!(
             result.is_err(),
             "lost acknowledgement cannot certify success"
         );
-        result = agent
-            .rollback("source", Some("kept"), Some("removed"), "/fixture", None)
-            .await;
+        result = tokio::time::timeout(std::time::Duration::from_secs(5), agent
+            .rollback("source", Some("kept"), Some("removed"), "/fixture", None)).await.expect("idempotent native rollback retry settles");
     }
     assert_eq!(
         result.is_ok(),
