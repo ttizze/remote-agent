@@ -11,6 +11,21 @@ use serde_json::json;
 mod observations;
 mod requests;
 
+/// Codex/Claude declare globally strong item identities. ACP's weak item keys
+/// (including DSH's constant plan ID) only identify an item within the Host's
+/// native turn UUID. Keep the raw key in NativeRef for provider operations.
+fn item_identity(prefix: &str, provider: ProviderKind, turn: &str, key: &str) -> String {
+    let key = if provider == ProviderKind::DeepSeek {
+        std::borrow::Cow::Owned(json!([turn, key]).to_string())
+    } else {
+        std::borrow::Cow::Borrowed(key)
+    };
+    model::derived_id(
+        prefix,
+        &["provider", provider.driver(), "native-item", key.as_ref()],
+    )
+}
+
 pub(super) fn text_item_id(
     provider: ProviderKind,
     turn: &str,
@@ -23,10 +38,7 @@ pub(super) fn text_item_id(
         TextField::ReasoningContent { index } => json!([turn, item, "content", index]).to_string(),
         _ => item.into(),
     };
-    model::derived_id(
-        "turn-item",
-        &["provider", provider.driver(), "native-item", &key],
-    )
+    item_identity("turn-item", provider, turn, &key)
 }
 
 pub(super) fn text_part(
@@ -99,10 +111,7 @@ impl Context {
                 | model::TurnItemStatus::Running
                 | model::TurnItemStatus::Waiting
         );
-        let node_id = model::derived_id(
-            "node",
-            &["provider", self.provider.driver(), "native-item", key],
-        );
+        let node_id = item_identity("node", self.provider, &self.native_turn_id, key);
         let native = native_id.map(|native_id| model::ProviderRef {
             driver: self.provider.driver().into(),
             native_id: Some(native_id.into()),
@@ -142,10 +151,7 @@ impl Context {
                 completed_at: terminal.then(|| self.now.clone()),
             },
             item: model::TurnItem {
-                id: model::derived_id(
-                    "turn-item",
-                    &["provider", self.provider.driver(), "native-item", key],
-                ),
+                id: item_identity("turn-item", self.provider, &self.native_turn_id, key),
                 thread_id: self.thread_id.clone(),
                 run_id: self.run_id.clone(),
                 node_id: Some(node_id),
@@ -177,10 +183,7 @@ impl Context {
             ItemBody::AssistantText { text, phase } => (
                 Kind::AssistantMessage,
                 Body::AssistantMessage {
-                    message_id: model::derived_id(
-                        "message",
-                        &["provider", self.provider.driver(), "native-item", id],
-                    ),
+                    message_id: item_identity("message", self.provider, &self.native_turn_id, id),
                     text: text.clone(),
                     phase: match phase {
                         agent_protocol::items::AssistantPhase::Commentary => {
@@ -263,10 +266,7 @@ impl Context {
                 )
             }
             ItemBody::Plan { text } => {
-                let plan_id = model::derived_id(
-                    "plan",
-                    &["provider", self.provider.driver(), "native-item", id],
-                );
+                let plan_id = item_identity("plan", self.provider, &self.native_turn_id, id);
                 let mut artifact = self.artifact(
                     id,
                     Some(id),
