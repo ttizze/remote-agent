@@ -37,13 +37,13 @@ async fn queued_input_reads_only_metadata_and_keeps_owned_execution() {
     {
         let mut record = record.lock().await;
         record.resumable = true;
-        record.running = Some(Running {
-            turn_id: "owned-turn".into(),
+        record.running = Some(Running::new(
+            "owned-turn".into(),
             input,
             interrupt,
-            effort: None,
-            work: watch::channel(Work::default()).1,
-        });
+            None,
+            watch::channel(Work::default()).1,
+        ));
     }
     let state = Agent::state(&claude, &session.id).await.unwrap();
     assert!(!state.needs_reload);

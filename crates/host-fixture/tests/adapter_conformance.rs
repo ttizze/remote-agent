@@ -1805,3 +1805,89 @@ async fn claude_native_baseline_rewind_preserves_only_the_inherited_prefix(#[cas
     local.close().await;
     host.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_native_fork_retires_settled_background_queries_without_rewriting_the_answer() {
+    // Pinned ClaudeAdapterV2.forkThread closes a settled live query before
+    // native copy. A completed answer remains completed; its background work ends.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    std::fs::write(root.join("background-shell-paused"), []).unwrap();
+    let host = start(&root, Arc::new(Memory::default())).await;
+    let local = host.local().await.unwrap();
+    let source = create(&local.peer, ProviderKind::Claude, &root).await;
+    let (_, mut events) = open(&local.peer, &source).await;
+    let input = submission(&source, "background-shell");
+    submit(&local.peer, &input).await.unwrap();
+    let first = events.input_turn(&input.client_user_message_id, true).await;
+    assert_eq!(first.status, TurnStatus::Completed);
+    assert_eq!(claude_answer(&first), "あとで結果を報告します");
+    assert!(
+        events
+            .projection
+            .snapshot
+            .projection
+            .provider_threads
+            .iter()
+            .any(|thread| !thread.pending_background_tasks.is_empty()),
+        "the source really has pending native background work"
+    );
+    let source_native = conversations::native_source(&root, &source, ProviderKind::Claude);
+    let target = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+    let returned: SessionRef = local
+        .peer
+        .request(&Call::ForkConversation(
+            agent_protocol::conversation::records::Fork {
+                source: source.clone(),
+                target: target.clone(),
+                through: agent_protocol::conversation::records::ForkPoint::Run {
+                    run_id: first.id.to_string(),
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(returned, target);
+    let (_, mut child) = open(&local.peer, &target).await;
+    let input = submission(&target, "after-background-fork");
+    submit(&local.peer, &input).await.unwrap();
+    let answer = child.input_turn(&input.client_user_message_id, true).await;
+    let snapshot = &child.projection.snapshot.projection;
+    assert!(
+        snapshot.provider_threads.iter().any(|thread| thread
+            .native_metadata
+            .as_ref()
+            .is_some_and(|meta| meta.fork_head_message_id.is_some())),
+        "the actual SDK fork succeeds after query closure; portable replay cannot stand in for this boundary"
+    );
+    assert_eq!(claude_answer(&answer), "reply 2: after-background-fork");
+    assert_ne!(
+        conversations::native_source(&root, &target, ProviderKind::Claude),
+        source_native
+    );
+    let (after, fresh) = open(&local.peer, &source).await;
+    assert_eq!(
+        after
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .find(|turn| turn.id == first.id)
+            .unwrap()
+            .status,
+        TurnStatus::Completed,
+        "closing background work must preserve the settled answer"
+    );
+    assert!(
+        fresh
+            .projection
+            .snapshot
+            .projection
+            .provider_threads
+            .iter()
+            .all(|thread| thread.pending_background_tasks.is_empty()),
+        "the original query and its native background work are closed"
+    );
+    local.close().await;
+    host.close().await.unwrap();
+}

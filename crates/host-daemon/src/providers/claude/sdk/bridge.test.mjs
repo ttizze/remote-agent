@@ -28,10 +28,11 @@ test("native fork captures the remapped SDK head even when the project moved", a
     const source = await getSessionMessages(session);
     const boundary = source.findIndex((message) => message.uuid === cursor);
     assert.ok(boundary >= 0);
+    for (const [upToMessageId, expected] of [[cursor, source.slice(0, boundary + 1)], [undefined, source]]) {
     for (const workingDirectory of [cwd, join(home, "moved-project")]) {
       const events = [];
       async function* input() {
-        yield JSON.stringify({ type: "fork", sessionId: session, cwd: workingDirectory, upToMessageId: cursor });
+        yield JSON.stringify({ type: "fork", sessionId: session, cwd: workingDirectory, upToMessageId });
       }
       await runBridge(input(), (event) => events.push(event), () => { throw new Error("fork must not run inference"); });
       assert.equal(events.length, 1);
@@ -39,11 +40,12 @@ test("native fork captures the remapped SDK head even when the project moved", a
       assert.equal(forked.type, "forked");
       assert.notEqual(forked.sessionId, session);
       const copied = await getSessionMessages(forked.sessionId);
-      assert.equal(copied.length, boundary + 1, "copy ends at the selected assistant");
-      assert.deepEqual(copied.map((message) => message.message), source.slice(0, boundary + 1).map((message) => message.message));
+      assert.equal(copied.length, expected.length, "copy ends at the selected assistant or includes the whole native thread");
+      assert.deepEqual(copied.map((message) => message.message), expected.map((message) => message.message));
       assert.notEqual(copied.at(-1).uuid, cursor, "SDK allocates new transcript UUIDs");
       assert.equal(forked.headMessageId, copied.at(-1).uuid, "save the real inherited head before the first query");
       assert.equal(await readFile(original, "utf8"), bytes, "source history remains intact");
+    }
     }
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;

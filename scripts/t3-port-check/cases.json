@@ -19,7 +19,8 @@
       "providers::claude::execution_tests::queued_input_reads_only_metadata_and_keeps_owned_execution",
       "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_1",
       "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_2",
-      "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_3"
+      "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_3",
+      "providers::claude::execution_tests::native_fork_without_a_cursor_reaches_full_copy_authentication"
     ]
   },
   "guards": {
@@ -2675,7 +2676,8 @@
     "host-fixture::adapter_conformance": [
       "claude_native_rewind_resumes_the_kept_assistant_through_rpc_and_the_real_sdk",
       "claude_native_baseline_rewind_preserves_only_the_inherited_prefix::case_1_empty",
-      "claude_native_baseline_rewind_preserves_only_the_inherited_prefix::case_2_fork"
+      "claude_native_baseline_rewind_preserves_only_the_inherited_prefix::case_2_fork",
+      "claude_native_fork_retires_settled_background_queries_without_rewriting_the_answer"
     ]
   }
 }

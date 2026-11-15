@@ -730,7 +730,7 @@ impl Agent for NativeAgent {
     async fn fork(
         &self,
         id: &str,
-        turn: &str,
+        turn: crate::providers::NativeForkPoint<'_>,
         _: Option<serde_json::Value>,
     ) -> Result<crate::providers::ForkResult, Failure> {
         let source = self.open(id, usize::MAX, true).await?;
@@ -738,13 +738,16 @@ impl Agent for NativeAgent {
             .create(source.thread.cwd.as_deref().unwrap(), None, None)
             .await?;
         let mut turns = source.thread.turns.unwrap();
-        turns.truncate(
-            turns
-                .iter()
-                .rposition(|candidate| candidate.id.as_str() == turn)
-                .unwrap()
-                + 1,
-        );
+        let point: Option<&str> = turn.into();
+        if let Some(turn) = point {
+            turns.truncate(
+                turns
+                    .iter()
+                    .rposition(|candidate| candidate.id.as_str() == turn)
+                    .unwrap()
+                    + 1,
+            );
+        }
         response.thread.turns = Some(turns);
         self.records.lock().unwrap().insert(
             response.thread.id.as_ref().unwrap().id.clone(),

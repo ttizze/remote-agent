@@ -27,15 +27,15 @@ async fn native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query() {
     let record = claude.record(&session.id).await.unwrap();
     let (input, _receiver) = mpsc::channel(1);
     let (_interrupt, interrupt) = watch::channel(None);
-    record.lock().await.running = Some(Running {
-        turn_id: "native-user-control".into(),
+    record.lock().await.running = Some(Running::new(
+        "native-user-control".into(),
         input,
         interrupt,
-        effort: None,
-        work: watch::channel(Work::default()).1,
-    });
+        None,
+        watch::channel(Work::default()).1,
+    ));
     for cursor in ["earlier-assistant-cursor", "current-assistant-cursor"] {
-        let error = Agent::fork(&claude, &session.id, cursor, None)
+        let error = Agent::fork(&claude, &session.id, cursor.into(), None)
             .await
             .unwrap_err();
         assert_eq!(error.code, "fork_failed");
@@ -46,9 +46,14 @@ async fn native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query() {
         );
     }
     record.lock().await.running = None;
-    let error = Agent::fork(&claude, &session.id, "earlier-assistant-cursor", None)
-        .await
-        .unwrap_err();
+    let error = Agent::fork(
+        &claude,
+        &session.id,
+        "earlier-assistant-cursor".into(),
+        None,
+    )
+    .await
+    .unwrap_err();
     assert!(
         error.message.contains("アカウント"),
         "the real SDK cursor reaches authentication without reading an obsolete user-to-assistant map: {}",
@@ -89,13 +94,13 @@ async fn native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_base
     let (_receiver, _watch) = if mode == "busy" {
         let (input, receiver) = mpsc::channel(1);
         let (watch, interrupt) = watch::channel(None);
-        record.lock().await.running = Some(Running {
-            turn_id: "raw-control".into(),
+        record.lock().await.running = Some(Running::new(
+            "raw-control".into(),
             input,
             interrupt,
-            effort: None,
-            work: watch::channel(Work::default()).1,
-        });
+            None,
+            watch::channel(Work::default()).1,
+        ));
         (Some(receiver), Some(watch))
     } else {
         (None, None)
@@ -274,17 +279,17 @@ async fn native_background_query_accepts_input_only_in_its_current_workspace_and
             }
         }
     });
-    record.lock().await.running = Some(Running {
-        turn_id: "old-control".into(),
+    record.lock().await.running = Some(Running::new(
+        "old-control".into(),
         input,
-        interrupt: watch::channel(None).1,
-        effort: None,
-        work: watch::channel(Work {
+        watch::channel(None).1,
+        None,
+        watch::channel(Work {
             settled: true,
             background: true,
         })
         .1,
-    });
+    ));
     let params = op::Submission {
         thread_id: session,
         client_user_message_id: Uuid::new_v4().to_string().into(),
@@ -325,4 +330,40 @@ async fn native_background_query_accepts_input_only_in_its_current_workspace_and
         assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(record.lock().await.cwd, root.to_str().unwrap());
     }
+}
+
+#[tokio::test]
+async fn native_fork_without_a_cursor_reaches_full_copy_authentication() {
+    // T3's absent selected assistant means SDK whole-copy, independently of
+    // authentication; it must not be confused with an invalid empty cursor.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    std::fs::create_dir_all(root.join("adapter/accounts")).unwrap();
+    std::fs::write(
+        root.join("adapter/accounts/accounts.json"),
+        r#"{"accounts":[],"selectedId":null}"#,
+    )
+    .unwrap();
+    let claude = Claude::load(
+        root.join("unused"),
+        root.join("adapter"),
+        Some(root.join("native")),
+    )
+    .await
+    .unwrap();
+    let session = claude
+        .create(root.to_str().unwrap(), "default")
+        .await
+        .unwrap()
+        .thread
+        .id
+        .unwrap();
+    let error = Agent::fork(&claude, &session.id, Default::default(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        error.message.contains("アカウント"),
+        "no selected cursor reaches SDK authentication for whole-copy: {}",
+        error.message
+    );
 }
