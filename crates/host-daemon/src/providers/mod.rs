@@ -173,7 +173,8 @@ pub(crate) struct ForkResult {
     pub head_id: Option<String>,
 }
 
-pub(crate) type NativeForkPoint<'a> = &'a str;
+/// A selected native cursor, or the provider's complete current native head.
+pub(crate) type NativeForkPoint<'a> = Option<&'a str>;
 impl From<ThreadResponse> for ForkResult {
     fn from(response: ThreadResponse) -> Self {
         Self {

@@ -134,38 +134,15 @@ async fn load_native_start(
     let browser = service.browser_config(&target.to_string())?;
     let mut fork_failure = None;
     let forked = if let Some((origin, point)) = fork {
-        if let Some((source, turn)) = service
-            .inner
-            .conversation
-            .storage
-            .native_fork_source(origin, point)
-            .map_err(storage_failure)?
-        {
-            let result = match (source.native_id.as_deref(), turn.native_id.as_deref()) {
-                (Some(source_id), Some(turn_id))
-                    if source.driver == provider.driver()
-                        && source.strength == model::NativeRefStrength::Strong
-                        && turn.driver == provider.driver() =>
-                {
-                    agent.fork(source_id, turn_id, browser.clone()).await
-                }
-                _ => Err(Failure::new(
-                    "fork_context_unavailable",
-                    "native fork references are unavailable",
-                )),
-            };
-            match result {
-                Ok(response) => Some(response),
-                Err(error) if will_retry || point.is_none() => {
-                    return Err(Failure::before_submission(error));
-                }
-                Err(error) => {
-                    fork_failure = Some(error.message);
-                    None
-                }
+        match fork_native(service, agent, provider, origin, point, browser.clone()).await {
+            Ok(result) => result,
+            Err(error) if will_retry || point.is_none() => {
+                return Err(Failure::before_submission(error));
             }
-        } else {
-            None
+            Err(error) => {
+                fork_failure = Some(error.message);
+                None
+            }
         }
     } else {
         None
@@ -194,6 +171,69 @@ async fn load_native_start(
         fork_failure,
         fork_head,
     })
+}
+
+/// A fork closes/copies its source query. Use the source's native I/O lease,
+/// then revalidate the canonical boundary after any earlier native write.
+async fn fork_native(
+    service: &HostRpcService,
+    agent: &dyn crate::providers::Agent,
+    provider: ProviderKind,
+    origin: &model::ProviderThreadFork,
+    point: Option<&model::ContextSourcePoint>,
+    browser: Option<serde_json::Value>,
+) -> Result<Option<crate::providers::ForkResult>, Failure> {
+    let runtime = &service.inner.conversation;
+    let Some((source, turn)) = runtime
+        .storage
+        .native_fork_source(origin, point)
+        .map_err(storage_failure)?
+    else {
+        return Ok(None);
+    };
+    let invalid = || {
+        Failure::new(
+            "fork_context_unavailable",
+            "native fork references are unavailable",
+        )
+    };
+    let source_id = source
+        .native_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(invalid)?;
+    let turn_id = turn
+        .native_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(invalid)?;
+    if source.driver != provider.driver()
+        || source.strength != model::NativeRefStrength::Strong
+        || turn.driver != provider.driver()
+    {
+        return Err(invalid());
+    }
+    let native = SessionRef::new(provider, source_id.to_owned()).map_err(|_| invalid())?;
+    let owner = runtime
+        .storage
+        .native_owner(&native)
+        .map_err(storage_failure)?
+        .ok_or_else(invalid)?;
+    let _retire = scopeguard::guard(native.clone(), |native| runtime.retire_source(&native));
+    let resource = runtime.register_native(&owner, &native);
+    let _io = resource.io.lock().await;
+    if runtime
+        .storage
+        .native_fork_source(origin, point)
+        .map_err(storage_failure)?
+        != Some((source.clone(), turn.clone()))
+    {
+        return Ok(None);
+    }
+    agent
+        .fork(source_id, Some(turn_id), browser)
+        .await
+        .map(Some)
 }
 
 impl Runtime {

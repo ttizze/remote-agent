@@ -1213,13 +1213,14 @@ impl Agent for Codex {
     async fn fork(
         &self,
         id: &str,
-        last_turn_id: &str,
+        last_turn_id: crate::providers::NativeForkPoint<'_>,
         browser_config: Option<Value>,
     ) -> Result<crate::providers::ForkResult, Failure> {
-        let params = thread_config(
-            serde_json::json!({"threadId":id,"lastTurnId":last_turn_id,"excludeTurns":false}),
-            browser_config,
-        );
+        let mut params = serde_json::json!({"threadId":id,"excludeTurns":false});
+        if let Some(turn) = last_turn_id {
+            params["lastTurnId"] = turn.into();
+        }
+        let params = thread_config(params, browser_config);
         let value = fork::request(params, |method, params| async move {
             self.request(method, &params).await
         })
@@ -1620,7 +1621,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
                 let response = agent
                     .fork(
                         params["threadId"].as_str().unwrap(),
-                        params["lastTurnId"].as_str().unwrap(),
+                        params["lastTurnId"].as_str(),
                         None,
                     )
                     .await

@@ -1366,7 +1366,7 @@ impl Agent for DeepSeek {
     async fn fork(
         &self,
         _: &str,
-        _: &str,
+        _: crate::providers::NativeForkPoint<'_>,
         _: Option<Value>,
     ) -> Result<crate::providers::ForkResult, Failure> {
         Err(unsupported())

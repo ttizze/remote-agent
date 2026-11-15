@@ -371,15 +371,17 @@ impl Process {
         homes: Option<(&Path, &Path)>,
         cwd: &Path,
         session: &str,
-        up_to: &str,
+        up_to: Option<&str>,
     ) -> Result<(String, Option<String>), String> {
         let mut process = Self::spawn(homes, cwd)?;
         let forked = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut request = json!({"type":"fork","sessionId":session});
+            if let Some(cursor) = up_to {
+                request["upToMessageId"] = cursor.into();
+            }
             process
                 .input
-                .write_line(
-                    &json!({"type":"fork","sessionId":session,"upToMessageId":up_to}).to_string(),
-                )
+                .write_line(&request.to_string())
                 .await
                 .map_err(|error| error.to_string())?;
             match process

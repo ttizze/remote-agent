@@ -153,6 +153,8 @@ struct Running {
     interrupt: watch::Receiver<Option<(String, Result<(), String>)>>,
     effort: Option<String>,
     work: watch::Receiver<Work>,
+    retire: CancellationToken,
+    retired: CancellationToken,
 }
 
 impl Running {
@@ -169,7 +171,13 @@ impl Running {
             interrupt,
             effort,
             work,
+            retire: CancellationToken::new(),
+            retired: CancellationToken::new(),
         }
+    }
+
+    fn is_active(&self) -> bool {
+        !self.work.borrow().settled
     }
 }
 
@@ -206,6 +214,31 @@ impl Drop for Claude {
 }
 
 impl Claude {
+    /// Native copy and rewind close the live query, including settled work.
+    /// The worker confirms process closure before this resource is returned.
+    async fn close_query(
+        record: &AsyncMutex<Record>,
+    ) -> Result<tokio::sync::MutexGuard<'_, Record>, String> {
+        let mut state = record.lock().await;
+        if let Some(running) = &state.running {
+            if running.is_active() {
+                return Err("Claude is still running".into());
+            }
+            let retired = running.retired.clone();
+            running.retire.cancel();
+            drop(state);
+            retired.cancelled().await;
+            state = record.lock().await;
+            if state.running.is_some() {
+                return Err("Claude query ownership changed during closure".into());
+            }
+        }
+        if let Some(idle) = state.idle.take() {
+            idle.close().await?;
+        }
+        Ok(state)
+    }
+
     pub async fn load(
         program: PathBuf,
         directory: PathBuf,
@@ -1240,6 +1273,15 @@ impl Worker {
                     .await;
             });
         });
+        let (retire, retired) = {
+            let record = self.record.lock().await;
+            let running = record
+                .running
+                .as_ref()
+                .expect("worker owns a running query");
+            (running.retire.clone(), running.retired.clone())
+        };
+        let _retired = scopeguard::guard(retired, |retired| retired.cancel());
         let mut response = ResponseState::default();
         let outcome = async {
             let turn=self.current_turn().cloned().ok_or("Claude execution state is unavailable")?;
@@ -1247,6 +1289,7 @@ impl Worker {
             loop {
                 let event = tokio::select! {
                     biased;
+                    _ = retire.cancelled() => return Ok(()),
                     _ = self.stop.cancelled() => {
                         response.interrupt("shutdown");
                         process.write(&SdkInput::Interrupt { request_id: "shutdown".into() }).await?;
@@ -1342,8 +1385,13 @@ impl Worker {
         drop(input);
         let _ = emit(&self.events, AgentChange::SourceClosed(self.instance)).await;
         scopeguard::ScopeGuard::into_inner(_requests);
-        self.finish_run(process, outcome, response.interrupted())
-            .await;
+        self.finish_run(
+            process,
+            outcome,
+            response.interrupted() || retire.is_cancelled(),
+            retire,
+        )
+        .await;
     }
 
     async fn fail_turn(&mut self, message: &Value) -> Result<(), String> {
@@ -1405,10 +1453,15 @@ impl Worker {
         process: Process,
         outcome: Result<(), String>,
         interrupted: bool,
+        retire: CancellationToken,
     ) {
         let mut retained = None;
         // An interrupt leaves background work running; stop it with its CLI.
-        let outcome = if outcome.is_ok() && !self.stop.is_cancelled() && !interrupted {
+        let outcome = if outcome.is_ok()
+            && !self.stop.is_cancelled()
+            && !retire.is_cancelled()
+            && !interrupted
+        {
             retained = Some(process);
             outcome
         } else {
@@ -1524,6 +1577,7 @@ impl Worker {
             tokio::select! {
                 _ = released.cancelled() => return,
                 _ = self.stop.cancelled() => {},
+                _ = retire.cancelled() => {},
                 _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {},
             }
             let idle = {
@@ -2484,10 +2538,7 @@ impl Agent for Claude {
             Some((
                 record.cwd.clone(),
                 record.model.clone(),
-                record
-                    .running
-                    .as_ref()
-                    .is_some_and(|running| !running.work.borrow().settled),
+                record.running.as_ref().is_some_and(Running::is_active),
                 record.running.is_some() || record.idle.is_some(),
             ))
         } else {
@@ -2618,14 +2669,8 @@ impl Agent for Claude {
         let record = self.records.lock().await.get(id).cloned();
         let mut model = "default".to_owned();
         if let Some(record) = record {
-            let mut record = record.lock().await;
-            if record.running.is_some() {
-                return Err(failure("Claude is still running".into()));
-            }
+            let record = Self::close_query(&record).await.map_err(failure)?;
             model = record.model.clone();
-            if let Some(idle) = record.idle.take() {
-                idle.close().await.map_err(failure)?;
-            }
         }
         if let Some(cursor) = retained {
             let synthetic = cursor.starts_with("turn:");
@@ -2656,27 +2701,19 @@ impl Agent for Claude {
     async fn fork(
         &self,
         id: &str,
-        turn: &str,
+        turn: crate::providers::NativeForkPoint<'_>,
         _browser: Option<Value>,
     ) -> Result<crate::providers::ForkResult, Failure> {
         let failure = |error: String| Failure::new("fork_failed", error);
         Uuid::parse_str(id).map_err(|_| failure("invalid Claude ID".into()))?;
-        if turn.is_empty() || turn.starts_with("turn:") {
+        if turn.is_some_and(|turn| turn.is_empty() || turn.starts_with("turn:")) {
             return Err(failure("Claude assistant cursor is unavailable".into()));
         }
         let record = self
             .record(id)
             .await
             .map_err(|error| failure(format!("{error:#}")))?;
-        let mut record = record.lock().await;
-        if record.running.is_some() {
-            return Err(failure(
-                "Claude がこの回答を生成中です。完了してから分岐してください。".into(),
-            ));
-        }
-        if let Some(idle) = record.idle.take() {
-            idle.close().await.map_err(failure)?;
-        }
+        let record = Self::close_query(&record).await.map_err(failure)?;
         let auth_home = self
             .accounts
             .lock()
@@ -2781,13 +2818,13 @@ pub(crate) mod execution_tests {
             .unwrap()
             .lock()
             .await
-            .running = Some(Running {
-            turn_id: "turn".into(),
+            .running = Some(Running::new(
+            "turn".into(),
             input,
             interrupt,
-            effort: None,
-            work: watch::channel(Work::default()).1,
-        });
+            None,
+            watch::channel(Work::default()).1,
+        ));
         let recent =
             crate::providers::Discovery::list(&claude, "", None, SessionListScope::Roots(&[]), 30)
                 .await
@@ -2875,13 +2912,13 @@ pub(crate) mod execution_tests {
         for enqueued in [false, true] {
             let (input, mut receiver) = mpsc::channel(1);
             let (_interrupt, interrupt) = watch::channel(None);
-            record.lock().await.running = Some(Running {
-                turn_id: "turn".into(),
+            record.lock().await.running = Some(Running::new(
+                "turn".into(),
                 input,
                 interrupt,
-                effort: None,
-                work: watch::channel(Work::default()).1,
-            });
+                None,
+                watch::channel(Work::default()).1,
+            ));
             if !enqueued {
                 receiver.close();
             }
@@ -2966,17 +3003,17 @@ pub(crate) mod execution_tests {
         ] {
             let (input, mut receiver) = mpsc::channel::<Command>(1);
             let (_interrupt, interrupt) = watch::channel(None);
-            record.lock().await.running = Some(Running {
-                turn_id: "turn".into(),
+            record.lock().await.running = Some(Running::new(
+                "turn".into(),
                 input,
                 interrupt,
-                effort: Some("high".into()),
-                work: watch::channel(Work {
+                Some("high".into()),
+                watch::channel(Work {
                     background,
                     settled: false,
                 })
                 .1,
-            });
+            ));
             // A forwarded input reaches the worker queue, which drops it unwritten.
             let worker = tokio::spawn(async move { receiver.recv().await.is_some() });
             let error = claude
@@ -3117,13 +3154,13 @@ pub(crate) mod execution_tests {
                 model: "default".into(),
                 session_id: uuid,
                 resumable: false,
-                running: Some(Running {
-                    turn_id: "turn".into(),
-                    input: input.clone(),
-                    interrupt: interrupted,
-                    effort: None,
-                    work: watch::channel(Work::default()).1,
-                }),
+                running: Some(Running::new(
+                    "turn".into(),
+                    input.clone(),
+                    interrupted,
+                    None,
+                    watch::channel(Work::default()).1,
+                )),
                 idle: None,
             })),
             events,
