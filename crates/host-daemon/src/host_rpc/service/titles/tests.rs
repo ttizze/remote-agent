@@ -70,7 +70,7 @@ async fn sdk_reviews_stay_out_of_titles_and_search_after_host_restart() {
     ] {
         let id = session(id).id;
         let rows = [
-            serde_json::json!({"type":"user","sessionId":id,"cwd":cwd,"entrypoint":entrypoint,"promptSource":source,"message":{"content":title}}),
+            serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id,"cwd":cwd,"entrypoint":entrypoint,"promptSource":source,"message":{"content":title}}),
             serde_json::json!({"type":"ai-title","sessionId":id,"aiTitle":title}),
         ].map(|row| row.to_string() + "\n").concat();
         std::fs::write(transcripts.join(format!("{id}.jsonl")), rows).unwrap();
@@ -114,6 +114,14 @@ async fn sdk_reviews_stay_out_of_titles_and_search_after_host_restart() {
             own(&service, &id, &response).await;
             side_chat = Some(id);
         }
+        // Project import owns native discovery. Ordinary search reads only the
+        // resulting canonical conversations, also after the service reopens.
+        crate::host_rpc::runtime::Runtime::import_project_threads(
+            &service,
+            &[cwd.to_string_lossy().into_owned()],
+        )
+        .await
+        .unwrap();
         for search in [
             "",
             "NSH",
@@ -159,7 +167,7 @@ async fn prefetched_project_titles_continue_past_the_first_native_page() {
     for _ in 0..102 {
         let id = uuid::Uuid::new_v4();
         expected.insert(id.to_string());
-        let user = serde_json::json!({"type":"user","sessionId":id,"cwd":cwd,"message":{"content":"hello"}});
+        let user = serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id,"cwd":cwd,"message":{"content":"hello"}});
         std::fs::write(transcripts.join(format!("{id}.jsonl")), format!("{user}\n")).unwrap();
     }
     let agent = crate::providers::Claude::load(
@@ -172,6 +180,12 @@ async fn prefetched_project_titles_continue_past_the_first_native_page() {
     let projects = ProjectStore::fixture(root.path().join("bex-worktrees.json"));
     projects.register(&cwd).await.unwrap();
     let service = HostRpcService::new([agent.into()], projects.path());
+    crate::host_rpc::runtime::Runtime::import_project_threads(
+        &service,
+        &[cwd.to_string_lossy().into_owned()],
+    )
+    .await
+    .unwrap();
     let page = service
         .search_list(&agent_protocol::conversation::records::SearchList {
             term: String::new(),
@@ -240,7 +254,7 @@ async fn native_project_metadata_does_not_change_registered_membership() {
                 "## Where you are\n\nProject: \"Native\" (id: `chan_native`)\n"
             ]
         }});
-        let user = serde_json::json!({"type":"user","sessionId":id,"cwd":cwd,"message":{"content":"hello"}});
+        let user = serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id,"cwd":cwd,"message":{"content":"hello"}});
         std::fs::write(
             transcripts.join(format!("{id}.jsonl")),
             format!("{metadata}\n{user}\n"),
@@ -258,6 +272,25 @@ async fn native_project_metadata_does_not_change_registered_membership() {
     .unwrap();
     let service = HostRpcService::new([claude.into()], projects.path());
     let session = service.open_session();
+    // Both conversations are explicitly opened, including the projectless
+    // one. Their saved membership must not follow native project metadata.
+    for id in &expected {
+        service
+            .dispatch(
+                session.id(),
+                &Call::SubscribeConversation(agent_protocol::conversation::records::Subscribe {
+                    session: agent_protocol::session::SessionRef::new(
+                        ProviderKind::Claude,
+                        id.clone(),
+                    )
+                    .unwrap(),
+                    subscription: uuid::Uuid::new_v4(),
+                    after_sequence: None,
+                }),
+            )
+            .await
+            .unwrap();
+    }
     for repaired in [false, true] {
         if repaired {
             std::fs::write(native.join(".claude.json"), "{}").unwrap();
