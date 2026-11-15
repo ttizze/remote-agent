@@ -2539,7 +2539,7 @@ impl Agent for Claude {
             .ok_or_else(|| failure("Claude アカウントを選択してください。".into()))?;
         let (forked, head_id) = Process::fork(
             process::homes(&self.native_home, self.native_inherited, &auth_home),
-            Path::new(&record.cwd),
+            &self.directory,
             id,
             turn,
         )

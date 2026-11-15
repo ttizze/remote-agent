@@ -1,4 +1,4 @@
-import { forkSession, query } from "@anthropic-ai/claude-agent-sdk";
+import { forkSession, getSessionMessages, query } from "@anthropic-ai/claude-agent-sdk";
 import { spawnClaudeCodeProcess } from "./session-state.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -73,10 +73,16 @@ export async function runBridge(lines: AsyncIterable<string>, emit: (event: Reco
   const iterator = lines[Symbol.asyncIterator]();
   const first = await iterator.next();
   if (first.done) return;
-  const config = JSON.parse(first.value) as Initialize | { type: "fork"; sessionId: string; cwd: string; upToMessageId?: string };
+  const config = JSON.parse(first.value) as Initialize | { type: "fork"; sessionId: string; upToMessageId?: string };
   if (config.type === "fork") {
     // Forking copies the native transcript; it starts no model request.
-    const { sessionId, headMessageId } = await fork(config.sessionId, { dir: config.cwd, upToMessageId: config.upToMessageId });
+    // A moved project retains its transcript under the old cwd. Find by ID.
+    const { sessionId } = await fork(config.sessionId, { upToMessageId: config.upToMessageId });
+    // The SDK remaps copied UUIDs. Like T3's QueryRunner, capture this new head
+    // before the first query; an unreadable history leaves it unknown.
+    let headMessageId: string | undefined;
+    try { headMessageId = (await getSessionMessages(sessionId)).at(-1)?.uuid; }
+    catch { /* The fork succeeded; no resume cursor is known. */ }
     emit({ type: "forked", sessionId, ...(headMessageId === undefined ? {} : { headMessageId }) });
     return;
   }
