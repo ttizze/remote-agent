@@ -4557,3 +4557,83 @@ async fn failed_recovery_allocation_keeps_the_existing_native_reference_and_unco
 mod codex_rollback {
     include!("codex_rollback_tests.rs");
 }
+
+#[tokio::test]
+async fn a_native_rollback_refusal_is_public_and_does_not_cut_visible_or_native_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let session = create(&service, directory.path().to_str().unwrap(), Some("kept")).await;
+    settled(&service, &session, 1).await;
+    send(&service, &session, ProviderKind::Codex, "still visible").await;
+    let before = settled(&service, &session, 2).await;
+    let run = before
+        .projection
+        .runs
+        .iter()
+        .max_by_key(|run| run.ordinal)
+        .unwrap();
+    *agent.rollback_error.lock().unwrap() = Some("native rollback was refused".into());
+    let request = Uuid::new_v4();
+    let connection = service.open_session();
+    let ack: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: session.clone(),
+            operation: request,
+            command: Command::Rewind(run.id.clone().into()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        ack.error.is_none(),
+        "the command is accepted before native completion"
+    );
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let current = snapshot(&service, &session);
+            let thread = serde_json::to_value(&current.projection.thread).unwrap();
+            if thread["rollbackFailure"]["requestId"] == request.to_string() {
+                break (current, thread);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the final native error must reach the canonical client projection");
+    assert_eq!(
+        failed.1["rollbackFailure"]["message"],
+        "native rollback was refused"
+    );
+    assert_eq!(failed.0.projection.runs, before.projection.runs);
+    assert_eq!(
+        failed.0.projection.visible_turn_items,
+        before.projection.visible_turn_items
+    );
+    assert_eq!(
+        agent
+            .rollback_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        5,
+        "T3 bounds native retries to five attempts"
+    );
+    assert_eq!(agent.inputs.lock().unwrap().len(), 2);
+    let source = service
+        .inner
+        .conversation
+        .storage
+        .active_source(&session)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        agent.records.lock().unwrap()[&source.id]
+            .thread
+            .turns
+            .as_ref()
+            .unwrap()
+            .len(),
+        2
+    );
+}

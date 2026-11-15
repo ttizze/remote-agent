@@ -196,6 +196,8 @@ pub(in crate::host_rpc) struct NativeAgent {
     pub(in crate::host_rpc) fail_inject: AtomicUsize,
     pub(in crate::host_rpc) open_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) state_error: Mutex<Option<Failure>>,
+    pub(in crate::host_rpc) rollback_error: Mutex<Option<String>>,
+    pub(in crate::host_rpc) rollback_calls: AtomicUsize,
     pub(in crate::host_rpc) fail_list: AtomicUsize,
     pub(in crate::host_rpc) fail_accounts: AtomicUsize,
     pub(in crate::host_rpc) accounts_gate: tokio::sync::Semaphore,
@@ -237,6 +239,8 @@ impl NativeAgent {
             fail_inject: AtomicUsize::new(0),
             open_gate: tokio::sync::Semaphore::new(1),
             state_error: Mutex::new(None),
+            rollback_error: Mutex::new(None),
+            rollback_calls: AtomicUsize::new(0),
             fail_list: AtomicUsize::new(0),
             fail_accounts: AtomicUsize::new(0),
             accounts_gate: tokio::sync::Semaphore::new(1),
@@ -273,6 +277,8 @@ impl NativeAgent {
             fail_inject: AtomicUsize::new(0),
             open_gate: tokio::sync::Semaphore::new(1),
             state_error: Mutex::new(None),
+            rollback_error: Mutex::new(None),
+            rollback_calls: AtomicUsize::new(0),
             fail_list: AtomicUsize::new(0),
             fail_accounts: AtomicUsize::new(0),
             accounts_gate: tokio::sync::Semaphore::new(1),
@@ -677,6 +683,10 @@ impl Agent for NativeAgent {
         _cwd: &str,
         _browser: Option<Value>,
     ) -> Result<crate::providers::RollbackResult, Failure> {
+        self.rollback_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self.rollback_error.lock().unwrap().as_ref() {
+            return Err(Failure::new("rollback_refused", error));
+        }
         let mut records = self.records.lock().unwrap();
         let response = records.get_mut(id).ok_or_else(unsupported)?;
         if let Some(first_removed) = first_removed {

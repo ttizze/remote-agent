@@ -522,3 +522,74 @@ async fn conversation_rpc_failures_are_logged_once_without_request_payloads() {
     assert!(text.contains("host_updating"));
     assert!(!text.contains("private request title"));
 }
+
+#[tokio::test]
+async fn canonical_storage_starts_fresh_when_an_unsupported_legacy_database_exists() {
+    use super::*;
+    let directory = tempfile::tempdir().unwrap();
+    let legacy = directory.path().join("bex-conversations.sqlite");
+    {
+        let connection = rusqlite::Connection::open(&legacy).unwrap();
+        connection.execute_batch("CREATE TABLE legacy_marker(value TEXT); INSERT INTO legacy_marker VALUES('legacy'); PRAGMA user_version=4;").unwrap();
+    }
+    let bytes = std::fs::read(&legacy).unwrap();
+    let service = HostRpcService::new([], directory.path().join("projects.json"));
+    service
+        .inner
+        .conversation
+        .storage
+        .check_ready()
+        .expect("fresh canonical storage must not open the old DB");
+    assert!(
+        service
+            .inner
+            .conversation
+            .storage
+            .shell_snapshot()
+            .unwrap()
+            .threads
+            .is_empty()
+    );
+    assert_eq!(
+        std::fs::read(legacy).unwrap(),
+        bytes,
+        "startup does not read, migrate or overwrite the old database"
+    );
+}
+
+#[tokio::test]
+async fn the_client_namespace_belongs_to_the_canonical_database_not_provider_homes() {
+    use super::super::runtime::native_fixture::NativeAgent;
+    use super::*;
+    let directory = tempfile::tempdir().unwrap();
+    let first = NativeAgent::new(
+        ProviderKind::Codex,
+        directory.path().join("first-native-home"),
+    );
+    let project = directory.path().join("host/projects.json");
+    let scope = HostRpcService::new([first.backend()], project.clone())
+        .storage_scope()
+        .unwrap();
+    let second = NativeAgent::new(
+        ProviderKind::Codex,
+        directory.path().join("different-native-home"),
+    );
+    assert_eq!(
+        HostRpcService::new([second.backend()], project.clone())
+            .storage_scope()
+            .unwrap(),
+        scope
+    );
+    assert_eq!(
+        HostRpcService::new([], project).storage_scope().unwrap(),
+        scope,
+        "offline provider access does not discard canonical drafts/cursors"
+    );
+    assert_ne!(
+        HostRpcService::new([], directory.path().join("another-host/projects.json"))
+            .storage_scope()
+            .unwrap(),
+        scope,
+        "another canonical database cannot reuse pending commands or cursors"
+    );
+}

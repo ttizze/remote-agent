@@ -1,17 +1,15 @@
 {
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
+    "agent-protocol": [
+      "orchestration::tests::rewind_publishes_a_correlated_request_and_clears_the_previous_failure",
+      "orchestration::tests::rewind_refuses_missing_or_foreign_native_turn_boundaries",
+      "orchestration::tests::rewind_refuses_native_work_even_without_an_active_application_run"
+    ],
     "host-daemon": [
-      "host_rpc::runtime::t3_contract::codex_rewind_continues_from_the_retained_head_in_the_same_native_thread",
-      "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources",
-      "host_rpc::service::workspace_setup::tests::remote_start_fetches_before_checkout_and_retains_the_completed_card",
-      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_1",
-      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_2",
-      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_3",
-      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_4",
-      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_5",
-      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_6",
-      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_7"
+      "host_rpc::runtime::t3_contract::a_native_rollback_refusal_is_public_and_does_not_cut_visible_or_native_history",
+      "host_rpc::service::tests::canonical_storage_starts_fresh_when_an_unsupported_legacy_database_exists",
+      "host_rpc::service::tests::the_client_namespace_belongs_to_the_canonical_database_not_provider_homes"
     ]
   },
   "guards": {
@@ -1722,6 +1720,14 @@
       "host_rpc::runtime::t3_contract::an_empty_launch_honors_the_selected_existing_worktree_without_sending_input",
       "host_rpc::runtime::t3_contract::an_empty_worktree_launch_prepares_a_checkout_without_creating_a_run",
       "host_rpc::runtime::t3_contract::attached_provider_sessions_publish_the_native_model_switch_capability",
+      "host_rpc::runtime::t3_contract::codex_rewind_continues_from_the_retained_head_in_the_same_native_thread",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_1",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_2",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_3",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_4",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_5",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_6",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_uses_the_same_native_thread_and_a_stable_before_turn_boundary::case_7",
       "host_rpc::runtime::t3_contract::context_history_finds_an_omitted_item_by_its_canonical_id",
       "host_rpc::runtime::t3_contract::context_history_inherits_only_the_selected_fork_prefix_with_source_identity",
       "host_rpc::runtime::t3_contract::context_history_reads_canonical_full_bodies_with_exact_unicode_continuations",
@@ -1819,6 +1825,7 @@
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_4___busy__",
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_5___state_error__",
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_6___injection_unknown__",
+      "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources",
       "host_rpc::runtime::tests::stopping_a_running_turn_saves_live_output_and_ends_its_subscription",
       "host_rpc::runtime::tests::stopping_root_provider_creation_keeps_one_native_session_for_retry",
       "host_rpc::runtime::tests::text_streams_commit_at_paragraphs_and_within_the_streaming_interval",
@@ -1869,6 +1876,7 @@
       "host_rpc::service::workspace_setup::tests::closing_the_running_setup_terminal_reports_failure_without_starting_the_agent",
       "host_rpc::service::workspace_setup::tests::local_base_skips_fetch_and_root_selection_overrides_automatic_worktrees",
       "host_rpc::service::workspace_setup::tests::project_script_failure_has_real_terminal_output_and_retries_in_the_same_checkout",
+      "host_rpc::service::workspace_setup::tests::remote_start_fetches_before_checkout_and_retains_the_completed_card",
       "host_rpc::service::workspace_setup::tests::restart_preserves_interrupted_checkouts_and_waits_for_an_explicit_retry_or_input",
       "host_rpc::service::workspace_setup::tests::restarted_host_restores_the_remaining_setup_card_lifetime",
       "host_rpc::service::workspace_setup::tests::retry_after_restart_restores_a_deleted_checkout_before_the_first_provider_is_created",

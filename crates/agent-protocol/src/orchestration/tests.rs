@@ -1256,6 +1256,104 @@ fn rewind_without_native_rollback_is_rejected_without_mutating_history() {
 }
 
 #[test]
+fn rewind_publishes_a_correlated_request_and_clears_the_previous_failure() {
+    let (state, run, attempt) = running();
+    let mut state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("done", &state),
+            )
+            .unwrap(),
+        ),
+    );
+    let mut thread = serde_json::to_value(&state.thread).unwrap();
+    thread["rollbackFailure"] =
+        serde_json::json!({"requestId":"older-request","message":"older failure"});
+    state.thread = serde_json::from_value(thread).unwrap();
+    let requested = state.apply(&rewind(&state, &run, context("current-request", &state)).unwrap());
+    let thread = serde_json::to_value(&requested.thread).unwrap();
+    assert_eq!(thread["rollbackRequestId"], "current-request");
+    assert_eq!(
+        thread.get("rollbackFailure"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(requested.runs[&run].status, RunStatus::Completed);
+}
+
+#[test]
+fn rewind_refuses_missing_or_foreign_native_turn_boundaries() {
+    let (state, run, attempt) = running();
+    let state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("done", &state),
+            )
+            .unwrap(),
+        ),
+    );
+    for reference in [
+        None,
+        Some(native("", None)),
+        Some(ProviderRef {
+            driver: "claudeAgent".into(),
+            ..native("foreign", None)
+        }),
+    ] {
+        let mut invalid = state.clone();
+        invalid
+            .provider_turns
+            .values_mut()
+            .next()
+            .unwrap()
+            .native_turn_ref = reference;
+        assert!(
+            rewind(&invalid, &run, context("rewind", &invalid)).is_err(),
+            "a missing reference cannot become a successful zero-turn rollback"
+        );
+    }
+    let mut invalid = state.clone();
+    invalid
+        .provider_turns
+        .values_mut()
+        .next()
+        .unwrap()
+        .native_thread_ref = Some(native("another-physical-thread", None));
+    assert!(rewind(&invalid, &run, context("rewind", &invalid)).is_err());
+}
+
+#[test]
+fn rewind_refuses_native_work_even_without_an_active_application_run() {
+    let (state, run, attempt) = running();
+    let mut state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("done", &state),
+            )
+            .unwrap(),
+        ),
+    );
+    state
+        .provider_threads
+        .get_mut("native-thread")
+        .unwrap()
+        .status = ProviderThreadStatus::Active;
+    assert!(state.active_run().is_none());
+    assert!(rewind(&state, &run, context("rewind", &state)).is_err());
+}
+
+#[test]
 fn proposal_body_has_one_owner_and_its_lifecycle_outlives_the_stream() {
     let (state, run, attempt) = running();
     let attempt_row = &state.run_attempts[&attempt];
