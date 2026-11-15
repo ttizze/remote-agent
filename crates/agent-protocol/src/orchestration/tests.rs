@@ -2934,3 +2934,87 @@ fn context_transfer_types_follow_t3_contract_instead_of_id_allocator_tags() {
             .is_err()
     );
 }
+
+#[test]
+fn native_rollback_requires_all_three_conversation_capabilities() {
+    let (state, run, attempt) = running();
+    let state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("completed", &state),
+            )
+            .unwrap(),
+        ),
+    );
+    for (thread, conversation, snapshot) in [
+        (false, false, false),
+        (false, false, true),
+        (false, true, false),
+        (false, true, true),
+        (true, false, false),
+        (true, false, true),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let mut candidate = state.clone();
+        let caps = &mut candidate
+            .provider_sessions
+            .get_mut("session")
+            .unwrap()
+            .capabilities;
+        caps.threads.can_rollback_thread = thread;
+        caps.checkpointing.provider_can_rollback_conversation = conversation;
+        caps.checkpointing.provider_rollback_returns_snapshot = snapshot;
+        let before = candidate.clone();
+        assert_eq!(
+            rewind(&candidate, &run, context("rewind", &candidate)).is_ok(),
+            thread && conversation && snapshot
+        );
+        assert_eq!(candidate, before);
+    }
+}
+
+#[test]
+fn a_missing_retained_attempt_cannot_borrow_a_runless_native_turn() {
+    let (state, first, attempt) = running();
+    let mut state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("completed", &state),
+            )
+            .unwrap(),
+        ),
+    );
+    // An inconsistent persisted boundary is rejected as in T3's explicit
+    // targetAttempt/targetTurn checks, rather than pairing two absent IDs.
+    state.runs.get_mut(&first).unwrap().active_attempt_id = None;
+    state
+        .provider_turns
+        .values_mut()
+        .next()
+        .unwrap()
+        .run_attempt_id = None;
+    let scope = state.checkpoint_scopes.values().next().unwrap().id.clone();
+    let checkpoint = state
+        .checkpoints
+        .values()
+        .find(|checkpoint| checkpoint.app_run_ordinal == Some(1))
+        .unwrap()
+        .id
+        .clone();
+    let native = state.thread.active_provider_thread_id.clone().unwrap();
+    let before = state.clone();
+    assert!(
+        rollback_target(&state, &native, &checkpoint, &scope).is_err(),
+        "runless native work is not evidence for a retained application attempt"
+    );
+    assert_eq!(state, before);
+}

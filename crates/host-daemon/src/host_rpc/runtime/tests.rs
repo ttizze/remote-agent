@@ -1124,10 +1124,36 @@ async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resour
             .unwrap();
         assert_eq!(ack.error, None);
         let continued = completed(&service, &fork, 2).await;
-        assert_eq!(
-            continued.thread.turns.as_ref().unwrap()[0],
-            original.thread.turns.as_ref().unwrap()[0]
+        let can_rewind_prefix = |thread: &agent_protocol::models::Thread| {
+            let rendered = agent_core::presentation::conversation::project_conversation(
+                Default::default(),
+                &Default::default(),
+                &Default::default(),
+                Arc::new(thread.clone()),
+                &None,
+            );
+            rendered.turns[0]
+                .rows
+                .iter()
+                .any(|row| row.edit_turn_id.is_some())
+        };
+        assert!(can_rewind_prefix(&original.thread));
+        assert!(
+            !can_rewind_prefix(&continued.thread),
+            "inherited history is not a local rollback target"
         );
+        let mut inherited =
+            serde_json::to_value(&continued.thread.turns.as_ref().unwrap()[0]).unwrap();
+        let mut original_prefix =
+            serde_json::to_value(&original.thread.turns.as_ref().unwrap()[0]).unwrap();
+        // Only the local action eligibility differs; every transcript field,
+        // provider attribution, fork action and timing fact stays identical.
+        inherited.as_object_mut().unwrap().remove("supportsRewind");
+        original_prefix
+            .as_object_mut()
+            .unwrap()
+            .remove("supportsRewind");
+        assert_eq!(inherited, original_prefix);
         let native = service
             .inner
             .conversation

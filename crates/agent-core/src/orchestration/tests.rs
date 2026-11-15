@@ -845,6 +845,9 @@ fn content_events_update_the_thread_clock_without_rewriting_explicit_metadata_or
 #[case("inherited", false)]
 #[case("imported", false)]
 #[case("stale-checkpoint", false)]
+#[case("retained-native", true)]
+#[case("retained-rebound-physical", false)]
+#[case("retained-latest-foreign", false)]
 #[test]
 fn canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary(
     #[case] condition: &str,
@@ -905,6 +908,45 @@ fn canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary(
         },
         1,
     ));
+    if condition.starts_with("retained-") {
+        let mut next = projection.runs[0].clone();
+        next.id = "next-run".into();
+        next.ordinal = 2;
+        next.active_attempt_id = Some("next-attempt".into());
+        projection.runs[0].active_attempt_id = Some("first-attempt".into());
+        projection.runs.push(next);
+        projection.checkpoints[0].app_run_ordinal = Some(1);
+        let visible = &mut projection.visible_turn_items[0];
+        Arc::make_mut(&mut visible.item).run_id = Some("next-run".into());
+        Arc::make_mut(&mut projection.turn_items[0]).run_id = Some("next-run".into());
+        let native_ref = json!({"driver":"codex","nativeId":"physical","strength":"strong"});
+        for (attempt, run) in [("first-attempt", "run"), ("next-attempt", "next-run")] {
+            projection.attempts.push(serde_json::from_value(json!({"id":attempt,"runId":run,"attemptOrdinal":1,"rootNodeId":"root","providerInstanceId":"codex","providerThreadId":"native","reason":"initial","status":"completed","nativeThreadRef":native_ref})).unwrap());
+        }
+        let turn:ProviderTurn=serde_json::from_value(json!({"id":"first-native-turn","providerThreadId":"native","nodeId":"root","runAttemptId":"first-attempt","nativeThreadRef":native_ref,"nativeTurnRef":{"driver":"codex","nativeId":"first-native-handle","strength":"strong"},"ordinal":1,"status":"completed"})).unwrap();
+        projection.provider_turns.push(turn.clone());
+        if condition == "retained-rebound-physical" {
+            projection.provider_turns[0].native_thread_ref = Some(ProviderRef {
+                driver: "codex".into(),
+                native_id: Some("previous-physical".into()),
+                strength: NativeRefStrength::Strong,
+                fingerprint: None,
+                ordinal: None,
+            });
+        } else if condition == "retained-latest-foreign" {
+            let mut latest = turn;
+            latest.id = "later-native-turn".into();
+            latest.ordinal = 2;
+            latest.native_thread_ref = Some(ProviderRef {
+                driver: "codex".into(),
+                native_id: Some("previous-physical".into()),
+                strength: NativeRefStrength::Strong,
+                fingerprint: None,
+                ordinal: None,
+            });
+            projection.provider_turns.push(latest);
+        }
+    }
     let view = project(
         &snapshot,
         &SessionRef::new(None, "thread".into()).unwrap(),

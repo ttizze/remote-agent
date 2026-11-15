@@ -2,14 +2,14 @@
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
     "agent-core": [
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_1",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_2",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_3",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_4",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_5",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_6",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_7",
-      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_8",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_02",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_03",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_04",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_05",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_06",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_08",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_10",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_11",
       "state::conversations::tests::provider_switch_projects_only_the_active_provider_sessions_capabilities"
     ],
     "agent-core::state": [
@@ -17,6 +17,12 @@
       "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_2",
       "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_3",
       "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_4"
+    ],
+    "agent-protocol": [
+      "orchestration::tests::a_missing_retained_attempt_cannot_borrow_a_runless_native_turn"
+    ],
+    "host-daemon": [
+      "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources"
     ]
   },
   "guards": {
@@ -129,6 +135,9 @@
       "orchestration::tests::a_queued_input_is_displayed_once_in_the_queue_until_it_starts",
       "orchestration::tests::an_older_page_deduplicates_by_both_source_thread_and_item",
       "orchestration::tests::an_uncertain_steer_is_answerable_as_its_own_input_without_replacing_the_running_turn",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_01",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_07",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_09",
       "orchestration::tests::canonical_subagents_keep_public_child_links_models_and_status_without_opening_the_child",
       "orchestration::tests::content_events_update_the_thread_clock_without_rewriting_explicit_metadata_or_foreign_threads",
       "orchestration::tests::delayed_history_preserves_live_bodies_and_does_not_revive_rolled_back_items",
@@ -1456,6 +1465,7 @@
       "orchestration::tests::io_owner_cancels_a_claimed_start_only_after_stop_and_late_native_evidence_cannot_revive_it",
       "orchestration::tests::late_native_acceptance_resolves_the_public_uncertainty_error_with_the_outbox",
       "orchestration::tests::native_evidence_before_an_unknown_ack_releases_the_start_lane",
+      "orchestration::tests::native_rollback_requires_all_three_conversation_capabilities",
       "orchestration::tests::native_status::a_native_status_change_releases_only_the_first_of_multiple_queued_messages",
       "orchestration::tests::native_status::a_native_turn_expires_only_its_pending_requests_while_session_and_other_turn_requests_remain_live",
       "orchestration::tests::native_status::an_attempt_retains_its_bound_native_thread_when_the_selected_reference_changes",
@@ -1823,7 +1833,6 @@
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_4___busy__",
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_5___state_error__",
       "host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history::mode_6___injection_unknown__",
-      "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources",
       "host_rpc::runtime::tests::stopping_a_running_turn_saves_live_output_and_ends_its_subscription",
       "host_rpc::runtime::tests::stopping_root_provider_creation_keeps_one_native_session_for_retry",
       "host_rpc::runtime::tests::text_streams_commit_at_paragraphs_and_within_the_streaming_interval",
@@ -2618,6 +2627,10 @@
       ],
       "reason": "User chose fresh canonical DB and one-time provider import. Provider homes no longer identify the authoritative store.",
       "replacement": "host_rpc::service::tests canonical namespace provider-independence, alias/reopen and harness-stability cases"
+    },
+    "inherited-prefix-editability": {
+      "reason": "T3 derives rewind counts from local AppRuns, so inherited source text keeps all transcript/fork facts but cannot rewind the child. Preserve original full DTO equality except that new derived eligibility and independently assert visible actions in both threads.",
+      "replacement": "host_rpc::runtime::tests::sibling_forks_continue_the_selected_native_prefix_in_independent_resources"
     }
   }
 }
