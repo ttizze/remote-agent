@@ -168,6 +168,10 @@ struct Work {
 /// model or effort only to a new process, which ends its background work.
 const BACKGROUND_BLOCKS_CHANGE: &str = "Claudeのバックグラウンドのエージェントやコマンドが実行中のため、モデルや設定を変更するとそれらが終了します。完了を待つか停止してから、もう一度送信してください。: Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
 
+fn can_reuse_query(current_cwd: &str, next_cwd: &str, resume_at: Option<&str>) -> bool {
+    current_cwd == next_cwd && resume_at.is_none()
+}
+
 pub(crate) struct Command {
     pub(crate) execution: Option<Uuid>,
     pub(crate) value: SdkInput,
@@ -604,16 +608,21 @@ impl Claude {
 
     /// Whether a worker still takes input. One that stopped taking it is
     /// finishing; its record is released for the next turn shortly.
-    async fn takes_input(&self, id: &str) -> bool {
+    async fn takes_input(&self, id: &str, cwd: &str, resume_at: Option<&str>) -> bool {
         let Some(record) = self.records.lock().await.get(id).cloned() else {
             return false;
         };
         loop {
-            match &record.lock().await.running {
+            let current = record.lock().await;
+            if !can_reuse_query(&current.cwd, cwd, resume_at) {
+                return false;
+            }
+            match &current.running {
                 None => return false,
                 Some(running) if !running.input.is_closed() => return true,
                 Some(_) => {}
             }
+            drop(current);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -744,7 +753,7 @@ impl Claude {
             return Err("ClaudeではCodexのサービス階層を指定できません。".into());
         }
         let session = state.session_id.to_string();
-        let moved = state.cwd != start.cwd;
+        let reuse_query = can_reuse_query(&state.cwd, start.cwd, start.resume_at);
         state.cwd = start.cwd.into();
         let cwd = state.cwd.clone();
         let should_resume = start.resume_at.is_some() || start.native_has_turns || state.resumable;
@@ -759,8 +768,7 @@ impl Claude {
         };
         let idle = state.idle.take();
         let mut process = if idle.as_ref().is_some_and(|idle| {
-            !moved
-                && start.resume_at.is_none()
+            reuse_query
                 && idle.auth_revision == auth_revision
                 && idle.model == model
                 && idle.effort.as_deref() == effort
@@ -2523,7 +2531,9 @@ impl Agent for Claude {
             // Claude waiting on background work after its answer runs the
             // input as its next turn.
             SubmissionTarget::Start(start)
-                if start.resume_at.is_none() && self.takes_input(&input.thread_id.id).await =>
+                if self
+                    .takes_input(&input.thread_id.id, start.cwd, start.resume_at)
+                    .await =>
             {
                 self.send_running(input, None, execution).await?
             }
