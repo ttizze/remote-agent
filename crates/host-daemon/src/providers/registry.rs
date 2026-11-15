@@ -10,7 +10,6 @@ use agent_protocol::{
 use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
-    path::PathBuf,
     sync::Arc,
 };
 
@@ -203,14 +202,6 @@ impl Registry {
         }
     }
 
-    /// Identifies the native storage the providers read, independent of path aliases.
-    pub(crate) fn storage_scope(&self) -> Result<String, serde_json::Error> {
-        storage_scope(self.all().into_iter().filter_map(|(p, a)| {
-            a.history_scope_directory()
-                .map(|path| (p, canonical_storage_path(path)))
-        }))
-    }
-
     pub(crate) fn data_recipients(&self) -> Vec<String> {
         self.all()
             .into_iter()
@@ -255,36 +246,6 @@ impl Registry {
         for (_, agent) in self.all() {
             agent.shutdown().await;
         }
-    }
-}
-
-fn storage_scope(
-    areas: impl IntoIterator<Item = (ProviderKind, PathBuf)>,
-) -> Result<String, serde_json::Error> {
-    let areas: BTreeMap<_, _> = areas
-        .into_iter()
-        .map(|(provider, path)| (provider.key().to_owned(), path))
-        .collect();
-    let bytes = serde_json::to_vec(&areas)?;
-    let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
-    Ok(digest
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
-// Resolve existing ancestors too: a newly created native directory must not
-// change a scope merely because /var is a symlink to /private/var on macOS.
-fn canonical_storage_path(path: &Path) -> PathBuf {
-    if let Ok(path) = dunce::canonicalize(path) {
-        return path;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
-            canonical_storage_path(parent).join(name)
-        }
-        _ => std::env::current_dir().unwrap_or_default().join(path),
     }
 }
 

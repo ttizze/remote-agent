@@ -1014,11 +1014,6 @@ impl crate::providers::Discovery for DeepSeek {
     fn storage_directory(&self) -> &Path {
         &self.0.directory
     }
-    fn history_scope_directory(&self) -> Option<&Path> {
-        // These are Host-owned display checkpoints, not an external native
-        // history root. Enabling Harness must retain existing BEX drafts.
-        None
-    }
     async fn list(
         &self,
         search: &str,

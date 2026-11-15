@@ -345,11 +345,6 @@ pub(crate) trait Configuration: Send + Sync {
 #[async_trait::async_trait]
 pub(crate) trait Discovery: Send + Sync {
     fn storage_directory(&self) -> &Path;
-    /// External native histories distinguish client draft namespaces. Provider
-    /// checkpoints owned by this Host already share its identity namespace.
-    fn history_scope_directory(&self) -> Option<&Path> {
-        Some(self.storage_directory())
-    }
     async fn list(
         &self,
         search: &str,
