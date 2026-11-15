@@ -70,7 +70,7 @@ async fn sdk_reviews_stay_out_of_titles_and_search_after_host_restart() {
     ] {
         let id = session(id).id;
         let rows = [
-            serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id,"cwd":cwd,"entrypoint":entrypoint,"promptSource":source,"message":{"content":title}}),
+            serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":id,"cwd":cwd,"entrypoint":entrypoint,"promptSource":source,"message":{"content":title}}),
             serde_json::json!({"type":"ai-title","sessionId":id,"aiTitle":title}),
         ].map(|row| row.to_string() + "\n").concat();
         std::fs::write(transcripts.join(format!("{id}.jsonl")), rows).unwrap();
@@ -122,6 +122,18 @@ async fn sdk_reviews_stay_out_of_titles_and_search_after_host_restart() {
         )
         .await
         .unwrap();
+        assert_eq!(
+            service
+                .inner
+                .conversation
+                .storage
+                .shell_snapshot()
+                .unwrap()
+                .threads
+                .len(),
+            3,
+            "the explicit import owns native discovery and excludes SDK reviews"
+        );
         for search in [
             "",
             "NSH",
@@ -167,7 +179,7 @@ async fn prefetched_project_titles_continue_past_the_first_native_page() {
     for _ in 0..102 {
         let id = uuid::Uuid::new_v4();
         expected.insert(id.to_string());
-        let user = serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id,"cwd":cwd,"message":{"content":"hello"}});
+        let user = serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":id,"cwd":cwd,"message":{"content":"hello"}});
         std::fs::write(transcripts.join(format!("{id}.jsonl")), format!("{user}\n")).unwrap();
     }
     let agent = crate::providers::Claude::load(
@@ -186,6 +198,18 @@ async fn prefetched_project_titles_continue_past_the_first_native_page() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        service
+            .inner
+            .conversation
+            .storage
+            .shell_snapshot()
+            .unwrap()
+            .threads
+            .len(),
+        expected.len(),
+        "explicit import must commit the complete native page sequence before search"
+    );
     let page = service
         .search_list(&agent_protocol::conversation::records::SearchList {
             term: String::new(),
@@ -254,7 +278,7 @@ async fn native_project_metadata_does_not_change_registered_membership() {
                 "## Where you are\n\nProject: \"Native\" (id: `chan_native`)\n"
             ]
         }});
-        let user = serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":id,"cwd":cwd,"message":{"content":"hello"}});
+        let user = serde_json::json!({"type":"user","uuid":uuid::Uuid::new_v4(),"parentUuid":null,"sessionId":id,"cwd":cwd,"message":{"content":"hello"}});
         std::fs::write(
             transcripts.join(format!("{id}.jsonl")),
             format!("{metadata}\n{user}\n"),
@@ -275,10 +299,11 @@ async fn native_project_metadata_does_not_change_registered_membership() {
     // Both conversations are explicitly opened, including the projectless
     // one. Their saved membership must not follow native project metadata.
     for id in &expected {
-        service
-            .dispatch(
+        let _: agent_protocol::conversation::records::Opened =
+            crate::host_rpc::runtime::native_fixture::call(
+                &service,
                 session.id(),
-                &Call::SubscribeConversation(agent_protocol::conversation::records::Subscribe {
+                Call::SubscribeConversation(agent_protocol::conversation::records::Subscribe {
                     session: agent_protocol::session::SessionRef::new(
                         ProviderKind::Claude,
                         id.clone(),
