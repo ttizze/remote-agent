@@ -604,6 +604,10 @@ pub struct ProviderTurn {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_thread_ref: Option<ProviderRef>,
     pub native_turn_ref: Option<ProviderRef>,
+    /// Claude controls a query by the echoed user handle; native_turn_ref is
+    /// its assistant history cursor. Other drivers use native_turn_ref for both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_control_id: Option<String>,
     pub ordinal: u64,
     pub status: ProviderTurnStatus,
     pub started_at: Option<String>,

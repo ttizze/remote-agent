@@ -273,6 +273,7 @@ impl Runtime {
                 Self::native_parent(service, &parent, &session, execution, None).await?;
             }
             AgentChange::Renamed { name: None, .. } => {}
+            AgentChange::Head { .. } => {}
         }
         Ok(())
     }

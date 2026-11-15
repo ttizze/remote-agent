@@ -150,6 +150,8 @@ pub(crate) struct RollbackResult {
     pub head_id: Option<String>,
 }
 
+pub(crate) type ForkResult = ThreadResponse;
+
 pub(crate) struct SessionSummary {
     pub thread: Thread,
     pub branch: Option<String>,
@@ -423,7 +425,7 @@ pub(crate) trait Agent: Send + Sync {
         id: &str,
         turn: &str,
         browser: Option<Value>,
-    ) -> Result<ThreadResponse, Failure>;
+    ) -> Result<ForkResult, Failure>;
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>>;
     async fn shutdown(&self);
 }
@@ -441,6 +443,11 @@ pub(crate) enum AgentChange {
     Session {
         session: SessionRef,
         change: agent_protocol::session::SessionChange,
+    },
+    Head {
+        session: SessionRef,
+        turn: TurnId,
+        head: String,
     },
     Request {
         session: SessionRef,

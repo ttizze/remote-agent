@@ -276,6 +276,7 @@ pub fn started(
         run_attempt_id: Some(attempt.id.clone()),
         native_thread_ref: attempt.native_thread_ref.clone(),
         native_turn_ref: Some(native_turn_ref),
+        native_control_id: None,
         ordinal: state
             .provider_turns
             .values()
