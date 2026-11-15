@@ -2,7 +2,8 @@
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
     "host-daemon": [
-      "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer"
+      "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer",
+      "host_rpc::runtime::t3_contract::claude_native_cursor_updates_keep_controls_callback_ownership_and_one_delivery"
     ]
   },
   "guards": {

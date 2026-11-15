@@ -4638,3 +4638,179 @@ async fn a_native_rollback_refusal_is_public_and_does_not_cut_visible_or_native_
         2
     );
 }
+
+#[tokio::test]
+async fn claude_native_cursor_updates_keep_controls_callback_ownership_and_one_delivery() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut agent = NativeAgent::new(ProviderKind::Claude, directory.path().join("native"));
+    Arc::get_mut(&mut agent).unwrap().submit_gate = Some(tokio::sync::Semaphore::new(0));
+    let _release = scopeguard::guard(agent.clone(), |agent| {
+        agent.submit_gate.as_ref().unwrap().add_permits(1)
+    });
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let connection = service.open_session();
+    let public = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let _: records::Opened = call(
+        &service,
+        connection.id(),
+        Call::CreateConversation(records::Create {
+            workspace: Some(agent_protocol::workspace::WorkspaceStrategy::Root),
+            session: public.clone(),
+            provider: ProviderKind::Claude,
+            subscription: Uuid::new_v4(),
+            cwd: Some(directory.path().to_str().unwrap().into()),
+            selection: Default::default(),
+            initial: Some((
+                Uuid::new_v4().to_string().into(),
+                input(ProviderKind::Claude, "one input"),
+            )),
+        }),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.submit_started.notified(),
+    )
+    .await
+    .unwrap();
+    let storage = &service.inner.conversation.storage;
+    let state = storage.thread_state(&public.id, &[]).unwrap();
+    let attempt = state
+        .active_run()
+        .unwrap()
+        .active_attempt_id
+        .clone()
+        .unwrap();
+    let execution = Uuid::parse_str(&attempt).unwrap();
+    // The private provider's wire control handle is independent of the actual
+    // assistant UUID and arrives before the held submission acknowledgement.
+    let control: agent_protocol::ids::TurnId = format!("turn-{execution}").into();
+    let native = storage.active_source(&public).unwrap().unwrap();
+    let cursor = Uuid::new_v4().to_string();
+    Runtime::observe(
+        &service,
+        AgentChange::Head {
+            session: native.clone(),
+            turn: control.clone(),
+            head: cursor.clone(),
+        },
+        Some(execution),
+    )
+    .await
+    .unwrap();
+    let state = storage.thread_state(&public.id, &[]).unwrap();
+    assert_eq!(
+        state.provider_turns.len(),
+        1,
+        "actual native output proves the same accepted turn"
+    );
+    assert_eq!(
+        state
+            .provider_turns
+            .values()
+            .next()
+            .unwrap()
+            .native_turn_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_deref(),
+        Some(cursor.as_str())
+    );
+    for (source, token) in [
+        (native.clone(), Uuid::new_v4()),
+        (
+            SessionRef::new(ProviderKind::Claude, "foreign-physical-source".into()).unwrap(),
+            execution,
+        ),
+    ] {
+        Runtime::observe(
+            &service,
+            AgentChange::Head {
+                session: source,
+                turn: control.clone(),
+                head: "foreign-cursor".into(),
+            },
+            Some(token),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        storage
+            .thread_state(&public.id, &[])
+            .unwrap()
+            .provider_turns,
+        state.provider_turns,
+        "a foreign attempt or physical source cannot replace the cursor"
+    );
+    let receipt: records::Acknowledged = call(
+        &service,
+        connection.id(),
+        Call::ChangeConversation(records::Change {
+            session: public.clone(),
+            operation: Uuid::new_v4(),
+            command: Command::Interrupt {
+                turn: Some(state.active_run().unwrap().id.clone().into()),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(receipt.error.is_none());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while agent.interrupts.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        agent.interrupts.lock().unwrap().as_slice(),
+        &[(native.id.clone(), control.clone())],
+        "SDK interrupt uses the echoed control handle, never the assistant resume cursor"
+    );
+    agent.submit_gate.as_ref().unwrap().add_permits(1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let state = storage.thread_state(&public.id, &[]).unwrap();
+            if state.active_run().is_none() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let completed = storage.thread_state(&public.id, &[]).unwrap();
+    assert_eq!(
+        completed.provider_turns.len(),
+        1,
+        "later SDK callbacks still address this turn after its history cursor changed"
+    );
+    assert_eq!(
+        agent.inputs.lock().unwrap().len(),
+        1,
+        "native evidence cannot resend the admitted input"
+    );
+    Runtime::observe(
+        &service,
+        AgentChange::Head {
+            session: native,
+            turn: control,
+            head: "late-old-query-cursor".into(),
+        },
+        Some(execution),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        storage
+            .thread_state(&public.id, &[])
+            .unwrap()
+            .provider_turns,
+        completed.provider_turns,
+        "terminal callbacks cannot revive a closed query"
+    );
+}

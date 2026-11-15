@@ -642,6 +642,19 @@ impl Agent for NativeAgent {
                 .get_or_insert_with(|| format!("request {}", input.client_user_message_id));
             record.model = input.model.clone();
         }
+        if self.provider == ProviderKind::Claude {
+            crate::providers::emit_for(
+                &self.events,
+                AgentChange::Head {
+                    session: input.thread_id.clone(),
+                    turn: turn_id.clone(),
+                    head: turn_id.to_string(),
+                },
+                Some(execution),
+            )
+            .await
+            .map_err(|error| Failure::new("event_failed", error))?;
+        }
         crate::providers::emit_for(
             &self.events,
             AgentChange::Session {
@@ -715,7 +728,7 @@ impl Agent for NativeAgent {
         id: &str,
         turn: &str,
         _: Option<serde_json::Value>,
-    ) -> Result<ThreadResponse, Failure> {
+    ) -> Result<crate::providers::ForkResult, Failure> {
         let source = self.open(id, usize::MAX, true).await?;
         let mut response = self
             .create(source.thread.cwd.as_deref().unwrap(), None, None)
@@ -733,7 +746,7 @@ impl Agent for NativeAgent {
             response.thread.id.as_ref().unwrap().id.clone(),
             response.clone(),
         );
-        Ok(response)
+        Ok(response.into())
     }
     fn event_stream(&self) -> Option<mpsc::Receiver<AgentEvent>> {
         self.receiver.lock().unwrap().take()
