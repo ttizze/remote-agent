@@ -3584,7 +3584,9 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         assert_eq!(snapshot.panes.primary().navigation.thread_id, None);
     }
     let draft = &snapshot.input.drafts[&DraftKey::from(source)];
-    assert_eq!(draft.text, "send this again");
+    // Pinned T3 chatViewSend.ts appends the recalled message to the latest
+    // composer prompt after native confirmation, preserving existing input.
+    assert_eq!(draft.text, "replaced\n\nsend this again");
     assert_eq!(
         draft
             .attachments
@@ -3761,12 +3763,16 @@ async fn rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts
         .await
         .unwrap();
     assert_eq!(result.is_err(), failure);
-    let expected = if edited {
-        "typed during native rewind"
-    } else if failure {
-        "original draft"
+    let expected = if failure {
+        if edited {
+            "typed during native rewind"
+        } else {
+            "original draft"
+        }
+    } else if edited {
+        "typed during native rewind\n\nsend this again"
     } else {
-        "send this again"
+        "original draft\n\nsend this again"
     };
     assert_eq!(
         store.snapshot().input.drafts[&DraftKey::from(source)].text,

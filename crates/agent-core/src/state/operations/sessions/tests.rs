@@ -673,3 +673,49 @@ fn opening_restores_model_metadata_or_uses_the_provider_catalog(
         expected_model
     );
 }
+
+#[test]
+fn a_paged_rewind_restores_only_the_selected_conversations_original_input() {
+    use agent_protocol::orchestration::{
+        TurnItemBody,
+        projection::{ProjectedTurnItem, Visibility},
+    };
+    let id = SessionRef::new(ProviderKind::Codex, "paged-source".into()).unwrap();
+    let mut state = Snapshot::default();
+    let response=serde_json::from_value(serde_json::json!({"thread":{"id":id,"turns":[
+        {"id":"old-run","status":"completed","items":[{"id":"old-input","status":"completed","body":{"inline":{"body":{"userMessage":{"text":"owned paged input","content":[]}}}}}]}
+    ]}})).unwrap();
+    let mut projection = crate::test_conversations::opened(response, &mut state)
+        .projection
+        .projection;
+    let own = projection
+        .turn_items
+        .iter()
+        .find(|item| matches!(item.body, TurnItemBody::UserMessage { .. }))
+        .unwrap()
+        .as_ref()
+        .clone();
+    projection.turn_items.clear();
+    let mut foreign = own.clone();
+    foreign.thread_id = "another-conversation".into();
+    if let TurnItemBody::UserMessage { text, .. } = &mut foreign.body {
+        *text = "foreign input with colliding raw IDs".into();
+    }
+    projection.visible_turn_items.insert(
+        0,
+        ProjectedTurnItem {
+            position: 0,
+            visibility: Visibility::Inherited,
+            source_thread_id: foreign.thread_id.clone(),
+            source_item_id: foreign.id.clone(),
+            item: Arc::new(foreign),
+        },
+    );
+    assert_eq!(
+        sent_input(&projection, &"old-run".into())
+            .unwrap()
+            .unwrap()
+            .0,
+        "owned paged input"
+    );
+}
