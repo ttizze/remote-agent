@@ -291,15 +291,41 @@ pub fn rollback_completed(
     {
         return Err("rewind returned an invalid native identity".into());
     }
-    let mut decision = Decision {
-        changes: vec![Change::ProviderThread(ProviderThread {
-            native_thread_ref: Some(native_thread),
-            native_conversation_head_ref: native_head,
-            status: ProviderThreadStatus::Idle,
-            last_run_ordinal: (target.ordinal != 0).then_some(target.ordinal),
+    let replaced = provider
+        .native_thread_ref
+        .as_ref()
+        .and_then(|reference| reference.native_id.as_ref())
+        != native_thread.native_id.as_ref();
+    if replaced
+        && (provider.driver != "claudeAgent" || target.ordinal != 0 || native_head.is_some())
+    {
+        return Err(
+            "only an empty Claude baseline can allocate a different native conversation".into(),
+        );
+    }
+    let mut bound = ProviderThread {
+        native_thread_ref: Some(native_thread),
+        native_conversation_head_ref: native_head,
+        status: ProviderThreadStatus::Idle,
+        last_run_ordinal: (target.ordinal != 0).then_some(target.ordinal),
+        updated_at: context.now.into(),
+        ..provider.clone()
+    };
+    let mut changes = Vec::new();
+    if replaced {
+        bound.id = derived_id("provider-thread", &[&action.id, "rollback-reset"]);
+        bound.first_run_ordinal = None;
+        bound.native_metadata = None;
+        bound.created_at = context.now.into();
+        changes.push(Change::Thread(Thread {
+            active_provider_thread_id: Some(bound.id.clone()),
             updated_at: context.now.into(),
-            ..provider.clone()
-        })],
+            ..state.thread.clone()
+        }));
+    }
+    changes.push(Change::ProviderThread(bound));
+    let mut decision = Decision {
+        changes,
         effects: vec![Effect {
             status: EffectStatus::Succeeded,
             lease_owner: None,

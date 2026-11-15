@@ -378,8 +378,7 @@ impl Process {
             process
                 .input
                 .write_line(
-                    &json!({"type":"fork","sessionId":session,"upToMessageId":up_to})
-                        .to_string(),
+                    &json!({"type":"fork","sessionId":session,"upToMessageId":up_to}).to_string(),
                 )
                 .await
                 .map_err(|error| error.to_string())?;

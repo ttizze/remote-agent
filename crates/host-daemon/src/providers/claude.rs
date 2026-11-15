@@ -244,6 +244,12 @@ impl Claude {
         if !cwd.is_dir() {
             return Err(anyhow::anyhow!("Claudeの作業フォルダがありません。"));
         }
+        self.allocate(&cwd.to_string_lossy(), model).await
+    }
+
+    // Allocation itself writes no transcript and needs no CLI or credentials.
+    // Empty-baseline rollback must also work before a query has ever run.
+    async fn allocate(&self, cwd: &str, model: &str) -> anyhow::Result<ThreadResponse> {
         let session_id = Uuid::new_v4();
         let response = ThreadResponse {
             thread: Thread {
@@ -251,7 +257,7 @@ impl Claude {
                     provider: Some(ProviderKind::Claude),
                     id: session_id.to_string(),
                 }),
-                cwd: Some(cwd.to_string_lossy().into_owned()),
+                cwd: Some(cwd.into()),
                 status: SessionStatus::Idle,
                 turns: Some(Vec::new()),
                 updated_at: Some(now_ms() as f64 / 1000.),
@@ -264,7 +270,7 @@ impl Claude {
             ..Default::default()
         };
         let record = Record {
-            cwd: cwd.to_string_lossy().into_owned(),
+            cwd: cwd.into(),
             model: model.into(),
             session_id,
             resumable: false,
@@ -2506,6 +2512,54 @@ impl Agent for Claude {
         }
         Ok(())
     }
+    async fn rollback(
+        &self,
+        id: &str,
+        retained: Option<&str>,
+        first_removed: Option<&str>,
+        cwd: &str,
+        _browser: Option<Value>,
+    ) -> Result<crate::providers::RollbackResult, Failure> {
+        let failure = |error: String| Failure::new("rollback_failed", error);
+        Uuid::parse_str(id).map_err(|_| failure("invalid Claude native identity".into()))?;
+        let record = self.records.lock().await.get(id).cloned();
+        let mut model = "default".to_owned();
+        if let Some(record) = record {
+            let mut record = record.lock().await;
+            if record.running.is_some() {
+                return Err(failure("Claude is still running".into()));
+            }
+            model = record.model.clone();
+            if let Some(idle) = record.idle.take() {
+                idle.close().await.map_err(failure)?;
+            }
+        }
+        if let Some(cursor) = retained {
+            let synthetic = cursor.starts_with("turn:");
+            if cursor.is_empty() || (synthetic && first_removed.is_some()) {
+                return Err(failure(
+                    "Claude assistant cursor is unavailable for this retained turn".into(),
+                ));
+            }
+            return Ok(crate::providers::RollbackResult {
+                native_id: id.into(),
+                head_id: (!synthetic).then(|| cursor.into()),
+            });
+        }
+        let allocated = self
+            .allocate(cwd, &model)
+            .await
+            .map_err(|error| failure(format!("{error:#}")))?;
+        Ok(crate::providers::RollbackResult {
+            native_id: allocated
+                .thread
+                .id
+                .ok_or_else(|| failure("Claude allocation returned no native identity".into()))?
+                .id,
+            head_id: None,
+        })
+    }
+
     async fn fork(
         &self,
         id: &str,

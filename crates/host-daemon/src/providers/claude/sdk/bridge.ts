@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { Options, SDKUserMessage, PermissionResult, ElicitationResult, McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 
 type Initialize = { type: "initialize"; cwd: string; program: string; model?: string;
-  effort?: Options["effort"]; browser?: McpServerConfig; sessionId?: string; resume?: boolean; probe?: boolean };
+  effort?: Options["effort"]; browser?: McpServerConfig; sessionId?: string; resume?: boolean; resumeSessionAt?: string; probe?: boolean };
 // A steer is a message the running response takes at once ("now" stops its
 // streaming and running tools); other messages wait for the next turn boundary.
 type Command = { type: "message" | "steer"; id: SDKUserMessage["uuid"]; content: SDKUserMessage["message"]["content"] }
@@ -128,6 +128,7 @@ export async function runBridge(lines: AsyncIterable<string>, emit: (event: Reco
     extraArgs: { "replay-user-messages": null, ...thinking.extraArgs },
     spawnClaudeCodeProcess,
     ...(config.sessionId ? config.resume ? { resume: config.sessionId } : { sessionId: config.sessionId } : {}),
+    ...(config.resumeSessionAt === undefined ? {} : { resumeSessionAt: config.resumeSessionAt }),
     canUseTool: (toolName, input, context) => request<PermissionResult>(context.requestId, {
       type: "tool", toolName, input, toolUseId: context.toolUseID,
     }, context.signal),
