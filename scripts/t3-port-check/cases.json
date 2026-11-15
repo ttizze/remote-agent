@@ -15,7 +15,8 @@
       "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_2",
       "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_3",
       "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_4",
-      "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_5"
+      "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_5",
+      "providers::claude::execution_tests::queued_input_reads_only_metadata_and_keeps_owned_execution"
     ]
   },
   "guards": {
@@ -2003,7 +2004,6 @@
       "providers::claude::execution_tests::late_blocks_and_api_retry_preserve_only_valid_stream_items",
       "providers::claude::execution_tests::native_error_evidence_distinguishes_quota_retry_auth_and_warning",
       "providers::claude::execution_tests::native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query",
-      "providers::claude::execution_tests::queued_input_reads_only_metadata_and_keeps_owned_execution",
       "providers::claude::execution_tests::recorded_claude_sdk_messages_cross_the_native_content_adapter",
       "providers::claude::execution_tests::repeated_stop_after_confirmation_acknowledges_without_another_sdk_write",
       "providers::claude::execution_tests::root_listings_include_only_live_unpersisted_native_work",

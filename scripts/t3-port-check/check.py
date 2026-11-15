@@ -42,7 +42,9 @@ guards = held_out if HOLDOUT else all_guards if MILESTONE else all_guards - defe
 crates = sorted({binary.split("::", 1)[0] for binary, _ in held_out | scored | guards} | (set() if HOLDOUT else {"agent-protocol", "agent-core", "host-daemon"}))
 command = [str(ROOT / "scripts/dev-env.sh"), "cargo", "nextest"]
 runtime = subprocess.run([str(ROOT / "scripts/dev-env.sh"), "cargo", "build", "--locked", "-p", "agent-process", "--bin", "agent-provider-supervisor"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-(ROOT / ".hill-climb/t3-port/setup-runtime.txt").write_text(runtime.stdout)
+runtime_log = ROOT / ".hill-climb/t3-port/setup-runtime.txt"
+runtime_log.parent.mkdir(parents=True, exist_ok=True)
+runtime_log.write_text(runtime.stdout)
 if runtime.returncode:
     print(runtime.stdout[-12000:])
     sys.exit("Invalid check: the process supervisor could not be built")

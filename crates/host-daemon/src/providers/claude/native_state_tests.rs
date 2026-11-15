@@ -1,5 +1,8 @@
 #[tokio::test]
 async fn queued_input_reads_only_metadata_and_keeps_owned_execution() {
+    // T3 resumeThread returns binding/liveness, with title/history owned by
+    // canonical projections. Native custom-title and malformed body must not
+    // become a second state/history import, even while an owned query is live.
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
     let native = root.join("native-home");
@@ -46,17 +49,19 @@ async fn queued_input_reads_only_metadata_and_keeps_owned_execution() {
     assert!(!state.needs_reload);
     assert_eq!(state.response.thread.id.as_ref(), Some(&session));
     assert_eq!(state.response.thread.cwd.as_deref(), root.to_str());
-    assert_eq!(
-        state.response.thread.name.as_deref(),
-        Some("Preserved title")
-    );
-    assert_eq!(
-        state.response.thread.preview.as_deref(),
-        Some("Original input")
-    );
+    assert!(state.response.thread.name.is_none());
+    assert!(state.response.thread.preview.is_none());
     assert_eq!(state.response.thread.status, SessionStatus::Running);
+    assert!(state.response.thread.turns.is_none());
     assert_eq!(
-        state.response.thread.turns.unwrap()[0].id.as_str(),
+        record
+            .lock()
+            .await
+            .running
+            .as_ref()
+            .unwrap()
+            .turn_id
+            .as_str(),
         "owned-turn"
     );
     assert_eq!(state.response.model.unwrap().id, "owned-model");
@@ -64,13 +69,9 @@ async fn queued_input_reads_only_metadata_and_keeps_owned_execution() {
 
     record.lock().await.running = None;
     let state = Agent::state(&claude, &session.id).await.unwrap();
-    assert!(
-        state
-            .response
-            .thread
-            .history_read_state
-            .is_some_and(|state| {
-                state.kind == agent_protocol::session::HistoryReadKind::Incomplete
-            })
-    );
+    assert_eq!(state.response.thread.status, SessionStatus::Idle);
+    assert!(state.response.thread.name.is_none());
+    assert!(state.response.thread.preview.is_none());
+    assert!(state.response.thread.turns.is_none());
+    assert!(state.response.thread.history_read_state.is_none());
 }
