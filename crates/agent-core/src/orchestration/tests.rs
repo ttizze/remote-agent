@@ -835,3 +835,91 @@ fn content_events_update_the_thread_clock_without_rewriting_explicit_metadata_or
         current
     );
 }
+
+#[rstest::rstest]
+#[case("eligible", true)]
+#[case("paged", false)]
+#[case("no-checkpoint", false)]
+#[case("no-session", false)]
+#[case("wrong-scope", false)]
+#[case("inherited", false)]
+#[case("imported", false)]
+#[case("stale-checkpoint", false)]
+#[test]
+fn canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary(
+    #[case] condition: &str,
+    #[case] expected: bool,
+) {
+    use agent_protocol::session::{Capabilities, ProviderKind, SessionRef};
+    let mut snapshot = snapshot(3);
+    snapshot.has_more_history = condition == "paged";
+    snapshot.history_cursor = condition.eq("paged").then(|| "older".into());
+    let projection = &mut snapshot.projection;
+    projection.thread.active_provider_thread_id = Some("native".into());
+    let mut run = run("completed");
+    run.root_node_id = Some("root".into());
+    run.provider_thread_id = Some("native".into());
+    projection.runs.push(run);
+    projection.nodes.push(serde_json::from_value(json!({"id":"root","threadId":"thread","rootNodeId":"root","runId":"run","kind":"root_turn","status":"completed","countsForRun":true,"checkpointScopeId":"scope"})).unwrap());
+    projection.provider_threads.push(serde_json::from_value(json!({"id":"native","driver":"codex","providerInstanceId":"codex","providerSessionId":if condition=="no-session" {None} else {Some("sdk")},"appThreadId":"thread","nativeThreadRef":{"driver":"codex","nativeId":"physical","strength":"strong"},"status":"idle","handoffIds":[],"createdAt":NOW,"updatedAt":NOW})).unwrap());
+    let mut caps = ProviderCapabilities::default();
+    caps.threads.can_rollback_thread = true;
+    caps.checkpointing.provider_can_rollback_conversation = true;
+    caps.checkpointing.provider_rollback_returns_snapshot = true;
+    projection.provider_sessions.push(ProviderSession {
+        id: "sdk".into(),
+        driver: "codex".into(),
+        provider_instance_id: "codex".into(),
+        status: ProviderSessionStatus::Ready,
+        cwd: "/fixture".into(),
+        model: None,
+        capabilities: caps,
+        created_at: NOW.into(),
+        updated_at: NOW.into(),
+        last_error: None,
+    });
+    projection.checkpoint_scopes.push(serde_json::from_value(json!({"id":"scope","threadId":"thread","nodeId":"root","kind":"root_turn","ordinalWithinParent":0,"advancesAppRunCount":true,"cwd":"/fixture","createdAt":NOW})).unwrap());
+    if condition != "no-checkpoint" {
+        projection.checkpoints.push(serde_json::from_value(json!({"id":"checkpoint","threadId":"thread","scopeId":if condition=="wrong-scope" {"foreign-scope"} else {"scope"},"nodeId":"root","ordinalWithinScope":0,"appRunOrdinal":0,"ref":"conversation-only","status":if condition=="stale-checkpoint" {"stale"} else {"missing"},"files":[],"capturedAt":NOW})).unwrap());
+    }
+    let mut input = item("input", 1);
+    input.body = TurnItemBody::UserMessage {
+        created_by: Actor::User,
+        creation_source: CreationSource::Mobile,
+        message_id: "input".into(),
+        input_intent: "submit".into(),
+        text: "original".into(),
+        attachments: vec![],
+        context: None,
+    };
+    if condition == "imported" {
+        input.run_id = None;
+    }
+    projection.turn_items.push(Arc::new(input.clone()));
+    projection.visible_turn_items.push(row(
+        input,
+        if condition == "inherited" {
+            Visibility::Inherited
+        } else {
+            Visibility::Local
+        },
+        1,
+    ));
+    let view = project(
+        &snapshot,
+        &SessionRef::new(None, "thread".into()).unwrap(),
+        ProviderKind::Codex,
+        Capabilities {
+            rollback: true,
+            fork: true,
+            ..Default::default()
+        },
+        None,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(&view.thread.turns.as_ref().unwrap()[0]).unwrap()["supportsRewind"],
+        json!(expected)
+    );
+}

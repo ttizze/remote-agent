@@ -44,7 +44,7 @@ fn stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed(
 fn provider_switch_projects_only_the_active_provider_sessions_capabilities() {
     let id = SessionRef::new(None, "provider-caps".into()).unwrap();
     let mut snapshot = Snapshot::default();
-    let opened=crate::test_conversations::opened(serde_json::from_value(serde_json::json!({"thread":{"id":id,"activeProvider":"codex","capabilities":{"steer":true,"modelChange":true,"fork":true,"rename":true}}})).unwrap(),&mut snapshot);
+    let opened=crate::test_conversations::opened(serde_json::from_value(serde_json::json!({"thread":{"id":id,"activeProvider":"codex","capabilities":{"steer":true,"modelChange":true,"rollback":true,"fork":true,"rename":true}}})).unwrap(),&mut snapshot);
     op::ReadThread::open(id.clone()).apply(&mut snapshot, "", opened);
     let mut next = snapshot.sessions.projections[&id].as_ref().clone();
     next.projection.thread.provider_instance_id = "claude".into();
@@ -58,7 +58,7 @@ fn provider_switch_projects_only_the_active_provider_sessions_capabilities() {
     .unwrap();
     let caps = snapshot.sessions.conversations[&id].capabilities.unwrap();
     assert!(
-        !caps.steer && !caps.model_change,
+        !caps.steer && !caps.model_change && !caps.rollback,
         "the previous provider must not supply unsupported controls"
     );
     assert!(

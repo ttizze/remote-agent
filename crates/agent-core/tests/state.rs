@@ -1676,3 +1676,55 @@ fn empty_directory_chat_keeps_its_draft_separate_from_the_list() {
     assert_eq!(reopened.panes.primary().navigation.draft_key, key);
     assert_eq!(reopened.input.drafts[&key].text, "keep");
 }
+
+#[rstest::rstest]
+#[case(true, false, None, false)]
+#[case(false, true, None, true)]
+#[case(true, true, Some(false), false)]
+#[case(false, true, Some(true), true)]
+#[test]
+fn rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions(
+    #[case] fork: bool,
+    #[case] rollback: bool,
+    #[case] eligible: Option<bool>,
+    #[case] expected: bool,
+) {
+    use agent_core::presentation::conversation::project_conversation;
+    let thread: Thread=serde_json::from_value(json!({
+        "id":{"id":"thread"},"capabilities":{"fork":fork,"rollback":rollback},
+        "turns":[{"id":"run","status":"completed","supportsRewind":eligible,"items":[
+            {"id":"input","status":"completed","body":{"inline":{"body":{"userMessage":{"text":"original","content":[]}}}}},
+            {"id":"answer","status":"completed","body":{"inline":{"body":{"assistantText":{"text":"answer","phase":"final"}}}}}
+        ]}]
+    })).unwrap();
+    let thread = Arc::new(thread);
+    let rendered = project_conversation(
+        Default::default(),
+        &Default::default(),
+        &Default::default(),
+        thread.clone(),
+        &None,
+    );
+    assert_eq!(
+        rendered.turns[0]
+            .rows
+            .iter()
+            .any(|row| row.edit_turn_id.is_some()),
+        expected
+    );
+    let mut changed = thread.as_ref().clone();
+    changed.capabilities.as_mut().unwrap().rollback = false;
+    let updated = project_conversation(
+        Default::default(),
+        &Default::default(),
+        &Default::default(),
+        Arc::new(changed),
+        &Some(rendered),
+    );
+    assert!(
+        !updated.turns[0]
+            .rows
+            .iter()
+            .any(|row| row.edit_turn_id.is_some())
+    );
+}

@@ -151,3 +151,51 @@ fn only_successful_committed_writes_wake_streams() {
     assert!(!changed.has_changed().unwrap());
     assert_eq!(storage.shell_snapshot().unwrap(), before);
 }
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+    #[test]
+    fn committed_database_streams_converge_through_reopen_overlap_and_snapshot_fallback(
+        actions in proptest::collection::vec((proptest::bool::ANY, "[a-zあ界é]{1,24}", 0u8..4), 1..24)
+    ) {
+        use agent_protocol::orchestration::projection::{ThreadSnapshot, ThreadStreamItem};
+        fn catch_up(storage: &Storage, id: &SessionRef, cached: &mut Option<ThreadSnapshot>) {
+            let after=cached.as_ref().map(|snapshot|snapshot.snapshot_sequence);
+            for frame in storage.thread_stream(id,after).unwrap() {
+                *cached=agent_core::orchestration::receive(&id.application_id(),cached.as_ref(),frame.clone()).unwrap();
+                let once=cached.clone();
+                *cached=agent_core::orchestration::receive(&id.application_id(),cached.as_ref(),frame).unwrap();
+                assert_eq!(*cached,once,"overlapping delivery is idempotent");
+            }
+        }
+        let directory=tempfile::tempdir().unwrap();
+        let path=directory.path().join("state.sqlite");
+        let mut storage=Storage::open(&path);
+        for id in ["thread","foreign"] {
+            storage.thread_command(commands::Command {id,thread_id:id,kind:"thread.create",now:NOW,item_ids:&[]},Some(&thread(id)),|_|Ok(model::Decision::default())).unwrap();
+        }
+        let id=SessionRef::new(None,"thread".into()).unwrap();
+        let mut cached=None;
+        catch_up(&storage,&id,&mut cached);
+        let mut expected="Example".to_string();
+        for (foreign,title,mode) in actions {
+            let target=if foreign {"foreign"} else {"thread"};
+            storage.observe_thread(target,&[],NOW,|state| {
+                let mut thread=state.thread.clone();thread.title=title.clone();
+                Ok(model::Decision {changes:vec![model::Change::Thread(thread)],effects:vec![]})
+            }).unwrap();
+            if !foreign {expected=title;}
+            if mode==1 {
+                drop(storage);
+                storage=Storage::open(&path);
+            } else if mode==2 {
+                storage.with(|db| {db.execute("INSERT INTO orchestration_v2_projection_metadata VALUES ('event-log-pruned-through',2,(SELECT max(sequence) FROM orchestration_events),?1) ON CONFLICT(projection_name) DO UPDATE SET last_sequence=excluded.last_sequence",[NOW]).map_err(failure)?;Ok(())}).unwrap();
+            }
+            if mode!=3 {catch_up(&storage,&id,&mut cached);}
+        }
+        catch_up(&storage,&id,&mut cached);
+        let current=storage.thread_stream(&id,None).unwrap().into_iter().find_map(|frame|match frame {ThreadStreamItem::Snapshot(value)=>Some(value),_=>None}).unwrap();
+        proptest::prop_assert_eq!(&cached.as_ref().unwrap().projection.thread.title,&expected);
+        proptest::prop_assert_eq!(cached.as_ref().unwrap(),&current);
+    }
+}

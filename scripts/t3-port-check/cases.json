@@ -1,9 +1,22 @@
 {
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
-    "host-daemon": [
-      "host_rpc::service::tests::canonical_storage_starts_fresh_when_an_unsupported_legacy_database_exists",
-      "host_rpc::service::tests::the_client_namespace_belongs_to_the_canonical_database_not_provider_homes"
+    "agent-core": [
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_1",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_2",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_3",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_4",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_5",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_6",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_7",
+      "orchestration::tests::canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary::case_8",
+      "state::conversations::tests::provider_switch_projects_only_the_active_provider_sessions_capabilities"
+    ],
+    "agent-core::state": [
+      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_1",
+      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_2",
+      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_3",
+      "rewind_actions_use_native_rollback_eligibility_independently_of_fork_actions::case_4"
     ]
   },
   "guards": {
@@ -900,7 +913,6 @@
       "state::conversations::tests::durable_receipts_restore_rejected_input_and_preserve_unknown_input_and_newer_edits",
       "state::conversations::tests::new_chat_after_admitting_the_first_input_allocates_an_independent_draft",
       "state::conversations::tests::only_finished_workspace_tools_refresh_the_tree_during_a_turn",
-      "state::conversations::tests::provider_switch_projects_only_the_active_provider_sessions_capabilities",
       "state::conversations::tests::receipt_from_a_replaced_subscription_cannot_restore_or_discard_new_input",
       "state::conversations::tests::stale_settled_details_keep_the_original_read_pending_until_refetched",
       "state::conversations::tests::stream_refresh_uses_the_opened_project_root_when_the_worktree_is_removed::moved_project_1_false",
@@ -1537,27 +1549,8 @@
       "sync::output::tests::tails_use_utf16_units_and_keep_unicode_and_color_boundaries",
       "sync::output::tests::terminal_edits_and_style_survive_late_subscription",
       "sync::output::tests::terminal_output_matches_the_t3_reference_corpus_after_each_chunk_and_reconnect",
-      "sync::tests::a_new_generation_receives_current_frames_and_rejects_old_ones",
-      "sync::tests::an_empty_running_turn_is_in_scope_and_an_old_item_is_not",
-      "sync::tests::arbitrary_live_and_catchup_histories_converge",
-      "sync::tests::extension_changes_membership_before_subsequent_live_changes",
-      "sync::tests::hydration_cannot_advance_a_stale_rows_version_without_its_live_change",
-      "sync::tests::hydration_fills_only_missing_content_at_the_same_version",
-      "sync::tests::late_items_in_old_turns_join_the_range_when_the_turn_is_loaded",
-      "sync::tests::list_and_conversation_cursors_and_id_namespaces_are_independent",
-      "sync::tests::malformed_frames_are_atomic_and_cannot_create_orphans",
-      "sync::tests::ordered_events_replace_zero_version_rows_and_skip_whole_old_transactions",
-      "sync::tests::removing_a_turn_cascades_items_and_keeps_the_loaded_window",
-      "sync::tests::replacement_snapshot_resets_expanded_membership",
-      "sync::tests::resume_boundaries_include_the_pruning_sequence",
-      "sync::tests::scope_sequence_gaps_are_valid_but_a_wrong_store_is_rejected",
-      "sync::tests::snapshot_replaces_cache_including_after_database_recreation",
-      "sync::tests::stale_extension_invalid_window_and_same_version_reparenting_are_rejected",
-      "sync::tests::stream::windows_reconnect_and_snapshot_fallback_converge",
-      "sync::tests::turn_order_precedes_item_creation_order_when_opening_and_extending",
-      "sync::tests::two_changed_targets_survive_catchup_and_duplicate_delivery",
-      "sync::tests::unrelated_streaming_does_not_starve_a_valid_hydration",
-      "sync::tests::wire_roundtrip_preserves_existing_conversation_identity_and_scope",
+      "sync::tests::scopes_preserve_provider_qualified_and_application_conversation_addresses",
+      "sync::tests::stream::serialized_scopes_keep_arbitrary_conversation_addresses",
       "tool_output::tests::compact_results_preserve_errors_and_do_not_report_partial_thread_batches",
       "tool_output::tests::reads_flat_and_base64_source_images_in_every_result_envelope",
       "tool_output::tests::recognizes_each_supported_raster_format",
@@ -1849,6 +1842,7 @@
       "host_rpc::service::tests::account_providers_are_read_in_parallel_without_blocking_conversation_lists",
       "host_rpc::service::tests::account_read_failures_keep_their_provider_alongside_startup_errors",
       "host_rpc::service::tests::canonical_database_aliases_and_reopening_preserve_the_client_namespace",
+      "host_rpc::service::tests::canonical_storage_starts_fresh_when_an_unsupported_legacy_database_exists",
       "host_rpc::service::tests::conversation_rpc_failures_are_logged_once_without_request_payloads",
       "host_rpc::service::tests::enabling_host_owned_harness_keeps_the_existing_draft_namespace",
       "host_rpc::service::tests::failed_model_providers_remain_identifiable_when_no_catalog_is_available",
@@ -1856,6 +1850,7 @@
       "host_rpc::service::tests::host_names_do_not_depend_on_provider_availability_and_failed_input_is_not_in_flight",
       "host_rpc::service::tests::provider_switches_broadcast_and_gate_new_work_while_retaining_history_access",
       "host_rpc::service::tests::successful_configuration_clears_the_provider_startup_error",
+      "host_rpc::service::tests::the_client_namespace_belongs_to_the_canonical_database_not_provider_homes",
       "host_rpc::service::tests::unknown_and_native_methods_are_rejected_before_dispatch",
       "host_rpc::service::titles::tests::list_decorations_use_the_listed_roots_without_reloading_project_catalogs",
       "host_rpc::service::titles::tests::native_project_metadata_does_not_change_registered_membership",
@@ -1926,6 +1921,7 @@
       "host_rpc::storage::shell::tests::shell_replay_limits_match_the_pinned_gap_and_byte_boundaries",
       "host_rpc::storage::stream::tests::reconnect_replays_committed_values_and_only_this_threads_events",
       "host_rpc::storage::stream::tests::unavailable_or_excessive_replay_is_replaced_by_a_snapshot",
+      "host_rpc::storage::tests::committed_database_streams_converge_through_reopen_overlap_and_snapshot_fallback",
       "host_rpc::storage::tests::only_successful_committed_writes_wake_streams",
       "host_rpc::storage::tests::reopening_preserves_canonical_receipts_and_never_creates_legacy_tables",
       "host_rpc::storage::tests::storage_uses_durable_wal_and_reports_an_invalid_path_to_every_consumer",
@@ -2170,10 +2166,7 @@
       "providers::refreshed::tests::full_cache_keeps_existing_keys_until_another_key_is_discovered",
       "providers::refreshed::tests::stale_metadata_answers_at_once_and_the_next_read_sees_the_refresh",
       "providers::registry::tests::catalog_candidates_keep_unicode_name_path_provider_order_and_stable_ties",
-      "providers::registry::tests::creating_native_storage_does_not_change_its_identity",
       "providers::registry::tests::startup_errors_stay_ordered_and_account_errors_keep_their_provider",
-      "providers::registry::tests::storage_scope_has_a_fixed_encoding",
-      "providers::registry::tests::storage_scope_ignores_input_order_but_tracks_provider_paths",
       "providers::requests::tests::approval_choices_preserve_native_effects_and_leave_cancelling_to_stop",
       "providers::requests::tests::canonical_request_kinds_and_decisions_follow_the_native_permission_scope",
       "providers::requests::tests::claude_questions_restore_native_labels_only_at_the_answer_boundary",
@@ -2588,5 +2581,43 @@
       "dictation::tests::slow_preparation_preserves_the_complete_recording_fallback_budget",
       "browser::cdp::tests::uncertain_navigation_and_input_keep_the_connection_without_replaying"
     ]
+  },
+  "contract_replacements": {
+    "old-row-replica": {
+      "retired": [
+        "sync::tests::a_new_generation_receives_current_frames_and_rejects_old_ones",
+        "sync::tests::an_empty_running_turn_is_in_scope_and_an_old_item_is_not",
+        "sync::tests::arbitrary_live_and_catchup_histories_converge",
+        "sync::tests::extension_changes_membership_before_subsequent_live_changes",
+        "sync::tests::hydration_cannot_advance_a_stale_rows_version_without_its_live_change",
+        "sync::tests::hydration_fills_only_missing_content_at_the_same_version",
+        "sync::tests::late_items_in_old_turns_join_the_range_when_the_turn_is_loaded",
+        "sync::tests::list_and_conversation_cursors_and_id_namespaces_are_independent",
+        "sync::tests::malformed_frames_are_atomic_and_cannot_create_orphans",
+        "sync::tests::ordered_events_replace_zero_version_rows_and_skip_whole_old_transactions",
+        "sync::tests::removing_a_turn_cascades_items_and_keeps_the_loaded_window",
+        "sync::tests::replacement_snapshot_resets_expanded_membership",
+        "sync::tests::resume_boundaries_include_the_pruning_sequence",
+        "sync::tests::scope_sequence_gaps_are_valid_but_a_wrong_store_is_rejected",
+        "sync::tests::snapshot_replaces_cache_including_after_database_recreation",
+        "sync::tests::stale_extension_invalid_window_and_same_version_reparenting_are_rejected",
+        "sync::tests::stream::windows_reconnect_and_snapshot_fallback_converge",
+        "sync::tests::turn_order_precedes_item_creation_order_when_opening_and_extending",
+        "sync::tests::two_changed_targets_survive_catchup_and_duplicate_delivery",
+        "sync::tests::unrelated_streaming_does_not_starve_a_valid_hydration",
+        "sync::tests::wire_roundtrip_preserves_existing_conversation_identity_and_scope"
+      ],
+      "reason": "No production caller uses Row/Replica/UUID cursors; new requirement is DB event replay and canonical client reception. Keep scope and output contracts.",
+      "replacement": "host_rpc::storage::tests::committed_database_streams_converge_through_reopen_overlap_and_snapshot_fallback plus existing canonical stream/history/Host-generation guards"
+    },
+    "provider-home-namespace": {
+      "retired": [
+        "providers::registry::tests::creating_native_storage_does_not_change_its_identity",
+        "providers::registry::tests::storage_scope_has_a_fixed_encoding",
+        "providers::registry::tests::storage_scope_ignores_input_order_but_tracks_provider_paths"
+      ],
+      "reason": "User chose fresh canonical DB and one-time provider import. Provider homes no longer identify the authoritative store.",
+      "replacement": "host_rpc::service::tests canonical namespace provider-independence, alias/reopen and harness-stability cases"
+    }
   }
 }
