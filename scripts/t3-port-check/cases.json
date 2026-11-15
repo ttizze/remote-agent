@@ -2,7 +2,8 @@
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
     "agent-protocol": [
-      "orchestration::tests::claude_empty_baseline_replaces_the_logical_native_owner_and_fences_old_callbacks"
+      "orchestration::tests::claude_empty_baseline_replaces_the_logical_native_owner_and_fences_old_callbacks",
+      "orchestration::tests::claude_resume_pin_survives_admission_and_errors_but_successful_completion_clears_it"
     ],
     "host-daemon": [
       "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_1",
@@ -2661,5 +2662,10 @@
   "sdk_contracts": [
     "native fork captures the remapped SDK head even when the project moved",
     "native resume forwards the real assistant cursor into query options"
-  ]
+  ],
+  "native_contracts": {
+    "host-fixture::adapter_conformance": [
+      "claude_native_rewind_resumes_the_kept_assistant_through_rpc_and_the_real_sdk"
+    ]
+  }
 }

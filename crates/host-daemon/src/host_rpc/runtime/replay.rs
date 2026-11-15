@@ -159,7 +159,7 @@ process.stdin.destroy();
                 service_tier: None,
                 follow_up: Default::default(),
             },
-            SubmissionTarget::Start { cwd },
+            SubmissionTarget::start(cwd, None, false),
             false,
             None,
             Uuid::new_v4(),

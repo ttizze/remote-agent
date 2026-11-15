@@ -1466,3 +1466,128 @@ async fn adapter_initialization_failure_preserves_the_other_provider_and_host() 
     local.close().await;
     host.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_native_rewind_resumes_the_kept_assistant_through_rpc_and_the_real_sdk() {
+    // T3 retains the first native assistant, removes the second app run, then
+    // resumes the same native session at that assistant. CLI history must also
+    // exclude the discarded input; a canonical-only cut cannot satisfy this.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let host = start(&root, Arc::new(Memory::default())).await;
+    let local = host.local().await.unwrap();
+    let session = create(&local.peer, ProviderKind::Claude, &root).await;
+    let (_, mut events) = open(&local.peer, &session).await;
+    let first = submission(&session, "remember-prefix");
+    submit(&local.peer, &first).await.unwrap();
+    let first_run = events
+        .input_turn(&first.client_user_message_id, true)
+        .await
+        .id;
+    let snapshot = &events.projection.snapshot.projection;
+    let attempt = snapshot
+        .runs
+        .iter()
+        .find(|run| run.id == first_run.as_str())
+        .unwrap()
+        .active_attempt_id
+        .as_ref()
+        .unwrap();
+    let kept_cursor = snapshot
+        .provider_turns
+        .iter()
+        .filter(|turn| turn.run_attempt_id.as_ref() == Some(attempt))
+        .max_by_key(|turn| turn.ordinal)
+        .unwrap()
+        .native_turn_ref
+        .as_ref()
+        .unwrap()
+        .native_id
+        .clone()
+        .unwrap();
+    assert!(
+        !kept_cursor.starts_with("turn:"),
+        "SDK wrote a real assistant cursor"
+    );
+    let tail = submission(&session, "discard-tail");
+    submit(&local.peer, &tail).await.unwrap();
+    let discarded = events
+        .input_turn(&tail.client_user_message_id, true)
+        .await
+        .id;
+    let native = conversations::native_source(&root, &session, ProviderKind::Claude);
+    conversations::command(
+        &local.peer,
+        &session,
+        uuid::Uuid::new_v4(),
+        Command::Rewind(discarded.clone()),
+    )
+    .await
+    .expect("Claude exposes native conversation rewind");
+    while events
+        .view()
+        .thread
+        .turns
+        .iter()
+        .flatten()
+        .any(|turn| turn.id == discarded)
+    {
+        events.next().await;
+    }
+    let snapshot = &events.projection.snapshot.projection;
+    let selected = snapshot
+        .provider_threads
+        .iter()
+        .find(|provider| Some(&provider.id) == snapshot.thread.active_provider_thread_id.as_ref())
+        .unwrap();
+    assert_eq!(
+        selected
+            .native_thread_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_deref(),
+        Some(native.as_str())
+    );
+    assert_eq!(
+        selected
+            .native_conversation_head_ref
+            .as_ref()
+            .unwrap()
+            .native_id
+            .as_deref(),
+        Some(kept_cursor.as_str())
+    );
+    assert!(
+        events
+            .view()
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .any(|turn| turn.id == first_run)
+    );
+    let next = submission(&session, "after-rewind");
+    submit(&local.peer, &next).await.unwrap();
+    let answer = events.input_turn(&next.client_user_message_id, true).await;
+    let text = answer
+        .items
+        .iter()
+        .flatten()
+        .filter_map(|item| match item.body() {
+            ItemBody::AssistantText { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(
+        text, "reply 2: after-rewind",
+        "the private CLI actually resumed the kept native prefix, excluding discard-tail"
+    );
+    assert_eq!(
+        conversations::native_source(&root, &session, ProviderKind::Claude),
+        native
+    );
+    local.close().await;
+    host.close().await.unwrap();
+}

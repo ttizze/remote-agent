@@ -3197,3 +3197,91 @@ fn claude_empty_baseline_replaces_the_logical_native_owner_and_fences_old_callba
         "the next input belongs to the fresh native owner"
     );
 }
+
+#[test]
+fn claude_resume_pin_survives_admission_and_errors_but_successful_completion_clears_it() {
+    // Pinned ClaudeAdapterV2~9048 clears a resume override on completion even
+    // without an assistant cursor, and keeps it on failed/interrupted no-output
+    // attempts. A generic started/ACK alone cannot advance the native head.
+    for (completion, retained) in [
+        (Completion::Completed, false),
+        (Completion::Interrupted, true),
+        (
+            Completion::Failed(ProviderFailure {
+                class: "fixture".into(),
+                message: "failed before transcript output".into(),
+                code: None,
+                retryable: None,
+                reset_at: None,
+            }),
+            true,
+        ),
+    ] {
+        let mut state = initial();
+        state.thread.provider_instance_id = "claude".into();
+        state.thread.model_selection.instance_id = "claude".into();
+        let session = state.provider_sessions.get_mut("session").unwrap();
+        session.driver = "claudeAgent".into();
+        session.provider_instance_id = "claude".into();
+        let provider = state.provider_threads.get_mut("native-thread").unwrap();
+        provider.driver = "claudeAgent".into();
+        provider.provider_instance_id = "claude".into();
+        provider.native_thread_ref.as_mut().unwrap().driver = "claudeAgent".into();
+        let pin = ProviderRef {
+            driver: "claudeAgent".into(),
+            ..native("retained-assistant", None)
+        };
+        provider.native_conversation_head_ref = Some(pin.clone());
+        let mut message = input(1);
+        message.driver = "claudeAgent".into();
+        message.model_selection.instance_id = "claude".into();
+        state = state.apply(
+            &admit(
+                &state,
+                message,
+                Admission::Queue,
+                context("admitted", &state),
+            )
+            .unwrap(),
+        );
+        let attempt = state
+            .active_run()
+            .unwrap()
+            .active_attempt_id
+            .clone()
+            .unwrap();
+        state = state.apply(
+            &started(
+                &state,
+                &attempt,
+                "session",
+                ProviderRef {
+                    driver: "claudeAgent".into(),
+                    ..native("raw-control", None)
+                },
+                context("started", &state),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            state.provider_threads["native-thread"].native_conversation_head_ref,
+            Some(pin.clone()),
+            "admission has no transcript evidence"
+        );
+        let next = state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                completion,
+                context("done", &state),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            next.provider_threads["native-thread"].native_conversation_head_ref,
+            retained.then_some(pin),
+            "terminal outcome owns the no-output resume policy"
+        );
+    }
+}

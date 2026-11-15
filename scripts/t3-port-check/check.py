@@ -103,12 +103,15 @@ if not guards.issubset(passed):
         print(f"guard did not pass: {binary} {name}", file=sys.stderr)
     sys.exit("Invalid check: fixed guard failed")
 sdk_failed = set()
+native_failed = set()
 if not HOLDOUT:
     sdk_expected = set(CASES.get("sdk_contracts", []))
-    if sdk_expected:
+    native_expected = entries(CASES.get("native_contracts", {}))
+    if sdk_expected or native_expected:
         builder = subprocess.run(["git", "config", "--get", "bex.remoteBuilder"], cwd=ROOT, text=True, capture_output=True).stdout.strip()
         if not builder:
             sys.exit("SDK contract requires the configured builder; refusing a local fallback")
+    if sdk_expected:
         sdk = subprocess.run([str(ROOT / "scripts/dev-env.sh"), str(ROOT / "scripts/remote-run.sh"), "--native", builder,
             "node", "--test", "--test-reporter=tap", "--test-name-pattern", "native (fork|resume)", "crates/host-daemon/src/providers/claude/sdk/bridge.test.mjs"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         (ROOT / ".hill-climb/t3-port/sdk-tests.txt").write_text(sdk.stdout)
@@ -119,6 +122,23 @@ if not HOLDOUT:
         sdk_failed = {name for result, name in sdk_results if result == "not ok"}
         for name in sorted(sdk_failed):
             print(f"native SDK contract did not pass: {name}")
+    if native_expected:
+        # Use the current production SDK bundle, never a stale target artifact.
+        built = subprocess.run([str(ROOT / "scripts/dev-env.sh"), str(ROOT / "scripts/remote-run.sh"), "--native", builder,
+            "node", "scripts/build-claude-sdk.ts", "target/debug"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if built.returncode:
+            print(built.stdout[-12000:])
+            sys.exit("Invalid check: current native SDK bundle could not be built")
+        native_filter = " | ".join(f"test(={name})" for _, name in sorted(native_expected))
+        native = subprocess.run(command + ["run", "--locked", "--color", "never", "-p", "host-fixture", "-E", native_filter, "--no-fail-fast", "--retries", "0"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        (ROOT / ".hill-climb/t3-port/native-tests.txt").write_text(native.stdout)
+        native_results = re.findall(r"\b(PASS|FAIL|TIMEOUT|LEAK|ABORT)\s+\[[^\]]+\]\s+\([^\n]+?\)\s+(\S+)\s+(\S+)", native.stdout)
+        if native.returncode not in (0, 100) or "Summary" not in native.stdout or {(binary, name) for _, binary, name in native_results} != native_expected:
+            print(native.stdout[-12000:])
+            sys.exit("Invalid check: composed native contract did not run completely")
+        native_failed = {(binary, name) for result, binary, name in native_results if result != "PASS"}
+        for binary, name in sorted(native_failed):
+            print(f"composed native contract did not pass: {binary} {name}")
 remaining = [] if HOLDOUT else [path for path in CASES["obsolete_files"] if (ROOT / path).exists()]
 obsolete = [] if HOLDOUT else [
     rule["name"] for rule in CASES["obsolete_symbols"]
@@ -134,4 +154,4 @@ for path in remaining:
 for name in obsolete:
     print(f"obsolete implementation remains: {name}")
 print(f"Passed {len(scored & passed)}/{len(scored)} scenarios; {len(guards)} guards")
-print(len(scored - passed) + len(sdk_failed) + len(remaining) + len(obsolete))
+print(len(scored - passed) + len(sdk_failed) + len(native_failed) + len(remaining) + len(obsolete))
