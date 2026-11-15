@@ -10,7 +10,12 @@
       "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_2",
       "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_3",
       "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_4",
-      "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_5"
+      "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_5",
+      "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_1",
+      "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_2",
+      "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_3",
+      "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_4",
+      "providers::claude::execution_tests::native_claude_resume_probe_classifies_transcripts_without_returning_history::case_5"
     ]
   },
   "guards": {

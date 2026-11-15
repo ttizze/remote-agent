@@ -155,3 +155,80 @@ async fn native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_base
         assert_eq!(claude.records.lock().await.len(), 1);
     }
 }
+
+#[rstest::rstest]
+#[case("missing")]
+#[case("empty")]
+#[case("conversation")]
+#[case("copies")]
+#[case("fresh")]
+#[tokio::test]
+async fn native_claude_resume_probe_classifies_transcripts_without_returning_history(
+    #[case] mode: &str,
+) {
+    // Pinned resumeThread: missing is left to the CLI, metadata-only is refused,
+    // and any conversation copy wins. This is a native start probe, not a
+    // second display/history reader after canonical import.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let home = root.join("native");
+    let claude = Claude::load(
+        root.join("unused"),
+        root.join("adapter"),
+        Some(home.clone()),
+    )
+    .await
+    .unwrap();
+    let id = if mode == "fresh" {
+        claude
+            .create(root.to_str().unwrap(), "default")
+            .await
+            .unwrap()
+            .thread
+            .id
+            .unwrap()
+            .id
+    } else {
+        Uuid::new_v4().to_string()
+    };
+    if matches!(mode, "empty" | "conversation" | "copies") {
+        let project = home.join("projects/first");
+        std::fs::create_dir_all(&project).unwrap();
+        let metadata = json!({"type":"system","subtype":"init","sessionId":id,"cwd":root});
+        std::fs::write(project.join(format!("{id}.jsonl")), format!("{metadata}\n")).unwrap();
+    }
+    if matches!(mode, "conversation" | "copies") {
+        let project = home.join(if mode == "copies" {
+            "projects/second"
+        } else {
+            "projects/first"
+        });
+        std::fs::create_dir_all(&project).unwrap();
+        let user = json!({"type":"user","uuid":"native-user","parentUuid":null,"sessionId":id,"cwd":root,"version":"2.1.266","message":{"role":"user","content":[{"type":"text","text":"native content stays out of a metadata probe"}]}});
+        let answer = json!({"type":"assistant","uuid":"assistant-cursor","parentUuid":"native-user","sessionId":id,"cwd":root,"version":"2.1.266","message":{"id":"api-message","role":"assistant","content":[{"type":"text","text":"answer"}]}});
+        std::fs::write(
+            project.join(format!("{id}.jsonl")),
+            format!("{user}\n{answer}\n"),
+        )
+        .unwrap();
+    }
+    let result = Agent::state(&claude, &id).await;
+    if mode == "empty" {
+        assert!(
+            result.is_err(),
+            "a readable metadata-only transcript cannot be resumed or overwritten"
+        );
+    } else {
+        let state = result.unwrap_or_else(|error| panic!("{mode}: {error}"));
+        assert_eq!(state.response.thread.id.as_ref().unwrap().id, id);
+        assert_eq!(state.response.thread.status, SessionStatus::Idle);
+        assert!(
+            state.response.thread.turns.is_none(),
+            "native state probes never return display bodies"
+        );
+        assert!(
+            state.response.thread.history_read_state.is_none(),
+            "a resume classification is not a second history import"
+        );
+    }
+}
