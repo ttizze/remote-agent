@@ -1,0 +1,27 @@
+--- a/crates/agent-core/src/orchestration/shell.rs
++++ b/crates/agent-core/src/orchestration/shell.rs
+@@ -78,1 +78,1 @@
+-        if !allow_snapshot_reset
++        if !allow_snapshot_reset
+@@ -104,1 +104,1 @@
+-    if sequence < snapshot.snapshot_sequence {
++    if sequence < snapshot.snapshot_sequence {
+--- a/crates/host-daemon/src/host_rpc/storage/shell.rs
++++ b/crates/host-daemon/src/host_rpc/storage/shell.rs
+@@ -490,1 +490,1 @@
+-    if after > through || through - after > 1_000 {
++    if after > through || through - after > 1_000 {
+@@ -495,1 +495,1 @@
+-    Ok(bytes <= 8 * 1024 * 1024)
++    Ok(bytes <= 8 * 1024 * 1024)
+@@ -499,1 +499,1 @@
+-    if after == through {
++    if after == through {
+@@ -506,1 +506,1 @@
+-    if after < u64::try_from(pruned).map_err(failure)? {
++    if after < u64::try_from(pruned).map_err(failure)? {
+--- a/crates/host-daemon/src/host_rpc/runtime/list.rs
++++ b/crates/host-daemon/src/host_rpc/runtime/list.rs
+@@ -78,1 +78,1 @@
+-                        now.duration_since(*sent) < Duration::from_secs(5)
++                        now.duration_since(*sent) < Duration::from_secs(5)

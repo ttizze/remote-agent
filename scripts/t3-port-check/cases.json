@@ -436,7 +436,12 @@
       "host_rpc::storage::tests::a_claimed_legacy_import_failure_is_unavailable_and_can_be_retried",
       "host_rpc::storage::tests::a_private_native_source_cannot_create_a_second_conversation_row",
       "host_rpc::storage::tests::catalog_claims_survive_restart_and_do_not_restore_superseded_native_sources",
-      "host_rpc::storage::tests::repeated_catalog_native_parent_does_not_version_an_unchanged_public_child"
+      "host_rpc::storage::tests::repeated_catalog_native_parent_does_not_version_an_unchanged_public_child",
+      "host_rpc::service::activity::tests::live_activity_tracks_committed_work_after_disconnect_and_revocation_prevents_reregistration",
+      "host_rpc::service::titles::tests::task_list_refreshes_branding_for_all_project_headers",
+      "host_rpc::storage::tests::catalog_failure_keeps_rows_and_only_the_current_claim_changes_their_confidence",
+      "host_rpc::storage::tests::each_header_producer_replays_to_the_next_snapshot::case_1",
+      "host_rpc::storage::tests::unknown_native_activity_stays_unknown_until_the_current_source_confirms_idle"
     ]
   },
   "obsolete_files": [
