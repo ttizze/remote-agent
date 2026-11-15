@@ -155,6 +155,24 @@ struct Running {
     work: watch::Receiver<Work>,
 }
 
+impl Running {
+    fn new(
+        turn_id: agent_protocol::ids::TurnId,
+        input: mpsc::Sender<Command>,
+        interrupt: watch::Receiver<Option<(String, Result<(), String>)>>,
+        effort: Option<String>,
+        work: watch::Receiver<Work>,
+    ) -> Self {
+        Self {
+            turn_id,
+            input,
+            interrupt,
+            effort,
+            work,
+        }
+    }
+}
+
 /// What the worker's process is doing beside its turns.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Work {
@@ -841,13 +859,13 @@ impl Claude {
         let (input, receiver) = mpsc::channel(32);
         let (interrupt, interrupted) = watch::channel(None);
         let (work, work_observed) = watch::channel(Work::default());
-        state.running = Some(Running {
-            turn_id: turn_id.clone(),
-            input: input.clone(),
-            interrupt: interrupted,
-            effort: effort.map(str::to_owned),
-            work: work_observed,
-        });
+        state.running = Some(Running::new(
+            turn_id.clone(),
+            input.clone(),
+            interrupted,
+            effort.map(str::to_owned),
+            work_observed,
+        ));
         drop(state);
         let target = SessionRef {
             provider: Some(ProviderKind::Claude),

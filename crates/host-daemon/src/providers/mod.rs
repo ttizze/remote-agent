@@ -172,6 +172,8 @@ pub(crate) struct ForkResult {
     pub response: ThreadResponse,
     pub head_id: Option<String>,
 }
+
+pub(crate) type NativeForkPoint<'a> = &'a str;
 impl From<ThreadResponse> for ForkResult {
     fn from(response: ThreadResponse) -> Self {
         Self {
@@ -452,7 +454,7 @@ pub(crate) trait Agent: Send + Sync {
     async fn fork(
         &self,
         id: &str,
-        turn: &str,
+        turn: NativeForkPoint<'_>,
         browser: Option<Value>,
     ) -> Result<ForkResult, Failure>;
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>>;
