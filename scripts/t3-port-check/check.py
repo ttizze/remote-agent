@@ -102,6 +102,23 @@ if not guards.issubset(passed):
     for binary, name in sorted(guards - passed):
         print(f"guard did not pass: {binary} {name}", file=sys.stderr)
     sys.exit("Invalid check: fixed guard failed")
+sdk_failed = set()
+if not HOLDOUT:
+    sdk_expected = set(CASES.get("sdk_contracts", []))
+    if sdk_expected:
+        builder = subprocess.run(["git", "config", "--get", "bex.remoteBuilder"], cwd=ROOT, text=True, capture_output=True).stdout.strip()
+        if not builder:
+            sys.exit("SDK contract requires the configured builder; refusing a local fallback")
+        sdk = subprocess.run([str(ROOT / "scripts/dev-env.sh"), str(ROOT / "scripts/remote-run.sh"), "--native", builder,
+            "node", "--test", "--test-reporter=tap", "--test-name-pattern", "native fork", "crates/host-daemon/src/providers/claude/sdk/bridge.test.mjs"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        (ROOT / ".hill-climb/t3-port/sdk-tests.txt").write_text(sdk.stdout)
+        sdk_results = re.findall(r"^(ok|not ok) \d+ - (.+)$", sdk.stdout, re.MULTILINE)
+        if sdk.returncode not in (0, 1) or {name for _, name in sdk_results} != sdk_expected:
+            print(sdk.stdout[-12000:])
+            sys.exit("Invalid check: native SDK contract did not run completely")
+        sdk_failed = {name for result, name in sdk_results if result == "not ok"}
+        for name in sorted(sdk_failed):
+            print(f"native SDK contract did not pass: {name}")
 remaining = [] if HOLDOUT else [path for path in CASES["obsolete_files"] if (ROOT / path).exists()]
 obsolete = [] if HOLDOUT else [
     rule["name"] for rule in CASES["obsolete_symbols"]
@@ -117,4 +134,4 @@ for path in remaining:
 for name in obsolete:
     print(f"obsolete implementation remains: {name}")
 print(f"Passed {len(scored & passed)}/{len(scored)} scenarios; {len(guards)} guards")
-print(len(scored - passed) + len(remaining) + len(obsolete))
+print(len(scored - passed) + len(sdk_failed) + len(remaining) + len(obsolete))

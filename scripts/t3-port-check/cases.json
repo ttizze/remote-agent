@@ -2651,5 +2651,8 @@
       "reason": "Pinned T3 ClaudeAdapterV2 forkThread rejects any active query and accepts an actual assistant UUID directly. The replaced private unit encoded obsolete raw-user-turn translation and allowed historical native fork during an active query. Native fork public context/output guards remain intact.",
       "replacement": "providers::claude::execution_tests::native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query"
     }
-  }
+  },
+  "sdk_contracts": [
+    "native fork captures the remapped SDK head even when the project moved"
+  ]
 }

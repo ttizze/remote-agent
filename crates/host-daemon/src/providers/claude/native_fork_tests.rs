@@ -4,6 +4,12 @@ async fn native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query() {
     // The cursor is already an assistant ID; it needs no user-turn lookup.
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
+    std::fs::create_dir_all(root.join("adapter/accounts")).unwrap();
+    std::fs::write(
+        root.join("adapter/accounts/accounts.json"),
+        r#"{"accounts":[],"selectedId":null}"#,
+    )
+    .unwrap();
     let claude = Claude::load(
         root.join("unused"),
         root.join("adapter"),

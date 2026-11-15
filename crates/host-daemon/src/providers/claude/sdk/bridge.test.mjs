@@ -7,6 +7,50 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sessionStateStream } from "./session-state.ts";
+import { getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
+
+test("native fork captures the remapped SDK head even when the project moved", async () => {
+  // The real SDK remaps copied UUIDs. Source user/control IDs cannot identify
+  // the baseline inherited by the new native session (T3 QueryRunner.forkSession).
+  const home = await mkdtemp(join(tmpdir(), "agent-native-fork-"));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = home;
+  try {
+    const bytes = await readFile(new URL("../../../../tests/fixtures/claude-2.1.266.jsonl", import.meta.url), "utf8");
+    const rows = bytes.trim().split("\n").map(JSON.parse);
+    const session = rows.find((row) => row.sessionId).sessionId;
+    const cwd = rows.find((row) => row.cwd).cwd;
+    const cursor = rows.find((row) => row.type === "assistant" && !row.isSidechain).uuid;
+    const directory = join(home, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+    await mkdir(directory, { recursive: true });
+    const original = join(directory, `${session}.jsonl`);
+    await writeFile(original, bytes);
+    const source = await getSessionMessages(session);
+    const boundary = source.findIndex((message) => message.uuid === cursor);
+    assert.ok(boundary >= 0);
+    for (const workingDirectory of [cwd, join(home, "moved-project")]) {
+      const events = [];
+      async function* input() {
+        yield JSON.stringify({ type: "fork", sessionId: session, cwd: workingDirectory, upToMessageId: cursor });
+      }
+      await runBridge(input(), (event) => events.push(event), () => { throw new Error("fork must not run inference"); });
+      assert.equal(events.length, 1);
+      const forked = events[0];
+      assert.equal(forked.type, "forked");
+      assert.notEqual(forked.sessionId, session);
+      const copied = await getSessionMessages(forked.sessionId);
+      assert.equal(copied.length, boundary + 1, "copy ends at the selected assistant");
+      assert.deepEqual(copied.map((message) => message.message), source.slice(0, boundary + 1).map((message) => message.message));
+      assert.notEqual(copied.at(-1).uuid, cursor, "SDK allocates new transcript UUIDs");
+      assert.equal(forked.headMessageId, copied.at(-1).uuid, "save the real inherited head before the first query");
+      assert.equal(await readFile(original, "utf8"), bytes, "source history remains intact");
+    }
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 function channel() {
   const values = [];
