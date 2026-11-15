@@ -195,6 +195,7 @@ pub(in crate::host_rpc) struct NativeAgent {
     pub(in crate::host_rpc) created: tokio::sync::Notify,
     pub(in crate::host_rpc) fail_inject: AtomicUsize,
     pub(in crate::host_rpc) open_gate: tokio::sync::Semaphore,
+    pub(in crate::host_rpc) state_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) state_error: Mutex<Option<Failure>>,
     pub(in crate::host_rpc) rollback_error: Mutex<Option<String>>,
     pub(in crate::host_rpc) rollback_calls: AtomicUsize,
@@ -238,6 +239,7 @@ impl NativeAgent {
             created: tokio::sync::Notify::new(),
             fail_inject: AtomicUsize::new(0),
             open_gate: tokio::sync::Semaphore::new(1),
+            state_gate: tokio::sync::Semaphore::new(1),
             state_error: Mutex::new(None),
             rollback_error: Mutex::new(None),
             rollback_calls: AtomicUsize::new(0),
@@ -276,6 +278,7 @@ impl NativeAgent {
             created: tokio::sync::Notify::new(),
             fail_inject: AtomicUsize::new(0),
             open_gate: tokio::sync::Semaphore::new(1),
+            state_gate: tokio::sync::Semaphore::new(1),
             state_error: Mutex::new(None),
             rollback_error: Mutex::new(None),
             rollback_calls: AtomicUsize::new(0),
@@ -537,6 +540,7 @@ impl Agent for NativeAgent {
         Ok(response)
     }
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
+        let _permit = self.state_gate.acquire().await.unwrap();
         if let Some(error) = self.state_error.lock().unwrap().take() {
             return Err(error);
         }

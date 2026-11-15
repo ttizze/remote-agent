@@ -511,6 +511,9 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         )
         .await;
         let blocked = fixture.agent.create_gate.acquire().await.unwrap();
+        // Rewind resumes the same native thread; fork allocates another one.
+        // Hold both actual preparation boundaries before observing Provider.
+        let resuming = fixture.agent.state_gate.acquire().await.unwrap();
         let input = Uuid::new_v4();
         let submitted: records::Acknowledged = call(
             &fixture.host,
@@ -564,6 +567,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
         })
         .await;
         drop(blocked);
+        drop(resuming);
         assert_eq!(
             std::fs::read_to_string(checkout.join("uncommitted.txt")).unwrap(),
             "keep local work"

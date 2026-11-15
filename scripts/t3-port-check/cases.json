@@ -1,9 +1,13 @@
 {
   "reference": "1a12c4afae998925b4a29417f2dc436c0ccd0969",
   "scenarios": {
+    "agent-protocol": [
+      "orchestration::tests::native_resource_replacement_cannot_reuse_a_previous_physical_cursor_or_metadata"
+    ],
     "host-daemon": [
       "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer",
-      "host_rpc::runtime::t3_contract::claude_native_cursor_updates_keep_controls_callback_ownership_and_one_delivery"
+      "host_rpc::runtime::t3_contract::claude_native_cursor_updates_keep_controls_callback_ownership_and_one_delivery",
+      "providers::claude::execution_tests::native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query"
     ]
   },
   "guards": {
@@ -1985,7 +1989,6 @@
       "providers::claude::execution_tests::background_work_that_ends_after_the_answer_reports_in_a_new_turn",
       "providers::claude::execution_tests::consumed_inputs_follow_the_current_turn_without_staying_in_completed_history",
       "providers::claude::execution_tests::final_blocks_match_content_kind_and_native_message_before_falling_back",
-      "providers::claude::execution_tests::fork_refuses_only_the_turn_still_answering",
       "providers::claude::execution_tests::late_blocks_and_api_retry_preserve_only_valid_stream_items",
       "providers::claude::execution_tests::native_error_evidence_distinguishes_quota_retry_auth_and_warning",
       "providers::claude::execution_tests::queued_input_reads_only_metadata_and_keeps_owned_execution",
@@ -2577,6 +2580,16 @@
       "exclude": [],
       "exclude_paths": [],
       "pattern": "\\bsession_pages\\s*\\("
+    },
+    {
+      "name": "claude-user-turn-fork-map",
+      "globs": [
+        "crates/host-daemon/src/providers/claude.rs",
+        "crates/host-daemon/src/providers/claude/history.rs"
+      ],
+      "exclude": [],
+      "exclude_paths": [],
+      "pattern": "\\bfork_points\\b"
     }
   ],
   "milestone_guards": {
@@ -2630,6 +2643,13 @@
     "claude-sdk-native-cursor": {
       "reason": "Extend existing real recorded SDK-reader/Worker/Runtime/writer check with T3 actual assistant envelope UUID and durable DB cursor; preserve all existing output/background assertions. User/control turn UUID and API message.id are not valid SDK resumeSessionAt cursors.",
       "replacement": "host_rpc::runtime::replay::recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_writer"
+    },
+    "claude-native-fork-cursor": {
+      "retired": [
+        "providers::claude::execution_tests::fork_refuses_only_the_turn_still_answering"
+      ],
+      "reason": "Pinned T3 ClaudeAdapterV2 forkThread rejects any active query and accepts an actual assistant UUID directly. The replaced private unit encoded obsolete raw-user-turn translation and allowed historical native fork during an active query. Native fork public context/output guards remain intact.",
+      "replacement": "providers::claude::execution_tests::native_fork_uses_an_assistant_cursor_and_waits_for_an_idle_query"
     }
   }
 }

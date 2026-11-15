@@ -58,7 +58,7 @@ if BASELINE:
 else:
     expected = scored | guards
 
-result = subprocess.run(command + ["run", *arguments, "--no-fail-fast", "--retries", "0"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+result = subprocess.run(command + ["run", *arguments, "--test-threads", "4", "--no-fail-fast", "--retries", "0"], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 log = ROOT / (".hill-climb/t3-port/holdout.txt" if HOLDOUT else ".hill-climb/t3-port/setup-tests.txt" if BASELINE else ".hill-climb/t3-port/tests.txt")
 log.parent.mkdir(parents=True, exist_ok=True)
 log.write_text(result.stdout)

@@ -3011,3 +3011,73 @@ fn a_missing_retained_attempt_cannot_borrow_a_runless_native_turn() {
     );
     assert_eq!(state, before);
 }
+
+#[test]
+fn native_resource_replacement_cannot_reuse_a_previous_physical_cursor_or_metadata() {
+    let mut state = initial();
+    state.thread.provider_instance_id = "claude".into();
+    state.thread.model_selection.instance_id = "claude".into();
+    let source = ProviderRef {
+        driver: "claudeAgent".into(),
+        native_id: Some("original-native".into()),
+        strength: NativeRefStrength::Strong,
+        fingerprint: None,
+        ordinal: None,
+    };
+    let session = state.provider_sessions.get_mut("session").unwrap();
+    session.driver = "claudeAgent".into();
+    session.provider_instance_id = "claude".into();
+    let mut session = session.clone();
+    session.id = "new-runtime-session".into();
+    let thread = state.provider_threads.get_mut("native-thread").unwrap();
+    thread.driver = "claudeAgent".into();
+    thread.provider_instance_id = "claude".into();
+    thread.native_thread_ref = Some(source.clone());
+    thread.native_metadata = Some(
+        serde_json::from_value(
+            serde_json::json!({"forkHeadMessageId":"old-fork-head","updatedAt":NOW}),
+        )
+        .unwrap(),
+    );
+    thread.native_conversation_head_ref = Some(ProviderRef {
+        native_id: Some("old-pinned-assistant".into()),
+        ..source.clone()
+    });
+    let original = thread.clone();
+    for replacement in [false, true] {
+        let mut target = source.clone();
+        if replacement {
+            target.native_id = Some("replacement-native".into());
+        }
+        let after = state.apply(
+            &native_resource_loaded(
+                &state,
+                "native-thread",
+                Some(&source),
+                session.clone(),
+                target.clone(),
+                false,
+                NOW,
+            )
+            .unwrap(),
+        );
+        let bound = &after.provider_threads["native-thread"];
+        assert_eq!(bound.native_thread_ref, Some(target));
+        if replacement {
+            assert!(
+                bound.native_metadata.is_none(),
+                "native facts do not describe another physical session"
+            );
+            assert!(
+                bound.native_conversation_head_ref.is_none(),
+                "never resume a new native session at an old session's UUID"
+            );
+        } else {
+            assert_eq!(bound.native_metadata, original.native_metadata);
+            assert_eq!(
+                bound.native_conversation_head_ref, original.native_conversation_head_ref,
+                "a reconnect preserves a pinned resume cursor until genuine transcript progress"
+            );
+        }
+    }
+}
