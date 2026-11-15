@@ -33,11 +33,12 @@ mod titles;
 pub(in crate::host_rpc) mod workspace;
 
 /// Host storage and offline fixture consumers address the same canonical file.
-pub const CONVERSATION_DATABASE_FILE: &str = "bex-conversations.sqlite";
+pub const CONVERSATION_DATABASE_FILE: &str = "bex-orchestration-v2.sqlite";
 
 #[derive(Debug)]
 pub(crate) struct Storage {
     connection: Mutex<Result<Connection, String>>,
+    scope: Result<String, String>,
     changed: tokio::sync::watch::Sender<()>,
 }
 fn failure(error: impl std::fmt::Display) -> String {
@@ -118,10 +119,26 @@ impl Storage {
                 .map_err(failure)?;
             Ok(connection)
         })();
+        // The DB is the authority after initial import. Resolve the created
+        // file itself so symlink aliases share pending commands and cursors.
+        // A new filename starts a new namespace without reading the old DB.
+        let scope = dunce::canonicalize(path).map_err(failure).and_then(|path| {
+            let bytes = serde_json::to_vec(&("orchestration-v2", path)).map_err(failure)?;
+            let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+            Ok(digest
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect())
+        });
         Self {
             connection: Mutex::new(connection),
+            scope,
             changed: tokio::sync::watch::channel(()).0,
         }
+    }
+    pub(in crate::host_rpc) fn scope(&self) -> Result<String, String> {
+        self.scope.clone()
     }
     fn initialize(connection: &mut Connection) -> Result<(), String> {
         let populated: bool = connection

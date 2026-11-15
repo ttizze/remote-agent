@@ -125,7 +125,11 @@ impl HostRpcService {
 
     /// Clients compare this with cached state at the start of every connection.
     pub(crate) fn storage_scope(&self) -> anyhow::Result<String> {
-        Ok(self.inner.providers.storage_scope()?)
+        self.inner
+            .conversation
+            .storage
+            .scope()
+            .map_err(anyhow::Error::msg)
     }
 
     async fn account_request(&self, request: Call) -> Result<Body, Failure> {
