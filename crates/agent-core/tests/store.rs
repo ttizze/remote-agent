@@ -3489,7 +3489,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
         .get(&source)
         .copied();
     assert_eq!(subscription.is_some(), !navigate);
-    writer.reply(&request,json!({"result":{"sequence":base.snapshot_sequence+1,"acceptedAt":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
+    writer.reply(&request,json!({"result":{"sequence":base.snapshot_sequence+1,"accepted_at":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(100), rewind.as_mut())
             .await
@@ -3611,6 +3611,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
 #[case(false, false)]
 #[case(true, false)]
 #[case(true, true)]
+#[case(false, true)]
 #[tokio::test]
 async fn rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts(
     #[case] edited: bool,
@@ -3650,7 +3651,13 @@ async fn rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts
     tokio::pin!(rewind);
     let (request, scoped) = rewind_request(&mut reader, &writer, &source, &base).await;
     let request_id = request["params"]["operation"].as_str().unwrap();
-    writer.reply(&request,json!({"result":{"sequence":base.snapshot_sequence+1,"acceptedAt":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
+    // Exercise both orderings. A queued run can start after native success
+    // while the original command ACK is still held by the transport.
+    let native_before_ack = edited && !failure;
+    if !native_before_ack {
+        writer.reply(&request,json!({"result":{"sequence":base.snapshot_sequence+1,"accepted_at":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
+    }
+
     assert!(
         tokio::time::timeout(Duration::from_millis(100), rewind.as_mut())
             .await
@@ -3692,6 +3699,64 @@ async fn rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts
         rewind_native_cut(&base, request_id)
     };
     rewind_frame(&writer, active, scoped, frame).await;
+    if native_before_ack {
+        let mut advanced = rewind_native_cut(&base, request_id);
+        advanced.snapshot_sequence += 1;
+        advanced.projection.provider_threads[0].last_run_ordinal = Some(4);
+        advanced.projection.provider_threads[0].status = model::ProviderThreadStatus::Active;
+        let mut next = base
+            .projection
+            .runs
+            .iter()
+            .find(|run| run.id == "later")
+            .unwrap()
+            .clone();
+        next.id = "next-queued-run".into();
+        next.ordinal = 4;
+        next.status = model::RunStatus::Running;
+        next.user_message_id = "next-input".into();
+        advanced.projection.runs.push(next);
+        let mut item = base
+            .projection
+            .turn_items
+            .iter()
+            .find(|item| {
+                item.run_id.as_deref() == Some("later")
+                    && matches!(item.body, model::TurnItemBody::UserMessage { .. })
+            })
+            .unwrap()
+            .as_ref()
+            .clone();
+        item.id = "next-input-item".into();
+        item.run_id = Some("next-queued-run".into());
+        if let model::TurnItemBody::UserMessage {
+            message_id, text, ..
+        } = &mut item.body
+        {
+            *message_id = "next-input".into();
+            *text = "already queued continuation".into();
+        }
+        advanced.projection.turn_items.push(Arc::new(item.clone()));
+        let mut row = base
+            .projection
+            .visible_turn_items
+            .iter()
+            .find(|row| row.item.run_id.as_deref() == Some("later"))
+            .unwrap()
+            .clone();
+        row.position += 1;
+        row.source_item_id = item.id.clone();
+        row.item = Arc::new(item);
+        advanced.projection.visible_turn_items.push(row);
+        rewind_frame(&writer, active, scoped, advanced).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rewind.as_mut())
+                .await
+                .is_err(),
+            "the accepted command receipt is still required"
+        );
+        writer.reply(&request,json!({"result":{"sequence":base.snapshot_sequence+1,"accepted_at":"2026-11-14T00:00:00.000Z","error":null}})).await.unwrap();
+    }
     let result = tokio::time::timeout(Duration::from_secs(2), rewind.as_mut())
         .await
         .unwrap();
