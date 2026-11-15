@@ -918,8 +918,18 @@ fn canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary(
         &Default::default(),
     )
     .unwrap();
+    let rendered = crate::presentation::conversation::project_conversation(
+        Default::default(),
+        &Default::default(),
+        &Default::default(),
+        Arc::new(view.thread),
+        &None,
+    );
     assert_eq!(
-        serde_json::to_value(&view.thread.turns.as_ref().unwrap()[0]).unwrap()["supportsRewind"],
-        json!(expected)
+        rendered.turns[0]
+            .rows
+            .iter()
+            .any(|row| row.edit_turn_id.is_some()),
+        expected
     );
 }
