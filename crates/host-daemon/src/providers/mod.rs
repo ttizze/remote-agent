@@ -145,7 +145,11 @@ pub(crate) enum SubmissionTarget<'a> {
 }
 
 impl<'a> SubmissionTarget<'a> {
-    pub(crate) fn start(cwd: &'a str, _resume_at: Option<&'a str>, _native_has_turns: bool) -> Self {
+    pub(crate) fn start(
+        cwd: &'a str,
+        _resume_at: Option<&'a str>,
+        _native_has_turns: bool,
+    ) -> Self {
         Self::Start { cwd }
     }
 }
