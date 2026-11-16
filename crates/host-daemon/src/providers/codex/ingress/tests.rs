@@ -165,6 +165,55 @@ async fn response_request_and_close_flush_all_prior_text_in_wire_order() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn item_and_turn_completion_flush_text_without_a_second_timer_delivery() {
+    // CodexAdapterV2.test.ts at 1a12c4af: buffered text precedes item/turn
+    // completion synchronously and must not be emitted again after 50ms.
+    let (input, events) = mpsc::unbounded_channel();
+    let mut received = receive(events);
+    for (sequence, method, item_id, text, params) in [
+        (
+            1,
+            "item/completed",
+            "a",
+            "item final",
+            json!({"threadId":"thread","turnId":"turn","item":{"type":"agentMessage","id":"a","text":"item final"}}),
+        ),
+        (
+            3,
+            "turn/completed",
+            "b",
+            "turn final",
+            json!({"threadId":"thread","turn":{"id":"turn","status":"completed","items":[]}}),
+        ),
+    ] {
+        input
+            .send(message(
+                sequence,
+                "item/agentMessage/delta",
+                json!({"threadId":"thread","turnId":"turn","itemId":item_id,"delta":text}),
+            ))
+            .unwrap();
+        input.send(message(sequence + 1, method, params)).unwrap();
+        let delta = received.recv().await.unwrap();
+        assert_eq!(delta.through, Some(sequence));
+        assert_eq!(delta.events.len(), 1);
+        assert_eq!(value(&delta.events[0])["params"]["delta"], text);
+        let completion = received.recv().await.unwrap();
+        assert_eq!(completion.through, Some(sequence + 1));
+        assert_eq!(completion.events.len(), 1);
+        assert_eq!(value(&completion.events[0])["method"], method);
+    }
+    tokio::time::advance(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        received.try_recv().is_err(),
+        "completion drained the buffer"
+    );
+    drop(input);
+    assert!(received.recv().await.is_none());
+}
+
+#[tokio::test(start_paused = true)]
 async fn continuous_text_flushes_from_the_first_fragment_and_releases_its_receiver() {
     let (input, events) = mpsc::unbounded_channel();
     let mut received = receive(events);
