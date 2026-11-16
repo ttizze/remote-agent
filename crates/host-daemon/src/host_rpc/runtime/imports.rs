@@ -653,6 +653,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn project_history_keeps_all_two_hundred_messages_including_an_assistant_preamble() {
+        let items = (0..200)
+            .map(|index| {
+                let text = format!("message-{index}");
+                let body = if index == 1 {
+                    ItemBody::UserMessage {
+                        text: Some(text),
+                        content: vec![],
+                    }
+                } else {
+                    ItemBody::AssistantText {
+                        text,
+                        phase: Default::default(),
+                    }
+                };
+                Arc::new(Item::new(
+                    index.to_string().into(),
+                    ItemStatus::Completed,
+                    body,
+                ))
+            })
+            .collect();
+        let (turns, omitted) = project_messages(
+            vec![Arc::new(Turn {
+                id: "full-window".into(),
+                items: Some(items),
+                ..Default::default()
+            })],
+            PROJECT_MESSAGES,
+        );
+        assert_eq!(omitted, 0, "the 200-message window fits without omissions");
+        let ids: Vec<_> = turns[0]
+            .items
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|item| item.id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            (0..200).map(|index| index.to_string()).collect::<Vec<_>>()
+        );
+    }
+
     #[rstest::rstest]
     #[case(0, 0)]
     #[case(1, 1)]
