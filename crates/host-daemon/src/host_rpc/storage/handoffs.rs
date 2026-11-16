@@ -442,6 +442,27 @@ fn prepare_retry(
     }))
 }
 
+/// The provider threads and instances a handoff's source runs ran in.
+fn handoff_sources(
+    runs: &[&model::Run],
+    native: Option<&model::ProviderThread>,
+) -> (Vec<String>, Vec<String>) {
+    let threads: std::collections::BTreeSet<_> = runs
+        .iter()
+        .filter_map(|run| run.provider_thread_id.clone())
+        .chain(native.map(|thread| thread.id.clone()))
+        .collect();
+    let providers: std::collections::BTreeSet<_> = runs
+        .iter()
+        .map(|run| run.provider_instance_id.clone())
+        .chain(native.map(|thread| thread.provider_instance_id.clone()))
+        .collect();
+    (
+        threads.into_iter().collect(),
+        providers.into_iter().collect(),
+    )
+}
+
 fn prepare(
     connection: &Connection,
     state: &model::State,
@@ -587,30 +608,16 @@ fn prepare(
                 }) => source.provider_threads.get(provider_thread_id),
                 _ => None,
             });
-    let from: Vec<_> = if fresh {
-        vec![thread.id.clone()]
+    let (from, from_providers) = if fresh {
+        (
+            vec![thread.id.clone()],
+            vec![thread.provider_instance_id.clone()],
+        )
     } else {
-        source_runs
-            .iter()
-            .filter_map(|run| run.provider_thread_id.clone())
-            .chain(native_source.map(|thread| thread.id.clone()))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
+        handoff_sources(&source_runs, native_source)
     };
     let from_models =
         history::distinct_model_selections(source_runs.iter().map(|run| &run.model_selection));
-    let from_providers = if fresh {
-        vec![thread.provider_instance_id.clone()]
-    } else {
-        source_runs
-            .iter()
-            .map(|run| run.provider_instance_id.clone())
-            .chain(native_source.map(|thread| thread.provider_instance_id.clone()))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
-    };
     let strategy = if legacy_import {
         model::HandoffStrategy::ManualContext
     } else if after == 0 {
