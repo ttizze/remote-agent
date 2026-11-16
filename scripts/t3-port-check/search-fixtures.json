@@ -2,6 +2,21 @@
   "reference": "T3 Code 1a12c4afae998925b4a29417f2dc436c0ccd0969 packages/shared/src/paletteSearch.ts and ThreadSearch.ts rendered-label projection",
   "messages": [
     {
+      "query": "attached",
+      "text": "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]",
+      "quality": null
+    },
+    {
+      "query": "attached",
+      "text": "Ultrathink:\n [User attached one or more files without additional text. Respond using the conversation context and the attached files.]",
+      "quality": null
+    },
+    {
+      "query": "attached",
+      "text": "[User attached one or more files without additional text. Respond using the conversation context and the attached files.] details",
+      "quality": 1
+    },
+    {
       "query": "secreturl",
       "text": "the [visible label](https://secreturl.example)",
       "quality": null
