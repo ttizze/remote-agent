@@ -199,3 +199,63 @@ proptest::proptest! {
         proptest::prop_assert_eq!(cached.as_ref().unwrap(),&current);
     }
 }
+
+#[tokio::test]
+async fn search_finds_an_old_saved_message_beyond_twenty_thousand_streaming_rows_after_reopen() {
+    // T3 defaults to the finished-message trigram index. The 20k scan is only
+    // its fallback; newer unfinished rows cannot hide an old indexed message.
+    // Use the real projection writer, SQL boundary and public Host RPC. The
+    // native producer boundary is separately exercised by the service matrix.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(CONVERSATION_DATABASE_FILE);
+    let old = uuid::Uuid::from_u128(4000).to_string();
+    let noise = uuid::Uuid::from_u128(4001).to_string();
+    let storage = Storage::open(&path);
+    storage.with(|db| {
+        let tx=db.transaction().map_err(failure)?;
+        for id in [&old,&noise] {projections::save(&tx,Some(id),&thread(id))?;}
+        for i in 0..20_002 {
+            let target=if i==0 {&old} else {&noise};
+            let item:model::TurnItem=serde_json::from_value(serde_json::json!({
+                "id":format!("search-message-{i}"),"threadId":target,"ordinal":i,"status":if i==0 {"completed"} else {"running"},"updatedAt":NOW,
+                "type":"assistant_message","messageId":format!("message-{i}"),"text":"needle","attachments":[],"streaming":i!=0
+            })).map_err(failure)?;
+            projections::save(&tx,Some(target),&item)?;
+        }
+        tx.commit().map_err(failure)
+    }).unwrap();
+    drop(storage);
+    for _ in 0..2 {
+        let host = crate::HostRpcService::new([], directory.path().join("projects.json"));
+        let client = host.open_session();
+        let reply = host
+            .dispatch(
+                client.id(),
+                &agent_protocol::protocol::Call::SearchList(
+                    agent_protocol::conversation::records::SearchList {
+                        term: "needle".into(),
+                        limit: Some(50),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+        let agent_protocol::protocol::Response::Success { result } =
+            agent_protocol::protocol::decode::<
+                agent_protocol::protocol::Response<agent_protocol::models::ThreadList>,
+            >(&reply.initial)
+            .unwrap()
+        else {
+            panic!("canonical search failed")
+        };
+        assert_eq!(
+            result
+                .data
+                .iter()
+                .map(|thread| thread.id.as_ref().unwrap().id.as_str())
+                .collect::<Vec<_>>(),
+            vec![old.as_str()],
+            "querying the real saved index must find the old completed message and exclude newer streaming noise"
+        );
+    }
+}

@@ -24,7 +24,8 @@
       "providers::claude::execution_tests::native_fork_without_a_cursor_reaches_full_copy_authentication",
       "host_rpc::service::titles::tests::canonical_message_search_matches_pinned_t3_word_boundaries_and_unicode",
       "host_rpc::service::titles::tests::canonical_title_search_preserves_pinned_t3_matching_and_rank_order",
-      "host_rpc::service::titles::tests::canonical_search_reserves_message_slots_after_ranked_titles_before_limiting"
+      "host_rpc::service::titles::tests::canonical_search_reserves_message_slots_after_ranked_titles_before_limiting",
+      "host_rpc::storage::tests::search_finds_an_old_saved_message_beyond_twenty_thousand_streaming_rows_after_reopen"
     ],
     "agent-core": [
       "state::operations::sessions::tests::a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences",
