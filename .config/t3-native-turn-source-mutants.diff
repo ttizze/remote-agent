@@ -2,7 +2,7 @@
 +++ b/crates/agent-protocol/src/orchestration/native_observation.rs
 @@ -41,0 +42,1 @@
 +            && turn.native_thread_ref == provider.native_thread_ref
-@@ -128,0 +129,1 @@
+@@ -130,0 +131,1 @@
 +            && other.native_thread_ref == provider.native_thread_ref
-@@ -166,0 +167,1 @@
+@@ -175,0 +176,1 @@
 +                .is_some_and(|provider| provider.native_thread_ref == turn.native_thread_ref)

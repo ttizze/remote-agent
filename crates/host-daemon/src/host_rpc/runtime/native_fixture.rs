@@ -170,6 +170,7 @@ impl Transcript {
 /// of its handoff/routing decisions.
 pub(in crate::host_rpc) struct NativeAgent {
     provider: ProviderKind,
+    pub(in crate::host_rpc) discovery_reads: Arc<AtomicUsize>,
     pub(in crate::host_rpc) records: Arc<Mutex<HashMap<String, ThreadResponse>>>,
     pub(in crate::host_rpc) idle_warning: Option<&'static str>,
     pub(in crate::host_rpc) deferred_history: bool,
@@ -214,6 +215,7 @@ impl NativeAgent {
         let (events, receiver) = mpsc::channel(32);
         Arc::new(Self {
             provider,
+            discovery_reads: Arc::default(),
             records: Default::default(),
             idle_warning: None,
             deferred_history: false,
@@ -252,6 +254,7 @@ impl NativeAgent {
         let (events, receiver) = mpsc::channel(32);
         Arc::new(Self {
             provider: self.provider,
+            discovery_reads: self.discovery_reads.clone(),
             records: self.records.clone(),
             idle_warning: self.idle_warning,
             deferred_history: self.deferred_history,
@@ -366,6 +369,7 @@ impl crate::providers::Discovery for NativeAgent {
         scope: SessionListScope<'_>,
         _: u32,
     ) -> Result<SessionPage, Failure> {
+        self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         if self.fail_list.swap(0, Ordering::SeqCst) != 0 {
             return Err(Failure::new(
                 "fixture_list_failed",
@@ -392,6 +396,7 @@ impl crate::providers::Discovery for NativeAgent {
         Ok(page)
     }
     async fn open(&self, id: &str, limit: usize, _: bool) -> Result<ThreadResponse, Failure> {
+        self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         let _permit = self.open_gate.acquire().await.unwrap();
         let mut response = self
             .records
@@ -411,6 +416,7 @@ impl crate::providers::Discovery for NativeAgent {
         Ok(response)
     }
     async fn read_history(&self, id: &str, cursor: &str, _: bool) -> Result<HistoryPage, Failure> {
+        self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         let response = self
             .records
             .lock()
@@ -431,6 +437,7 @@ impl crate::providers::Discovery for NativeAgent {
         &self,
         params: &op::ReadItem,
     ) -> Result<agent_protocol::models::Item, Failure> {
+        self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         if self
             .unreadable
             .lock()

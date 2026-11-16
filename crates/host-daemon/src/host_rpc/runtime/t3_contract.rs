@@ -4879,6 +4879,13 @@ async fn saved_short_long_and_forked_conversations_open_through_rpc_and_core_wit
     }
     // Remove the actual discovery source after its one-time paginated import.
     // A normal open that accidentally reloads it must fail, not get a cheap stub.
+    let imported_reads = agent
+        .discovery_reads
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        imported_reads > 0,
+        "the recorder must observe the actual paginated import"
+    );
     agent.records.lock().unwrap().clear();
     let long_snapshot = snapshot(&service, &long);
     // The pinned importer stores run-less history without native executions.
@@ -4907,6 +4914,13 @@ async fn saved_short_long_and_forked_conversations_open_through_rpc_and_core_wit
     ] {
         for _ in 0..3 {
             let (opened, bytes, micros) = open(&service, connection.id(), session).await;
+            assert_eq!(
+                agent
+                    .discovery_reads
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                imported_reads,
+                "saved opens must not read provider discovery/history, even on a caught failure"
+            );
             let view = opened.project().unwrap();
             let turns = view.thread.turns.as_ref().unwrap();
             // ThreadReader sends local records plus the rendered inherited
