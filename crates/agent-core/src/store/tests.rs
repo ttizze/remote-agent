@@ -1195,6 +1195,7 @@ fn every_snapshot_field_notifies_subscribers_independently() {
                         has_more_projects: false,
                         limit: 5,
                         provider_errors: None,
+                        ..Default::default()
                     }),
                 )]
                 .into(),
@@ -1241,6 +1242,7 @@ fn every_snapshot_field_notifies_subscribers_independently() {
                 limit: 5,
 
                 provider_errors: None,
+                ..Default::default()
             }))
         }),
         ("epoch", |snapshot| snapshot.connection.epoch += 1),

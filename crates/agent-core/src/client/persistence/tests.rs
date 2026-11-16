@@ -620,6 +620,7 @@ async fn conversation_copies_are_saved_restored_and_cleared_on_pairing() {
                 has_more: false,
                 has_more_projects: false,
                 provider_errors: None,
+                ..Default::default()
             },
         );
         Arc::make_mut(&mut snapshot.sessions.projections).insert(
