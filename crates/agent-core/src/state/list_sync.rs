@@ -56,52 +56,132 @@ pub(crate) fn reconnect_search(snapshot: &Snapshot) -> Option<Effect> {
     (!term.trim().is_empty()).then(|| Effect::execute(SearchCatalog { term: term.clone() }))
 }
 
+/// Bex's shell contains every canonical active header, including unopened
+/// conversations. A late body-search reply selects IDs; it cannot resurrect
+/// removed threads, projects, subagents or stale display metadata.
+pub(crate) fn search_order<'a>(
+    term: &str,
+    threads: &[Arc<agent_protocol::orchestration::shell::ThreadShell>],
+    projects: impl IntoIterator<Item = (&'a str, &'a str)>,
+    response: Option<(&str, &ThreadList)>,
+    now_ms: i64,
+) -> Vec<crate::session::SessionRef> {
+    let query = agent_protocol::search::Query::new(term);
+    let projects: BTreeMap<_, _> = projects.into_iter().collect();
+    let eligible: Vec<_> = threads
+        .iter()
+        .filter(|fact| {
+            let t = &fact.thread;
+            agent_protocol::search::visible_thread(
+                t.lineage.relationship_to_parent.as_deref(),
+                t.lineage.side_chat,
+                t.deleted_at.is_some(),
+                t.archived_at.is_some(),
+                t.project_id.is_some(),
+                t.project_id
+                    .as_deref()
+                    .is_some_and(|id| projects.contains_key(id)),
+            )
+        })
+        .collect();
+    let subjects: Vec<_> = eligible
+        .iter()
+        .map(|fact| agent_protocol::search::TitleSubject {
+            id: &fact.thread.id,
+            title: &fact.thread.title,
+            branch: fact.thread.branch.as_deref(),
+            project: fact
+                .thread
+                .project_id
+                .as_deref()
+                .and_then(|id| projects.get(id).copied()),
+            activity_at_ms: chrono::DateTime::parse_from_rfc3339(
+                fact.latest_user_authored_message_at
+                    .as_deref()
+                    .unwrap_or(&fact.thread.created_at),
+            )
+            .ok()
+            .map(|at| at.timestamp_millis()),
+        })
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+    for index in query.rank_titles(&subjects, now_ms) {
+        let id = subjects[index].id;
+        if let Ok(public) = shell::public_session_ref(id) {
+            seen.insert(id.to_owned());
+            result.push(public);
+        }
+    }
+    let known: BTreeSet<_> = subjects.iter().map(|subject| subject.id).collect();
+    for public in saved_message_matches(term, response) {
+        let id = public.application_id();
+        if known.contains(id.as_str()) && seen.insert(id) {
+            result.push(public.clone());
+        }
+    }
+    result
+}
+
 fn search_rows(
     term: &str,
-    results: Option<&ThreadList>,
+    results: Option<(&str, &ThreadList)>,
     current: Vec<crate::models::Thread>,
     projects: Vec<crate::models::Project>,
+    facts: &[Arc<agent_protocol::orchestration::shell::ThreadShell>],
+    now_ms: i64,
 ) -> (Vec<crate::models::Thread>, Vec<crate::models::Project>) {
-    let term = term.trim().to_lowercase();
-    let mut rows = results
+    let query = agent_protocol::search::Query::new(term);
+    let order = search_order(
+        term,
+        facts,
+        projects.iter().map(|p| (p.id.as_str(), p.name.as_str())),
+        results,
+        now_ms,
+    );
+    let mut current: BTreeMap<_, _> = current
         .into_iter()
-        .flat_map(|results| &results.data)
-        .filter_map(|thread| thread.id.clone().map(|id| (id, thread.clone())))
-        .collect::<BTreeMap<_, _>>();
-    for thread in current {
-        let Some(id) = thread.id.clone() else {
-            continue;
-        };
-        if rows.contains_key(&id)
-            || format!(
-                "{} {}",
-                thread.name.as_deref().unwrap_or_default(),
-                thread.preview.as_deref().unwrap_or_default()
-            )
-            .to_lowercase()
-            .contains(&term)
-        {
-            rows.insert(id, thread);
-        }
-    }
-    let matching = rows
-        .values()
-        .filter_map(|thread| thread.project_id.as_deref())
-        .collect::<std::collections::HashSet<_>>();
-    let mut groups = results
+        .filter_map(|row| row.id.clone().map(|id| (id, row)))
+        .collect();
+    let rows: Vec<_> = order
         .into_iter()
-        .flat_map(|results| &results.projects)
-        .map(|project| (project.id.clone(), project.clone()))
-        .collect::<BTreeMap<_, _>>();
-    for project in projects {
-        if groups.contains_key(&project.id)
-            || matching.contains(project.id.as_str())
-            || project.name.to_lowercase().contains(&term)
-        {
-            groups.insert(project.id.clone(), project);
-        }
-    }
-    (rows.into_values().collect(), groups.into_values().collect())
+        .filter_map(|id| current.remove(&id))
+        .collect();
+    let matching: BTreeSet<_> = rows
+        .iter()
+        .filter_map(|row| row.project_id.as_deref())
+        .collect();
+    let projects = projects
+        .into_iter()
+        .filter(|project| {
+            matching.contains(project.id.as_str()) || query.matches_project(&project.name)
+        })
+        .collect();
+    (rows, projects)
+}
+
+/// The caller captures time once at its projection boundary; matching stays pure.
+pub(crate) fn search_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_millis().min(i64::MAX as u128) as i64)
+}
+
+/// A late search reply proves only saved-message membership for its own query.
+/// Consumers separately select from current canonical eligible headers.
+pub(crate) fn saved_message_matches<'a>(
+    term: &str,
+    response: Option<(&str, &'a ThreadList)>,
+) -> impl Iterator<Item = &'a crate::session::SessionRef> {
+    response
+        .filter(|(requested, _)| *requested == term)
+        .into_iter()
+        .flat_map(|(_, page)| {
+            page.data
+                .iter()
+                .filter_map(|row| row.id.as_ref())
+                .filter(|id| page.message_matches.contains(id))
+        })
 }
 
 pub(crate) fn query(
@@ -305,7 +385,7 @@ pub(crate) fn received(
 }
 
 pub(crate) fn project(snapshot: &mut Snapshot, refresh: bool) -> Vec<Effect> {
-    let Some(shell) = &snapshot.lists.shell else {
+    let Some(shell) = snapshot.lists.shell.clone() else {
         return Vec::new();
     };
     let mut projects = shell
@@ -412,12 +492,14 @@ pub(crate) fn project(snapshot: &mut Snapshot, refresh: bool) -> Vec<Effect> {
             .lists
             .search_results
             .as_ref()
-            .filter(|(term, _)| term == &snapshot.lists.list_query.search_term);
+            .map(|(term, page)| (term.as_str(), page.as_ref()));
         (summaries, projects) = search_rows(
             &snapshot.lists.list_query.search_term,
-            results.map(|(_, page)| page.as_ref()),
+            results,
             summaries,
             projects,
+            &shell.threads,
+            search_now_ms(),
         );
         if let Some((_, page)) = results
             && let Some(provider_errors) = &page.provider_errors
@@ -499,6 +581,11 @@ fn pages(
             }
         }
     }
+    let page = if searching {
+        op::page_ranked_rows
+    } else {
+        op::page_rows
+    };
     let expanded = if searching {
         &snapshot.lists.search_expanded_projects
     } else {
@@ -511,7 +598,7 @@ fn pages(
             .copied()
             .unwrap_or(5)
             .max(snapshot.lists.list_query.limit * u32::from(snapshot.lists.recent_chats));
-        let (data, has_more) = op::page_rows(rows, limit);
+        let (data, has_more) = page(rows, limit);
         pages.insert(
             id,
             Arc::new(ThreadList {
@@ -535,7 +622,7 @@ fn pages(
             })
             .and_then(|project| project.icon.clone());
     }
-    let (mut data, has_more) = op::page_rows(standalone, snapshot.lists.list_query.limit);
+    let (mut data, has_more) = page(standalone, snapshot.lists.list_query.limit);
     let previous: HashMap<_, _> = snapshot
         .listed_threads()
         .filter_map(|row| Some((row.id.as_ref()?, row)))
@@ -585,6 +672,7 @@ fn pages(
         has_more_projects,
         provider_errors: errors,
         limit: snapshot.lists.list_query.limit,
+        ..Default::default()
     };
     if snapshot.lists.threads.as_deref() != Some(&list) {
         snapshot.lists.threads = Some(Arc::new(list));

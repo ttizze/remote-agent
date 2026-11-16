@@ -1,47 +1,140 @@
 //! Lists read committed headers, never a live transcript overlay.
 use super::*;
-use agent_protocol::models::Thread;
+use agent_protocol::{
+    models::Thread,
+    search::{Query, TitleSubject},
+};
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Storage {
-    pub(in crate::host_rpc) fn search_threads(&self, search: &str) -> Result<Vec<Thread>, String> {
-        let terms: Vec<_> = search.split_whitespace().map(str::to_lowercase).collect();
+    pub(in crate::host_rpc) fn search_threads(
+        &self,
+        search: &str,
+        limit: usize,
+    ) -> Result<(Vec<Thread>, bool, Vec<agent_protocol::session::SessionRef>), String> {
         self.with(|connection| {
             let tx = connection.transaction().map_err(failure)?;
             let snapshot = shell::snapshot(&tx)?;
-            let messages = matching_message_threads(&tx, &terms)?;
-            let projects = &snapshot.projects;
-            let result = snapshot
+            let projects: BTreeMap<_, _> = snapshot
+                .projects
+                .iter()
+                .map(|p| (p.id.as_str(), p.title.as_str()))
+                .collect();
+            let candidates: Vec<_> = snapshot
                 .threads
-                .into_iter()
+                .iter()
                 .filter(|shell| {
-                    let thread = &shell.thread;
-                    if thread.lineage.relationship_to_parent.as_deref() == Some("subagent")
-                        || thread.lineage.side_chat == Some(true)
-                    {
-                        return false;
-                    }
-                    let project = thread
-                        .project_id
-                        .as_deref()
-                        .and_then(|id| projects.iter().find(|project| project.id == id));
-                    if thread.project_id.is_some() && project.is_none() {
-                        return false;
-                    }
-                    messages.contains(&thread.id)
-                        || contains_terms(
-                            &format!(
-                                "{} {} {}",
-                                thread.title,
-                                thread.branch.as_deref().unwrap_or_default(),
-                                project.map_or("", |project| project.title.as_str())
-                            ),
-                            &terms,
-                        )
+                    let t = &shell.thread;
+                    agent_protocol::search::visible_thread(
+                        t.lineage.relationship_to_parent.as_deref(),
+                        t.lineage.side_chat,
+                        t.deleted_at.is_some(),
+                        t.archived_at.is_some(),
+                        t.project_id.is_some(),
+                        t.project_id
+                            .as_deref()
+                            .is_some_and(|id| projects.contains_key(id)),
+                    )
                 })
-                .map(|shell| summary(&tx, &shell))
+                .collect();
+            // The Bex list RPC also serves an empty-query catalog. This still
+            // reads only canonical metadata; an empty normalized search is not
+            // a request to discover provider sessions.
+            let (selected, more, message_ids) = if search.trim().is_empty() {
+                let mut selected: Vec<_> = (0..candidates.len()).collect();
+                selected.sort_by(|&a, &b| {
+                    let at = |i: usize| {
+                        chrono::DateTime::parse_from_rfc3339(&candidates[i].thread.updated_at).ok()
+                    };
+                    at(b)
+                        .cmp(&at(a))
+                        .then_with(|| candidates[a].thread.id.cmp(&candidates[b].thread.id))
+                });
+                let more = selected.len() > limit;
+                selected.truncate(limit);
+                (selected, more, Vec::new())
+            } else {
+                let query = Query::new(search);
+                let now = chrono::DateTime::parse_from_rfc3339(&projects::timestamp())
+                    .map_err(failure)?
+                    .timestamp_millis();
+                let subjects: Vec<_> = candidates
+                    .iter()
+                    .map(|shell| TitleSubject {
+                        id: &shell.thread.id,
+                        title: &shell.thread.title,
+                        branch: shell.thread.branch.as_deref(),
+                        project: shell
+                            .thread
+                            .project_id
+                            .as_deref()
+                            .and_then(|id| projects.get(id).copied()),
+                        activity_at_ms: chrono::DateTime::parse_from_rfc3339(
+                            shell
+                                .latest_user_authored_message_at
+                                .as_deref()
+                                .unwrap_or(&shell.thread.created_at),
+                        )
+                        .ok()
+                        .map(|at| at.timestamp_millis()),
+                    })
+                    .collect();
+                let titles = query.rank_titles(&subjects, now);
+                let shown: BTreeSet<_> =
+                    titles.iter().take(limit).map(|&i| subjects[i].id).collect();
+                let eligible: BTreeSet<_> = subjects.iter().map(|s| s.id).collect();
+                let indexed: BTreeMap<_, _> = subjects
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        (
+                            s.id,
+                            (
+                                i,
+                                agent_protocol::search::usage_boost(s.activity_at_ms, now),
+                            ),
+                        )
+                    })
+                    .collect();
+                let mut messages = message_search::matches(&tx, &query, &eligible, &shown)?;
+                messages.sort_by(|(left, a), (right, b)| {
+                    let score = |id: &str, hits: &message_search::MessageHit| {
+                        (1.0 + (1.0 + hits.hits as f64).log2()) * indexed[id].1
+                    };
+                    (b.quality >= 0.8)
+                        .cmp(&(a.quality >= 0.8))
+                        .then_with(|| b.quality.total_cmp(&a.quality))
+                        .then_with(|| score(right, b).total_cmp(&score(left, a)))
+                        .then_with(|| b.created_at.cmp(&a.created_at))
+                });
+                let more = titles.len() + messages.len() > limit;
+                messages.truncate(50);
+                let slots = messages.len().min(limit / 5);
+                let selected: Vec<_> = titles
+                    .into_iter()
+                    .take(limit.saturating_sub(slots))
+                    .chain(
+                        messages
+                            .iter()
+                            .filter_map(|(id, _)| indexed.get(id.as_str()).map(|(i, _)| *i)),
+                    )
+                    .take(limit)
+                    .collect();
+                let message_ids = selected
+                    .iter()
+                    .filter(|&&i| !shown.contains(subjects[i].id))
+                    .map(|&i| {
+                        agent_protocol::orchestration::shell::public_session_ref(subjects[i].id)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                (selected, more, message_ids)
+            };
+            let result = selected
+                .into_iter()
+                .map(|index| summary(&tx, candidates[index]))
                 .collect::<Result<Vec<_>, _>>()?;
             tx.commit().map_err(failure)?;
-            Ok(result)
+            Ok((result, more, message_ids))
         })
     }
 
@@ -97,49 +190,6 @@ fn summary(
     connection: &Connection,
     shell: &agent_protocol::orchestration::shell::ThreadShell,
 ) -> Result<Thread, String> {
-    let root=shell.thread.project_id.as_deref().map(|id|connection.query_row(
-        "SELECT workspace_root FROM projection_projects WHERE project_id=?1 AND deleted_at IS NULL",[id],|row|row.get::<_,String>(0)).optional().map_err(failure)).transpose()?.flatten();
+    let root=shell.thread.project_id.as_deref().map(|id|connection.query_row("SELECT workspace_root FROM projection_projects WHERE project_id=?1 AND deleted_at IS NULL",[id],|row|row.get::<_,String>(0)).optional().map_err(failure)).transpose()?.flatten();
     agent_protocol::orchestration::shell::summary(shell, root.as_deref())
-}
-
-fn contains_terms(text: &str, terms: &[String]) -> bool {
-    let text = text.to_lowercase();
-    terms.iter().all(|term| text.contains(term))
-}
-
-fn matching_message_threads(
-    connection: &Connection,
-    terms: &[String],
-) -> Result<std::collections::BTreeSet<String>, String> {
-    if terms.is_empty() {
-        return Ok(Default::default());
-    }
-    // ThreadSearch.messageHitsQuery bounds a scan to the latest 20,000 messages.
-    // Bex keeps message text in turn items; tools do not consume that budget.
-    // The role/streaming rules follow messageSearchIndex.indexedMessageCondition.
-    let mut query = connection.prepare("SELECT i.thread_id, json_extract(i.payload_json,'$.text')
-        FROM (SELECT * FROM orchestration_v2_projection_turn_items
-            WHERE type IN ('user_message','assistant_message') ORDER BY rowid DESC LIMIT 20000) i
-        LEFT JOIN orchestration_v2_projection_runs r ON r.thread_id=i.thread_id AND r.run_id=i.run_id
-        WHERE (i.type='assistant_message' OR i.created_by='user')
-          AND coalesce(json_extract(i.payload_json,'$.streaming'),0)=0
-          AND coalesce(r.status,'')!='rolled_back'
-          AND NOT(i.input_intent IS 'queued_turn' AND r.status IN ('queued','cancelled'))
-          AND coalesce(json_extract(i.payload_json,'$.messageId'),'') NOT LIKE 'async-answer:%'").map_err(failure)?;
-    let rows = query
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
-        .map_err(failure)?;
-    let mut found = std::collections::BTreeSet::new();
-    for row in rows {
-        let (thread, text) = row.map_err(failure)?;
-        if text
-            .as_deref()
-            .is_some_and(|text| contains_terms(text, terms))
-        {
-            found.insert(thread);
-        }
-    }
-    Ok(found)
 }

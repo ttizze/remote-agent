@@ -325,6 +325,10 @@ pub struct ThreadResponse {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadList {
+    /// Disposable search evidence: these returned rows matched saved messages.
+    /// Title matches are re-evaluated against the current canonical header.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_matches: Vec<crate::session::SessionRef>,
     pub limit: u32,
     pub data: Vec<Thread>,
     pub projects: Vec<Project>,

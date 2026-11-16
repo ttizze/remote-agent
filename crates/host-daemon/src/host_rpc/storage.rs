@@ -16,6 +16,7 @@ mod event_store;
 mod forks;
 mod handoffs;
 mod lifecycle;
+mod message_search;
 mod native_bindings;
 mod native_import;
 mod native_threads;
@@ -154,6 +155,7 @@ impl Storage {
         let tx = connection.transaction().map_err(failure)?;
         tx.execute_batch(include_str!("storage/orchestration.sql"))
             .map_err(failure)?;
+        message_search::initialize(&tx)?;
         tx.pragma_update(None, "user_version", 6).map_err(failure)?;
         tx.commit().map_err(failure)
     }

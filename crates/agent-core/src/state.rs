@@ -2306,6 +2306,7 @@ mod submission_tests {
                     has_more_projects: false,
                     limit: 5,
                     provider_errors: None,
+                    ..Default::default()
                 })),
                 ..Default::default()
             },

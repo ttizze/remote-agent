@@ -25,6 +25,7 @@ pub mod project_import;
 pub mod protocol;
 pub mod providers;
 pub mod requests;
+pub mod search;
 pub mod session;
 pub mod sync;
 pub mod tool_output;

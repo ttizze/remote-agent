@@ -615,14 +615,20 @@ pub(super) fn page_rows(
     mut rows: Vec<crate::models::Thread>,
     limit: u32,
 ) -> (Vec<crate::models::Thread>, bool) {
-    let limit = limit as usize;
-    let more = rows.len() > limit;
     rows.sort_by(|a, b| {
         b.updated_at
             .unwrap_or_default()
             .total_cmp(&a.updated_at.unwrap_or_default())
     });
-    rows.truncate(limit);
+    page_ranked_rows(rows, limit)
+}
+
+pub(super) fn page_ranked_rows(
+    mut rows: Vec<crate::models::Thread>,
+    limit: u32,
+) -> (Vec<crate::models::Thread>, bool) {
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
     (rows, more)
 }
 

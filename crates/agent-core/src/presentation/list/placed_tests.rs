@@ -214,6 +214,7 @@ fn project_preferences_keep_pinned_section_order_ties_and_hidden_labels() {
         has_more: false,
         has_more_projects: false,
         provider_errors: None,
+        ..Default::default()
     };
     let mut snapshot = Snapshot {
         lists: crate::state::Lists {

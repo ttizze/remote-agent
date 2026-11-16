@@ -306,6 +306,9 @@ impl<'a> ListSource<'a> {
                 .search_expanded_projects
                 .same(&other.lists.search_expanded_projects)
             && self.lists.list_query.same(&other.lists.list_query)
+            && (self.lists.list_query.search_term.trim().is_empty()
+                || self.lists.shell.same(&other.lists.shell)
+                    && self.lists.search_results.same(&other.lists.search_results))
             && self.lists.activity.same(&other.lists.activity)
             && self
                 .lists
@@ -436,6 +439,93 @@ impl Snapshot {
 }
 
 impl ListSource<'_> {
+    fn search_ranks(&self) -> Option<BTreeMap<crate::session::SessionRef, usize>> {
+        let term = &self.lists.list_query.search_term;
+        if term.trim().is_empty() {
+            return None;
+        }
+        let order = self
+            .lists
+            .shell
+            .as_ref()
+            .map(|shell| {
+                crate::state::list_sync::search_order(
+                    term,
+                    &shell.threads,
+                    shell
+                        .projects
+                        .iter()
+                        .map(|p| (p.id.as_str(), p.title.as_str())),
+                    self.lists
+                        .search_results
+                        .as_ref()
+                        .map(|(term, page)| (term.as_str(), page.as_ref())),
+                    crate::state::list_sync::search_now_ms(),
+                )
+            })
+            .unwrap_or_default();
+        Some(
+            order
+                .into_iter()
+                .enumerate()
+                .map(|(i, id)| (id, i))
+                .collect(),
+        )
+    }
+    // A user-placed shortcut survives a missing/unopened canonical header.
+    // Search its displayed plain title (live metadata, else the saved label)
+    // with the common scorer; only saved-message hits require canonical proof.
+    fn searched_placements<'a>(
+        &self,
+        rows: Vec<Cow<'a, crate::models::Thread>>,
+        project: &str,
+        ranks: Option<&BTreeMap<crate::session::SessionRef, usize>>,
+    ) -> Vec<Cow<'a, crate::models::Thread>> {
+        let Some(ranks) = ranks else {
+            return rows;
+        };
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|row| row.id.is_some() && row.parent_id.is_none())
+            .collect();
+        let term = &self.lists.list_query.search_term;
+        let keys: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                row.id
+                    .as_ref()
+                    .map_or(String::new(), |id| id.application_id())
+            })
+            .collect();
+        let subjects: Vec<_> = rows
+            .iter()
+            .zip(&keys)
+            .map(|(row, id)| agent_protocol::search::TitleSubject {
+                id,
+                title: row.name.as_deref().unwrap_or_default(),
+                branch: row.git_branch.as_deref(),
+                project: Some(project),
+                activity_at_ms: None,
+            })
+            .collect();
+        let query = agent_protocol::search::Query::new(term);
+        let mut order = query.rank_titles(&subjects, crate::state::list_sync::search_now_ms());
+        let body: BTreeSet<_> = crate::state::list_sync::saved_message_matches(
+            term,
+            self.lists
+                .search_results
+                .as_ref()
+                .map(|(term, page)| (term.as_str(), page.as_ref())),
+        )
+        .filter(|id| ranks.contains_key(*id))
+        .collect();
+        for (i, row) in rows.iter().enumerate() {
+            if row.id.as_ref().is_some_and(|id| body.contains(id)) && !order.contains(&i) {
+                order.push(i);
+            }
+        }
+        order.into_iter().map(|i| rows[i].clone()).collect()
+    }
     fn list_error_providers(&self, list: &crate::models::ThreadList) -> Vec<String> {
         list.provider_errors
             .iter()
@@ -469,9 +559,9 @@ impl ListSource<'_> {
         &self,
         list: &crate::models::ThreadList,
         include_standalone: bool,
+        ranks: Option<&BTreeMap<crate::session::SessionRef, usize>>,
     ) -> (ThreadList, ChatPlacements<'_>) {
         let marks = self.task_marks();
-        let search = self.lists.list_query.search_term.to_lowercase();
         let project_ids: HashSet<_> = list
             .projects
             .iter()
@@ -691,17 +781,8 @@ impl ListSource<'_> {
                                             }),
                                     )
                             })
-                            .filter(|thread| {
-                                search.is_empty()
-                                    || task_title(
-                                        self.language,
-                                        thread.name.as_deref(),
-                                        thread.preview.as_deref(),
-                                    )
-                                    .to_lowercase()
-                                    .contains(&search)
-                            })
                             .collect::<Vec<_>>();
+                        let placed = self.searched_placements(placed, &project.name, ranks);
                         summary.threads.splice(
                             0..0,
                             thread_summaries(
@@ -729,7 +810,8 @@ impl ListSource<'_> {
     /// Recent top-level chats across standalone and project pages, regardless of expansion.
     pub fn recent_thread_list(&self) -> Option<ThreadList> {
         let source = self.lists.threads.as_deref()?;
-        let (mut list, placements) = self.list_projection(source, false);
+        let ranks = self.search_ranks();
+        let (mut list, placements) = self.list_projection(source, false, ranks.as_ref());
         let marks = self.task_marks();
         let project_ids: HashSet<_> = source.projects.iter().map(|p| p.id.as_str()).collect();
         let mut rows: BTreeMap<_, &crate::models::Thread> = BTreeMap::new();
@@ -762,12 +844,23 @@ impl ListSource<'_> {
             .into_values()
             .filter(|thread| thread.parent_id.is_none())
             .collect();
-        rows.sort_by(|a, b| {
-            b.updated_at
-                .unwrap_or(0.0)
-                .total_cmp(&a.updated_at.unwrap_or(0.0))
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        if let Some(ranks) = ranks {
+            rows.retain(|row| row.id.as_ref().is_some_and(|id| ranks.contains_key(id)));
+            rows.sort_by_key(|row| {
+                row.id
+                    .as_ref()
+                    .and_then(|id| ranks.get(id))
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        } else {
+            rows.sort_by(|a, b| {
+                b.updated_at
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.updated_at.unwrap_or(0.0))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+        }
         let limit = self.lists.list_query.limit as usize;
         list.has_more |= rows.len() > limit;
         rows.truncate(limit);
@@ -792,7 +885,10 @@ impl ListSource<'_> {
 
     pub fn thread_list(&self) -> Option<ThreadList> {
         let list = self.lists.threads.as_deref()?;
-        Some(self.list_projection(list, true).0)
+        Some(
+            self.list_projection(list, true, self.search_ranks().as_ref())
+                .0,
+        )
     }
 }
 

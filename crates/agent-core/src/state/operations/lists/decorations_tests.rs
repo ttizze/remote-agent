@@ -30,6 +30,7 @@ fn list(data: Vec<Thread>, projects: Vec<Project>) -> Arc<ThreadList> {
         has_more: false,
         has_more_projects: false,
         provider_errors: None,
+        ..Default::default()
     })
 }
 

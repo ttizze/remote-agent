@@ -15,6 +15,7 @@ base64.workspace = true
 uuid = { version = "1", features = ["serde", "v5"] }
 thiserror.workspace = true
 regex = "1"
+icu_normalizer = "=2.4.0"
 url.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 zeroize = { workspace = true, features = ["serde"] }

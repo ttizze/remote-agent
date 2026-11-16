@@ -21,11 +21,11 @@ impl HostRpcService {
             .unwrap_or(records::DEFAULT_SEARCH_LIMIT)
             .max(1) as usize;
         let snapshot = self.project_snapshot().await?;
-        let mut data = self
+        let (mut data, has_more, message_matches) = self
             .inner
             .conversation
             .storage
-            .search_threads(&request.term)
+            .search_threads(&request.term, limit)
             .map_err(super::super::runtime::storage_failure)?;
         for thread in &mut data {
             let capabilities = thread.capabilities.unwrap_or_default();
@@ -36,14 +36,6 @@ impl HostRpcService {
             .as_object()
             .cloned()
             .unwrap_or_default();
-        data.sort_by(|a, b| {
-            b.updated_at
-                .unwrap_or_default()
-                .total_cmp(&a.updated_at.unwrap_or_default())
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        let has_more = data.len() > limit;
-        data.truncate(limit);
         let projects = snapshot
             .projects
             .into_iter()
@@ -57,6 +49,7 @@ impl HostRpcService {
         Ok(agent_protocol::models::ThreadList {
             limit: limit as u32,
             data,
+            message_matches,
             projects,
             has_more,
             provider_errors: (!errors.is_empty()).then_some(errors),

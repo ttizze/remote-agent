@@ -1969,6 +1969,7 @@ mod model_reconnection_tests {
             has_more: false,
             has_more_projects: false,
             provider_errors: None,
+            ..Default::default()
         });
         let mut previous = Snapshot {
             lists: crate::state::Lists {
