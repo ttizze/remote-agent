@@ -95,13 +95,10 @@ pub(crate) fn search_order<'a>(
                 .project_id
                 .as_deref()
                 .and_then(|id| projects.get(id).copied()),
-            activity_at_ms: chrono::DateTime::parse_from_rfc3339(
-                fact.latest_user_authored_message_at
-                    .as_deref()
-                    .unwrap_or(&fact.thread.created_at),
-            )
-            .ok()
-            .map(|at| at.timestamp_millis()),
+            activity_at_ms: agent_protocol::search::authored_activity_ms(
+                fact.latest_user_authored_message_at.as_deref(),
+                &fact.thread.created_at,
+            ),
         })
         .collect();
     let mut seen = BTreeSet::new();

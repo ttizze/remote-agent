@@ -424,9 +424,8 @@ impl Claude {
         Ok(record)
     }
 
-    async fn list(
+    async fn read_catalog(
         &self,
-        search: &str,
         cursor: Option<String>,
         owned: Option<HashSet<String>>,
         limit: u32,
@@ -442,16 +441,8 @@ impl Claude {
                 thread
             })
             .collect();
-        let search = search.to_owned();
         tokio::task::spawn_blocking(move || {
-            history::list_page(
-                &home,
-                running,
-                &search,
-                cursor.as_deref(),
-                owned.as_ref(),
-                limit,
-            )
+            history::list_page(&home, running, cursor.as_deref(), owned.as_ref(), limit)
         })
         .await?
     }
@@ -2424,9 +2415,8 @@ impl crate::providers::Configuration for Claude {
 
 #[async_trait::async_trait]
 impl crate::providers::Discovery for Claude {
-    async fn list(
+    async fn catalog_page(
         &self,
-        search: &str,
         cursor: Option<String>,
         scope: SessionListScope<'_>,
         limit: u32,
@@ -2447,7 +2437,7 @@ impl crate::providers::Discovery for Claude {
             ),
             SessionListScope::All => None,
         };
-        Claude::list(self, search, cursor, owned, limit)
+        Claude::read_catalog(self, cursor, owned, limit)
             .await
             .map_err(|e| Failure::new("session_list_failed", e))
     }
@@ -2823,10 +2813,14 @@ pub(crate) mod execution_tests {
             None,
             watch::channel(Work::default()).1,
         ));
-        let recent =
-            crate::providers::Discovery::list(&claude, "", None, SessionListScope::Roots(&[]), 30)
-                .await
-                .unwrap();
+        let recent = crate::providers::Discovery::catalog_page(
+            &claude,
+            None,
+            SessionListScope::Roots(&[]),
+            30,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             recent.data.len(),
             1,
@@ -2873,7 +2867,7 @@ pub(crate) mod execution_tests {
             ),
         ] {
             let mut listed: Vec<_> =
-                crate::providers::Discovery::list(&claude, "", None, scope, 10)
+                crate::providers::Discovery::catalog_page(&claude, None, scope, 10)
                     .await
                     .unwrap()
                     .data

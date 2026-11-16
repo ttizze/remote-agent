@@ -486,6 +486,14 @@ struct TitleMatch {
     score: f64,
 }
 
+/// T3 ranks activity by the latest authored input, or the thread's creation.
+/// Metadata/status updates do not make an old conversation a recent match.
+pub fn authored_activity_ms(latest_authored: Option<&str>, created_at: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(latest_authored.unwrap_or(created_at))
+        .ok()
+        .map(|at| at.timestamp_millis())
+}
+
 /// Recency of authored activity; Bex's sidebar has no palette pick/open score.
 pub fn usage_boost(activity: Option<i64>, now: i64) -> f64 {
     1.0 + activity.map_or(0.0, |at| {

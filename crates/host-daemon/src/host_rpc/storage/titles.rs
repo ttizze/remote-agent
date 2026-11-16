@@ -69,14 +69,10 @@ impl Storage {
                             .project_id
                             .as_deref()
                             .and_then(|id| projects.get(id).copied()),
-                        activity_at_ms: chrono::DateTime::parse_from_rfc3339(
-                            shell
-                                .latest_user_authored_message_at
-                                .as_deref()
-                                .unwrap_or(&shell.thread.created_at),
-                        )
-                        .ok()
-                        .map(|at| at.timestamp_millis()),
+                        activity_at_ms: agent_protocol::search::authored_activity_ms(
+                            shell.latest_user_authored_message_at.as_deref(),
+                            &shell.thread.created_at,
+                        ),
                     })
                     .collect();
                 let titles = query.rank_titles(&subjects, now);

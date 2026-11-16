@@ -322,9 +322,8 @@ mod tests {
         assert!(scan.projects[0].registered);
         // Import only registers folders. Native titles and IDs remain readable without a CLI.
         let agent = &service.inner.providers.all()[0].1;
-        let page = crate::providers::Discovery::list(
+        let page = crate::providers::Discovery::catalog_page(
             agent.as_ref(),
-            "",
             None,
             SessionListScope::Roots(&[]),
             100,

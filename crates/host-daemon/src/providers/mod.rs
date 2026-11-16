@@ -257,20 +257,6 @@ pub(crate) fn native_pages<'a>(
     .fuse()
 }
 
-// Temporary compile adapter for the locked import consumer; removed after it
-// accepts the native catalog API without a search argument.
-pub(crate) fn session_pages<'a>(
-    agent: &'a dyn Discovery,
-    _: &'a str,
-    scope: SessionListScope<'a>,
-    first_limit: u32,
-    later_limit: u32,
-    deadline: Option<tokio::time::Instant>,
-    first_page: Option<Result<SessionPage, Failure>>,
-) -> impl Stream<Item = Result<Vec<Thread>, Failure>> + 'a {
-    native_pages(agent, scope, first_limit, later_limit, deadline, first_page)
-}
-
 pub(crate) async fn read_session_page(
     read: impl Future<Output = Result<SessionPage, Failure>>,
     deadline: tokio::time::Instant,
@@ -384,23 +370,14 @@ pub(crate) trait Configuration: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Discovery: Send + Sync {
+    /// Native headers for import and activity discovery. Saved conversation
+    /// search belongs to canonical storage, outside this provider interface.
     async fn catalog_page(
         &self,
         cursor: Option<String>,
         scope: SessionListScope<'_>,
         limit: u32,
-    ) -> Result<SessionPage, Failure> {
-        self.list("", cursor, scope, limit).await
-    }
-    async fn list(
-        &self,
-        _search: &str,
-        _cursor: Option<String>,
-        _scope: SessionListScope<'_>,
-        _limit: u32,
-    ) -> Result<SessionPage, Failure> {
-        unreachable!("native catalog implementations migrate to catalog_page")
-    }
+    ) -> Result<SessionPage, Failure>;
     async fn open(
         &self,
         id: &str,
@@ -672,9 +649,8 @@ mod tests {
     async fn prefetched_pages_survive_project_waits_and_continue_from_their_cursor() {
         let (_root, agent, expected) = two_session_history().await;
         for first_limit in [1, 2] {
-            let first_page = crate::providers::Discovery::list(
+            let first_page = crate::providers::Discovery::catalog_page(
                 &agent,
-                "",
                 None,
                 SessionListScope::All,
                 first_limit,

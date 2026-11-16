@@ -95,12 +95,11 @@ pub(super) fn home() -> Result<PathBuf> {
         .context("Claude home directory is unavailable")
 }
 
-/// Cursor is a candidate offset, so search can skip nonmatching transcripts
-/// without retaining their bodies or repeatedly decoding earlier pages.
+/// Cursor is a candidate offset, so provenance filtering skips unowned SDK
+/// transcripts without retaining bodies or decoding earlier pages again.
 pub(super) fn list_page(
     home: &Path,
     running: Vec<Thread>,
-    search: &str,
     cursor: Option<&str>,
     owned: Option<&HashSet<String>>,
     limit: u32,
@@ -150,7 +149,6 @@ pub(super) fn list_page(
         anyhow::bail!("invalid Claude list cursor");
     }
     let total = candidates.len();
-    let search = search.trim().to_lowercase();
     let mut data = Vec::new();
     let mut visited = offset;
     for (timestamp, id, path, fallback) in candidates.into_iter().skip(offset) {
@@ -194,24 +192,9 @@ pub(super) fn list_page(
         {
             summary.status = SessionStatus::Running;
         }
-        if search.is_empty()
-            || summary
-                .name
-                .as_deref()
-                .unwrap_or_default()
-                .to_lowercase()
-                .contains(&search)
-            || summary
-                .preview
-                .as_deref()
-                .unwrap_or_default()
-                .to_lowercase()
-                .contains(&search)
-        {
-            data.push(summary);
-            if data.len() >= limit.max(1) as usize {
-                break;
-            }
+        data.push(summary);
+        if data.len() >= limit.max(1) as usize {
+            break;
         }
     }
     Ok(super::SessionPage {
@@ -1147,7 +1130,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let first = list_page(root.path(), vec![], "", None, Some(&HashSet::new()), 3).unwrap();
+        let first = list_page(root.path(), vec![], None, Some(&HashSet::new()), 3).unwrap();
         assert_eq!(
             first
                 .data
@@ -1160,7 +1143,6 @@ mod tests {
         let second = list_page(
             root.path(),
             vec![],
-            "",
             first.next_cursor.as_deref(),
             Some(&HashSet::new()),
             3,
@@ -1177,7 +1159,6 @@ mod tests {
         let last = list_page(
             root.path(),
             vec![],
-            "",
             second.next_cursor.as_deref(),
             Some(&HashSet::new()),
             3,
@@ -1185,29 +1166,8 @@ mod tests {
         .unwrap();
         assert_eq!(last.data.len(), 2);
         assert!(last.next_cursor.is_none());
-        let found = list_page(
-            root.path(),
-            vec![],
-            "title 1",
-            None,
-            Some(&HashSet::new()),
-            3,
-        )
-        .unwrap();
-        assert_eq!(found.data.len(), 1);
-        assert!(found.next_cursor.is_none());
-        assert!(
-            list_page(
-                root.path(),
-                vec![],
-                "",
-                Some("bad"),
-                Some(&HashSet::new()),
-                3
-            )
-            .is_err()
-        );
-        assert!(list_page(root.path(), vec![], "", Some("9"), Some(&HashSet::new()), 3).is_err());
+        assert!(list_page(root.path(), vec![], Some("bad"), Some(&HashSet::new()), 3).is_err());
+        assert!(list_page(root.path(), vec![], Some("9"), Some(&HashSet::new()), 3).is_err());
     }
     #[test]
     fn task_listings_omit_unowned_sdk_runs_started_by_other_agents() {
@@ -1249,13 +1209,12 @@ mod tests {
             .into_iter()
             .collect();
         let listed = |owned| {
-            let mut names: Vec<_> =
-                list_page(root.path(), vec![running.clone()], "", None, owned, 10)
-                    .unwrap()
-                    .data
-                    .into_iter()
-                    .map(|summary| summary.preview.unwrap())
-                    .collect();
+            let mut names: Vec<_> = list_page(root.path(), vec![running.clone()], None, owned, 10)
+                .unwrap()
+                .data
+                .into_iter()
+                .map(|summary| summary.preview.unwrap())
+                .collect();
             names.sort();
             names
         };
@@ -1270,19 +1229,6 @@ mod tests {
             ]
         );
         assert_eq!(listed(None).len(), transcripts.len());
-        assert!(
-            list_page(
-                root.path(),
-                vec![],
-                "NSH message text sizing",
-                None,
-                Some(&owned),
-                1
-            )
-            .unwrap()
-            .data
-            .is_empty()
-        );
     }
 
     #[test]
@@ -1310,8 +1256,8 @@ mod tests {
             fs::write(project.join(format!("{id}.jsonl")), rows).unwrap();
         }
         let owned = HashSet::from([Uuid::from_u128(2).to_string()]);
-        let listed = |search, owned| {
-            let mut names: Vec<_> = list_page(root.path(), vec![], search, None, owned, 10)
+        let listed = |owned| {
+            let mut names: Vec<_> = list_page(root.path(), vec![], None, owned, 10)
                 .unwrap()
                 .data
                 .into_iter()
@@ -1321,15 +1267,14 @@ mod tests {
             names
         };
         assert_eq!(
-            listed("", Some(&owned)),
+            listed(Some(&owned)),
             [
                 "host",
                 "legacy-terminal-resumed-by-sdk",
                 "terminal-resumed-by-sdk"
             ]
         );
-        assert!(listed("review", Some(&owned)).is_empty());
-        assert_eq!(listed("", None).len(), transcripts.len());
+        assert_eq!(listed(None).len(), transcripts.len());
     }
     #[test]
     fn a_send_now_prompt_continues_the_turn_it_cut() {

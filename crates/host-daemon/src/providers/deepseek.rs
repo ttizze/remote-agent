@@ -1010,28 +1010,18 @@ impl crate::providers::Configuration for DeepSeek {
 
 #[async_trait::async_trait]
 impl crate::providers::Discovery for DeepSeek {
-    async fn list(
+    async fn catalog_page(
         &self,
-        search: &str,
         cursor: Option<String>,
         scope: SessionListScope<'_>,
         limit: u32,
     ) -> Result<SessionPage, Failure> {
-        let search = search.to_lowercase();
         let records = self.0.records.lock().await;
         let mut data: Vec<_> = records
             .iter()
-            .filter(|(id, r)| {
+            .filter(|(id, _)| {
                 !matches!(scope, SessionListScope::Descendants(_))
                     && cursor.as_ref().is_none_or(|c| *id > c)
-                    && (search.is_empty()
-                        || format!(
-                            "{} {}",
-                            r.thread.name.as_deref().unwrap_or_default(),
-                            r.thread.preview.as_deref().unwrap_or_default()
-                        )
-                        .to_lowercase()
-                        .contains(&search))
             })
             .take(limit.max(1) as usize + 1)
             .map(|(_, r)| {
@@ -1472,79 +1462,48 @@ mod tests {
         .collect::<BTreeMap<_, _>>();
         *adapter.0.records.lock().await = records.clone();
         for scope in [SessionListScope::All, SessionListScope::Roots(&[])] {
-            for (query, ids) in [
-                ("", vec!["a", "b", "c", "d"]),
-                (" ", vec!["a", "b", "c", "d"]),
-                (" \t", vec![]),
-                (" ALPHA ", vec![]),
-                ("alpHA", vec!["a", "d"]),
-                ("ALPHA βE", vec!["a"]),
-                ("İSTANBUL", vec!["b"]),
-                ("i\u{307}staN", vec!["b"]),
-                ("missing", vec![]),
-            ] {
-                let result = crate::providers::Discovery::list(&adapter, query, None, scope, 10)
-                    .await
-                    .unwrap();
-                let actual = result
-                    .data
-                    .into_iter()
-                    .map(|row| {
-                        assert!(row.turns.is_none());
-                        row
-                    })
-                    .collect::<Vec<_>>();
-                let expected = ids
-                    .into_iter()
-                    .map(|id| {
-                        let mut thread = records[id].thread.clone();
-                        thread.turns = None;
-                        thread
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(actual, expected, "query={query:?}");
-                assert!(result.next_cursor.is_none());
-            }
+            let ids = ["a", "b", "c", "d"];
+            let result = crate::providers::Discovery::catalog_page(&adapter, None, scope, 10)
+                .await
+                .unwrap();
+            let actual = result
+                .data
+                .into_iter()
+                .inspect(|row| assert!(row.turns.is_none()))
+                .collect::<Vec<_>>();
+            let expected = ids
+                .into_iter()
+                .map(|id| {
+                    let mut thread = records[id].thread.clone();
+                    thread.turns = None;
+                    thread
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            assert!(result.next_cursor.is_none());
         }
-        for (query, cursor, scope, limit, ids, next) in [
+        for (cursor, scope, limit, ids, next) in [
             (
-                "",
                 None,
                 SessionListScope::Roots(&[]),
                 2,
                 vec!["a", "b"],
                 Some("b"),
             ),
+            (Some("b"), SessionListScope::All, 2, vec!["c", "d"], None),
+            (None, SessionListScope::All, 0, vec!["a"], Some("a")),
             (
-                "",
-                Some("b"),
-                SessionListScope::All,
-                2,
-                vec!["c", "d"],
-                None,
-            ),
-            ("", None, SessionListScope::All, 0, vec!["a"], Some("a")),
-            (
-                "alpha",
                 Some("a"),
                 SessionListScope::All,
                 u32::MAX,
-                vec!["d"],
+                vec!["b", "c", "d"],
                 None,
             ),
-            ("", Some("z"), SessionListScope::All, 2, vec![], None),
-            (
-                "",
-                None,
-                SessionListScope::Descendants("a"),
-                2,
-                vec![],
-                None,
-            ),
+            (Some("z"), SessionListScope::All, 2, vec![], None),
+            (None, SessionListScope::Descendants("a"), 2, vec![], None),
         ] {
-            let result = crate::providers::Discovery::list(
+            let result = crate::providers::Discovery::catalog_page(
                 &adapter,
-                query,
                 cursor.map(str::to_owned),
                 scope,
                 limit,
@@ -1757,7 +1716,7 @@ readline.createInterface({input: process.stdin}).on('line', line => {
             "a rejected model must close the new native session"
         );
         assert_eq!(
-            crate::providers::Discovery::list(&adapter, "", None, SessionListScope::All, 100)
+            crate::providers::Discovery::catalog_page(&adapter, None, SessionListScope::All, 100)
                 .await
                 .unwrap()
                 .data

@@ -43,8 +43,6 @@ struct ThreadListParams<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ancestor_thread_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub search_term: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
 
@@ -807,9 +805,8 @@ impl crate::providers::Configuration for Codex {
 
 #[async_trait::async_trait]
 impl crate::providers::Discovery for Codex {
-    async fn list(
+    async fn catalog_page(
         &self,
-        search: &str,
         cursor: Option<String>,
         scope: SessionListScope<'_>,
         limit: u32,
@@ -846,7 +843,6 @@ impl crate::providers::Discovery for Codex {
                     use_state_db_only: true,
                     source_kinds,
                     ancestor_thread_id,
-                    search_term: (!search.trim().is_empty()).then_some(search),
                     cursor,
                 },
             )
@@ -1897,7 +1893,7 @@ rl.on('line', line => {
                 vec!["task", "review", "helper"],
             ),
         ] {
-            let page = crate::providers::Discovery::list(&agent, "", None, scope, 10)
+            let page = crate::providers::Discovery::catalog_page(&agent, None, scope, 10)
                 .await
                 .unwrap();
             let ids: Vec<_> = page
