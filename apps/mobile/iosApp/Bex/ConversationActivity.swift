@@ -69,8 +69,10 @@ struct ThreadDecoratedActivity: View {
 }
 
 private struct PlanDocument: FileDocument {
+    static let contentType = UTType(importedAs: "net.daringfireball.markdown", conformingTo: .utf8PlainText)
+
     static var readableContentTypes: [UTType] {
-        [.markdown, .plainText]
+        [contentType, .plainText]
     }
 
     let markdown: String
@@ -114,7 +116,7 @@ struct ConversationPlanPresenter: ViewModifier {
             .fileExporter(
                 isPresented: exporting,
                 document: request.map { PlanDocument($0.markdown) },
-                contentType: .markdown,
+                contentType: PlanDocument.contentType,
                 defaultFilename: request?.filename ?? "plan.md"
             ) { result in
                 if case let .failure(failure) = result {
