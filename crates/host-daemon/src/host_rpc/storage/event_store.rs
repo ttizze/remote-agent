@@ -129,6 +129,21 @@ pub(super) fn item_position(
     if run_id.is_some() != run_ordinal.is_some() {
         return Err("item position requires its run ordinal".into());
     }
+    // Run-less native work (imported history, or a turn the provider started
+    // itself) follows everything the thread already shows.
+    if run_id.is_none() {
+        let last: i64 = transaction
+            .query_row(
+                "SELECT coalesce(max(ordinal),0) FROM orchestration_v2_turn_item_positions WHERE thread_id=?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        let ordinal = last.checked_add(1).ok_or("item position exhausted")?;
+        transaction.execute("INSERT INTO orchestration_v2_turn_item_positions(thread_id,turn_item_id,ordinal) VALUES (?1,?2,?3)",
+                params![thread_id,item_id,ordinal]).map_err(failure)?;
+        return ordinal.try_into().map_err(failure);
+    }
     let lower = integer(run_ordinal.unwrap_or(0))?
         .checked_mul(1_000_000)
         .ok_or("item position exhausted")?;

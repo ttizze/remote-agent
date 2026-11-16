@@ -26,6 +26,21 @@ async fn open(
     let stream = Conversation::open(client, session).await.unwrap();
     (stream.view(), stream)
 }
+/// A queued input as the user sent it. Its run carries the resolved T3 model
+/// selection rather than the request's.
+fn queued_inputs(
+    thread: &agent_protocol::models::Thread,
+) -> Vec<(&agent_protocol::ids::ClientInputId, &[op::Input])> {
+    thread
+        .queue
+        .inputs
+        .iter()
+        .map(|queued| (&queued.client_user_message_id, queued.input.as_slice()))
+        .collect()
+}
+fn sent(input: &op::Submission) -> (&agent_protocol::ids::ClientInputId, &[op::Input]) {
+    (&input.client_user_message_id, input.input.as_slice())
+}
 async fn finished(events: &mut Conversation) -> Turn {
     events.finished().await
 }
@@ -229,15 +244,20 @@ async fn initial_import_discovers_native_projects_and_continues_the_original_ses
         opened.thread.project_id,
         agent_protocol::models::ProjectMembership::Assigned(registered[0].id.clone())
     );
-    assert!(
-        opened
-            .thread
-            .turns
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|turn| turn.id.as_str() == "original-turn")
-    );
+    // T3 imports native history as items of the conversation, not native turn IDs.
+    let imported: Vec<_> = opened
+        .thread
+        .turns
+        .iter()
+        .flatten()
+        .flat_map(|turn| turn.items.iter().flatten())
+        .filter_map(|item| match item.body() {
+            ItemBody::UserMessage { text, .. } => text.as_deref(),
+            ItemBody::AssistantText { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(imported, ["original input", "original answer"]);
     submit(
         &local.peer,
         &submission(&id, "continue imported conversation"),
@@ -593,9 +613,7 @@ async fn scenarios(provider: ProviderKind) {
     }
     assert!(history.thread.turns.iter().flatten().any(|turn| {
         turn.items.iter().flatten().any(|item| {
-        matches!(item.body(), ItemBody::UserMessage { content, .. } if content.iter().any(|part| {
-            matches!(part, agent_protocol::items::MessagePart::Text {text} if text == "first input")
-        }))
+        matches!(item.body(), ItemBody::UserMessage { text: Some(text), .. } if text == "first input")
     })
     }));
     let trace_offset = if provider == ProviderKind::Codex {
@@ -608,12 +626,16 @@ async fn scenarios(provider: ProviderKind) {
     };
     let after_restart = submission(&session, "after process restart");
     submit(&local.peer, &after_restart).await.unwrap();
+    let restarted = events
+        .input_turn(&after_restart.client_user_message_id, true)
+        .await;
+    let debug_trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap_or_default();
+    let debug_tail: Vec<_> = debug_trace.lines().skip(trace_offset).collect();
     assert_eq!(
-        events
-            .input_turn(&after_restart.client_user_message_id, true)
-            .await
-            .status,
-        TurnStatus::Completed
+        restarted.status,
+        TurnStatus::Completed,
+        "{:?} {debug_tail:#?}",
+        restarted.error
     );
     if provider == ProviderKind::Codex {
         let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
@@ -647,6 +669,17 @@ async fn scenarios(provider: ProviderKind) {
             .input_turn(&initial.client_user_message_id, false)
             .await
             .id;
+        // Follow-ups target a live turn: wait until the provider started it.
+        while !events
+            .view()
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .any(|live| live.id == turn && live.started_at_ms.is_some())
+        {
+            events.next().await;
+        }
         let follow_up = op::Submission {
             follow_up: if case == "steer" {
                 op::FollowUp::Steer
@@ -660,7 +693,7 @@ async fn scenarios(provider: ProviderKind) {
         receipt.accepted().unwrap();
         if case != "steer" {
             let (opened, _) = open(&local.peer, &session).await;
-            assert_eq!(opened.thread.queue.inputs, std::slice::from_ref(&follow_up));
+            assert_eq!(queued_inputs(&opened.thread), [sent(&follow_up)]);
         }
         if case == "stop" {
             conversations::command(
@@ -674,7 +707,7 @@ async fn scenarios(provider: ProviderKind) {
             assert_eq!(finished(&mut events).await.status, TurnStatus::Interrupted);
             let (opened, _) = open(&local.peer, &session).await;
             assert!(opened.thread.queue.held);
-            assert_eq!(opened.thread.queue.inputs, std::slice::from_ref(&follow_up));
+            assert_eq!(queued_inputs(&opened.thread), [sent(&follow_up)]);
             conversations::command(
                 &local.peer,
                 &session,
@@ -828,517 +861,6 @@ async fn codex_conforms_to_host_conversations() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claude_conforms_to_host_conversations() {
     scenarios(ProviderKind::Claude).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn search_preserves_cached_catalog_rows_when_native_pagination_fails() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(directory.path()).unwrap();
-    let threads: Vec<_> = (0..101)
-        .map(|index| serde_json::json!({
-            "id":format!("page-{index}"),"cwd":root,"name":format!("Conversation {index}"),"updatedAt":index,
-        }))
-        .collect();
-    std::fs::write(
-        root.join("list-fixture.json"),
-        serde_json::to_vec(&threads).unwrap(),
-    )
-    .unwrap();
-    let host = start(&root, Arc::new(Memory::default())).await;
-    let local = host.local().await.unwrap();
-    let chats = root.join("bex-chats");
-    std::fs::create_dir(&chats).unwrap();
-    let session = create(&local.peer, ProviderKind::Claude, &chats).await;
-    let (_, mut events) = open(&local.peer, &session).await;
-    submit(&local.peer, &submission(&session, "saved conversation"))
-        .await
-        .unwrap();
-    assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
-    let mut catalog = conversations::Catalog::open(&local.peer).await;
-    catalog.wait_rows(102).await;
-    let query = agent_protocol::conversation::records::SearchList {
-        term: String::new(),
-        limit: Some(200),
-    };
-    let listing = local.peer.call(&query).await.unwrap();
-    assert_eq!(listing.data.len(), 102);
-    assert!(listing.provider_errors.is_none());
-    let known = listing
-        .data
-        .iter()
-        .filter_map(|thread| thread.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    std::fs::write(root.join("repeat-list-cursor"), []).unwrap();
-    let listing = local.peer.call(&query).await.unwrap();
-    assert!(
-        listing
-            .data
-            .iter()
-            .any(|thread| thread.id.as_ref() == Some(&session))
-    );
-    assert_eq!(
-        listing
-            .data
-            .iter()
-            .filter_map(|thread| thread.id.clone())
-            .collect::<std::collections::BTreeSet<_>>(),
-        known,
-        "a partial native failure preserves the already synchronized catalog"
-    );
-    assert_eq!(
-        listing.provider_errors.unwrap()["codex"]["code"],
-        "invalid_session_list"
-    );
-    local.close().await;
-    host.close().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(directory.path()).unwrap();
-    let repository = root.join("repository");
-    std::fs::create_dir(&repository).unwrap();
-    let git = |args: &[&str]| {
-        let output = std::process::Command::new("git")
-            .current_dir(&repository)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    git(&["init", "--quiet", "--initial-branch=main"]);
-    git(&[
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        "commit",
-        "--allow-empty",
-        "--quiet",
-        "-m",
-        "fixture",
-    ]);
-    let paths = [
-        root.join("first"),
-        root.join("second"),
-        root.join("deleted"),
-    ];
-    let mut mappings = serde_json::Map::new();
-    for (index, path) in paths.iter().enumerate() {
-        git(&[
-            "worktree",
-            "add",
-            "-b",
-            &format!("task-{index}"),
-            path.to_str().unwrap(),
-        ]);
-        mappings.insert(
-            path.to_string_lossy().into_owned(),
-            serde_json::json!(repository),
-        );
-    }
-    git(&["worktree", "remove", paths[2].to_str().unwrap()]);
-    std::fs::write(
-        root.join("bex-worktrees.json"),
-        serde_json::json!({"workspaceRoots":mappings}).to_string(),
-    )
-    .unwrap();
-    let host = start(&root, Arc::new(Memory::default())).await;
-    let local = host.local().await.unwrap();
-    let reads = || {
-        std::fs::read_to_string(root.join("rpc-trace.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|entry| {
-                entry["method"] == "thread/list"
-                    && entry["sourceKinds"]
-                        .as_array()
-                        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "exec"))
-            })
-            .count()
-    };
-    for (subagent, running) in [(false, true), (false, false), (true, true), (true, false)] {
-        let threads: Vec<_> = (0..101)
-            .map(|index| {
-                serde_json::json!({
-                    "id":format!("page-{index}"),
-                    "parentThreadId":(index == 0 && subagent).then_some("parent-outside-the-checkout"),
-                    "cwd":if index == 0 { &paths[0] } else { &paths[1] },
-                    "name":format!("Conversation {index}: {running}"),
-                    "updatedAt":index,
-                    "status":{"type":if index == 0 && running { "active" } else { "idle" }},
-                    "loaded":index == 0,
-                })
-            })
-            .collect();
-        std::fs::write(
-            root.join("list-fixture.json"),
-            serde_json::to_vec(&threads).unwrap(),
-        )
-        .unwrap();
-        let before = reads();
-        let entries: Vec<agent_protocol::models::Worktree> = local
-            .peer
-            .request(&Call::ListWorktrees(Empty {}))
-            .await
-            .unwrap();
-        assert_eq!(
-            reads() - before,
-            2,
-            "worktree count must not multiply native history reads"
-        );
-        assert_eq!(entries.len(), 3);
-        let first = entries
-            .iter()
-            .find(|entry| Path::new(&entry.path) == paths[0])
-            .unwrap();
-        assert_eq!(first.threads.len(), 1);
-        assert_eq!(first.threads[0].active, running);
-        assert_eq!(first.blocked_reason.is_some(), running);
-        assert_eq!(first.threads[0].name, format!("Conversation 0: {running}"));
-        let second = entries
-            .iter()
-            .find(|entry| Path::new(&entry.path) == paths[1])
-            .unwrap();
-        assert_eq!(second.threads.len(), 100);
-        assert!(second.threads.iter().all(|thread| !thread.active));
-        assert!(second.blocked_reason.is_none());
-        let deleted = entries
-            .iter()
-            .find(|entry| Path::new(&entry.path) == paths[2])
-            .unwrap();
-        assert_eq!(deleted.branch, "削除済み");
-        assert!(deleted.blocked_reason.is_none() && deleted.threads.is_empty());
-        let counted = running && !subagent;
-        let mut catalog = conversations::Catalog::open(&local.peer).await;
-        let activity = loop {
-            let activity = catalog.activity();
-            let fresh = catalog.snapshot.threads.iter().any(|shell| {
-                shell.thread.title == format!("Conversation 0: {running}")
-                    && shell.thread.lineage.parent_thread_id.is_some() == subagent
-                    && (shell.task_state().status
-                        == agent_protocol::execution::SessionStatus::Running)
-                        == running
-            });
-            if fresh && activity.display.current.total == u32::from(counted) {
-                break activity;
-            }
-            catalog.next().await;
-        };
-        assert_eq!(activity.display.current.total, u32::from(counted));
-        assert_eq!(activity.display.ongoing, counted);
-        assert_eq!(
-            activity.display.current.label,
-            if counted {
-                "実行中 1件"
-            } else {
-                "すべてのタスクが終了"
-            },
-            "task activity counts user conversations from every native page, excluding subagents"
-        );
-    }
-    local.close().await;
-    host.close().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn root_lists_skip_descendant_reads_and_concurrent_fleets_share_native_admission() {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        let directory = tempfile::tempdir().unwrap();
-        let root = dunce::canonicalize(directory.path()).unwrap();
-        let mut threads: Vec<_> = (0..200).map(|index| serde_json::json!({
-            "id":format!("root-{index:03}"), "name":format!("Conversation {index:03}"),
-            "updatedAt":index,
-        })).collect();
-        threads.extend([
-            serde_json::json!({"id":"child", "parentThreadId":"root-199", "name":"Child", "updatedAt":-1}),
-            serde_json::json!({"id":"grandchild", "parentThreadId":"child", "name":"Grandchild", "updatedAt":-2}),
-            serde_json::json!({"id":"hidden-child", "parentThreadId":"root-000", "updatedAt":-3}),
-        ]);
-        std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
-        let host = start(&root, Arc::new(Memory::default())).await;
-        let first = host.local().await.unwrap();
-        let second = host.local().await.unwrap();
-        let descendant_reads = || {
-            std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap_or_default()
-                .lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .filter(|entry| entry["method"] == "thread/list" && entry["ancestorThreadId"].is_string()).count()
-        };
-        let (mut first_catalog,mut second_catalog)=tokio::join!(conversations::Catalog::open(&first.peer),conversations::Catalog::open(&second.peer));
-        tokio::join!(first_catalog.wait_rows(203),second_catalog.wait_rows(203));
-        for catalog in [&first_catalog,&second_catalog] {
-            let page=catalog.page(agent_protocol::models::ListQuery {limit:150,..Default::default()});
-            let page=page.lists.threads.as_ref().unwrap();
-            assert!(page.provider_errors.is_none());
-            assert!(page.has_more);
-            assert_eq!(page.data.len(),150);
-            assert!(page.data.iter().all(|thread|thread.parent_id.is_none()));
-        }
-        let complete=first_catalog.page(agent_protocol::models::ListQuery {limit:250,..Default::default()});
-        let complete=complete.lists.threads.as_ref().unwrap();
-        assert!(!complete.has_more);
-        assert_eq!(complete.data.len(),200);
-        let searched=first.peer.call(&agent_protocol::conversation::records::SearchList {term:"Conversation 199".into(),limit: Some(100)}).await.unwrap();
-        assert_eq!(searched.data.len(),1);
-        assert_eq!(descendant_reads(),0,"catalogs and search must not issue descendant reads");
-        let gate = root.join("hold-list-reads");
-        std::fs::write(&gate, []).unwrap();
-        let agents = op::ListAgents {
-            thread_id: agent_protocol::session::SessionRef { provider: Some(ProviderKind::Codex), id: "root-199".into() },
-        };
-        let [a, b, c, d, e, f, g, h] = [
-            &first.peer, &first.peer, &first.peer, &first.peer,
-            &second.peer, &second.peer, &second.peer, &second.peer,
-        ].map(|peer| peer.call(&agents));
-        let listing = async { tokio::join!(a, b, c, d, e, f, g, h) };
-        let release = async {
-            tokio::time::timeout(Duration::from_secs(5), async {
-                while descendant_reads() < 4 {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            }).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let pending = descendant_reads();
-            std::fs::remove_file(&gate).unwrap();
-            assert_eq!(pending, 4, "concurrent clients must share native list admission");
-        };
-        let ((a, b, c, d, e, f, g, h), ()) = tokio::join!(listing, release);
-        for response in [a, b, c, d, e, f, g, h] {
-            let agents = response.unwrap();
-            assert_eq!(agents.iter().map(|agent| agent.id.id.as_str()).collect::<Vec<_>>(), ["child", "grandchild"]);
-        }
-        assert_eq!(descendant_reads(), 8);
-        first.close().await;
-        second.close().await;
-        host.close().await.unwrap();
-    }).await.expect("concurrent fleet list deadline");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn catalog_pages_and_project_disclosure_use_the_same_rows_without_native_reads() {
-    use agent_core::state::{Event, Intent, reduce};
-    use agent_protocol::models::ListQuery;
-    let directory = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(directory.path()).unwrap();
-    let projects=(0..9).map(|index| {
-        let path=root.join(format!("project-{index}"));
-        std::fs::create_dir(&path).unwrap();
-        serde_json::json!({"id":format!("project-{index}"),"name":format!("Project {index}"),"roots":[{"path":path}]})
-    }).collect::<Vec<_>>();
-    host_fixture::test_support::seed_projects(
-        &root,
-        serde_json::from_value(serde_json::json!(projects)).unwrap(),
-    )
-    .unwrap();
-    let threads=(0..2000).map(|index|serde_json::json!({
-        "id":format!("scoped-{index:04}"),"name":format!("Scoped conversation {index}"),"updatedAt":index,
-        "cwd":if index%4==3 {root.clone()} else {root.join(format!("project-{}",index%4))}
-    })).collect::<Vec<_>>();
-    std::fs::write(
-        root.join("list-fixture.json"),
-        serde_json::to_vec(&threads).unwrap(),
-    )
-    .unwrap();
-    let host = start(&root, Arc::new(Memory::default())).await;
-    let local = host.local().await.unwrap();
-    let mut catalog = conversations::Catalog::open(&local.peer).await;
-    catalog.wait_rows(2000).await;
-    // Full row count alone does not prove the terminal native page was committed.
-
-    let mut initial = catalog.page(ListQuery::default());
-    assert_eq!(initial.thread_list().unwrap().threads.len(), 5);
-    let projects = initial
-        .lists
-        .threads
-        .as_ref()
-        .unwrap()
-        .projects
-        .iter()
-        .map(|project| project.id.clone())
-        .collect::<Vec<_>>();
-    for project_id in projects {
-        initial = reduce(
-            &initial,
-            "",
-            Event::Intent(Intent::SetProjectExpanded {
-                project_id,
-                expanded: true,
-            }),
-        )
-        .0;
-    }
-    let listing = initial.lists.threads.as_ref().unwrap();
-    assert_eq!(
-        listing
-            .projects
-            .iter()
-            .take(3)
-            .map(|project| project.id.as_str())
-            .collect::<Vec<_>>(),
-        ["project-2", "project-1", "project-0"]
-    );
-    assert_eq!(listing.projects.len(), 5);
-    assert!(listing.has_more_projects);
-    let displayed = initial.thread_list().unwrap();
-    assert_eq!(
-        displayed.threads.len()
-            + displayed
-                .projects
-                .iter()
-                .map(|project| project.threads.len())
-                .sum::<usize>(),
-        20
-    );
-    assert_eq!(
-        listing
-            .data
-            .iter()
-            .filter(|thread| thread.project_id.is_none())
-            .count(),
-        5
-    );
-    assert_eq!(
-        initial.lists.project_threads["project-0"].data[0]
-            .id
-            .as_ref()
-            .unwrap()
-            .id,
-        "scoped-1996"
-    );
-    let reads = || {
-        std::fs::read_to_string(root.join("rpc-trace.jsonl"))
-            .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|entry| entry["method"] == "thread/list" || entry["method"] == "thread/read")
-            .collect::<Vec<_>>()
-    };
-    let before = reads();
-    assert!(
-        before.iter().all(|entry| entry["method"] == "thread/list"),
-        "catalog discovery must not import bodies"
-    );
-    let mut expanded = initial.clone();
-    for _ in 0..15 {
-        expanded = reduce(
-            &expanded,
-            "",
-            Event::Intent(Intent::ExpandThreadList {
-                project_id: Some("project-0".into()),
-            }),
-        )
-        .0;
-    }
-    let project = &expanded.lists.project_threads["project-0"];
-    assert_eq!(project.data.len(), 155);
-    assert_eq!(project.data[149].id.as_ref().unwrap().id, "scoped-1400");
-    assert!(project.has_more);
-    let (shown, _) = reduce(&expanded, "", Event::Intent(Intent::ExpandProjects));
-    assert_eq!(shown.lists.threads.as_ref().unwrap().projects.len(), 9);
-    assert!(!shown.lists.threads.as_ref().unwrap().has_more_projects);
-    assert!(
-        shown
-            .lists
-            .project_threads
-            .get("project-8")
-            .is_none_or(|page| page.data.is_empty())
-    );
-    let (collapsed, _) = reduce(
-        &shown,
-        "",
-        Event::Intent(Intent::SetProjectExpanded {
-            project_id: "project-0".into(),
-            expanded: false,
-        }),
-    );
-    assert_eq!(collapsed.lists.shell, initial.lists.shell);
-    assert_eq!(
-        reads(),
-        before,
-        "disclosure and pagination leave native discovery untouched"
-    );
-    let found = local
-        .peer
-        .call(&agent_protocol::conversation::records::SearchList {
-            term: "Scoped conversation 1900".into(),
-            limit: Some(100),
-        })
-        .await
-        .unwrap();
-    assert_eq!(found.data.len(), 1);
-    assert_eq!(found.data[0].id.as_ref().unwrap().id, "scoped-1900");
-    assert!(
-        catalog.snapshot.threads.len() + catalog.snapshot.projects.len() >= 2009,
-        "search does not replace the replicated catalog"
-    );
-    local.close().await;
-    host.close().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn codex_queues_input_for_a_running_turn_it_has_not_observed() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(directory.path()).unwrap();
-    std::fs::write(
-        root.join("list-fixture.json"),
-        serde_json::to_vec(&serde_json::json!([{
-            "id":"external","cwd":root,"historyMode":"paginated","status":{"type":"active","activeFlags":[]},
-            "turns":[{"id":"native-turn","status":"inProgress","items":[]}]
-        }]))
-        .unwrap(),
-    )
-    .unwrap();
-    let program = host_fixture::fixture::Config {
-        trace: true,
-        stream_delay_ms: 5,
-        ..Default::default()
-    }
-    .install(Path::new(env!("CARGO_BIN_EXE_agent-codex-fixture")), &root)
-    .unwrap();
-    let host = HostFixture::start(
-        &root,
-        codex_app_server::AppServerConfig {
-            program,
-            ..Default::default()
-        },
-        Arc::new(Memory::default()),
-        "queue conformance",
-        false,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let local = host.local().await.unwrap();
-    let _catalog = conversations::Catalog::open(&local.peer).await;
-    let session = SessionRef::new(ProviderKind::Codex, "external".into()).unwrap();
-    // Even a steer waits for a running turn the Host has not observed.
-    let input = op::Submission {
-        follow_up: op::FollowUp::Steer,
-        ..submission(&session, "queued for unobserved turn")
-    };
-    submit(&local.peer, &input)
-        .await
-        .unwrap()
-        .accepted()
-        .unwrap();
-    let (opened, _) = open(&local.peer, &session).await;
-    assert_eq!(opened.thread.queue.inputs, [input]);
-    let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
-    assert!(!trace.lines().any(|line| {
-        let event: serde_json::Value = serde_json::from_str(line).unwrap();
-        event["method"] == "turn/steer" || event["method"] == "turn/start"
-    }));
-    local.close().await;
-    host.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

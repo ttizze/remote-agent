@@ -225,7 +225,24 @@ fn restore_queued(projection: &mut ThreadProjection, run_id: &str) {
     let items:Vec<_>=projection.turn_items.iter().filter(|item|item.run_id.as_deref()==Some(run_id)
         && matches!(&item.body,model::TurnItemBody::UserMessage {input_intent,..} if input_intent=="queued_turn")
         && visibility.visible(item)).cloned().collect();
+    // The Host writes the starting run before its input's transcript position.
+    // Until that update, the input stays after everything already shown.
+    let last = projection
+        .visible_turn_items
+        .iter()
+        .filter(|row| row.visibility == Visibility::Local)
+        .map(|row| row.item.ordinal)
+        .max()
+        .unwrap_or(0);
     for item in items {
+        let item = if item.ordinal == 0 {
+            Arc::new(model::TurnItem {
+                ordinal: last + 1,
+                ..(*item).clone()
+            })
+        } else {
+            item
+        };
         upsert_visible(&mut projection.visible_turn_items, item);
     }
 }

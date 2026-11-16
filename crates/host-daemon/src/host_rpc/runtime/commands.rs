@@ -128,6 +128,39 @@ impl Runtime {
         ))
     }
 
+    /// A chat created without a model defers its default to the first input,
+    /// so creating it never launches a provider CLI to read the catalog.
+    async fn deferred_default(
+        service: &HostRpcService,
+        session: &SessionRef,
+        command: &Command,
+    ) -> Result<Option<model::ModelSelection>, Failure> {
+        let Command::Submit { content, .. } = command else {
+            return Ok(None);
+        };
+        if content.model.is_some() {
+            return Ok(None);
+        }
+        let Some(thread) = service
+            .inner
+            .conversation
+            .storage
+            .thread_header(session)
+            .map_err(storage_failure)?
+            .filter(|thread| thread.model_selection.is_deferred())
+        else {
+            return Ok(None);
+        };
+        let kind = ProviderKind::from_instance_id(&thread.model_selection.instance_id)
+            .map_err(|error| Failure::new("model_unavailable", error))?;
+        let default =
+            Self::default_selection(service, kind, &records::Selection::default()).await?;
+        Ok(Some(model::ModelSelection {
+            model: default.model,
+            ..thread.model_selection
+        }))
+    }
+
     pub(super) async fn message_content(
         service: &HostRpcService,
         thread_id: &str,
@@ -217,6 +250,7 @@ impl Runtime {
             }
             _ => None,
         };
+        let deferred = Self::deferred_default(service, &request.session, &request.command).await?;
         let operation = request.operation.to_string();
         let item_ids = match &request.command {
             Command::RetryInput { id, .. } | Command::RemoveInput(id) => runtime
@@ -277,6 +311,7 @@ impl Runtime {
                     &request.command,
                     state,
                     content.as_ref(),
+                    deferred.as_ref(),
                     context,
                     fork_origin,
                     origin,
@@ -336,6 +371,7 @@ fn decide(
     command: &Command,
     state: &model::State,
     content: Option<&MessageContent>,
+    deferred: Option<&model::ModelSelection>,
     context: model::Context<'_>,
     fork_origin: Option<&model::ProviderThreadFork>,
     origin: Origin<'_>,
@@ -347,7 +383,7 @@ fn decide(
         } => {
             let content = content.ok_or("message was not prepared")?;
             let selected = selection(
-                &state.thread.model_selection,
+                deferred.unwrap_or(&state.thread.model_selection),
                 &records::Selection {
                     model: options.model.clone(),
                     effort: options.effort.clone(),
@@ -446,28 +482,21 @@ fn decide(
                 .transpose()?,
         ),
         Command::SteerInput(id) => model::promote_queued(state, &input_run(state, id)?.id, context),
-        Command::Interrupt { turn } => {
-            let run = turn
-                .as_ref()
-                .map(|turn| {
-                    state
-                        .runs
-                        .get(turn.as_str())
-                        .or_else(|| {
-                            state
-                                .runs
-                                .values()
-                                .find(|run| run.user_message_id == turn.as_str())
-                        })
-                        .ok_or("run does not exist")
-                })
-                .transpose()?
-                .or_else(|| state.active_run());
-            match run {
+        Command::Interrupt { turn: Some(turn) } => {
+            match state.runs.get(turn.as_str()).or_else(|| {
+                state
+                    .runs
+                    .values()
+                    .find(|run| run.user_message_id == turn.as_str())
+            }) {
                 Some(run) => model::interrupt(state, &run.id, context),
-                None => Ok(model::hold_queue(state, true)),
+                None => model::interrupt_provider_turn(state, turn.as_str(), context),
             }
         }
+        Command::Interrupt { turn: None } => match state.active_run() {
+            Some(run) => model::interrupt(state, &run.id, context),
+            None => Ok(model::hold_queue(state, true)),
+        },
         Command::Rename(title) => {
             let title = title.trim();
             if title.is_empty() {

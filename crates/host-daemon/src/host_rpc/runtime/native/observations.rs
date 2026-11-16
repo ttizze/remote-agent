@@ -49,7 +49,12 @@ pub(super) fn native_context(
 
 fn failure(error: Option<&ExecutionError>) -> model::ProviderFailure {
     model::ProviderFailure {
-        class: "provider".into(),
+        class: model::ProviderFailure::class_for(
+            &error
+                .map(|error| error.category.clone())
+                .unwrap_or_default(),
+        )
+        .into(),
         message: error.map_or_else(
             || "Native execution failed".into(),
             |error| error.message.clone(),
@@ -747,28 +752,98 @@ impl Runtime {
     ) -> Result<(), String> {
         let now = commands::at();
         let owners = source.background_owners();
-        service.inner.conversation.storage.observe_thread(&source.target.id,&[],&now,|state| {
-            let id=attempt.to_string();
-            if !state.accepts_observation(&id,&source.session_id) && !state.accepts_background_observation(&id,&source.session_id) {return Ok(model::Decision::default());}
-            let attempt=&state.run_attempts[&id];
-            let thread=state.provider_threads.get(&attempt.provider_thread_id).ok_or("background provider thread is missing")?;
-            let mut tasks=std::collections::BTreeMap::new();
-            for (owner,pending) in owners {
-                let id=owner.to_string();
-                let Some(owner)=state.run_attempts.get(&id).filter(|owner|owner.provider_thread_id==thread.id) else {continue;};
-                if !state.accepts_observation(&id,&source.session_id) && !state.accepts_background_observation(&id,&source.session_id) {continue;}
-                for task in pending {
-                    let item=state.turn_items.values().find(|item|item.run_id.as_ref()==Some(&owner.run_id) && item.native_item_ref.as_ref().and_then(|reference|reference.native_id.as_deref())==Some(task.id.as_str()));
-                    if item.is_some_and(|item|!matches!(item.status,model::TurnItemStatus::Pending|model::TurnItemStatus::Running|model::TurnItemStatus::Waiting)) {continue;}
-                    tasks.insert(task.id.clone(),model::PendingBackgroundTask {
-                        kind:match task.kind {agent_protocol::execution::BackgroundTaskKind::Command=>"command",agent_protocol::execution::BackgroundTaskKind::Subagent=>"subagent",agent_protocol::execution::BackgroundTaskKind::Monitor=>"monitor",agent_protocol::execution::BackgroundTaskKind::BackgroundTask=>"background_task"}.into(),
-                        task_id:task.id.clone(),command:task.description.clone(),item_id:item.map(|item|item.id.clone()),source_thread_id:None,description:task.description,parent_task_id:None,native_item_id:Some(task.id),awaited:None,provider_instance_id:Some(owner.provider_instance_id.clone()),child_thread_id:None,
-                    });
+        service
+            .inner
+            .conversation
+            .storage
+            .observe_thread(&source.target.id, &[], &now, |state| {
+                let id = attempt.to_string();
+                if !state.accepts_observation(&id, &source.session_id)
+                    && !state.accepts_background_observation(&id, &source.session_id)
+                {
+                    return Ok(model::Decision::default());
                 }
-            }
-            let pending_background_tasks=tasks.into_values().collect();
-            if thread.pending_background_tasks==pending_background_tasks {return Ok(model::Decision::default());}
-            Ok(model::Decision {changes:vec![model::Change::ProviderThread(model::ProviderThread {pending_background_tasks,updated_at:now.clone(),..thread.clone()})],..Default::default()})
-        }).map(|_|())
+                let attempt = &state.run_attempts[&id];
+                let thread = state
+                    .provider_threads
+                    .get(&attempt.provider_thread_id)
+                    .ok_or("background provider thread is missing")?;
+                // Keep the provider's start order; a task reported twice appears once.
+                let mut tasks: Vec<model::PendingBackgroundTask> = Vec::new();
+                for (owner, pending) in owners {
+                    let id = owner.to_string();
+                    let Some(owner) = state
+                        .run_attempts
+                        .get(&id)
+                        .filter(|owner| owner.provider_thread_id == thread.id)
+                    else {
+                        continue;
+                    };
+                    if !state.accepts_observation(&id, &source.session_id)
+                        && !state.accepts_background_observation(&id, &source.session_id)
+                    {
+                        continue;
+                    }
+                    for task in pending {
+                        let item = state.turn_items.values().find(|item| {
+                            item.run_id.as_ref() == Some(&owner.run_id)
+                                && item
+                                    .native_item_ref
+                                    .as_ref()
+                                    .and_then(|reference| reference.native_id.as_deref())
+                                    == Some(task.id.as_str())
+                        });
+                        if item.is_some_and(|item| {
+                            !matches!(
+                                item.status,
+                                model::TurnItemStatus::Pending
+                                    | model::TurnItemStatus::Running
+                                    | model::TurnItemStatus::Waiting
+                            )
+                        }) {
+                            continue;
+                        }
+                        if tasks.iter().any(|saved| saved.task_id == task.id) {
+                            continue;
+                        }
+                        tasks.push(model::PendingBackgroundTask {
+                            kind: match task.kind {
+                                agent_protocol::execution::BackgroundTaskKind::Command => "command",
+                                agent_protocol::execution::BackgroundTaskKind::Subagent => {
+                                    "subagent"
+                                }
+                                agent_protocol::execution::BackgroundTaskKind::Monitor => "monitor",
+                                agent_protocol::execution::BackgroundTaskKind::BackgroundTask => {
+                                    "background_task"
+                                }
+                            }
+                            .into(),
+                            task_id: task.id.clone(),
+                            command: task.description.clone(),
+                            item_id: item.map(|item| item.id.clone()),
+                            source_thread_id: None,
+                            description: task.description,
+                            parent_task_id: None,
+                            native_item_id: Some(task.id),
+                            awaited: None,
+                            provider_instance_id: Some(owner.provider_instance_id.clone()),
+                            child_thread_id: None,
+                        });
+                    }
+                }
+                let pending_background_tasks = tasks;
+                if thread.pending_background_tasks == pending_background_tasks {
+                    return Ok(model::Decision::default());
+                }
+                Ok(model::Decision {
+                    changes: vec![model::Change::ProviderThread(model::ProviderThread {
+                        pending_background_tasks,
+                        updated_at: now.clone(),
+                        ..thread.clone()
+                    })],
+                    ..Default::default()
+                })
+            })
+            .map(|_| ())
     }
 }

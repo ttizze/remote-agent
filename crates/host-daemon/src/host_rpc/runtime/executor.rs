@@ -62,7 +62,14 @@ pub(super) fn native_ref(provider: ProviderKind, id: &str) -> model::ProviderRef
 
 fn failure(error: &Failure) -> model::ProviderFailure {
     model::ProviderFailure {
-        class: "provider".into(),
+        class: model::ProviderFailure::class_for(
+            &error
+                .execution
+                .as_ref()
+                .map(|execution| execution.category.clone())
+                .unwrap_or_default(),
+        )
+        .into(),
         message: error.message.clone(),
         code: Some(error.code.into()),
         retryable: None,

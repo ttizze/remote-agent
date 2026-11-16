@@ -1029,6 +1029,27 @@ impl Agent for Codex {
     }
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
         self.validate_create()?;
+        // A thread this process never loaded can only read as notLoaded, so,
+        // as T3 does, the next start resumes it without asking first.
+        if !self.subscriptions.known(id) {
+            return Ok(SubmissionState {
+                response: agent_protocol::models::ThreadResponse {
+                    thread: agent_protocol::models::Thread {
+                        id: Some(
+                            agent_protocol::session::SessionRef::new(
+                                ProviderKind::Codex,
+                                id.into(),
+                            )
+                            .map_err(|error| Failure::new("invalid_thread", error))?,
+                        ),
+                        status: agent_protocol::execution::SessionStatus::Unknown,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                needs_reload: true,
+            });
+        }
         let native: Value = self
             .request(
                 "thread/read",

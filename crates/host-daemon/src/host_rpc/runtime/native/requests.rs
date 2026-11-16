@@ -169,7 +169,14 @@ fn request_artifact(
                 .ok_or("request has no accepting native turn")?;
             (Some(turn), item_id.as_ref())
         }
-        agent_protocol::requests::RequestTarget::Session => (None, None),
+        // As in T3's Claude onElicitation, a session-level prompt raised during
+        // an attempt belongs to that attempt's running turn.
+        agent_protocol::requests::RequestTarget::Session => (
+            attempt
+                .and_then(|attempt| attempt.provider_turn_id.as_ref())
+                .and_then(|id| state.provider_turns.get(id)),
+            None,
+        ),
     };
     let node_id = model::derived_id("node", &[request_id]);
     let root = attempt

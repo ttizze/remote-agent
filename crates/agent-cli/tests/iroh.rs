@@ -55,14 +55,15 @@ async fn exercise(command: &[&str], expected: Value) {
                 Some("host/list/subscribe") => {
                     lists += 1;
                     assert_eq!(request["params"].get("after_sequence"), Some(&Value::Null));
-                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false})
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"},{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false})
                 }
                 Some("host/list/search") => {
                     assert_eq!(mode, "list");
                     assert_eq!(request["params"], json!({"term":"CLI search","limit":50}));
                     assert!(!handled);
                     handled = true;
-                    json!({"data":[{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"projects":[],"limit":50,"hasMore":false,"hasMoreProjects":false})
+                    // As in T3, a saved-message match selects a listed conversation.
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-search-thread"},"name":"Search result"}],"messageMatches":[{"provider":"codex","id":"fixture-search-thread"}],"projects":[],"limit":50,"hasMore":false,"hasMoreProjects":false})
                 }
                 Some("host/conversation/subscribe") => {
                     reads += 1;
@@ -75,7 +76,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     if let Some(id) = &approval {
                         thread["turns"] =
                             json!([{"id":"fixture-turn","status":"running","items":[]}]);
-                        thread["requests"] = json!({id.as_str().unwrap():{"id":id,"target":{"turn":{"turnId":"fixture-turn","itemId":null}},"delivery":"awaiting","body":{"approval":{"kind":"command","description":"fixture","details":"","choices":[{"id":"accept-choice","label":"承認","description":"","effect":"allow"},{"id":"session-choice","label":"セッション中","description":"","effect":"allowLasting"},{"id":"decline-choice","label":"拒否","description":"","effect":"deny"}]}}}});
+                        thread["requests"] = json!({id.as_str().unwrap():{"id":id,"target":{"turn":{"turnId":"fixture-turn","itemId":null}},"delivery":"awaiting","body":{"approval":{"kind":"command","description":"fixture","details":"","choices":[{"id":"accept","label":"承認","description":"","effect":"allow"},{"id":"acceptForSession","label":"セッション中","description":"","effect":"allowLasting"},{"id":"decline","label":"拒否","description":"","effect":"deny"}]}}}});
                     }
                     json!({"thread":thread})
                 }
@@ -103,7 +104,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     } else {
                         assert_eq!(
                             *command,
-                            json!({"Answer":{"id":approval.as_ref().unwrap(),"answer":{"approval":{"choiceId":"decline-choice"}}}})
+                            json!({"Answer":{"id":approval.as_ref().unwrap(),"answer":{"approval":{"choiceId":"decline"}}}})
                         );
                     }
                     handled = true;

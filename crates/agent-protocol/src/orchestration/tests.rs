@@ -855,16 +855,34 @@ fn uncertainty_resolution_requires_the_exact_unresolved_input_and_releases_no_ot
 }
 
 #[test]
-fn steer_before_native_turn_is_ready_queues_with_the_target_run() {
+fn steer_before_native_turn_is_ready_queues_with_the_target_run_and_joins_it_once_running() {
     let state = accepted(&initial(), 1, Admission::Queue);
     let next = accepted(&state, 2, Admission::Steer);
     assert_eq!(next.runs.len(), 2);
-    let queued = next.next_queued_run().unwrap();
+    let queued = next.next_queued_run().unwrap().id.clone();
+    let target = state.active_run().unwrap();
     assert_eq!(
-        queued.steer_when_ready_run_id.as_deref(),
-        Some(state.active_run().unwrap().id.as_str())
+        next.runs[&queued].steer_when_ready_run_id.as_deref(),
+        Some(target.id.as_str())
     );
     assert_eq!(next.effects.len(), 1);
+    let attempt = target.active_attempt_id.clone().unwrap();
+    let running = next.apply(
+        &started(
+            &next,
+            &attempt,
+            "session",
+            native("turn-1", None),
+            context("3", &next),
+        )
+        .unwrap(),
+    );
+    assert!(running.next_queued_run().is_none());
+    assert!(running.effects.values().any(|effect| matches!(
+        &effect.request,
+        EffectRequest::ProviderTurnSteer { message_id, .. }
+            if *message_id == Uuid::from_u128(2).to_string()
+    )));
 }
 
 #[test]
@@ -916,6 +934,40 @@ fn stop_during_native_submission_waits_for_the_turn_address_and_then_interrupts_
         .as_ref()
         .unwrap();
     assert!(started.effects.values().any(|effect|matches!(&effect.request,EffectRequest::ProviderTurnInterrupt {provider_turn_id,..} if provider_turn_id==native)));
+}
+
+#[test]
+fn stop_interrupts_a_running_native_turn_the_provider_started_without_a_run() {
+    let (mut state, _, attempt) = running();
+    let own = state.run_attempts[&attempt]
+        .provider_turn_id
+        .clone()
+        .unwrap();
+    let external = ProviderTurn {
+        id: "external-turn".into(),
+        run_attempt_id: None,
+        ordinal: state.provider_turns[&own].ordinal + 1,
+        ..state.provider_turns[&own].clone()
+    };
+    state
+        .provider_turns
+        .insert(external.id.clone(), external.clone());
+    let decision = interrupt_provider_turn(&state, &external.id, context("4", &state)).unwrap();
+    assert!(matches!(&decision.effects[..], [Effect {
+        request: EffectRequest::ProviderTurnInterrupt { provider_turn_id, .. }, ..
+    }] if provider_turn_id == "external-turn"));
+    assert!(matches!(&decision.changes[..], [Change::TurnItem(item)]
+        if item.run_id.is_none()
+            && item.provider_turn_id.as_deref() == Some("external-turn")
+            && item.node_id.as_deref() == Some(external.node_id.as_str())));
+    let settled = state.apply(&Decision {
+        changes: vec![Change::ProviderTurn(ProviderTurn {
+            status: ProviderTurnStatus::Completed,
+            ..external
+        })],
+        effects: vec![],
+    });
+    assert!(interrupt_provider_turn(&settled, "external-turn", context("5", &settled)).is_err());
 }
 
 #[test]
@@ -2262,7 +2314,8 @@ fn promoting_a_queue_entry_moves_its_original_message_and_cancels_only_its_reser
         deferred.runs[&queued.id].steer_when_ready_run_id.as_ref(),
         Some(&run.id)
     );
-    let state = deferred.apply(
+    // As in T3 deliverDeferredSteers, the native turn's start promotes it.
+    let promoted = deferred.apply(
         &started(
             &deferred,
             run.active_attempt_id.as_deref().unwrap(),
@@ -2272,7 +2325,6 @@ fn promoting_a_queue_entry_moves_its_original_message_and_cancels_only_its_reser
         )
         .unwrap(),
     );
-    let promoted = state.apply(&promote_queued(&state, &queued.id, context("5", &state)).unwrap());
     assert_eq!(promoted.runs[&queued.id].status, RunStatus::Cancelled);
     assert_eq!(
         promoted.run_attempts[queued.active_attempt_id.as_ref().unwrap()].status,

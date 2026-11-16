@@ -264,8 +264,15 @@ impl Runtime {
         if let Some((_, content)) = &request.initial {
             service.creation_agent(request.provider, content.model.as_ref())?;
         }
-        let selected =
-            Self::default_selection(service, request.provider, &request.selection).await?;
+        let selected = if request.initial.is_none() && request.selection.model.is_none() {
+            service.creation_agent(request.provider, None)?;
+            super::commands::selection(
+                &model::ModelSelection::deferred(request.provider.key()),
+                &request.selection,
+            )
+        } else {
+            Self::default_selection(service, request.provider, &request.selection).await?
+        };
         let selected_cwd = request.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty());
         let cwd = match selected_cwd {
             Some(cwd) => cwd.to_owned(),

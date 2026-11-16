@@ -107,21 +107,11 @@ pub fn project(
                     session::SubmissionDelivery::Sending
                 }
             }
+            // A queued input promoted to a steer moved into the run it joined.
             model::RunStatus::Failed | model::RunStatus::Cancelled
                 if item.status != model::TurnItemStatus::Cancelled
-                    && projection
-                        .attempts
-                        .iter()
-                        .find(|attempt| Some(&attempt.id) == run.active_attempt_id.as_ref())
-                        .is_some_and(|attempt| {
-                            attempt.provider_turn_id.is_none() && attempt.started_at.is_none()
-                        })
-                    && !projection.provider_turns.iter().any(|turn| {
-                        projection.attempts.iter().any(|attempt| {
-                            attempt.run_id == run.id
-                                && turn.run_attempt_id.as_ref() == Some(&attempt.id)
-                        })
-                    }) =>
+                    && item.run_id.as_deref() == Some(run.id.as_str())
+                    && never_started(projection, run) =>
             {
                 let failure = projection.turn_items.iter().find_map(|item| {
                     if item.run_id.as_ref() != Some(&run.id)
@@ -148,7 +138,7 @@ pub fn project(
                 session::SubmissionDelivery::Accepted { turn_id: None }
             }
             _ => session::SubmissionDelivery::Accepted {
-                turn_id: Some(run.id.clone().into()),
+                turn_id: Some(item.run_id.as_ref().unwrap_or(&run.id).clone().into()),
             },
         };
         submissions.insert(run.user_message_id.clone().into(), delivery);
@@ -277,7 +267,7 @@ pub fn project(
             )),
             ..Default::default()
         },
-        model: Some(models::ModelRef {
+        model: (!selection.is_deferred()).then(|| models::ModelRef {
             provider,
             id: selection.model.clone(),
         }),
@@ -571,6 +561,9 @@ fn timeline(
                     .find(|run| Some(run.id.as_str()) == row.item.run_id.as_deref())
             })
             .flatten();
+        if run.is_some_and(|run| never_started(projection, run)) {
+            continue;
+        }
         let native_turns = group
             .iter()
             .filter_map(|row| row.item.provider_turn_id.as_deref())
@@ -826,6 +819,24 @@ fn run_attempts(projection: &ThreadProjection, run: &str) -> Vec<models::Executi
         .collect()
 }
 
+/// A failed or stopped run that never reached its provider stays an editable
+/// input with its reason, rather than a turn.
+fn never_started(projection: &ThreadProjection, run: &model::Run) -> bool {
+    matches!(
+        run.status,
+        model::RunStatus::Failed | model::RunStatus::Cancelled
+    ) && projection
+        .attempts
+        .iter()
+        .find(|attempt| Some(&attempt.id) == run.active_attempt_id.as_ref())
+        .is_some_and(|attempt| attempt.provider_turn_id.is_none() && attempt.started_at.is_none())
+        && !projection.provider_turns.iter().any(|turn| {
+            projection.attempts.iter().any(|attempt| {
+                attempt.run_id == run.id && turn.run_attempt_id.as_ref() == Some(&attempt.id)
+            })
+        })
+}
+
 fn run_status(status: model::RunStatus) -> display::TurnStatus {
     match status {
         model::RunStatus::Preparing
@@ -847,13 +858,7 @@ fn failure_view(failure: &model::ProviderFailure) -> display::ExecutionError {
     display::ExecutionError {
         message: failure.message.clone(),
         provider_code: failure.code.clone(),
-        category: match failure.class.as_str() {
-            "usage_limit" => display::ErrorCategory::UsageLimit,
-            "transport_error" => display::ErrorCategory::Network,
-            "permission_error" => display::ErrorCategory::Policy,
-            "validation_error" => display::ErrorCategory::InvalidInput,
-            _ => display::ErrorCategory::Other,
-        },
+        category: failure.category(),
         ..Default::default()
     }
 }
@@ -1042,7 +1047,7 @@ fn request_views(
             _=>unreachable!(),
         };
         let id:agent_protocol::ids::RequestId=request.id.clone().into();
-        Ok((id.clone(),Arc::new(requests::Request {id,target:match item.provider_turn_id.as_ref() {Some(id)=>requests::RequestTarget::Turn {turn_id:item.run_id.as_ref().unwrap_or(id).clone().into(),item_id:Some(item.id.clone().into())},None=>requests::RequestTarget::Session},delivery:session::RequestDelivery::Awaiting,body})))
+        Ok((id.clone(),Arc::new(requests::Request {id,target:match item.provider_turn_id.as_ref() {Some(id)=>requests::RequestTarget::Turn {turn_id:item.run_id.as_ref().unwrap_or(id).clone().into(),item_id:item.native_item_ref.as_ref().map(|_|item.id.clone().into())},None=>requests::RequestTarget::Session},delivery:session::RequestDelivery::Awaiting,body})))
     }).collect()
 }
 

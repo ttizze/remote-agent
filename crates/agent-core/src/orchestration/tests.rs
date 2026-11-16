@@ -605,6 +605,44 @@ fn queued_input_is_hidden_until_activation_regardless_of_event_order_and_stays_h
 }
 
 #[test]
+fn a_started_queued_input_stays_after_shown_items_until_its_transcript_position_arrives() {
+    let mut initial = projection();
+    initial.runs.push(run("queued"));
+    let mut earlier = item("earlier", 500);
+    earlier.run_id = None;
+    let mut queued = item("input", 0);
+    queued.status = TurnItemStatus::Pending;
+    queued.body = TurnItemBody::UserMessage {
+        created_by: Actor::User,
+        creation_source: CreationSource::Mobile,
+        scheduled_task_id: None,
+        message_id: "input".into(),
+        input_intent: "queued_turn".into(),
+        text: "hello".into(),
+        attachments: vec![],
+        context: None,
+    };
+    let shown = |projection: &ThreadProjection| {
+        projection
+            .visible_turn_items
+            .iter()
+            .map(|row| row.source_item_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let waiting = apply(
+        &apply(&initial, Change::TurnItem(earlier)),
+        Change::TurnItem(queued.clone()),
+    );
+    // The Host writes the starting run before that run's positioned input.
+    let started = apply(&waiting, Change::Run(run("starting")));
+    assert_eq!(shown(&started), ["earlier", "input"]);
+    queued.ordinal = 1_000_001;
+    queued.status = TurnItemStatus::Completed;
+    let positioned = apply(&started, Change::TurnItem(queued));
+    assert_eq!(shown(&positioned), ["earlier", "input"]);
+}
+
+#[test]
 fn a_partial_timeline_drops_unloaded_old_updates_but_accepts_queued_runs_below_the_watermark() {
     let mut initial = projection();
     initial.runs.push(run("completed"));

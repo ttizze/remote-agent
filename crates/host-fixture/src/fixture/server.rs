@@ -298,6 +298,27 @@ impl Threads {
         format!("{}-{}", thread_id.rsplit('-').next().unwrap(), *ordinal)
     }
 
+    /// Like native Codex, turn and item IDs stay unique after a process restart.
+    fn reserve_turn_suffix(
+        &mut self,
+        context: &Context,
+        thread_id: &str,
+        observed_turns: usize,
+    ) -> Result<String> {
+        loop {
+            let suffix = self.turn_suffix(thread_id, observed_turns);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(context.home.join(format!("fixture-turn-{suffix}.reserved")))
+            {
+                Ok(_) => return Ok(suffix),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     fn cancel(&self) {
         for control in self.controls.values() {
             control.stop.cancel();
@@ -720,7 +741,7 @@ impl Threads {
         }
         let thread = thread.clone();
         let observed_turns = thread.borrow().turns.len();
-        let suffix = self.turn_suffix(thread_id, observed_turns);
+        let suffix = self.reserve_turn_suffix(context, thread_id, observed_turns)?;
         let turn_id = format!("fixture-turn-{suffix}");
         // A turn starts now, so clients show its real elapsed time.
         let started_at_ms = now_ms();

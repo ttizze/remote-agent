@@ -54,9 +54,9 @@ mod forks;
 pub mod handoffs;
 pub use execution::{
     Completion, activate_queued, cancel_start, cancel_uncertain, complete, fail_start,
-    finish_provider_turn, interrupt, native_resource_loaded, native_resource_unloaded,
-    observe_item, observe_native_status, observe_plan, observe_subagent, observe_subagent_progress,
-    started, uncertain_delivery,
+    finish_provider_turn, interrupt, interrupt_provider_turn, native_resource_loaded,
+    native_resource_unloaded, observe_item, observe_native_status, observe_plan, observe_subagent,
+    observe_subagent_progress, started, uncertain_delivery,
 };
 pub use forks::{ForkTarget, fork_native_thread, fork_thread, fork_title};
 mod generated_images;
@@ -269,6 +269,21 @@ pub struct ModelSelection {
 }
 
 impl ModelSelection {
+    /// Bex creates a chat before reading the provider catalog; the first input
+    /// resolves the default model. T3 requires a model at creation, which would
+    /// launch the provider CLI just to open an empty chat.
+    pub fn deferred(instance_id: &str) -> Self {
+        Self {
+            instance_id: instance_id.into(),
+            model: String::new(),
+            options: Vec::new(),
+        }
+    }
+
+    pub fn is_deferred(&self) -> bool {
+        self.model.is_empty()
+    }
+
     pub fn text_option(&self, id: &str) -> Option<&str> {
         self.options
             .iter()
@@ -929,6 +944,31 @@ pub struct ProviderFailure {
     pub retryable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset_at: Option<String>,
+}
+
+impl ProviderFailure {
+    /// T3's failure classes for the error categories clients distinguish.
+    pub fn class_for(category: &crate::execution::ErrorCategory) -> &'static str {
+        use crate::execution::ErrorCategory;
+        match category {
+            ErrorCategory::UsageLimit => "usage_limit",
+            ErrorCategory::Network => "transport_error",
+            ErrorCategory::Policy => "permission_error",
+            ErrorCategory::InvalidInput => "validation_error",
+            _ => "provider_error",
+        }
+    }
+
+    pub fn category(&self) -> crate::execution::ErrorCategory {
+        use crate::execution::ErrorCategory;
+        match self.class.as_str() {
+            "usage_limit" => ErrorCategory::UsageLimit,
+            "transport_error" => ErrorCategory::Network,
+            "permission_error" => ErrorCategory::Policy,
+            "validation_error" => ErrorCategory::InvalidInput,
+            _ => ErrorCategory::Other,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

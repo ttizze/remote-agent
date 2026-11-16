@@ -455,7 +455,55 @@ pub fn started(
             },
         ));
     }
-    Ok(Decision { changes, effects })
+    Ok(deliver_deferred_steers(
+        state,
+        &run.id,
+        context,
+        Decision { changes, effects },
+    ))
+}
+
+/// T3 deliverDeferredSteers: a steer sent before its run's native turn was
+/// ready joins that turn once it runs.
+fn deliver_deferred_steers(
+    state: &State,
+    run_id: &str,
+    context: Context<'_>,
+    mut decision: Decision,
+) -> Decision {
+    let mut pending: Vec<_> = state
+        .runs
+        .values()
+        .filter(|queued| {
+            queued.status == RunStatus::Queued
+                && queued.steer_when_ready_run_id.as_deref() == Some(run_id)
+        })
+        .collect();
+    pending.sort_by_key(|queued| {
+        (
+            queued.queue_position.unwrap_or(queued.ordinal),
+            queued.ordinal,
+        )
+    });
+    for queued in pending {
+        let command_id = format!("deferred-steer:{}:{run_id}", queued.id);
+        // Admission recorded the target only for a provider that steers. As in
+        // T3, an input that still cannot join stays queued behind the run.
+        let Ok(promoted) = commands::promote_queued(
+            &state.apply(&decision),
+            &queued.id,
+            Context {
+                command_id: &command_id,
+                can_steer: true,
+                ..context
+            },
+        ) else {
+            continue;
+        };
+        decision.changes.extend(promoted.changes);
+        decision.effects.extend(promoted.effects);
+    }
+    decision
 }
 
 pub fn observe_item(
@@ -1209,27 +1257,31 @@ pub(super) fn finish_run(
     }
     if let Completion::Failed(failure) = completion {
         let error_id = id(context.command_id, "error-item");
-        changes.push(Change::TurnItem(TurnItem {
-            detail_omitted: false,
-            id: error_id,
-            thread_id: state.thread.id.clone(),
-            run_id: Some(run.id.clone()),
-            node_id: Some(attempt.root_node_id.clone()),
-            provider_thread_id: Some(attempt.provider_thread_id.clone()),
-            provider_turn_id: attempt.provider_turn_id.clone(),
-            native_item_ref: None,
-            parent_item_id: None,
-            ordinal: 0,
-            status: TurnItemStatus::Failed,
-            title: None,
-            started_at: Some(context.now.into()),
-            completed_at: Some(context.now.into()),
-            updated_at: context.now.into(),
-            body: TurnItemBody::Error {
-                failure,
-                retry: None,
-            },
-        }));
+        // Clients apply each change in order: the reason precedes the failure.
+        changes.insert(
+            0,
+            Change::TurnItem(TurnItem {
+                detail_omitted: false,
+                id: error_id,
+                thread_id: state.thread.id.clone(),
+                run_id: Some(run.id.clone()),
+                node_id: Some(attempt.root_node_id.clone()),
+                provider_thread_id: Some(attempt.provider_thread_id.clone()),
+                provider_turn_id: attempt.provider_turn_id.clone(),
+                native_item_ref: None,
+                parent_item_id: None,
+                ordinal: 0,
+                status: TurnItemStatus::Failed,
+                title: None,
+                started_at: Some(context.now.into()),
+                completed_at: Some(context.now.into()),
+                updated_at: context.now.into(),
+                body: TurnItemBody::Error {
+                    failure,
+                    retry: None,
+                },
+            }),
+        );
     }
     if matches!(run_status, RunStatus::Completed | RunStatus::Interrupted)
         && let Some(scope_id) = scope_id
@@ -1261,12 +1313,102 @@ pub(super) fn finish_run(
     Ok(Decision { changes, effects })
 }
 
-pub fn interrupt(state: &State, run_id: &str, context: Context<'_>) -> Result<Decision, String> {
-    let mut effects = Vec::new();
+/// T3 run.interrupt after the answer: the latest run's provider thread still
+/// runs background work, so Stop interrupts that thread's latest turn.
+fn stop_background(state: &State, run_id: &str, context: Context<'_>) -> Result<Decision, String> {
     let run = state
-        .active_run()
+        .runs
+        .values()
+        .filter(|run| run.status != RunStatus::Queued)
+        .max_by_key(|run| run.ordinal)
         .filter(|run| run.id == run_id)
         .ok_or("run is no longer active")?;
+    let thread = run
+        .provider_thread_id
+        .as_ref()
+        .and_then(|id| state.provider_threads.get(id))
+        .filter(|thread| {
+            !thread.pending_background_tasks.is_empty()
+                || state.turn_items.values().any(|item| {
+                    item.provider_thread_id.as_ref() == Some(&thread.id)
+                        && is_pending_background_item(item)
+                })
+        })
+        .ok_or("run is no longer active")?;
+    let turn = state
+        .provider_turns
+        .values()
+        .filter(|turn| turn.provider_thread_id == thread.id)
+        .max_by_key(|turn| turn.ordinal)
+        .ok_or("background work has no provider turn")?;
+    request_turn_interrupt(state, Some(run), turn, context)
+}
+
+/// T3 thread.turn.interrupt names a provider turn; native work started outside
+/// the application (a background wake) has no run to interrupt.
+pub fn interrupt_provider_turn(
+    state: &State,
+    provider_turn_id: &str,
+    context: Context<'_>,
+) -> Result<Decision, String> {
+    let turn = state
+        .provider_turns
+        .get(provider_turn_id)
+        .filter(|turn| turn.status == ProviderTurnStatus::Running)
+        .ok_or("turn is no longer running")?;
+    request_turn_interrupt(state, None, turn, context)
+}
+
+fn request_turn_interrupt(
+    state: &State,
+    run: Option<&Run>,
+    turn: &ProviderTurn,
+    context: Context<'_>,
+) -> Result<Decision, String> {
+    let session = state
+        .provider_session(&turn.provider_thread_id)
+        .ok_or("provider session is unavailable")?;
+    let request = TurnItem {
+        detail_omitted: false,
+        id: id(context.command_id, "interrupt-request"),
+        thread_id: state.thread.id.clone(),
+        run_id: run.map(|run| run.id.clone()),
+        node_id: run
+            .map_or(Some(&turn.node_id), |run| run.root_node_id.as_ref())
+            .cloned(),
+        provider_thread_id: Some(turn.provider_thread_id.clone()),
+        provider_turn_id: Some(turn.id.clone()),
+        native_item_ref: None,
+        parent_item_id: None,
+        ordinal: 0,
+        status: TurnItemStatus::Completed,
+        title: None,
+        started_at: Some(context.now.into()),
+        completed_at: Some(context.now.into()),
+        updated_at: context.now.into(),
+        body: TurnItemBody::RunInterruptRequest {
+            message: "Interrupt requested".into(),
+        },
+    };
+    Ok(Decision {
+        changes: vec![Change::TurnItem(request)],
+        effects: vec![effect(
+            context,
+            &state.thread.id,
+            EffectRequest::ProviderTurnInterrupt {
+                provider_session_id: session.id.clone(),
+                provider_thread_id: turn.provider_thread_id.clone(),
+                provider_turn_id: turn.id.clone(),
+            },
+        )],
+    })
+}
+
+pub fn interrupt(state: &State, run_id: &str, context: Context<'_>) -> Result<Decision, String> {
+    let mut effects = Vec::new();
+    let Some(run) = state.active_run().filter(|run| run.id == run_id) else {
+        return stop_background(state, run_id, context);
+    };
     if state.turn_items.values().any(|item| {
         item.run_id.as_deref() == Some(run_id)
             && matches!(item.body, TurnItemBody::RunInterruptRequest { .. })

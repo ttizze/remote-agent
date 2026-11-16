@@ -38,7 +38,8 @@ impl Runtime {
         let events = runtime.storage.provider_stopped(
             provider.key(),
             &agent_protocol::orchestration::ProviderFailure {
-                class: "provider_error".into(),
+                class: agent_protocol::orchestration::ProviderFailure::class_for(&error.category)
+                    .into(),
                 message: error.message.clone(),
                 code: error.provider_code.clone(),
                 retryable: None,

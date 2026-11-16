@@ -286,7 +286,9 @@ impl ScenarioTurn {
         if prompt.contains("[delayed-input]") && !wait_for_release(&context.home, stop).await {
             return context.finish(thread, turn, "interrupted", None);
         }
-        context.stream_item(
+        // Codex completes the user message item as soon as it starts.
+        stream_whole(
+            context,
             &thread_id,
             turn,
             json!({"id":format!("fixture-user-{suffix}"),"clientId":client_id,

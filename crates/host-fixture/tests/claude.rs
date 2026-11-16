@@ -169,7 +169,20 @@ fn session_inputs(path: impl AsRef<Path>) -> serde_json::Value {
         .collect()
 }
 
-async fn until(store: &Store, condition: impl Fn(&Snapshot) -> bool) -> Arc<Snapshot> {
+#[track_caller]
+fn until<'a>(
+    store: &'a Store,
+    condition: impl Fn(&Snapshot) -> bool + 'a,
+) -> impl std::future::Future<Output = Arc<Snapshot>> + 'a {
+    let caller = std::panic::Location::caller();
+    async move { until_at(store, condition, caller).await }
+}
+
+async fn until_at(
+    store: &Store,
+    condition: impl Fn(&Snapshot) -> bool,
+    caller: &'static std::panic::Location<'static>,
+) -> Arc<Snapshot> {
     let mut updates = store.subscribe();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
@@ -184,7 +197,7 @@ async fn until(store: &Store, condition: impl Fn(&Snapshot) -> bool) -> Arc<Snap
     .unwrap_or_else(|_| {
         let snapshot = store.snapshot();
         panic!(
-            "Claude state did not settle: error={:?}, turns={:?}, requests={:?}, expanded={:?}, root={:?}, pages={:?}",
+            "Claude state did not settle at {caller}: error={:?}, turns={:?}, requests={:?}, expanded={:?}, root={:?}, pages={:?}",
             snapshot.panes.primary().error,
             snapshot
                 .sessions.conversations
@@ -245,6 +258,79 @@ fn notification(
         .unwrap()[0]
         .body()
         .clone()
+}
+
+/// Completed command items of a turn with their full output. As in T3, the
+/// ordinary projection omits command output; reading the item loads it.
+async fn command_outputs(
+    store: &Store,
+    id: &agent_protocol::session::SessionRef,
+    turn: usize,
+) -> Vec<(Option<i32>, String)> {
+    let commands = |snapshot: &Snapshot| {
+        let turn = &snapshot.sessions.conversations[id].turns.as_ref().unwrap()[turn];
+        turn.items
+            .iter()
+            .flatten()
+            .filter(|item| {
+                item.status == agent_protocol::execution::ItemStatus::Completed
+                    && matches!(
+                        item.body(),
+                        agent_protocol::items::ItemBody::CommandExecution { .. }
+                    )
+            })
+            .map(|item| (turn.id.clone(), item.clone()))
+            .collect::<Vec<_>>()
+    };
+    for (turn_id, item) in commands(&store.snapshot()) {
+        if item.is_deferred() {
+            store
+                .dispatch(Intent::ReadItem(op::ReadItem {
+                    thread_id: id.clone(),
+                    turn_id,
+                    item_id: item.id.clone(),
+                }))
+                .await
+                .unwrap();
+        }
+    }
+    let snapshot = until(store, |snapshot| {
+        commands(snapshot)
+            .iter()
+            .all(|(_, item)| !item.is_deferred())
+    })
+    .await;
+    commands(&snapshot)
+        .into_iter()
+        .filter_map(|(_, item)| match item.body() {
+            agent_protocol::items::ItemBody::CommandExecution {
+                exit_code, output, ..
+            } => Some((*exit_code, output.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn command_output_until(
+    store: &Store,
+    id: &agent_protocol::session::SessionRef,
+    turn: usize,
+    expected: (Option<i32>, String),
+) {
+    let mut updates = store.subscribe();
+    let mut outputs = vec![];
+    let found = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            updates.borrow_and_update();
+            outputs = command_outputs(store, id, turn).await;
+            if outputs.contains(&expected) {
+                return;
+            }
+            updates.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(found.is_ok(), "{expected:?} not in {outputs:?}");
 }
 
 async fn completed(
@@ -571,7 +657,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
             assert!(item_text(responses[0]).unwrap().starts_with(&format!("reply {}: message {number}", number + 1)));
             let user = items.iter().find(|item| matches!(item.body(), agent_protocol::items::ItemBody::UserMessage { .. })).unwrap();
             assert_eq!(user.client_input_id.as_deref(), Some(input_id(&format!("client-{number}")).as_str()));
-            assert!(matches!(user.body(), agent_protocol::items::ItemBody::UserMessage { content, .. } if content.first() == Some(&agent_protocol::items::MessagePart::Text { text: format!("message {number}") })));
+            assert_eq!(item_text(user), Some(format!("message {number}").as_str()));
             let inputs = session_inputs(session_trace(Path::new(&cwd)));
             assert_eq!(inputs.as_array().unwrap().len(), number + 1);
             assert_eq!(inputs[number]["effort"], "low");
@@ -1304,22 +1390,20 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
         );
         let local = fixture.local().await.unwrap();
         std::fs::write(root.path().join("exit-on-list"), "").unwrap();
-        // BEX may return partial Claude results when Codex exits during listing.
-        if let Ok(list) = local
-            .peer
-            .call(&agent_protocol::conversation::records::SearchList {
-                term: String::new(),
-                limit: Some(10000),
-            })
-            .await
-        {
-            assert!(list.provider_errors.unwrap().contains_key("codex"));
-            assert!(
-                list.data
-                    .iter()
-                    .any(|thread| thread.id.as_ref() == Some(&id))
-            );
-        }
+        // Search reads canonical storage, so a native Codex listing ends Codex.
+        assert!(
+            local
+                .peer
+                .call(&rpc::ListAgents {
+                    thread_id: agent_protocol::session::SessionRef::new(
+                        ProviderKind::Codex,
+                        "exit-probe".into()
+                    )
+                    .unwrap()
+                })
+                .await
+                .is_err()
+        );
         until(&store, |snapshot| {
             snapshot.requests().count() == 1
                 && !snapshot.lists.activity.active[&codex_id]
@@ -2110,10 +2194,16 @@ async fn claude_follows_an_intermediate_result_in_a_new_turn_after_reconnect() {
             .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
             .await
             .unwrap();
-        let snapshot = store.snapshot();
+        // The wake turn and its request are separate commits.
+        let snapshot = until(&store, |snapshot| {
+            snapshot.sessions.conversations[&id]
+                .turns
+                .as_ref()
+                .is_some_and(|turns| turns.len() == 2)
+        })
+        .await;
         let thread = &snapshot.sessions.conversations[&id];
         let turns = thread.turns.as_ref().unwrap();
-        assert_eq!(turns.len(), 2);
         assert_eq!(
             turns.last().unwrap().status,
             TurnStatus::Running,
@@ -2149,25 +2239,31 @@ async fn claude_follows_an_intermediate_result_in_a_new_turn_after_reconnect() {
             .await
             .unwrap();
         if prompt == "background" {
-            let snapshot = until(&store, |snapshot| {
-                snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[1]
-                    .items.iter().flatten().any(|item|
-                        item.status == agent_protocol::execution::ItemStatus::Completed
-                        && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution { output, exit_code:None, .. } if output == "background stdout\n"))
-            }).await;
+            // The launch result completes the Bash item first; the task
+            // notification then replaces its output with the background stdout.
+            command_output_until(&store, &id, 1, (None, "background stdout\n".into())).await;
+            let snapshot = store.snapshot();
             assert_eq!(
                 snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[1].status,
                 TurnStatus::Running
             );
             std::fs::remove_file(root.path().join("background-paused")).unwrap();
         }
-        let snapshot = completed(&store, &id, 2, "completed").await;
+        completed(&store, &id, 2, "completed").await;
+        assert!(
+            command_outputs(&store, &id, 1)
+                .await
+                .iter()
+                .any(|(exit_code, output)| if prompt == "background" {
+                    exit_code.is_none()
+                } else {
+                    *exit_code == Some(0) && output == "approved"
+                }),
+            "live outcomes must update the originating tool"
+        );
+        let snapshot = store.snapshot();
         let thread = &snapshot.sessions.conversations[&id];
         let items = thread.turns.as_ref().unwrap()[1].items.as_ref().unwrap();
-        assert!(items.iter().any(|item| item.status == agent_protocol::execution::ItemStatus::Completed
-            && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {exit_code, output, ..}
-                if if prompt == "background" {exit_code.is_none()} else {*exit_code == Some(0) && output == "approved"})
-        ), "live outcomes must update the originating tool");
         assert!(!items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::Attachment {content, ..} if content["commandMode"] == "task-notification")));
         assert!(
             thread.turns.as_ref().unwrap()[1]
@@ -2323,9 +2419,10 @@ async fn claude_responses_show_their_time_and_fork_from_the_selected_turn() {
         .find(|(fork, _)| *fork != &id)
         .unwrap();
     let items = forked.turns.as_ref().unwrap()[0].items.as_ref().unwrap();
-    assert!(items.iter().any(|item| matches!(item.body(),
-        agent_protocol::items::ItemBody::UserMessage { content, .. }
-            if content == &[agent_protocol::items::MessagePart::Text { text: "first".into() }])));
+    assert!(items.iter().any(|item| matches!(
+        item.body(),
+        agent_protocol::items::ItemBody::UserMessage { content, .. } if content.is_empty()
+    ) && item_text(item) == Some("first")));
     assert!(
         items
             .iter()
@@ -2691,9 +2788,23 @@ async fn claude_waits_on_its_background_roster_refuses_a_model_change_and_report
     let thread = &snapshot.sessions.conversations[&id];
     assert!(thread.background.is_empty());
     let report = thread.turns.as_ref().unwrap()[1].items.as_ref().unwrap();
-    let agent_protocol::items::ItemBody::Notification { reports } = report[0].body() else {
-        panic!("the work's notification starts Claude's report: {report:#?}");
-    };
+    // As in T3, each ended task is its own notification row; they open the
+    // turn Claude reports in.
+    assert!(
+        matches!(
+            report[0].body(),
+            agent_protocol::items::ItemBody::Notification { .. }
+        ),
+        "the work's notification starts Claude's report: {report:#?}"
+    );
+    let reports: Vec<_> = report
+        .iter()
+        .filter_map(|item| match item.body() {
+            agent_protocol::items::ItemBody::Notification { reports } => Some(reports),
+            _ => None,
+        })
+        .flatten()
+        .collect();
     assert_eq!(
         reports
             .iter()
@@ -2773,7 +2884,13 @@ async fn codex_waits_on_the_commands_and_subagents_its_turn_left_running() {
             })
             .unwrap_or_default()
     };
-    let snapshot = until(&store, |snapshot| roster(snapshot).len() == 2).await;
+    // The roster and the answer's completion are separate events.
+    let snapshot = until(&store, |snapshot| {
+        roster(snapshot).len() == 2
+            && snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0].status
+                != models::TurnStatus::Running
+    })
+    .await;
     assert_eq!(
         roster(&snapshot),
         [
@@ -2929,12 +3046,14 @@ async fn input_while_only_a_background_shell_runs_opens_the_turn_history_shows()
                         agent_protocol::items::ItemBody::AssistantText { text, .. } => {
                             Some(text.clone())
                         }
-                        agent_protocol::items::ItemBody::UserMessage { content, .. } => {
-                            content.iter().find_map(|part| match part {
-                                agent_protocol::items::MessagePart::Text { text } => {
-                                    Some(text.clone())
-                                }
-                                _ => None,
+                        agent_protocol::items::ItemBody::UserMessage { text, content } => {
+                            text.clone().or_else(|| {
+                                content.iter().find_map(|part| match part {
+                                    agent_protocol::items::MessagePart::Text { text } => {
+                                        Some(text.clone())
+                                    }
+                                    _ => None,
+                                })
                             })
                         }
                         _ => None,

@@ -281,7 +281,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert!(accounts["result"]["errors"]["codex"].is_string());
         assert!(call(&service, &mut session, "host/list/subscribe", json!(records::SubscribeList { refresh: false, subscription:uuid::Uuid::new_v4(),after_sequence:None })).await.get("error").is_none());
         let operation=uuid::Uuid::new_v4();
-        let rejected=call(&service,&mut session,"host/conversation/change",json!(records::Change {
+        let submitted=call(&service,&mut session,"host/conversation/change",json!(records::Change {
             session:thread.clone(),operation,command:decision::Command::Submit {
                 id:operation.to_string().into(),content:decision::InputContent {
                 fresh_context: false,
@@ -290,8 +290,23 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
                 },
             },
         })).await;
-        let rejected:records::Acknowledged=serde_json::from_value(rejected["result"].clone()).unwrap();
-        assert_eq!(rejected.error.as_deref(), Some("Codexにログインしてください。"));
+        // As in T3, the input is accepted and fails at the signed-out provider,
+        // so it is never sent through a different account.
+        let accepted:records::Acknowledged=serde_json::from_value(submitted["result"].clone()).unwrap();
+        accepted.accepted().unwrap();
+        let (mut replica, mut updates) = opened(&service, &session, &thread).await;
+        loop {
+            let failure = replica.view().thread.preparations.iter().find_map(|preparation| match &preparation.status {
+                agent_protocol::session::PreparationStatus::Failed { error } if preparation.submission.client_user_message_id.as_str() == operation.to_string() => Some(error.message.clone()),
+                _ => None,
+            });
+            if let Some(message) = failure {
+                assert_eq!(message, "Codexにログインしてください。");
+                break;
+            }
+            let bytes = tokio::time::timeout(std::time::Duration::from_secs(10), updates.recv()).await.expect("signed-out input settles").unwrap();
+            replica.receive(agent_protocol::protocol::decode(&bytes).unwrap());
+        }
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         let recovered=create(&service,&mut session,&home).await;
         completed_turn(&service,&mut session,&recovered,"recovered account").await;

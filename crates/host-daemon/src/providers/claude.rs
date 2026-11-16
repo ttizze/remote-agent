@@ -2155,9 +2155,11 @@ async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
                     content.push(json!({"type":"text","text":format!("/{name}")}));
                 }
             }
-            op::Input::Mention { path, .. } => {
-                content.push(json!({"type":"text","text":format!("添付ファイル: {path}")}))
-            }
+            // T3 attachmentPrompt: the saved path loses the original name.
+            op::Input::Mention { path, name } => content.push(json!({
+                "type":"text",
+                "text":format!("[Attached file \"{name}\" is saved at: {path}]")
+            })),
             op::Input::LocalImage { path } => {
                 let bytes = tokio::fs::read(path)
                     .await

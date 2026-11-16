@@ -188,7 +188,7 @@ impl Runtime {
                     model::NodeKind::System,
                     model::TurnItemBody::Error {
                         failure: model::ProviderFailure {
-                            class: "provider".into(),
+                            class: model::ProviderFailure::class_for(&error.category).into(),
                             message: error.message,
                             code: error.provider_code,
                             retryable: None,

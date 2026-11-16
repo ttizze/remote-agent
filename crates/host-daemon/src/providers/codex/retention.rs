@@ -51,6 +51,10 @@ impl Subscriptions {
             .iter()
             .any(|thread| thread.active || !thread.running.is_empty())
     }
+    /// This app-server process has started, resumed or reported the thread.
+    pub(super) fn known(&self, id: &str) -> bool {
+        lock(&self.activity).threads.contains_key(id)
+    }
     pub(super) fn touch(&self, id: &str) {
         lock(&self.activity).touch(id, Instant::now());
     }
@@ -177,6 +181,11 @@ impl Activity {
                 match change {
                     SessionChange::Status { status } => {
                         thread.active = *status == SessionStatus::Running;
+                    }
+                    // The idle status follows turn completion as a later
+                    // notification; a completed turn already ends activity.
+                    SessionChange::Turn { completed, .. } => {
+                        thread.active = !completed;
                     }
                     SessionChange::Item { item, .. } if item.status == ItemStatus::Running => {
                         thread.running.insert(item.id.to_string());

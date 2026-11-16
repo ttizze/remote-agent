@@ -338,9 +338,22 @@ struct Fixture {
     waiting: Option<Waiting>,
     /// The current wait ended: by input, a stop, or the release of inputs.
     wait_settled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Like the real SDK, each prompt's tool, request and task IDs are new,
+    /// also across conversations.
+    prompt: usize,
 }
 
 impl Fixture {
+    fn tool_id(&self) -> String {
+        format!("tool-{}-{}", self.session, self.prompt)
+    }
+    fn request_id(&self) -> String {
+        format!("permission-{}-{}", self.session, self.prompt)
+    }
+    fn task_id(&self) -> String {
+        format!("background-{}-{}", self.session, self.prompt)
+    }
+
     /// Ends the current wait; true when the release of inputs already ended it.
     fn settle_wait(&self) -> bool {
         self.wait_settled
@@ -353,11 +366,7 @@ impl Fixture {
     fn release_wait(&mut self, message: String) {
         let settled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.wait_settled = settled.clone();
-        let release = Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap())
-            .parent()
-            .unwrap()
-            .join("release-inputs");
-        let _ = fs::remove_file(&release);
+        let release = release_path();
         let session = self.session.clone();
         std::thread::spawn(move || {
             loop {
@@ -414,7 +423,7 @@ impl Fixture {
         if prompted {
             emit(
                 &self.session,
-                json!({"type":"control_cancel_request","request_id":"permission-1"}),
+                json!({"type":"control_cancel_request","request_id":self.request_id()}),
             );
         }
         emit(
@@ -425,7 +434,7 @@ impl Fixture {
             emit(
                 &self.session,
                 json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),
-                    "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"The user doesn't want to proceed with this tool use.","is_error":true}]}}),
+                    "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":self.tool_id(),"content":"The user doesn't want to proceed with this tool use.","is_error":true}]}}),
             );
         }
         // A settled response has no result to end; its shell keeps running.
@@ -543,11 +552,26 @@ impl Fixture {
                     "is_error":true,"terminal_reason":"aborted_streaming","errors":[]}),
             );
         }
+        let content = value["message"]["content"].clone();
+        let text = content
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The echo below tells the Host the prompt started. Clear an earlier
+        // release first, so a release sent after that start is never lost.
+        if matches!(
+            InputScenario::parse(&text, self.config["resultError"] == true),
+            InputScenario::Wait
+        ) {
+            let _ = fs::remove_file(release_path());
+        }
         emit(
             &self.session,
             json!({"type":"system","subtype":"init","session_id":self.session,"user_message_uuids":[value["uuid"]]}),
         );
-        let content = value["message"]["content"].clone();
         let input = json!({"content":content,"model":self.model,"effort":self.effort,"process":self.process});
         let mut saved = value.clone();
         saved["fixtureInput"] = input.clone();
@@ -565,20 +589,13 @@ impl Fixture {
             write_json_line(&mut trace, input).unwrap();
         }
         output(session_state(&self.session, "running"));
-        let text = content
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|block| block["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
         self.waiting = self.respond_to_input(&text);
     }
 
     fn control_response(&mut self, value: &Value) {
         match self.waiting {
             // The SDK still answers a prompt that a stop withdrew.
-            None => assert_eq!(value["response"]["request_id"], "permission-1"),
+            None => assert_eq!(value["response"]["request_id"], self.request_id().as_str()),
             Some(Waiting::Control(control)) => {
                 assert_eq!(value["response"]["request_id"], "control-1");
                 match control {
@@ -594,7 +611,7 @@ impl Fixture {
                 self.reply("control resolved");
             }
             _ => {
-                assert_eq!(value["response"]["request_id"], "permission-1");
+                assert_eq!(value["response"]["request_id"], self.request_id().as_str());
                 let response = &value["response"]["response"];
                 let allowed = response["behavior"] == "allow";
                 let text = if self.waiting == Some(Waiting::Question) && allowed {
@@ -611,8 +628,8 @@ impl Fixture {
                 emit(
                     &self.session,
                     json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),
-                        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":text,"is_error":!allowed}]},
-                        "tool_use_result":if allowed && self.waiting == Some(Waiting::Background) { json!({"backgroundTaskId":"background-1"}) }
+                        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":self.tool_id(),"content":text,"is_error":!allowed}]},
+                        "tool_use_result":if allowed && self.waiting == Some(Waiting::Background) { json!({"backgroundTaskId":self.task_id()}) }
                             else if allowed && self.waiting != Some(Waiting::Question) { json!({"exitCode":0}) } else { json!({}) }}),
                 );
                 if self.waiting == Some(Waiting::Background) {
@@ -620,7 +637,7 @@ impl Fixture {
                     fs::write(&output_file, "background stdout\n").unwrap();
                     emit(
                         &self.session,
-                        json!({"type":"system","subtype":"task_notification","task_id":"background-1","tool_use_id":"tool-1","output_file":output_file,"status":"completed","summary":"background done","session_id":self.session}),
+                        json!({"type":"system","subtype":"task_notification","task_id":self.task_id(),"tool_use_id":self.tool_id(),"output_file":output_file,"status":"completed","summary":"background done","session_id":self.session}),
                     );
                     while Path::new("background-paused").exists() {
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -700,7 +717,7 @@ impl Fixture {
                 Some(Waiting::BackgroundRoster)
             }
             InputScenario::Wait => {
-                let message = format!("waiting-{}", self.inputs.len());
+                let message = format!("waiting-{}", self.message_id());
                 emit(
                     &self.session,
                     json!({"type":"stream_event","session_id":self.session,"event":{"type":"message_start","message":{"id":message}}}),
@@ -733,15 +750,16 @@ impl Fixture {
                 Some(Waiting::Control(control))
             }
             InputScenario::Permission(permission) => {
+                self.prompt = self.inputs.len();
                 if matches!(
                     permission,
                     PermissionScenario::Background | PermissionScenario::BackgroundSettled
                 ) {
                     emit(
                         &self.session,
-                        json!({"type":"system","subtype":"task_started","task_id":"background-1","task_type":"local_agent","description":"background work","session_id":self.session}),
+                        json!({"type":"system","subtype":"task_started","task_id":self.task_id(),"task_type":"local_agent","description":"background work","session_id":self.session}),
                     );
-                    let message = format!("background-{}", self.inputs.len());
+                    let message = format!("background-{}", self.message_id());
                     emit(
                         &self.session,
                         json!({"type":"stream_event","session_id":self.session,"event":{"type":"message_start","message":{"id":message}}}),
@@ -758,7 +776,7 @@ impl Fixture {
                     if permission == PermissionScenario::BackgroundSettled {
                         emit(
                             &self.session,
-                            json!({"type":"system","subtype":"task_notification","task_id":"background-1","status":"completed","summary":"background done","session_id":self.session}),
+                            json!({"type":"system","subtype":"task_notification","task_id":self.task_id(),"status":"completed","summary":"background done","session_id":self.session}),
                         );
                     }
                     // The parent still owes a follow-up after this result.
@@ -769,11 +787,11 @@ impl Fixture {
                 let (tool, input) = permission.tool();
                 emit(
                     &self.session,
-                    json!({"type":"assistant","uuid":uuid::Uuid::new_v4().to_string(),"message":{"id":format!("tool-{}", self.message_id()),"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":tool,"input":input}]}}),
+                    json!({"type":"assistant","uuid":uuid::Uuid::new_v4().to_string(),"message":{"id":format!("tool-{}", self.message_id()),"role":"assistant","content":[{"type":"tool_use","id":self.tool_id(),"name":tool,"input":input}]}}),
                 );
                 emit(
                     &self.session,
-                    json!({"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":tool,"tool_use_id":"tool-1","input":input}}),
+                    json!({"type":"control_request","request_id":self.request_id(),"request":{"subtype":"can_use_tool","tool_name":tool,"tool_use_id":self.tool_id(),"input":input}}),
                 );
                 Some(permission.waiting())
             }
@@ -905,6 +923,13 @@ fn usage(session: &str, value: &Value) {
     );
 }
 
+fn release_path() -> std::path::PathBuf {
+    Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap())
+        .parent()
+        .unwrap()
+        .join("release-inputs")
+}
+
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("auth") {
@@ -1024,6 +1049,7 @@ fn main() {
         trace: path,
         waiting: None,
         wait_settled: Default::default(),
+        prompt: 0,
     };
 
     for line in io::stdin().lock().lines() {

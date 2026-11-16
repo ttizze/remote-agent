@@ -265,17 +265,21 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
                         {
                             let history =
                                 super::native_fixture::history(&service, &target).unwrap();
-                            let error = history
-                                .thread
-                                .turns
-                                .as_ref()
-                                .unwrap()
-                                .iter()
-                                .find(|turn| turn.id.as_str() == run.id)
-                                .unwrap()
-                                .error
-                                .as_ref()
-                                .unwrap();
+                            // The input never reached a provider, so it stays an
+                            // editable input with its reason rather than a turn.
+                            let Some(agent_protocol::session::PreparationStatus::Failed { error }) =
+                                history
+                                    .thread
+                                    .preparations
+                                    .iter()
+                                    .find(|preparation| {
+                                        preparation.submission.client_user_message_id.as_str()
+                                            == operation.to_string()
+                                    })
+                                    .map(|preparation| &preparation.status)
+                            else {
+                                panic!("failed input is missing")
+                            };
                             assert_eq!(
                                 error.message,
                                 if mode == "busy" {
