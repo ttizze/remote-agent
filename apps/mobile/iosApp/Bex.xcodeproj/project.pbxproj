@@ -188,7 +188,7 @@
 		A9C1000000000000000000F3 /* ConversationQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationQueue.swift; sourceTree = "<group>"; };
 		A9C1000000000000000000F5 /* ConversationActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationActivity.swift; sourceTree = "<group>"; };
 		A9C1000000000000000000FD /* ConversationStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-ui/Sources/NativeUI/ConversationStyle.swift; sourceTree = SOURCE_ROOT; };
-		A9C1000000000000000000FB /* ConversationModel+Input.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bex/ConversationModel+Input.swift; sourceTree = SOURCE_ROOT; };
+		A9C1000000000000000000FB /* ConversationModel+Input.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bex/ConversationModel+Input.swift"; sourceTree = SOURCE_ROOT; };
 		A9C1000000000000000000F9 /* Conversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-ui/Sources/NativeUI/Conversation.swift; sourceTree = SOURCE_ROOT; };
 		A9C1000000000000000000F7 /* Shimmer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../../native-ui/Sources/NativeUI/Shimmer.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
