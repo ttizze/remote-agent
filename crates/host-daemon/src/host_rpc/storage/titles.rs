@@ -154,31 +154,19 @@ impl Storage {
                 connection,
                 &owner.application_id(),
             )?
-            .filter(|thread| thread.deleted_at.is_none()) else {
+            else {
                 return Ok(None);
             };
-            let active = thread
-                .active_provider_thread_id
-                .as_deref()
-                .map(|id| {
-                    projections::read::<agent_protocol::orchestration::ProviderThread>(
-                        connection, id,
-                    )
-                })
-                .transpose()?
-                .flatten();
-            let selected = active.is_some_and(|source| {
-                source.app_thread_id.as_deref() == Some(&thread.id)
-                    && source.provider_instance_id == thread.provider_instance_id
-                    && id.provider.is_some_and(|kind| {
-                        source.provider_instance_id == kind.key() && source.driver == kind.driver()
-                    })
-                    && source.native_thread_ref.as_ref().is_some_and(|reference| {
-                        reference.driver == source.driver
-                            && reference.native_id.as_ref() == Some(&id.id)
-                    })
-            });
-            if !selected {
+            if native_bindings::selected_source(
+                connection,
+                &thread.id,
+                &thread.provider_instance_id,
+                thread.active_provider_thread_id.as_deref(),
+                thread.deleted_at.is_some(),
+            )?
+            .as_ref()
+                != Some(&id)
+            {
                 return Ok(None);
             }
             summary(connection, &shell::thread(connection, thread)?).map(Some)

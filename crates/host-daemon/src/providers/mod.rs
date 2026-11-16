@@ -189,6 +189,28 @@ pub(crate) struct SessionSummary {
     pub branch: Option<String>,
 }
 
+// Compile-time adapters for migrating the in-repository discovery consumers.
+// Removed together with SessionSummary after those callers use plain threads.
+impl From<Thread> for SessionSummary {
+    fn from(thread: Thread) -> Self {
+        Self {
+            thread,
+            branch: None,
+        }
+    }
+}
+impl From<SessionSummary> for Thread {
+    fn from(summary: SessionSummary) -> Self {
+        summary.thread
+    }
+}
+impl std::ops::Deref for SessionSummary {
+    type Target = Thread;
+    fn deref(&self) -> &Thread {
+        &self.thread
+    }
+}
+
 pub(crate) struct SessionPage {
     pub data: Vec<SessionSummary>,
     pub next_cursor: Option<String>,
@@ -378,7 +400,11 @@ pub(crate) trait Configuration: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Discovery: Send + Sync {
-    fn storage_directory(&self) -> &Path;
+    // No production consumer reads native homes as conversation authority.
+    // Allow fixture implementations to drop the obsolete method before removal.
+    fn storage_directory(&self) -> &Path {
+        unreachable!("native homes do not own canonical conversation storage")
+    }
     async fn list(
         &self,
         search: &str,

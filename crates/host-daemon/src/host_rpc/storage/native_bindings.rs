@@ -131,38 +131,57 @@ impl Storage {
         &self,
         id: &SessionRef,
     ) -> Result<Option<SessionRef>, String> {
-        self.with(|connection| {
-            let Some(thread) =
-                projections::read::<model::Thread>(connection, &id.application_id())?
-                    .filter(|thread| thread.deleted_at.is_none())
-            else {
-                return Ok(None);
-            };
-            let Some(provider) = thread
-                .active_provider_thread_id
-                .as_ref()
-                .map(|id| projections::read::<model::ProviderThread>(connection, id))
-                .transpose()?
-                .flatten()
-                .filter(|provider| {
-                    provider.app_thread_id.as_ref() == Some(&thread.id)
-                        && provider.provider_instance_id == thread.provider_instance_id
-                })
-            else {
-                return Ok(None);
-            };
-            let Some(reference) = provider.native_thread_ref else {
-                return Ok(None);
-            };
-            if reference.driver != provider.driver {
-                return Err("native binding uses another provider".into());
-            }
-            reference
-                .native_id
-                .map(|native| source(&provider.provider_instance_id, &provider.driver, native))
-                .transpose()
-        })
+        self.with(|connection| active_source(connection, id))
     }
+}
+
+pub(super) fn active_source(
+    connection: &Connection,
+    id: &SessionRef,
+) -> Result<Option<SessionRef>, String> {
+    let Some(thread) = projections::read::<model::Thread>(connection, &id.application_id())? else {
+        return Ok(None);
+    };
+    selected_source(
+        connection,
+        &thread.id,
+        &thread.provider_instance_id,
+        thread.active_provider_thread_id.as_deref(),
+        thread.deleted_at.is_some(),
+    )
+}
+
+pub(super) fn selected_source(
+    connection: &Connection,
+    thread: &str,
+    instance: &str,
+    active: Option<&str>,
+    deleted: bool,
+) -> Result<Option<SessionRef>, String> {
+    if deleted {
+        return Ok(None);
+    }
+    let Some(provider) = active
+        .map(|id| projections::read::<model::ProviderThread>(connection, id))
+        .transpose()?
+        .flatten()
+        .filter(|provider| {
+            provider.app_thread_id.as_deref() == Some(thread)
+                && provider.provider_instance_id == instance
+        })
+    else {
+        return Ok(None);
+    };
+    let Some(reference) = provider.native_thread_ref else {
+        return Ok(None);
+    };
+    if reference.driver != provider.driver {
+        return Err("native binding uses another provider".into());
+    }
+    reference
+        .native_id
+        .map(|native| source(&provider.provider_instance_id, &provider.driver, native))
+        .transpose()
 }
 
 impl Storage {

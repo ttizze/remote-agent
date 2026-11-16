@@ -13,6 +13,8 @@ mod activity;
 pub(in crate::host_rpc) mod checkpoints;
 pub(in crate::host_rpc) mod commands;
 mod event_store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
 mod forks;
 mod handoffs;
 mod lifecycle;
