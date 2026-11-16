@@ -1849,7 +1849,8 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         let turns = first_page.thread.turns.as_ref().unwrap();
         // This provider recording has 981 messages and 42 user boundaries.
         // Its last ten inputs start at section 10/input 140 and contain 181
-        // messages, ending at section 14/progress 153. Native tool rows do not
+        // messages; the final message has the fixture's interrupted-response text.
+        // Native tool rows do not
         // consume the imported message window.
         assert_eq!(
             turns
@@ -1859,7 +1860,7 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
             181
         );
         assert_eq!(turns.len(), 10);
-        assert!(turns.last().unwrap().items.iter().flatten().any(|item|item_text(item).is_some_and(|text|text.starts_with("Section 14, progress 153."))), "the latest provider-authored response must be present");
+        assert!(turns.last().unwrap().items.iter().flatten().any(|item|item_text(item).is_some_and(|text|text=="Latest interrupted conversation message is visible.")), "the latest provider-authored response must be present");
         while history.view().thread.history_has_more==Some(true) { history.extend(&mobile.peer).await; }
         let history = history.view();
         let turns = history.thread.turns.as_ref().unwrap();
@@ -1899,7 +1900,7 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         conversations::submit(
             &mobile.peer,
             &rpc::Submission {
-                thread_id: image_id,
+                thread_id: image_id.clone(),
                 client_user_message_id: next_submission_id().into(),
                 input: vec![rpc::Input::Text {
                     text: "[generated-images]".into(),
@@ -1912,23 +1913,15 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         )
         .await
         .unwrap();
-        let turn = images.finished().await;
-        let items: Vec<_> = turn
-            .items
-            .iter()
-            .flatten()
-            .filter(|item| {
-                matches!(
-                    item.body(),
-                    agent_protocol::items::ItemBody::ImageGeneration { .. }
-                )
-            })
-            .collect();
-        assert_eq!(items.len(), 2);
-        let original = std::fs::read(directory.path().join("fixture image.png")).unwrap();
-        for item in items {
-            let agent_protocol::items::ItemBody::ImageGeneration { saved_path:Some(source), .. }=item.body() else {panic!("generated image source missing")};
-            assert_eq!(std::fs::read(source).unwrap(), original, "the live image asset must preserve its bytes");
+        images.finished().await;
+        // T3 represents generated images as links in the assistant message;
+        // clients read their durable assets rather than hydrate native image IDs.
+        let gallery=mobile.peer.session_images(&image_id, Some(&mobile.session)).await.unwrap();
+        assert_eq!(gallery.len(),2);
+        let original=std::fs::read(directory.path().join("fixture image.png")).unwrap();
+        for image in gallery {
+            assert!(!image.encoded,"generated image bytes belong in the durable asset store");
+            assert_eq!(std::fs::read(&image.source).unwrap(),original);
         }
         mobile.close().await;
         fixture.close().await.unwrap();
@@ -2336,7 +2329,7 @@ async fn daemon_exposes_project_roots_and_structured_tool_results() {
         for item in deferred { history.hydrate(&local.peer, &local.session, &item).await; }
         let history=json!(history.view());
         assert_eq!(list.projects[0].roots[0].path, directory.path().to_str().unwrap());
-        assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["body"]["inline"]["body"]["toolCall"]["result"].is_object()));
+        assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| body_json(item)["toolCall"]["result"].as_array().is_some_and(|blocks|blocks.iter().any(|block|block["type"]=="image"))), "the structured tool result must retain its image block");
         let reopened = serde_json::from_value::<models::ThreadResponse>(history).unwrap().thread;
         let tool_ids = reopened.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten()).filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::ToolCall { tool, .. } if matches!(tool.as_str(),"lookup" | "fixture.lookup" | "fixture"))).map(|item| item.id.clone()).collect::<std::collections::HashSet<_>>();
         let snapshot = agent_core::state::Snapshot::default();
