@@ -537,9 +537,6 @@ impl Query {
             words,
         }
     }
-    pub fn is_empty(&self) -> bool {
-        self.normalized.is_empty()
-    }
     fn title(&self, subject: &TitleSubject<'_>, typos: bool, now: i64) -> Option<TitleMatch> {
         let fields = [
             WeightedField {
