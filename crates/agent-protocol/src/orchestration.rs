@@ -66,10 +66,7 @@ pub use recovery::{continue_restarted, provider_stopped, runtime_restarted};
 mod checkpoints;
 pub use checkpoints::{checkpoint_captured, prepare_checkpoint_scope};
 mod preparation;
-pub use preparation::{
-    PreparationPhase, preparation_fail, preparation_progress, preparation_release, retry_input,
-    workspace_progress,
-};
+pub use preparation::{preparation_fail, preparation_release, retry_input, workspace_progress};
 mod requests;
 pub use requests::{
     RequestResponse, observe_external_request, observe_request, request_source_closed,

@@ -2164,8 +2164,6 @@ fn workspace_preparation_failure_retry_and_release_keep_the_reserved_run_and_att
         .changes
         .is_empty()
     );
-    let state = state
-        .apply(&preparation_progress(&state, &run.id, PreparationPhase::SetupScript, NOW).unwrap());
     let state = state.apply(
         &preparation_fail(
             &state,

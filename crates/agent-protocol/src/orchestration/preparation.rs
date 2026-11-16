@@ -198,35 +198,6 @@ fn prepared<'a>(
     Ok((run, attempt, item))
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum PreparationPhase {
-    Worktree,
-    SetupScript,
-}
-
-pub fn preparation_progress(
-    state: &State,
-    run_id: &str,
-    phase: PreparationPhase,
-    now: &str,
-) -> Result<Decision, String> {
-    let (_, _, item) = prepared(state, run_id, RunStatus::Preparing)?;
-    Ok(Decision {
-        changes: vec![Change::TurnItem(TurnItem {
-            title: Some(
-                match phase {
-                    PreparationPhase::Worktree => "Preparing worktree",
-                    PreparationPhase::SetupScript => "Starting setup script",
-                }
-                .into(),
-            ),
-            updated_at: now.into(),
-            ..item.clone()
-        })],
-        ..Default::default()
-    })
-}
-
 pub fn preparation_release(
     state: &State,
     run_id: &str,
