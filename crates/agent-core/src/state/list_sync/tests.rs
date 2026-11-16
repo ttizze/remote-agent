@@ -686,3 +686,55 @@ fn ranked_search_order_reaches_the_rendered_conversation_list() {
         expected
     );
 }
+
+#[test]
+fn search_reply_distinguishes_saved_message_matches_from_stale_titles_and_removed_headers() {
+    use crate::state::operations::Operation;
+    // T3 search hits identify their source. An old title match is not proof
+    // that a saved body still matches; a real body match can outlive a rename.
+    let mut base = list();
+    Arc::make_mut(&mut base.lists.list_query).search_term = "needle".into();
+    let shell = Arc::make_mut(base.lists.shell.as_mut().unwrap());
+    Arc::make_mut(&mut shell.threads[0]).thread.title = "needle old title".into();
+    let old = agent_protocol::orchestration::shell::summary(&shell.threads[0], None).unwrap();
+    Arc::make_mut(&mut shell.threads[0]).thread.title = "current opaque title".into();
+    let mut differences = Vec::new();
+    for (body_match, removed, expected) in [
+        (false, false, false),
+        (true, false, true),
+        (true, true, false),
+    ] {
+        let mut state = base.clone();
+        if removed {
+            Arc::make_mut(state.lists.shell.as_mut().unwrap())
+                .threads
+                .remove(0);
+        }
+        let mut wire = serde_json::to_value(ThreadList {
+            data: vec![old.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+        wire["messageMatches"] = serde_json::json!(if body_match {
+            vec![address(0)]
+        } else {
+            Vec::new()
+        });
+        let result = serde_json::from_value(wire).unwrap();
+        SearchCatalog {
+            term: "needle".into(),
+        }
+        .apply(&mut state, "", result);
+        let rows = &state.lists.threads.as_ref().unwrap().data;
+        if rows.iter().any(|row| row.id.as_ref() == Some(&address(0))) != expected {
+            differences.push((body_match, removed));
+        }
+        if expected && let Some(row) = rows.first() {
+            assert_eq!(row.name.as_deref(), Some("current opaque title"));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "canonical source/header fences differ for (body_match,removed): {differences:?}"
+    );
+}

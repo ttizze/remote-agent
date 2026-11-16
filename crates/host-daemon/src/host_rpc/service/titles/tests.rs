@@ -734,11 +734,17 @@ async fn canonical_message_search_matches_pinned_t3_word_boundaries_and_unicode(
             })
             .await
             .unwrap();
+        let wire = serde_json::to_value(&result).unwrap();
+        let body_match = wire["messageMatches"]
+            .as_array()
+            .is_some_and(|matches| matches.contains(&serde_json::to_value(id).unwrap()));
+        let expected = !case["quality"].is_null();
         if result
             .data
             .iter()
             .any(|thread| thread.id.as_ref() == Some(id))
-            != !case["quality"].is_null()
+            != expected
+            || body_match != expected
         {
             differences.push(case.clone());
         }
