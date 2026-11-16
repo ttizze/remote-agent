@@ -4814,3 +4814,162 @@ async fn claude_native_cursor_updates_keep_controls_callback_ownership_and_one_d
         "terminal callbacks cannot revive a closed query"
     );
 }
+
+#[tokio::test]
+async fn saved_short_long_and_forked_conversations_open_through_rpc_and_core_without_native_history()
+ {
+    use super::native_fixture::Transcript;
+    use agent_protocol::models::ThreadResponse;
+    use agent_protocol::protocol::Response;
+    use std::time::Instant;
+
+    async fn open(
+        service: &HostRpcService,
+        connection: crate::host_rpc::SessionId,
+        session: &SessionRef,
+    ) -> (Transcript, usize, u128) {
+        let started = Instant::now();
+        let reply = service
+            .dispatch(
+                connection,
+                &Call::SubscribeConversation(records::Subscribe {
+                    session: session.clone(),
+                    subscription: Uuid::new_v4(),
+                    after_sequence: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let bytes = reply.initial.len();
+        let Response::Success { result: opened } =
+            agent_protocol::protocol::decode::<Response<records::Opened>>(&reply.initial).unwrap()
+        else {
+            panic!("saved conversation must open")
+        };
+        let transcript = Transcript::opened(opened);
+        transcript.project().unwrap(); // include the actual client projection in the timing
+        (transcript, bytes, started.elapsed().as_micros())
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex);
+    for (name, count) in [("short", 2usize), ("long", 1000)] {
+        let turns:Vec<_>=(0..count).map(|i|serde_json::json!({
+            "id":format!("native-turn-{i}"),"status":"completed","items":[
+                {"id":format!("input-{i}"),"status":"completed","body":{"inline":{"body":{"userMessage":{"content":[{"text":{"text":format!("input-{i}")}}]}}}}},
+                {"id":format!("answer-{i}"),"status":"completed","body":{"inline":{"body":{"assistantText":{"text":format!("answer-{i} {}","x".repeat(512)),"phase":"final"}}}}}
+            ]
+        })).collect();
+        let response: ThreadResponse = serde_json::from_value(serde_json::json!({"thread":{
+            "id":{"provider":"codex","id":name},"cwd":directory.path(),"status":"idle","turns":turns
+        }}))
+        .unwrap();
+        agent.records.lock().unwrap().insert(name.into(), response);
+    }
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let connection = service.open_session();
+    let short = SessionRef::new(ProviderKind::Codex, "short".into()).unwrap();
+    let long = SessionRef::new(ProviderKind::Codex, "long".into()).unwrap();
+    for session in [&short, &long] {
+        let (_, bytes, micros) = open(&service, connection.id(), session).await;
+        eprintln!(
+            "normal_open_sample {}",
+            serde_json::json!({"case":session.id,"phase":"first_import","bytes":bytes,"micros":micros})
+        );
+    }
+    // Remove the actual discovery source after its one-time paginated import.
+    // A normal open that accidentally reloads it must fail, not get a cheap stub.
+    agent.records.lock().unwrap().clear();
+    let long_snapshot = snapshot(&service, &long);
+    // The pinned importer stores run-less history without native executions.
+    // Choose the actual displayed imported reply, as its UI fork action does.
+    let boundary = long_snapshot.projection.turn_items.iter().find(|item| {
+        matches!(&item.body, model::TurnItemBody::AssistantMessage {text,..} if text.starts_with("answer-994 "))
+    }).unwrap();
+    let fork = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
+    let _: SessionRef = call(
+        &service,
+        connection.id(),
+        Call::ForkConversation(records::Fork {
+            source: long.clone(),
+            target: fork.clone(),
+            through: records::ForkPoint::TurnItem {
+                turn_item_id: boundary.id.clone(),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    for (name, session, total, last) in [
+        ("short", &short, 2, 1),
+        ("long", &long, 1000, 999),
+        ("fork", &fork, 995, 994),
+    ] {
+        for _ in 0..3 {
+            let (opened, bytes, micros) = open(&service, connection.id(), session).await;
+            let view = opened.project().unwrap();
+            let turns = view.thread.turns.as_ref().unwrap();
+            // ThreadReader sends local records plus the rendered inherited
+            // rows. Count their canonical identities across both wire fields.
+            let projection = &opened.snapshot.projection;
+            let bodies: std::collections::BTreeSet<_> = projection
+                .turn_items
+                .iter()
+                .map(AsRef::as_ref)
+                .chain(
+                    projection
+                        .visible_turn_items
+                        .iter()
+                        .map(|row| row.item.as_ref()),
+                )
+                .filter(|item| {
+                    matches!(
+                        item.body,
+                        model::TurnItemBody::UserMessage { .. }
+                            | model::TurnItemBody::AssistantMessage { .. }
+                    )
+                })
+                .map(|item| (&item.thread_id, &item.id))
+                .collect();
+            assert_eq!(
+                bodies.len(),
+                2 * 10.min(total),
+                "the actual RPC must not transfer old message bodies"
+            );
+            let texts: Vec<_> = turns
+                .iter()
+                .flat_map(|turn| turn.items.iter().flatten())
+                .filter_map(|item| match item.body() {
+                    agent_protocol::items::ItemBody::UserMessage { text, content } => {
+                        Some(text.clone().unwrap_or_else(|| {
+                            content
+                                .iter()
+                                .filter_map(|part| match part {
+                                    agent_protocol::items::MessagePart::Text { text, .. } => {
+                                        Some(text.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<String>()
+                        }))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<_> = ((last + 1 - 10.min(total))..=last)
+                .map(|i| format!("input-{i}"))
+                .collect();
+            assert_eq!(
+                texts, expected,
+                "RPC and core must select the provider's retained boundary"
+            );
+            // Report bytes/time as measurements, without inventing a machine-
+            // dependent latency threshold. The ten-user-turn/body contract
+            // and loss of native access above supply the regression criteria.
+            eprintln!(
+                "normal_open_sample {}",
+                serde_json::json!({"case":name,"phase":"saved","bytes":bytes,"micros":micros})
+            );
+        }
+    }
+}

@@ -360,9 +360,8 @@ impl crate::providers::Configuration for NativeAgent {
 
 #[async_trait::async_trait]
 impl crate::providers::Discovery for NativeAgent {
-    async fn list(
+    async fn catalog_page(
         &self,
-        search: &str,
         _: Option<String>,
         scope: SessionListScope<'_>,
         _: u32,
@@ -379,19 +378,11 @@ impl crate::providers::Discovery for NativeAgent {
                 .lock()
                 .unwrap()
                 .values()
-                .filter(|record| {
-                    !matches!(scope, SessionListScope::Descendants(_))
-                        && record
-                            .thread
-                            .preview
-                            .as_deref()
-                            .unwrap_or("")
-                            .contains(search)
-                })
+                .filter(|_| !matches!(scope, SessionListScope::Descendants(_)))
                 .map(|record| {
                     let mut thread = record.thread.clone();
                     thread.turns = None;
-                    thread.into()
+                    thread
                 })
                 .collect(),
             next_cursor: None,

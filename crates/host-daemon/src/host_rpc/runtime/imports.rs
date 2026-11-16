@@ -33,9 +33,8 @@ impl Runtime {
                 let _native = runtime.native_access[&provider].write().await;
                 let agent = service.inner.providers.discovery(provider)?;
                 let owned = runtime.storage.active_sources().map_err(storage_failure)?;
-                let pages = crate::providers::session_pages(
+                let pages = crate::providers::native_pages(
                     agent.as_ref(),
-                    "",
                     crate::providers::SessionListScope::Roots(&owned),
                     100,
                     100,
@@ -45,7 +44,6 @@ impl Runtime {
                 futures_util::pin_mut!(pages);
                 while let Some(page) = pages.try_next().await? {
                     for summary in page {
-                        let summary: agent_protocol::models::Thread = summary.into();
                         if summary.parent_id.is_some() {
                             continue;
                         }
