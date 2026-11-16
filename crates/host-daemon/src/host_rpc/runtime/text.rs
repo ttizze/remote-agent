@@ -419,21 +419,31 @@ impl Runtime {
                     break;
                 };
                 let service = HostRpcService { inner };
-                let _updates = source.updates.lock().await;
-                let Some(ready) = source.text.lock().unwrap().ready(token) else {
-                    break;
-                };
-                for ((id, field), entry) in ready {
-                    if let Err(error) = Self::publish_text(&service, &source, &id, field, &entry) {
-                        tracing::error!(target: "agent", operation="conversation.text", %error);
-                        let mut text = source.text.lock().unwrap();
-                        text.worker = Some(token);
-                        if let Some(pending) = text.pending.get_mut(&(id, field)) {
-                            pending.boundary = false;
-                            pending.changed = Instant::now();
-                            pending.delivered = 0;
+                let source = source.clone();
+                if let Err(error) = tokio::task::spawn_blocking(move || {
+                    let _updates = source.updates.blocking_lock();
+                    let Some(ready) = source.text.lock().unwrap().ready(token) else {
+                        return;
+                    };
+                    for ((id, field), entry) in ready {
+                        if let Err(error) =
+                            Self::publish_text(&service, &source, &id, field, &entry)
+                        {
+                            tracing::error!(target: "agent", operation="conversation.text", %error);
+                            let mut text = source.text.lock().unwrap();
+                            text.worker = Some(token);
+                            if let Some(pending) = text.pending.get_mut(&(id, field)) {
+                                pending.boundary = false;
+                                pending.changed = Instant::now();
+                                pending.delivered = 0;
+                            }
                         }
                     }
+                })
+                .await
+                {
+                    tracing::error!(target:"agent",operation="conversation.text",%error);
+                    break;
                 }
             }
             drop(source);

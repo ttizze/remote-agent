@@ -14,7 +14,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ struct Registry {
 struct Login {
     directory: tempfile::TempDir,
     server: CodexAppServer,
-    events: broadcast::Receiver<PeerEvent>,
+    events: mpsc::UnboundedReceiver<PeerEvent>,
     id: String,
     completed: bool,
 }
@@ -418,7 +418,7 @@ impl Accounts {
                     login.completed = true;
                 }
                 Ok(PeerEvent::Response { .. }) => {}
-                Err(broadcast::error::TryRecvError::Empty) => {
+                Err(mpsc::error::TryRecvError::Empty) => {
                     return Ok(AccountLoginStatus {
                         completed: false,
                         account_id: None,

@@ -5,6 +5,7 @@ mod background;
 mod cli;
 mod composer;
 mod fork;
+mod ingress;
 pub(crate) mod native;
 mod permissions;
 mod retention;
@@ -53,7 +54,6 @@ use crate::providers::{
 use agent_transport::peer::PeerEvent;
 use futures_util::FutureExt;
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::broadcast;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1204,7 +1204,7 @@ impl Agent for Codex {
         let Ok(codex) = &self.process else {
             return None;
         };
-        let mut events = codex.subscribe();
+        let mut events = ingress::receive(codex.subscribe());
         let stopped = self.stopped.clone();
         let instance = self.instance;
         let processed = self.processed.clone();
@@ -1216,93 +1216,67 @@ impl Agent for Codex {
         subscriptions.clone().spawn_releaser(codex.clone());
         let (output, receiver) = tokio::sync::mpsc::channel(256);
         tokio::spawn(async move {
-            let (cause, reason) = loop {
-                match events.recv().await {
-                    Ok(PeerEvent::Message(message)) => {
-                        let sequence = message.sequence;
-                        let _processed = scopeguard::guard(sequence, |sequence| {
-                            processed.send_replace(sequence);
-                        });
-                        let line = message.value;
-                        let Ok(request) = RpcMessage::parse(&line) else {
-                            continue;
-                        };
-                        if request.kind() == RpcMessageKind::Request
-                            && request.method() == Some("account/chatgptAuthTokens/refresh")
-                        {
-                            let accounts = accounts.clone();
-                            let process = process.clone();
-                            tokio::spawn(async move {
-                                refresh_auth_tokens(&accounts, &process, &line).await;
-                            });
-                        } else if request.kind() == RpcMessageKind::Request {
-                            admit_request(
-                                instance,
-                                stopped.clone(),
-                                &process,
-                                &output,
-                                &scopes,
-                                &line,
-                            )
-                            .await;
-                        } else {
-                            let result = match event_changes(instance, &request) {
-                                Ok(changes) => {
-                                    async {
-                                        for change in changes {
-                                            subscriptions.observe(&change);
-                                            let background = rosters.observe(
-                                                &change,
-                                                &request.params::<Value>().unwrap_or_default(),
-                                            );
-                                            wake(&process, &change, background.continuations);
-                                            let child =
-                                                if let AgentChange::TaskParent { session, .. } =
-                                                    &change
-                                                {
-                                                    Some(session.id.clone())
-                                                } else {
-                                                    None
-                                                };
-                                            let execution = scopes.observe(&change);
-                                            let result = emit_all(
-                                                &output,
-                                                [Some(change), background.roster],
-                                                execution,
-                                            )
-                                            .await;
-                                            result?;
-                                            if let Some(child) = child {
-                                                scopes.admit(&child);
-                                            }
-                                        }
-                                        Ok(())
-                                    }
-                                    .await
-                                }
-                                Err(error) => Err(error),
+            let (cause, reason) = 'receive: loop {
+                let Some(batch) = events.recv().await else {
+                    break ("event_stream_closed", "event sender dropped".into());
+                };
+                for event in batch.events {
+                    match event {
+                        PeerEvent::Message(message) => {
+                            let sequence = message.sequence;
+                            let line = message.value;
+                            let Ok(request) = RpcMessage::parse(&line) else {
+                                continue;
                             };
-                            if let Err(error) = result {
-                                break (
-                                    "event_processing_failed",
-                                    format!(
-                                        "sequence={sequence} method={} error={error}",
-                                        request.method().unwrap_or_default(),
-                                    ),
-                                );
+                            if request.kind() == RpcMessageKind::Request
+                                && request.method() == Some("account/chatgptAuthTokens/refresh")
+                            {
+                                let accounts = accounts.clone();
+                                let process = process.clone();
+                                tokio::spawn(async move {
+                                    refresh_auth_tokens(&accounts, &process, &line).await;
+                                });
+                            } else if request.kind() == RpcMessageKind::Request {
+                                admit_request(
+                                    instance,
+                                    stopped.clone(),
+                                    &process,
+                                    &output,
+                                    &scopes,
+                                    &line,
+                                )
+                                .await;
+                            } else {
+                                let result = apply_notification(
+                                    &output,
+                                    &process,
+                                    &subscriptions,
+                                    &rosters,
+                                    &scopes,
+                                    instance,
+                                    &request,
+                                )
+                                .await;
+                                if let Err(error) = result {
+                                    processed.send_replace(sequence);
+                                    break 'receive (
+                                        "event_processing_failed",
+                                        format!(
+                                            "sequence={sequence} method={} error={error}",
+                                            request.method().unwrap_or_default(),
+                                        ),
+                                    );
+                                }
                             }
                         }
+                        PeerEvent::Response { .. } => {}
+                        PeerEvent::Closed(reason) => break 'receive ("peer_closed", reason),
                     }
-                    Ok(PeerEvent::Response { sequence, .. }) => {
-                        processed.send_replace(sequence);
-                    }
-                    Ok(PeerEvent::Closed(reason)) => break ("peer_closed", reason),
-                    Err(broadcast::error::RecvError::Closed) => {
-                        break ("event_stream_closed", "event sender dropped".into());
-                    }
-                    Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        break ("event_stream_lagged", format!("missed_events={missed}"));
-                    }
+                }
+                // Never expose a response fence until the whole earlier batch
+                // is persisted, including interleaved item/part keys.
+                if let Some(sequence) = batch.through {
+                    processed.send_replace(sequence);
                 }
             };
             // Record the cause before cancellation or process cleanup can hide
@@ -1358,13 +1332,33 @@ fn wake(process: &Arc<CodexAppServer>, change: &AgentChange, prompts: Vec<String
     }
 }
 
-async fn emit_all(
+// The persistence consumer retains the original subscription/child admission
+// order. The receive/coalescing task never waits for any of these receipts.
+async fn apply_notification(
     output: &tokio::sync::mpsc::Sender<AgentEvent>,
-    changes: impl IntoIterator<Item = Option<AgentChange>>,
-    execution: Option<uuid::Uuid>,
+    process: &Arc<CodexAppServer>,
+    subscriptions: &retention::Subscriptions,
+    rosters: &background::Rosters,
+    scopes: &super::scopes::Scopes,
+    instance: uuid::Uuid,
+    request: &RpcMessage<'_>,
 ) -> Result<(), String> {
-    for change in changes.into_iter().flatten() {
-        crate::providers::emit_for(output, change, execution).await?;
+    for change in event_changes(instance, request)? {
+        subscriptions.observe(&change);
+        let background = rosters.observe(&change, &request.params::<Value>().unwrap_or_default());
+        wake(process, &change, background.continuations);
+        let child = if let AgentChange::TaskParent { session, .. } = &change {
+            Some(session.id.clone())
+        } else {
+            None
+        };
+        let execution = scopes.observe(&change);
+        for change in [Some(change), background.roster].into_iter().flatten() {
+            crate::providers::emit_for(output, change, execution).await?;
+        }
+        if let Some(child) = child {
+            scopes.admit(&child);
+        }
     }
     Ok(())
 }

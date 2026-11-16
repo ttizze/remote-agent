@@ -16,11 +16,11 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{Semaphore, broadcast, mpsc, oneshot, watch},
+    sync::{Semaphore, mpsc, oneshot, watch},
 };
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-const QUEUE_CAPACITY: usize = 4096;
+const OUTBOUND_QUEUE_CAPACITY: usize = 4096;
 
 pub use agent_protocol::error::{Delivery, PeerError};
 /// Position in the external provider’s JSONL stream.
@@ -98,8 +98,15 @@ struct State {
     sequence: u64,
     pending: HashMap<u64, Pending>,
     closed: Option<String>,
-    events: Option<broadcast::Sender<PeerEvent>>,
-    initial: Option<broadcast::Receiver<PeerEvent>>,
+    events: Option<Vec<mpsc::UnboundedSender<PeerEvent>>>,
+    initial: Option<mpsc::UnboundedReceiver<PeerEvent>>,
+}
+impl State {
+    fn publish(&mut self, event: PeerEvent) {
+        if let Some(events) = &mut self.events {
+            events.retain(|receiver| receiver.send(event.clone()).is_ok());
+        }
+    }
 }
 type WriterStatus = Option<Result<(), String>>;
 
@@ -123,7 +130,7 @@ impl RpcPeer {
         if max_requests == 0 {
             return Err(invalid("max_requests must be positive"));
         }
-        let (events, initial) = broadcast::channel(QUEUE_CAPACITY);
+        let (events, initial) = mpsc::unbounded_channel();
         let (finished, writer_done) = watch::channel(None);
         let stop = CancellationToken::new();
         Ok((
@@ -134,7 +141,7 @@ impl RpcPeer {
                     sequence: 0,
                     pending: HashMap::new(),
                     closed: None,
-                    events: Some(events),
+                    events: Some(vec![events]),
                     initial: Some(initial),
                 })),
                 permits: Arc::new(Semaphore::new(max_requests)),
@@ -163,7 +170,7 @@ impl RpcPeer {
                 "max_message_bytes must be positive".into(),
             ));
         }
-        let (outbound, outgoing) = mpsc::channel(QUEUE_CAPACITY);
+        let (outbound, outgoing) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
         let (peer, writer_finished) = Self::new(request_timeout, max_requests, outbound)?;
         tokio::spawn(read_loop(
             reader,
@@ -182,17 +189,17 @@ impl RpcPeer {
         ));
         Ok(peer)
     }
-    /// Lag is explicit through `RecvError::Lagged`; consumers must refresh state.
-    pub fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+    /// Lossless, ordered notifications, server requests and response fences.
+    /// Adapters must drain into their memory coalescer before doing persistence.
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<PeerEvent> {
         let mut state = self.state.lock().unwrap();
         if let Some(initial) = state.initial.take() {
             return initial;
         }
-        if let Some(events) = &state.events {
-            return events.subscribe();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        if let Some(events) = &mut state.events {
+            events.push(sender);
         }
-        let (sender, receiver) = broadcast::channel(1);
-        drop(sender);
         receiver
     }
     /// Stops new work and waits for the writer's transport shutdown.
@@ -459,9 +466,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 .and_then(|id| serde_json::from_str::<u64>(id).ok());
             let pending = {
                 let pending = id.and_then(|id| received.pending.remove(&id));
-                if let Some(events) = &received.events {
-                    let _ = events.send(PeerEvent::Response { sequence });
-                }
+                received.publish(PeerEvent::Response { sequence });
                 pending
             };
             drop(received);
@@ -479,12 +484,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
         } else {
             crate::diagnostics::notification(&message);
-            if let Some(events) = &received.events {
-                let _ = events.send(PeerEvent::Message(Reply {
-                    sequence,
-                    value: Arc::from(line.as_str()),
-                }));
-            }
+            received.publish(PeerEvent::Message(Reply {
+                sequence,
+                value: Arc::from(line.as_str()),
+            }));
         }
     };
     terminate(&state, &permits, &stop, reason);
@@ -530,9 +533,8 @@ fn terminate(
             return;
         }
         state.closed = Some(reason.clone());
-        if let Some(events) = state.events.take() {
-            let _ = events.send(PeerEvent::Closed(reason.clone()));
-        }
+        state.publish(PeerEvent::Closed(reason.clone()));
+        state.events = None;
         std::mem::take(&mut state.pending)
     };
     permits.close();

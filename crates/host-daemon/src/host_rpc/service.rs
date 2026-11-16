@@ -625,12 +625,18 @@ impl HostRpcService {
                             let Some(inner) = owner.upgrade() else {
                                 break;
                             };
-                            let result = super::runtime::Runtime::observe(
-                                &Self { inner },
-                                event.change,
-                                event.execution,
-                            )
-                            .await;
+                            let runtime = tokio::runtime::Handle::current();
+                            let result = tokio::task::spawn_blocking(move || {
+                                runtime.block_on(super::runtime::Runtime::observe(
+                                    &Self { inner },
+                                    event.change,
+                                    event.execution,
+                                ))
+                            })
+                            .await
+                            .unwrap_or_else(|error| {
+                                Err(format!("provider event worker failed: {error}"))
+                            });
                             if let Some(applied) = event.applied {
                                 let _ = applied.send(result);
                             }

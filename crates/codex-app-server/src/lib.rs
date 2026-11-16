@@ -10,7 +10,7 @@ use std::{env, io, path::PathBuf, process::Stdio, time::Duration};
 
 use agent_transport::peer::{PeerError, PeerEvent, RpcMessage, RpcPeer, RpcResponse};
 use serde::{Deserialize, Serialize};
-use tokio::{process::Child, sync::broadcast};
+use tokio::{process::Child, sync::mpsc};
 
 #[derive(Debug, Clone)]
 pub struct AppServerConfig {
@@ -124,7 +124,7 @@ impl CodexAppServer {
     }
 
     /// Ordered Codex messages, response markers, and connection termination.
-    pub fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<PeerEvent> {
         self.peer.subscribe()
     }
 

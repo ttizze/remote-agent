@@ -96,6 +96,41 @@ async fn codex_text_burst_survives_a_blocked_real_database(#[case] warm: bool) {
                 .unwrap();
             agent.state(&native.id).await.unwrap();
         }
+        let publication = if warm {
+            let source = service.inner.conversation.resources.lock().unwrap()[&native].clone();
+            let service = service.clone();
+            let public = public.clone();
+            let (publish, start) = std::sync::mpsc::channel();
+            let (entered, waiting) = tokio::sync::oneshot::channel();
+            let task = tokio::task::spawn_blocking(move || {
+                let _updates = source.updates.blocking_lock();
+                let _ = entered.send(());
+                if start.recv().is_err() {
+                    return;
+                }
+                // The real publisher begins with this full-item SQL query.
+                // Stall at that boundary even if its earlier seed was already
+                // published; no mock database or final snapshot is substituted.
+                let item_id = super::native::text_item_id(
+                    ProviderKind::Codex,
+                    "wire-turn",
+                    "wire-answer",
+                    agent_protocol::session::TextField::AssistantText,
+                );
+                service
+                    .inner
+                    .conversation
+                    .storage
+                    .thread_item(&public, &item_id)
+                    .unwrap()
+                    .expect("the warm publisher reads its saved item");
+                Runtime::flush_text(&service, &source).unwrap();
+            });
+            waiting.await.unwrap();
+            Some((task, publish))
+        } else {
+            None
+        };
         let (held, ready) = tokio::sync::oneshot::channel();
         let (release, unblock) = std::sync::mpsc::channel();
         let storage = service.inner.conversation.storage.clone();
@@ -116,32 +151,29 @@ async fn codex_text_burst_survives_a_blocked_real_database(#[case] warm: bool) {
         let release_guard = scopeguard::guard(finish, |finish| {
             let _ = finish.send(());
         });
-        let publication = if warm {
-            let source = service.inner.conversation.resources.lock().unwrap()[&native].clone();
-            let service = service.clone();
-            let (entered, waiting) = tokio::sync::oneshot::channel();
-            let task = tokio::task::spawn_blocking(move || {
-                let _updates = source.updates.blocking_lock();
-                let _ = entered.send(());
-                Runtime::flush_text(&service, &source).unwrap();
-            });
-            waiting.await.unwrap();
-            Some(task)
-        } else {
-            None
-        };
+        if let Some((_, publish)) = &publication {
+            publish.send(()).unwrap();
+        }
         // This RPC goes through the real transport but does not wait for Host
         // persistence. Its response is strictly after all 16000 notifications.
         let received = server
             .request::<_, Value>("fixture/burst", &serde_json::json!({}))
             .await;
+        let barrier = agent.state(&native.id);
+        tokio::pin!(barrier);
+        assert!(futures_util::poll!(barrier.as_mut()).is_pending());
+        server
+            .request::<_, Value>("fixture/barrier", &serde_json::json!({}))
+            .await
+            .unwrap();
+        let premature_barrier = futures_util::poll!(barrier.as_mut()).is_ready();
         let independent_receive = !forced.load(Ordering::SeqCst);
         drop(release_guard);
         tokio::task::spawn_blocking(move || watchdog.join().unwrap())
             .await
             .unwrap();
         blocker.await.unwrap();
-        if let Some(publication) = publication {
+        if let Some((publication, _)) = publication {
             publication.await.unwrap();
         }
         assert!(
@@ -149,8 +181,11 @@ async fn codex_text_burst_survives_a_blocked_real_database(#[case] warm: bool) {
             "DB contention must not starve wire reception"
         );
         received.unwrap();
-        agent
-            .state(&native.id)
+        assert!(
+            !premature_barrier,
+            "a wire response must not certify persistence while the database is blocked"
+        );
+        barrier
             .await
             .expect("notification backlog must not terminate Codex");
         let saved = service
@@ -159,16 +194,23 @@ async fn codex_text_burst_survives_a_blocked_real_database(#[case] warm: bool) {
             .storage
             .thread_state(&public.id, &[])
             .unwrap();
-        let text = saved
-            .turn_items
-            .values()
-            .find_map(|item| match &item.body {
-                agent_protocol::orchestration::TurnItemBody::AssistantMessage { text, .. } => {
-                    Some(text)
-                }
-                _ => None,
-            })
-            .unwrap();
+        let item_id = super::native::text_item_id(
+            ProviderKind::Codex,
+            "wire-turn",
+            "wire-answer",
+            agent_protocol::session::TextField::AssistantText,
+        );
+        let item = service
+            .inner
+            .conversation
+            .storage
+            .thread_item(&public, &item_id)
+            .unwrap()
+            .expect("every streamed item must be persisted");
+        let agent_protocol::orchestration::TurnItemBody::AssistantMessage { text, .. } = &item.body
+        else {
+            panic!("assistant message body")
+        };
         let expected = format!(
             "{}{}",
             if warm { "seed\n\n" } else { "" },

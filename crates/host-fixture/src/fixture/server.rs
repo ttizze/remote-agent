@@ -1015,11 +1015,9 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
             let line = tokio::select! {
                 result = &mut writer => { result??; break; }
                 line = lines.recv() => match line {
-                    Ok(PeerEvent::Message(message)) => message.value,
-                    Ok(PeerEvent::Response { .. }) => continue,
-                    Ok(PeerEvent::Closed(_)) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(error) => return Err(error.into()),
+                    Some(PeerEvent::Message(message)) => message.value,
+                    Some(PeerEvent::Response { .. }) => continue,
+                    Some(PeerEvent::Closed(_)) | None => break,
                 }
             };
             let mut message: Value = serde_json::from_str(&line)?;

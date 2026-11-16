@@ -2307,7 +2307,10 @@
       "host_rpc::runtime::executor::fork_tests::native_fork_serializes_and_revalidates_the_source::case_1_unchanged",
       "host_rpc::runtime::executor::fork_tests::native_fork_serializes_and_revalidates_the_source::case_2_changed",
       "host_rpc::runtime::t3_contract::codex_rollback::rollback_replays_real_codex_metadata_cursor_and_revert_response",
-      "host_rpc::runtime::t3_contract::saved_short_long_and_forked_conversations_open_through_rpc_and_core_without_native_history"
+      "host_rpc::runtime::t3_contract::saved_short_long_and_forked_conversations_open_through_rpc_and_core_without_native_history",
+      "providers::codex::ingress::tests::interleaved_items_threads_and_reasoning_parts_keep_text_and_one_batch_fence",
+      "providers::codex::ingress::tests::response_request_and_close_flush_all_prior_text_in_wire_order",
+      "providers::codex::ingress::tests::continuous_text_flushes_from_the_first_fragment_and_releases_its_receiver"
     ],
     "host-daemon::bin/host-daemon": [
       "command_line::tests::invitation_lifetime_defaults_to_a_week_and_is_bounded",

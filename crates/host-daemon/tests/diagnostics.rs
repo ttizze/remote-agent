@@ -69,7 +69,7 @@ async fn codex_event_stream_logs_the_stop_cause_without_conversation_payloads() 
     tokio::time::timeout(Duration::from_secs(60), async {
         for (scenario, cause, detail) in [
             ("eof", "peer_closed", "JSONL stream reached EOF"),
-            ("lag", "event_stream_lagged", "missed_events="),
+            ("burst", "peer_closed", "JSONL stream reached EOF"),
             (
                 "event",
                 "event_processing_failed",
@@ -82,20 +82,20 @@ async fn codex_event_stream_logs_the_stop_cause_without_conversation_payloads() 
             let codex_home = directory.path().join("codex");
             fs::create_dir(&codex_home).unwrap();
             let program = directory.path().join("codex-fixture");
-            // The lag scenario fills the real peer queue before replying to
-            // initialize, so no Host consumer can drain the burst early.
+            // Before initialization, no Host subscriber can drain the burst.
+            // It must survive intact; only the later deliberate EOF stops Codex.
             fs::write(
                 &program,
                 format!(
                     r#"#!/bin/sh
 read -r initialize
-if [ {} = lag ]; then
+if [ {} = burst ]; then
     awk 'BEGIN {{ for (i=0; i<10000; i++) print "{{\"method\":\"fixture/ignored\",\"params\":{{\"text\":\"PRIVATE_CONVERSATION_SENTINEL\"}}}}" }}'
 fi
 printf '%s\n' '{{"id":1,"result":{{"userAgent":"diagnostic-fixture","platformFamily":"unix","platformOs":"test","codexHome":"{}"}}}}'
 read -r initialized
 case {} in
-    eof)
+    eof|burst)
         while [ ! -f "$AGENT_DIAGNOSTIC_HOST_READY" ]; do sleep 0.02; done
         exit 0
         ;;
@@ -169,15 +169,11 @@ while read -r line; do :; done
             assert!(message.contains(detail), "{message}");
             assert!(message.contains("instance="), "{message}");
             let expected_sequence = match scenario {
-                "lag" => 0,
+                "burst" => 10_001,
                 "event" => 2,
                 _ => 1,
             };
             assert!(message.contains(&format!("last_processed_sequence={expected_sequence} ")), "{message}");
-            if scenario == "lag" {
-                let missed: u64 = message.split("missed_events=").nth(1).unwrap().parse().unwrap();
-                assert!(missed > 0, "{message}");
-            }
             assert!(message.contains(&format!("shutdown_requested={}", scenario == "shutdown")), "{message}");
             if scenario != "shutdown" {
                 host.kill().await.unwrap();
