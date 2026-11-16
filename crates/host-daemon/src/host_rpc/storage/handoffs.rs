@@ -461,13 +461,23 @@ fn prepare(
     };
     let switched =
         latest.is_some_and(|source| source.provider_instance_id != run.provider_instance_id);
-    let imported = thread.native_thread_ref.is_none()
-        && state.thread.history_origin == Some(model::ThreadHistoryOrigin::V1Import);
+    // T3 prepares imported run-less history until an app run completes, even
+    // when the provider has already allocated a native identity. In particular,
+    // a baseline rewind allocates an unwritten identity, not a native prefix.
+    let imported = state.thread.history_origin == Some(model::ThreadHistoryOrigin::V1Import)
+        && !state
+            .runs
+            .values()
+            .any(|run| run.status == model::RunStatus::Completed);
     if fork.is_none() && !fresh && !switched && !imported {
         return Ok(Vec::new());
     }
+    let legacy_import = imported && fork.is_none() && !fresh && !switched;
+    // A failed/interrupted app run does not turn an initial import into a
+    // provider switch. Only the imported messages belong to this handoff.
+    let latest = if legacy_import { None } else { latest };
     let through = latest.map_or(0, |source| source.ordinal);
-    let after = if fork.is_some() || fresh || thread.native_thread_ref.is_none() {
+    let after = if fork.is_some() || fresh || legacy_import || thread.native_thread_ref.is_none() {
         0
     } else {
         source
@@ -531,7 +541,6 @@ fn prepare(
         "provider".into()
     };
     let id = model::derived_id("context-handoff", &[&run.id, &scope]);
-    let legacy_import = latest.is_none() && imported && fork.is_none() && !fresh;
     let transfer_id = (!legacy_import).then(|| {
         fork.map_or_else(
             || model::derived_id("context-transfer", &[&run.id, &scope]),
