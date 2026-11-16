@@ -215,3 +215,66 @@ fn read_receipts_acknowledge_only_the_observed_completion_and_replay_once() {
     storage.mark_read(&id, &"new".into()).unwrap();
     assert_eq!(storage.shell_changes(&read).unwrap().1, []);
 }
+
+#[test]
+fn shell_preserves_plain_session_errors_and_only_classifies_the_matching_root_failure() {
+    // ProjectionStore + orchestrationV2ThreadError.ts at pinned T3 1a12c4a:
+    // session lastError is plain text; a different current session error clears
+    // the prior root failure's class/code/reset metadata. Child and nonfailed
+    // error items cannot replace the failed root's error.
+    for root in [None, Some("root")] {
+        for root_failure in [false, true] {
+            for class in ["usage_limit", "unknown"] {
+                for session_error in [
+                    None,
+                    Some("root error"),
+                    Some("Host restarted"),
+                    Some("{\"message\":\"literal provider text\"}"),
+                ] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let storage = Storage::open(&directory.path().join("state.sqlite"));
+                    create(&storage, "thread");
+                    storage.with(|connection| {
+                        let tx=connection.transaction().unwrap();
+                        let session=model::ProviderSession {id:"session".into(),driver:"codex".into(),provider_instance_id:"codex".into(),status:model::ProviderSessionStatus::Stopped,cwd:"/project".into(),model:None,capabilities:Default::default(),created_at:NOW.into(),updated_at:NOW.into(),last_error:session_error.map(str::to_owned)};
+                        projections::apply(&tx,"thread",&model::Change::ProviderSessionAttached(session)).unwrap();
+                        let run:model::Run=serde_json::from_value(json!({"id":"run","threadId":"thread","ordinal":1,"providerInstanceId":"codex","modelSelection":{"instanceId":"codex","model":"fixture"},"providerThreadId":null,"userMessageId":"input","rootNodeId":root,"activeAttemptId":null,"status":if root_failure {"failed"} else {"completed"},"queuePosition":null,"queueHeld":false,"requestedAt":NOW,"startedAt":NOW,"completedAt":NOW,"checkpointId":null,"contextHandoffId":null})).unwrap();
+                        projections::save(&tx,Some("thread"),&run).unwrap();
+                        let child:model::ExecutionNode=serde_json::from_value(json!({"id":"child","threadId":"thread","runId":"run","parentNodeId":root,"rootNodeId":"root","kind":"tool_call","status":"failed","countsForRun":false,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"runtimeRequestId":null,"checkpointScopeId":null,"startedAt":NOW,"completedAt":NOW})).unwrap();
+                        let mut root_node=child.clone();root_node.id="root".into();root_node.parent_node_id=None;root_node.kind=model::NodeKind::RootTurn;root_node.counts_for_run=true;root_node.status=if root_failure {model::NodeStatus::Failed} else {model::NodeStatus::Completed};
+                        projections::save(&tx,Some("thread"),&root_node).unwrap();
+                        projections::save(&tx,Some("thread"),&child).unwrap();
+                        for (id,node,status,ordinal,message) in [("root-error",root,"failed",1,"root error"),("completed-error",root,"completed",98,"not a failed error"),("child-error",Some("child"),"failed",99,"child error")] {
+                            if id=="root-error" && !root_failure {continue;}
+                            let item:model::TurnItem=serde_json::from_value(json!({"id":id,"threadId":"thread","runId":"run","nodeId":node,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":ordinal,"status":status,"title":null,"startedAt":NOW,"completedAt":NOW,"updatedAt":NOW,"type":"error","failure":{"class":class,"message":message,"code":"root-code","retryable":true,"resetAt":"2026-11-14T02:00:00.000Z"}})).unwrap();
+                            projections::save(&tx,Some("thread"),&item).unwrap();
+                        }
+                        tx.commit().unwrap();Ok(())
+                    }).unwrap();
+                    let (_, items) = storage
+                        .open_shell(None)
+                        .expect("plain text provider errors cannot corrupt the catalog");
+                    let ShellStreamItem::Snapshot { snapshot, .. } = &items[0] else {
+                        panic!("shell snapshot")
+                    };
+                    let row = &snapshot.threads[0];
+                    assert_eq!(
+                        row.last_error.as_deref(),
+                        session_error.or(root_failure.then_some("root error"))
+                    );
+                    let matching =
+                        root_failure && session_error.is_none_or(|error| error == "root error");
+                    assert_eq!(row.last_error_class.as_deref(), matching.then_some(class));
+                    assert_eq!(
+                        row.last_error_code.as_deref(),
+                        matching.then_some("root-code")
+                    );
+                    assert_eq!(
+                        row.usage_limit_reset_at.as_deref(),
+                        (matching && class == "usage_limit").then_some("2026-11-14T02:00:00.000Z")
+                    );
+                }
+            }
+        }
+    }
+}

@@ -409,7 +409,7 @@ fn strong_native_item_ids_keep_the_pinned_global_identity_and_match_text_updates
 }
 
 #[test]
-fn codex_dynamic_and_mcp_output_reaches_canonical_items_without_losing_content() {
+fn native_tool_outputs_preserve_provider_names_and_canonical_content() {
     let context = Context {
         thread_id: "app".into(),
         run_id: Some("run".into()),
@@ -470,6 +470,32 @@ fn codex_dynamic_and_mcp_output_reaches_canonical_items_without_losing_content()
             matches!(&artifacts[0].item.body, model::TurnItemBody::DynamicTool {tool_name:Some(actual),output:Some(output),..} if actual==name && output==&expected),
             "expected {name}: {expected}; got {:?}",
             artifacts[0].item.body
+        );
+    }
+    let metadata_image = serde_json::json!({"type":"mcpToolCall","id":"metadata-image","status":"completed","server":"fixture","tool":"lookup","result":{"content":[{"type":"image","mimeType":"image/png"}],"structuredContent":{"value":7}}});
+    let item = crate::providers::codex::native::parse_item(metadata_image).unwrap();
+    let artifacts = context.item(&item).unwrap();
+    assert!(
+        matches!(&artifacts[0].item.body,model::TurnItemBody::DynamicTool {output:Some(value),..} if value==&json!({"content":[{"type":"image","mimeType":"image/png"}],"structuredContent":{"value":7}})),
+        "image metadata must survive alongside structured results before its bytes are hydrated"
+    );
+    let mut other = context;
+    for (provider, kind, server, expected) in [
+        (ProviderKind::Claude, "mcp", Some("a"), "mcp__a__b__tool"),
+        (
+            ProviderKind::Claude,
+            "local",
+            Some("Claude Code"),
+            "b__tool",
+        ),
+        (ProviderKind::DeepSeek, "local", None, "b__tool"),
+    ] {
+        other.provider = provider;
+        let item=serde_json::from_value(json!({"id":"other","status":"completed","body":{"inline":{"body":{"toolCall":{"kind":kind,"tool":"b__tool","server":server,"arguments":{},"result":7,"content":[]}}}}})).unwrap();
+        let artifacts = other.item(&item).unwrap();
+        assert!(
+            matches!(&artifacts[0].item.body,model::TurnItemBody::DynamicTool {tool_name:Some(name),..} if name==expected),
+            "each provider keeps its native name convention"
         );
     }
 }

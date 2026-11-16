@@ -4296,3 +4296,26 @@ async fn gallery_hydrates_a_large_saved_assistant_body_before_extracting_its_las
     local.close().await;
     fixture.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn large_saved_reasoning_finishes_loading_through_the_shared_store() {
+    tokio::time::timeout(Duration::from_secs(20),async {
+        use agent_core::{state::Intent,store::Store};
+        let directory=tempfile::tempdir().unwrap();
+        let text="r".repeat(2*1024*1024);
+        std::fs::write(directory.path().join("list-fixture.json"),json!([{"id":"large-reasoning","cwd":directory.path(),"historyMode":"paginated","turns":[{"id":"turn","status":"completed","items":[{"id":"reasoning","type":"reasoning","content":[{"text":text}],"summary":[]}]}]}]).to_string()).unwrap();
+        let fixture=start_host(directory.path()).await;
+        let endpoint=Endpoint::bind(fixture.credentials.local_identity().await,Relays::Disabled).await.unwrap();
+        let store=Store::connect(&endpoint,&fixture.ticket,codex_chat_snapshot(),None,"Fixture device",None).await.unwrap();
+        let id=SessionRef::new(ProviderKind::Codex,"large-reasoning".into()).unwrap();
+        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+        let mut updates=store.subscribe();
+        loop {
+            let snapshot=updates.borrow_and_update().clone();
+            assert!(snapshot.panes.primary().error.is_none(),"{:?}",snapshot.panes.primary().error);
+            if snapshot.sessions.conversations[&id].turns.iter().flatten().flat_map(|turn|turn.items.iter().flatten()).any(|item|!item.is_deferred() && matches!(item.body(),agent_protocol::items::ItemBody::Reasoning {content,..} if content==&[text.clone()])) {break;}
+            updates.changed().await.unwrap();
+        }
+        store.close().await.unwrap();endpoint.close().await;fixture.close().await.unwrap();
+    }).await.expect("large reasoning hydration deadline");
+}

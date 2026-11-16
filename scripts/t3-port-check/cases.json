@@ -27,7 +27,8 @@
       "host_rpc::service::titles::tests::canonical_title_search_preserves_pinned_t3_matching_and_rank_order",
       "host_rpc::service::titles::tests::canonical_search_reserves_message_slots_after_ranked_titles_before_limiting",
       "host_rpc::storage::tests::search_finds_an_old_saved_message_beyond_twenty_thousand_streaming_rows_after_reopen",
-      "host_rpc::runtime::native::tests::codex_dynamic_and_mcp_output_reaches_canonical_items_without_losing_content"
+      "host_rpc::runtime::native::tests::native_tool_outputs_preserve_provider_names_and_canonical_content",
+      "host_rpc::storage::shell::tests::shell_preserves_plain_session_errors_and_only_classifies_the_matching_root_failure"
     ],
     "agent-core": [
       "state::operations::sessions::tests::a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences",
@@ -36,7 +37,8 @@
       "state::list_sync::tests::ranked_search_order_reaches_the_rendered_conversation_list",
       "state::list_sync::tests::search_reply_distinguishes_saved_message_matches_from_stale_titles_and_removed_headers",
       "state::list_sync::tests::placed_saved_shortcuts_use_word_boundaries_without_requiring_a_canonical_header",
-      "state::operations::sessions::tests::rewind_never_recalls_an_omitted_or_stale_input_preview"
+      "state::operations::sessions::tests::rewind_never_recalls_an_omitted_or_stale_input_preview",
+      "orchestration::tests::authored_body_previews_only_accept_their_own_hydration_revision"
     ]
   },
   "guards": {
@@ -2752,7 +2754,8 @@
       "upstream_exit_keeps_host_management_connected",
       "visualization_reaches_store_and_reopens_after_source_removal",
       "worktree_management_preserves_conversations_and_recreates_deleted_checkouts",
-      "gallery_hydrates_a_large_saved_assistant_body_before_extracting_its_last_image"
+      "gallery_hydrates_a_large_saved_assistant_body_before_extracting_its_last_image",
+      "large_saved_reasoning_finishes_loading_through_the_shared_store"
     ]
   }
 }

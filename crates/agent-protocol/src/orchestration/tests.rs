@@ -3395,6 +3395,15 @@ fn oversized_authored_bodies_have_an_explicit_lossless_hydration_contract() {
             "binary round trips must preserve the hydration witness"
         );
     }
+    // Queued inputs are the inline control record used by the composer editor.
+    let queued = turn_item(
+        serde_json::json!({"type":"user_message","messageId":"queued","createdBy":"user","creationSource":"mobile","inputIntent":"queued_turn","text":text,"attachments":[]}),
+    );
+    assert_eq!(
+        wire::item(&queued),
+        queued,
+        "queue editing must retain its complete original input"
+    );
     let full = turn_item(
         serde_json::json!({"type":"assistant_message","messageId":"literal","text":"ordinary authored text\n… output truncated for transport","attachments":[],"streaming":false}),
     );

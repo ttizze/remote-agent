@@ -965,3 +965,33 @@ fn canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary(
         expected
     );
 }
+
+#[test]
+fn authored_body_previews_only_accept_their_own_hydration_revision() {
+    for status in [TurnItemStatus::Running, TurnItemStatus::Completed] {
+        let mut preview = item("body", 1);
+        preview.detail_omitted = true;
+        preview.status = status;
+        let mut detail = preview.clone();
+        detail.detail_omitted = false;
+        assert!(same_detail_revision(&preview, &detail));
+        detail.updated_at = "2026-11-14T00:00:00.001Z".into();
+        assert!(
+            !same_detail_revision(&preview, &detail),
+            "a different authored-body revision cannot replace the preview, including during streaming"
+        );
+    }
+    // Command output still streams independently of its complete detail read.
+    let mut live = item("command", 1);
+    live.body = serde_json::from_value(
+        json!({"type":"command_execution","input":"build","output":"live output"}),
+    )
+    .unwrap();
+    live.status = TurnItemStatus::Running;
+    let mut detail = live.clone();
+    detail.updated_at = "2026-11-14T00:00:00.001Z".into();
+    assert!(
+        same_detail_revision(&live, &detail),
+        "preserve the existing independent live command-output contract"
+    );
+}
