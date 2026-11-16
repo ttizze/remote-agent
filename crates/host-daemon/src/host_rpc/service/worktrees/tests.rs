@@ -29,7 +29,7 @@ async fn worktree_resolves_public_tasks_and_preserves_native_idle_warnings() {
     for warning in [None, Some("native idle warning")] {
         let directory = tempfile::tempdir().unwrap();
         let repository = repository(directory.path());
-        let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let mut agent = NativeAgent::new(ProviderKind::Codex);
         Arc::get_mut(&mut agent).unwrap().idle_warning = warning;
         let host = HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
         host.inner
@@ -103,7 +103,7 @@ async fn worktree_occupancy_uses_the_imported_status_when_source_history_is_inco
         for status in [TurnStatus::Completed, TurnStatus::Running] {
             let directory = tempfile::tempdir().unwrap();
             let repository = repository(directory.path());
-            let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+            let agent = NativeAgent::new(ProviderKind::Codex);
             let host =
                 HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
             host.inner
@@ -173,7 +173,7 @@ async fn worktree_keeps_idle_uncertainty_and_provider_failures_alongside_running
     use crate::host_rpc::runtime::native_fixture::{NativeAgent, call};
     let directory = tempfile::tempdir().unwrap();
     let repository = repository(directory.path());
-    let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let mut agent = NativeAgent::new(ProviderKind::Codex);
     Arc::get_mut(&mut agent).unwrap().idle_warning = Some("native idle warning");
     let host = HostRpcService::new(
         [
@@ -265,7 +265,7 @@ async fn worktree_block_reasons_keep_every_provider_failure_in_provider_order() 
                 ProviderKind::Claude,
             ],
         ] {
-            let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+            let a = NativeAgent::new(ProviderKind::Codex);
             let host = HostRpcService::new(
                 order.map(|provider| {
                     if listing_fails && provider == ProviderKind::Codex {
@@ -458,7 +458,7 @@ async fn failed_provider_preparation_keeps_the_owned_checkout_for_retry() {
     use agent_protocol::conversation::{InputContent, records};
     let directory = tempfile::tempdir().unwrap();
     let repository = repository(directory.path());
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     agent.create_gate.close();
     let host = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     host.inner
@@ -546,7 +546,7 @@ async fn unchanged_cleanup_follows_each_projects_override() {
     use uuid::Uuid;
     let directory = tempfile::tempdir().unwrap();
     let repository = repository(directory.path());
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let host = HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
     host.inner.projects.register(&repository).await.unwrap();
     let project = host.project_snapshot().await.unwrap().projects[0]

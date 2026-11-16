@@ -54,7 +54,7 @@ async fn completed(
 #[tokio::test]
 async fn native_fork_serializes_and_revalidates_the_source(#[case] changed: bool) {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let source = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();

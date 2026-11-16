@@ -367,24 +367,17 @@ fn route(
 // Native fixture item IDs locate a backing session, while UI assertions must
 // use its persisted public address. Unmanaged fixture sessions own their ID.
 fn session_identity(root: &Path, native: &str) -> Result<serde_json::Value> {
-    use rusqlite::OptionalExtension;
     let path = root.join(host_daemon::CONVERSATION_DATABASE_FILE);
-    let identity = if path.exists() {
-        let connection = rusqlite::Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        connection.busy_timeout(Duration::from_secs(10))?;
-        connection.query_row(
-            "SELECT DISTINCT thread_id FROM orchestration_v2_projection_provider_threads WHERE provider_instance_id='codex' AND driver='codex' AND json_extract(payload_json,'$.nativeThreadRef.nativeId')=?1 AND thread_id IS NOT NULL",
-            [native], |row| row.get::<_, String>(0),
-        ).optional()?
-    } else {
-        None
-    };
+    let source = agent_protocol::session::SessionRef::new(
+        agent_protocol::session::ProviderKind::Codex,
+        native.to_owned(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let identity = host_daemon::canonical_test_support::native_owner(&path, &source)
+        .map_err(anyhow::Error::msg)?;
     Ok(match identity {
         Some(id) => serde_json::to_value(
-            agent_protocol::orchestration::shell::public_session_ref(&id)
+            agent_protocol::orchestration::shell::public_session_ref(&id.application_id())
                 .map_err(anyhow::Error::msg)?,
         )?,
         None => json!({"provider":"codex","id":native}),

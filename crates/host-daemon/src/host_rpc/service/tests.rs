@@ -7,7 +7,7 @@ async fn provider_switches_broadcast_and_gate_new_work_while_retaining_history_a
         providers::{ProviderSettings, SetProviderEnabled},
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let host = HostRpcService::new([agent.backend()], directory.path().join("worktrees.json"));
     let client = host.open_session();
     let mut other = host.open_session();
@@ -129,8 +129,8 @@ async fn account_providers_are_read_in_parallel_without_blocking_conversation_li
     use super::super::runtime::native_fixture::{NativeAgent, call};
     use super::*;
     let directory = tempfile::tempdir().unwrap();
-    let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let b = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let a = NativeAgent::new(ProviderKind::Codex);
+    let b = NativeAgent::new(ProviderKind::Claude);
     a.accounts_gate.forget_permits(1);
     b.accounts_gate.forget_permits(1);
     let host = HostRpcService::new(
@@ -177,7 +177,7 @@ async fn account_read_failures_keep_their_provider_alongside_startup_errors() {
     use super::*;
     use std::sync::atomic::Ordering;
     let directory = tempfile::tempdir().unwrap();
-    let a = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let a = NativeAgent::new(ProviderKind::Codex);
     let host = HostRpcService::new(
         [
             Backend::unavailable(ProviderKind::DeepSeek, "deepseek startup failed"),
@@ -262,7 +262,7 @@ async fn successful_configuration_clears_the_provider_startup_error() {
         service.provider_errors()["claude"]["code"],
         "provider_unavailable"
     );
-    let agent = NativeAgent::new(ProviderKind::Claude, root.path().join("claude"));
+    let agent = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new([agent.backend()], root.path().join("worktrees.json"));
     assert!(service.provider_errors().get("claude").is_none());
     let session = service.open_session();
@@ -557,23 +557,28 @@ async fn canonical_storage_starts_fresh_when_an_unsupported_legacy_database_exis
 
 #[tokio::test]
 async fn the_client_namespace_belongs_to_the_canonical_database_not_provider_homes() {
-    use super::super::runtime::native_fixture::NativeAgent;
     use super::*;
     let directory = tempfile::tempdir().unwrap();
-    let first = NativeAgent::new(
-        ProviderKind::Codex,
-        directory.path().join("first-native-home"),
-    );
+    let first = crate::providers::Claude::load(
+        directory.path().join("missing-cli"),
+        directory.path().join("first-state"),
+        Some(directory.path().join("first-native-home")),
+    )
+    .await
+    .unwrap();
     let project = directory.path().join("host/projects.json");
-    let scope = HostRpcService::new([first.backend()], project.clone())
+    let scope = HostRpcService::new([first.into()], project.clone())
         .storage_scope()
         .unwrap();
-    let second = NativeAgent::new(
-        ProviderKind::Codex,
-        directory.path().join("different-native-home"),
-    );
+    let second = crate::providers::Claude::load(
+        directory.path().join("missing-cli"),
+        directory.path().join("second-state"),
+        Some(directory.path().join("different-native-home")),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        HostRpcService::new([second.backend()], project.clone())
+        HostRpcService::new([second.into()], project.clone())
             .storage_scope()
             .unwrap(),
         scope

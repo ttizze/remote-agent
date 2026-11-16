@@ -176,7 +176,7 @@ impl Fixture {
             crate::host_rpc::service::worktrees::tests::repository(directory.path()),
         )
         .unwrap();
-        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+        let agent = NativeAgent::new(ProviderKind::Codex);
         let host = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         host.inner
             .worktrees

@@ -15,8 +15,8 @@ pub(in crate::host_rpc) fn thread(id: &str) -> Thread {
 }
 
 pub(super) fn database() -> Connection {
-    let db = Connection::open_in_memory().unwrap();
-    db.execute_batch(include_str!("orchestration.sql")).unwrap();
+    let mut db = Connection::open_in_memory().unwrap();
+    Storage::initialize(&mut db).unwrap();
     db.pragma_update(None, "foreign_keys", true).unwrap();
     db
 }

@@ -19,7 +19,7 @@ fn content() -> decision::InputContent {
 async fn child_discovery_uses_the_public_parent_and_preserves_already_received_work() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
-        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let agent = NativeAgent::new(ProviderKind::Codex);
         let service =
             HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         let connection = service.open_session();
@@ -137,9 +137,9 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let compacted = mode == "compacted";
         let directory = tempfile::tempdir().unwrap();
-        let mut codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let mut codex = NativeAgent::new(ProviderKind::Codex);
         Arc::get_mut(&mut codex).unwrap().metadata_only_state = compacted;
-        let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+        let claude = NativeAgent::new(ProviderKind::Claude);
         let service = HostRpcService::new(
             [codex.backend(), claude.backend()],
             directory.path().join("projects.json"),
@@ -364,8 +364,8 @@ async fn returning_to_a_provider_reuses_its_context_and_injects_only_unseen_hist
 async fn compact_keeps_inline_provider_handoff_until_the_next_ordinary_input() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
-        let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-        let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+        let codex = NativeAgent::new(ProviderKind::Codex);
+        let claude = NativeAgent::new(ProviderKind::Claude);
         let service = HostRpcService::new([codex.backend(), claude.backend()], directory.path().join("projects.json"));
         let connection = service.open_session();
         let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
@@ -496,7 +496,7 @@ async fn command_output_case(case: &str) {
         sync::OutputUpdate,
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let (target, native, execution) =
@@ -729,7 +729,7 @@ async fn native_reply_before_submit_ack_commits_one_turn_and_replay_never_sends_
     #[case] unknown_ack: bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     if unknown_ack {
         agent
             .fail_submit
@@ -836,7 +836,7 @@ async fn native_reply_before_submit_ack_commits_one_turn_and_replay_never_sends_
 async fn cancelling_unknown_delivery_releases_native_resources_and_allows_a_new_input_without_resending()
  {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     agent
         .fail_submit
         .store(2, std::sync::atomic::Ordering::SeqCst);
@@ -947,7 +947,7 @@ async fn cancelling_unknown_delivery_releases_native_resources_and_allows_a_new_
 #[tokio::test]
 async fn a_known_unsent_start_retries_the_reserved_attempt_after_its_outbox_deadline() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     agent
         .fail_submit
         .store(1, std::sync::atomic::Ordering::SeqCst);
@@ -1033,7 +1033,7 @@ async fn completed(
 async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resources() {
     use agent_protocol::session::{HistoryReadKind, HistoryReadState};
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let submit = |session: SessionRef| {
@@ -1219,7 +1219,7 @@ async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resour
 #[tokio::test(start_paused = true)]
 async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
     let directory = tempfile::tempdir().unwrap();
-    let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let mut agent = NativeAgent::new(ProviderKind::Codex);
     Arc::get_mut(&mut agent).unwrap().submit_gate = Some(tokio::sync::Semaphore::new(0));
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
@@ -1461,7 +1461,7 @@ async fn text_streams_commit_at_paragraphs_and_within_the_streaming_interval() {
 #[tokio::test]
 async fn explicit_project_import_never_backfills_an_owned_conversations_history() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
@@ -1639,7 +1639,7 @@ async fn registering_a_project_updates_open_conversations_and_the_shared_list_af
 #[tokio::test]
 async fn a_failed_initial_import_cannot_start_an_empty_replacement_conversation() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(ProviderKind::Codex, "unreadable-native".into()).unwrap();
@@ -1682,7 +1682,7 @@ async fn a_failed_initial_import_cannot_start_an_empty_replacement_conversation(
 async fn opening_native_history_waits_for_atomic_import_before_publishing_its_canonical_snapshot() {
     use agent_protocol::models::{Thread, ThreadResponse, Turn};
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let target = SessionRef::new(ProviderKind::Codex, "slow-history".into()).unwrap();
     agent.records.lock().unwrap().insert(
         target.id.clone(),
@@ -1782,7 +1782,7 @@ async fn opening_native_history_waits_for_atomic_import_before_publishing_its_ca
 #[tokio::test]
 async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_another_turn() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
@@ -1967,7 +1967,7 @@ async fn completed_resources_retire_and_late_fenced_callbacks_cannot_create_anot
 async fn discovery_cannot_publish_a_private_source_before_its_creation_receipt() {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
-        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
+        let agent = NativeAgent::new(ProviderKind::Codex);
         let held = agent.create_response_gate.acquire().await.unwrap();
         let service =
             HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
@@ -2033,7 +2033,7 @@ async fn ending_a_turn_releases_its_answer_resource_without_a_resolved_notificat
     use agent_protocol::requests::{Request, RequestBody, RequestTarget};
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
-        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+        let agent = NativeAgent::new(ProviderKind::Codex);
         let service =
             HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         let (target, native, execution) =
@@ -2168,7 +2168,7 @@ async fn ending_a_turn_releases_its_answer_resource_without_a_resolved_notificat
 #[tokio::test]
 async fn unavailable_project_does_not_block_listing_or_opening_saved_conversations() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let target = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
@@ -2254,7 +2254,7 @@ async fn stopping_root_provider_creation_keeps_one_native_session_for_retry() {
     for retry_before_reply in [false, true] {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let directory = tempfile::tempdir().unwrap();
-            let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+            let agent = NativeAgent::new(ProviderKind::Codex);
             let held = agent.create_gate.acquire().await.unwrap();
             let service =
                 HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
@@ -2355,7 +2355,7 @@ async fn stopping_root_provider_creation_keeps_one_native_session_for_retry() {
 #[tokio::test]
 async fn a_delivery_admitted_before_update_cannot_write_after_the_update_gate_closes() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let held = agent.create_response_gate.acquire().await.unwrap();
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     service.set_history_scope(directory.path().into(), true);

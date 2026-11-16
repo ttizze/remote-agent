@@ -7,7 +7,7 @@ async fn search_defaults_to_the_t3_bound_and_accepts_an_explicit_limit() {
         session::SessionRef,
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().into());
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     for index in 0..55 {
         let id = format!("conversation-{index}");
@@ -591,7 +591,7 @@ async fn search_reads_saved_message_bodies_without_discovering_native_threads() 
     };
     let directory = tempfile::tempdir().unwrap();
     let project_path = directory.path().join("projects.json");
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "saved-source".into()).unwrap();
     let public = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
     let response = ThreadResponse {
@@ -681,7 +681,7 @@ async fn canonical_message_search_matches_pinned_t3_word_boundaries_and_unicode(
     )))
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let cases = fixture["messages"].as_array().unwrap();
     let mut ids = Vec::new();
@@ -771,7 +771,7 @@ async fn canonical_title_search_preserves_pinned_t3_matching_and_rank_order() {
     let mut differences = Vec::new();
     for (group, case) in fixture["titles"].as_array().unwrap().iter().enumerate() {
         let directory = tempfile::tempdir().unwrap();
-        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+        let agent = NativeAgent::new(ProviderKind::Codex);
         let service =
             HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
         let subjects = case["subjects"].as_array().unwrap();
@@ -871,7 +871,7 @@ async fn canonical_search_reserves_message_slots_after_ranked_titles_before_limi
         session::{SessionChange, SessionRef},
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     for i in 0..10 {
         let native = SessionRef::new(ProviderKind::Codex, format!("native-{i}")).unwrap();

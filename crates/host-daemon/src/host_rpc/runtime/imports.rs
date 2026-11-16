@@ -45,10 +45,11 @@ impl Runtime {
                 futures_util::pin_mut!(pages);
                 while let Some(page) = pages.try_next().await? {
                     for summary in page {
-                        if summary.thread.parent_id.is_some() {
+                        let summary: agent_protocol::models::Thread = summary.into();
+                        if summary.parent_id.is_some() {
                             continue;
                         }
-                        let Some(cwd) = summary.thread.cwd.as_deref() else {
+                        let Some(cwd) = summary.cwd.as_deref() else {
                             continue;
                         };
                         if !projects
@@ -57,8 +58,7 @@ impl Runtime {
                         {
                             continue;
                         }
-                        let Some(native) =
-                            summary.thread.id.filter(|id| id.provider == Some(provider))
+                        let Some(native) = summary.id.filter(|id| id.provider == Some(provider))
                         else {
                             continue;
                         };
@@ -285,7 +285,7 @@ mod tests {
     ) {
         use agent_protocol::session::{HistoryReadKind, HistoryReadState};
         let directory = tempfile::tempdir().unwrap();
-        let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+        let mut agent = NativeAgent::new(ProviderKind::Codex);
         Arc::get_mut(&mut agent).unwrap().deferred_history = true;
         agent
             .unreadable
@@ -395,7 +395,7 @@ mod tests {
     async fn opening_native_history_keeps_runless_messages_once_and_continues_the_same_native_thread()
      {
         let directory = tempfile::tempdir().unwrap();
-        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+        let agent = NativeAgent::new(ProviderKind::Codex);
         let native = SessionRef::new(ProviderKind::Codex, "external".into()).unwrap();
         let mut turns = Vec::new();
         for index in 0..2 {

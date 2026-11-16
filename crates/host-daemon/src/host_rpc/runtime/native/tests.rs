@@ -194,7 +194,7 @@ fn plans(service: &HostRpcService, target: &SessionRef) -> Vec<(String, String, 
 async fn weak_native_plan_ids_are_scoped_across_conversations_and_successive_turns_without_changing_raw_references()
  {
     let root = tempfile::tempdir().unwrap();
-    let mut agent = NativeAgent::new(ProviderKind::DeepSeek, root.path().join("native"));
+    let mut agent = NativeAgent::new(ProviderKind::DeepSeek);
     Arc::get_mut(&mut agent).unwrap().submit_gate = Some(tokio::sync::Semaphore::new(0));
     let service = HostRpcService::new([agent.backend()], root.path().join("projects.json"));
     let cwd = root.path().to_str().unwrap();

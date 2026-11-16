@@ -2,8 +2,7 @@ use super::*;
 use crate::host_rpc::routing::SessionId;
 use crate::providers::Discovery as _;
 use crate::providers::{
-    AccountCommand, AccountReply, AgentChange, AgentEvent, Identity, SessionPage, SessionSummary,
-    SubmissionState,
+    AccountCommand, AccountReply, AgentChange, AgentEvent, Identity, SessionPage, SubmissionState,
 };
 use crate::providers::{Agent, Backend, SessionListScope};
 use agent_protocol::protocol::{Call, Response};
@@ -23,7 +22,7 @@ use agent_protocol::{
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -171,7 +170,6 @@ impl Transcript {
 /// of its handoff/routing decisions.
 pub(in crate::host_rpc) struct NativeAgent {
     provider: ProviderKind,
-    directory: PathBuf,
     pub(in crate::host_rpc) records: Arc<Mutex<HashMap<String, ThreadResponse>>>,
     pub(in crate::host_rpc) idle_warning: Option<&'static str>,
     pub(in crate::host_rpc) deferred_history: bool,
@@ -212,11 +210,10 @@ fn unsupported() -> Failure {
 }
 
 impl NativeAgent {
-    pub(in crate::host_rpc) fn new(provider: ProviderKind, directory: PathBuf) -> Arc<Self> {
+    pub(in crate::host_rpc) fn new(provider: ProviderKind) -> Arc<Self> {
         let (events, receiver) = mpsc::channel(32);
         Arc::new(Self {
             provider,
-            directory,
             records: Default::default(),
             idle_warning: None,
             deferred_history: false,
@@ -255,7 +252,6 @@ impl NativeAgent {
         let (events, receiver) = mpsc::channel(32);
         Arc::new(Self {
             provider: self.provider,
-            directory: self.directory.clone(),
             records: self.records.clone(),
             idle_warning: self.idle_warning,
             deferred_history: self.deferred_history,
@@ -364,9 +360,6 @@ impl crate::providers::Configuration for NativeAgent {
 
 #[async_trait::async_trait]
 impl crate::providers::Discovery for NativeAgent {
-    fn storage_directory(&self) -> &Path {
-        &self.directory
-    }
     async fn list(
         &self,
         search: &str,
@@ -380,39 +373,32 @@ impl crate::providers::Discovery for NativeAgent {
                 format!("{} list failed", self.provider.key()),
             ));
         }
-        let mut data = self
-            .records
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|record| {
-                !matches!(scope, SessionListScope::Descendants(_))
-                    && record
-                        .thread
-                        .preview
-                        .as_deref()
-                        .unwrap_or("")
-                        .contains(search)
-            })
-            .map(|record| {
-                let mut thread = record.thread.clone();
-                thread.turns = None;
-                SessionSummary {
-                    thread,
-                    branch: None,
-                }
-            })
-            .collect::<Vec<_>>();
-        data.sort_by(|a, b| {
-            b.thread
-                .updated_at
-                .partial_cmp(&a.thread.updated_at)
+        let mut page = SessionPage {
+            data: self
+                .records
+                .lock()
                 .unwrap()
-        });
-        Ok(SessionPage {
-            data,
+                .values()
+                .filter(|record| {
+                    !matches!(scope, SessionListScope::Descendants(_))
+                        && record
+                            .thread
+                            .preview
+                            .as_deref()
+                            .unwrap_or("")
+                            .contains(search)
+                })
+                .map(|record| {
+                    let mut thread = record.thread.clone();
+                    thread.turns = None;
+                    thread.into()
+                })
+                .collect(),
             next_cursor: None,
-        })
+        };
+        page.data
+            .sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap());
+        Ok(page)
     }
     async fn open(&self, id: &str, limit: usize, _: bool) -> Result<ThreadResponse, Failure> {
         let _permit = self.open_gate.acquire().await.unwrap();

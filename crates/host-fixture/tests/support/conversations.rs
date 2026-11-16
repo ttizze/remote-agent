@@ -391,9 +391,18 @@ impl Catalog {
 /// The fixture archives provider data under its private source, while public
 /// assertions continue to address the original conversation UUID.
 pub fn native_source(root: &std::path::Path, id: &SessionRef, provider: ProviderKind) -> String {
-    let connection =
-        rusqlite::Connection::open(root.join(host_daemon::CONVERSATION_DATABASE_FILE)).unwrap();
-    connection.query_row("SELECT json_extract(p.payload_json,'$.nativeThreadRef.nativeId') FROM orchestration_v2_projection_threads t JOIN orchestration_v2_projection_provider_threads p ON p.provider_thread_id=t.active_provider_thread_id AND p.thread_id=t.thread_id WHERE t.thread_id=?1 AND p.provider_instance_id=?2 AND p.driver=?3",rusqlite::params![id.application_id(),provider.key(),provider.driver()],|row|row.get(0)).unwrap()
+    let source = host_daemon::canonical_test_support::active_native_source(
+        &root.join(host_daemon::CONVERSATION_DATABASE_FILE),
+        id,
+    )
+    .unwrap()
+    .expect("canonical active native source");
+    assert_eq!(
+        source.provider,
+        Some(provider),
+        "fixture expects the selected provider"
+    );
+    source.id
 }
 
 pub fn list_ids(

@@ -110,7 +110,7 @@ async fn native_requests_keep_their_real_scope_and_typed_answer_callback_without
     use crate::host_rpc::runtime::native_fixture::{NativeAgent, history, own};
     use agent_protocol::{execution::SessionStatus, models};
     let root = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, root.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "native-request-owner".into()).unwrap();
     let response = models::ThreadResponse {
         thread: models::Thread {
@@ -459,7 +459,7 @@ async fn a_native_question_keeps_its_password_field_hint_through_storage_and_cal
     use crate::host_rpc::runtime::native_fixture::{AnswerResource, NativeAgent, history, own};
     use agent_protocol::models;
     let root = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, root.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "native-question-owner".into()).unwrap();
     let response = models::ThreadResponse {
         thread: models::Thread {

@@ -22,7 +22,7 @@ async fn saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source(
 ) {
     use agent_protocol::orchestration as model;
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(provider, directory.path().join("native"));
+    let agent = NativeAgent::new(provider);
     let native = SessionRef::new(provider, "actual-native-source".into()).unwrap();
     let public = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
     let full_output = format!("先頭\n{}\n末尾", "日".repeat(5000));
@@ -257,7 +257,7 @@ async fn unreadable_message_history_is_atomic_and_can_be_retried_without_importi
  {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
-        let mut agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let mut agent = NativeAgent::new(ProviderKind::Codex);
         Arc::get_mut(&mut agent).unwrap().deferred_history = true;
         let native = SessionRef::new(ProviderKind::Codex, "external".into()).unwrap();
         let public = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
@@ -380,9 +380,9 @@ async fn unreadable_native_messages_block_handoff_and_switch_until_atomic_import
             handoff,
         };
         let directory = tempfile::tempdir().unwrap();
-        let mut codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+        let mut codex = NativeAgent::new(ProviderKind::Codex);
         Arc::get_mut(&mut codex).unwrap().deferred_history = true;
-        let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+        let claude = NativeAgent::new(ProviderKind::Claude);
         let native = SessionRef::new(ProviderKind::Codex, "external".into()).unwrap();
         let answer = "日".repeat(4_205);
         codex.records.lock().unwrap().insert(

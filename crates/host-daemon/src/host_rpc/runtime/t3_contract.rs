@@ -147,8 +147,8 @@ async fn shell(service: &HostRpcService) -> serde_json::Value {
 #[tokio::test]
 async fn native_source_queries_use_canonical_ownership_across_provider_switches() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -251,7 +251,7 @@ async fn native_source_queries_use_canonical_ownership_across_provider_switches(
 #[tokio::test]
 async fn created_and_renamed_threads_are_shared_as_t3_shells() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let session = create(&service, directory.path().to_str().unwrap(), None).await;
     let connection = service.open_session();
@@ -287,8 +287,8 @@ async fn created_and_renamed_threads_are_shared_as_t3_shells() {
 #[tokio::test]
 async fn switching_providers_carries_prior_history_without_duplicate_input() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -334,7 +334,7 @@ async fn switching_providers_carries_prior_history_without_duplicate_input() {
 #[tokio::test]
 async fn a_fork_keeps_the_selected_prefix_and_independent_native_resources() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let source = create(
         &service,
@@ -428,7 +428,7 @@ async fn an_empty_launch_honors_the_selected_existing_worktree_without_sending_i
     let directory = tempfile::tempdir().unwrap();
     let selected = directory.path().join("selected");
     std::fs::create_dir(&selected).unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let session = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
@@ -484,7 +484,7 @@ async fn an_empty_launch_honors_the_selected_existing_worktree_without_sending_i
 #[tokio::test]
 async fn obsolete_storage_is_absent(#[case] table: &str) {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     create(&service, directory.path().to_str().unwrap(), None).await;
     let connection =
@@ -563,7 +563,7 @@ async fn observe(
 #[tokio::test]
 async fn provider_stop_settles_the_owned_run_and_preserves_the_conversation() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, _, _) = running(&service, &agent, directory.path().to_str().unwrap()).await;
     Runtime::observe(
@@ -602,7 +602,7 @@ async fn a_late_creation_reply_cannot_publish_ready_after_provider_process_loss(
 ) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let directory = tempfile::tempdir().unwrap();
-        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+        let agent = NativeAgent::new(ProviderKind::Codex);
         let held = agent.create_response_gate.acquire().await.unwrap();
         let service =
             HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
@@ -711,7 +711,7 @@ async fn provider_stop_saves_live_command_output_without_reopening_a_completed_r
         items::{Item, ItemBody},
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -906,7 +906,7 @@ async fn provider_stop_saves_live_command_output_without_reopening_a_completed_r
 #[tokio::test]
 async fn update_restart_continues_the_same_conversation_once_without_repeating_user_input() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let projects = directory.path().join("projects.json");
     let service = HostRpcService::new([agent.backend()], projects.clone());
     let (session, native, _) = running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -970,7 +970,7 @@ async fn update_restart_continues_the_same_conversation_once_without_repeating_u
 #[tokio::test]
 async fn a_native_child_has_canonical_subagent_lineage_and_an_execution_node() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -1032,7 +1032,7 @@ async fn native_children_with_the_parent_execution_token_keep_their_own_turns_an
         models::Turn,
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -1326,7 +1326,7 @@ async fn generated_images_keep_t3_tool_results_and_markdown_embeds() {
     let directory = tempfile::tempdir().unwrap();
     let image = directory.path().join("generated image.png");
     std::fs::write(&image,base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a+X0AAAAASUVORK5CYII=").unwrap()).unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -1469,7 +1469,7 @@ async fn generated_image_answers_match_the_pinned_markdown_cases(#[case] case: u
     .unwrap();
     let fixture = &fixtures["cases"][case];
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -1546,7 +1546,7 @@ async fn late_generated_images_finish_the_same_answer_after_foreground_completio
     #[values(false, true)] existing_answer: bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -1642,7 +1642,7 @@ async fn late_generated_images_finish_the_same_answer_after_foreground_completio
 async fn late_images_keep_their_original_turn_while_a_continued_turn_is_running() {
     use agent_protocol::execution::{ItemStatus, TurnStatus};
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -1739,7 +1739,7 @@ async fn generated_image_bytes_are_bounded_files_instead_of_database_payloads(
         data
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -1792,7 +1792,7 @@ async fn generated_image_bytes_are_bounded_files_instead_of_database_payloads(
 #[tokio::test]
 async fn explicit_project_import_is_visible_as_a_canonical_thread_without_inventing_a_run() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "catalog-native".into()).unwrap();
     agent.records.lock().unwrap().insert(
         native.id.clone(),
@@ -1850,7 +1850,7 @@ async fn explicit_project_import_is_visible_as_a_canonical_thread_without_invent
 #[tokio::test]
 async fn codex_rewind_continues_from_the_retained_head_in_the_same_native_thread() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let session = create(
         &service,
@@ -1961,7 +1961,7 @@ async fn an_empty_worktree_launch_prepares_a_checkout_without_creating_a_run() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let connection = service.open_session();
     let _: String = call(
@@ -2026,7 +2026,7 @@ async fn assert_background_late_result(replace_source: bool) {
         items::{Item, ItemBody},
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (session, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -2178,7 +2178,7 @@ async fn assert_background_late_result(replace_source: bool) {
 #[tokio::test]
 async fn importing_a_discovered_project_lists_its_existing_native_conversations() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "project-native".into()).unwrap();
     agent.records.lock().unwrap().insert(
         native.id.clone(),
@@ -2229,7 +2229,7 @@ async fn importing_a_discovered_project_lists_its_existing_native_conversations(
 #[tokio::test]
 async fn a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_restart() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let projects = directory.path().join("projects.json");
     let service = HostRpcService::new([agent.backend()], projects.clone());
     let source = create(
@@ -2389,8 +2389,8 @@ async fn a_fork_retries_its_unconsumed_source_after_a_failed_start_and_host_rest
 #[tokio::test]
 async fn queued_fork_input_preserves_context_after_a_failed_start(#[case] provider: ProviderKind) {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let projects = directory.path().join("projects.json");
     let service = HostRpcService::new([codex.backend(), claude.backend()], projects.clone());
     let source = create(
@@ -2598,9 +2598,9 @@ async fn send(service: &HostRpcService, session: &SessionRef, provider: Provider
 #[tokio::test]
 async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[case] fault: &str) {
     let directory = tempfile::tempdir().unwrap();
-    let mut codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
+    let mut codex = NativeAgent::new(ProviderKind::Codex);
     Arc::get_mut(&mut codex).unwrap().metadata_only_state = fault == "metadata_only";
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -2791,8 +2791,8 @@ async fn stopping_during_provider_release_preserves_the_actual_unload_result_and
  {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let root = tempfile::tempdir().unwrap();
-        let codex = NativeAgent::new(ProviderKind::Codex, root.path().join("codex"));
-        let claude = NativeAgent::new(ProviderKind::Claude, root.path().join("claude"));
+        let codex = NativeAgent::new(ProviderKind::Codex);
+        let claude = NativeAgent::new(ProviderKind::Claude);
         let service = HostRpcService::new(
             [codex.backend(), claude.backend()],
             root.path().join("projects.json"),
@@ -2906,8 +2906,8 @@ async fn provider_release_checks_real_background_work_and_preserves_other_conver
 ) {
     use agent_protocol::{execution, models};
     let root = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, root.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, root.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         root.path().join("projects.json"),
@@ -3113,8 +3113,8 @@ async fn provider_release_checks_real_background_work_and_preserves_other_conver
 #[tokio::test]
 async fn portable_forks_include_only_the_selected_source_prefix() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3187,7 +3187,7 @@ async fn portable_forks_include_only_the_selected_source_prefix() {
 #[tokio::test]
 async fn accepted_attempts_record_the_native_identity_used_for_context_coverage() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let session = create(
         &service,
@@ -3209,7 +3209,7 @@ async fn accepted_attempts_record_the_native_identity_used_for_context_coverage(
 #[tokio::test]
 async fn attached_provider_sessions_publish_the_native_model_switch_capability() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let session = create(
         &service,
@@ -3229,8 +3229,8 @@ async fn attached_provider_sessions_publish_the_native_model_switch_capability()
 #[tokio::test]
 async fn switching_back_replaces_a_full_native_context_before_appending_history() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3291,8 +3291,8 @@ async fn switching_back_replaces_a_full_native_context_before_appending_history(
 #[tokio::test]
 async fn provider_handoff_is_committed_before_the_dispatch_acknowledgement() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3345,8 +3345,8 @@ async fn provider_handoff_is_committed_before_the_dispatch_acknowledgement() {
 #[tokio::test]
 async fn provider_handoff_uses_the_message_actor_for_agent_created_input() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3416,8 +3416,8 @@ async fn provider_handoff_uses_the_message_actor_for_agent_created_input() {
 #[tokio::test]
 async fn a_provider_thread_without_a_native_reference_receives_full_history() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3474,8 +3474,8 @@ async fn a_provider_thread_without_a_native_reference_receives_full_history() {
 #[tokio::test]
 async fn native_fork_provenance_survives_provider_switches() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3566,8 +3566,8 @@ async fn runless_forks_continue_only_the_selected_native_or_imported_prefix(
 ) {
     use agent_protocol::{execution, items, models};
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3757,8 +3757,8 @@ async fn runless_forks_continue_only_the_selected_native_or_imported_prefix(
 #[tokio::test]
 async fn first_injection_recovery_keeps_its_provider_without_inventing_a_source_model() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3820,8 +3820,8 @@ async fn first_injection_recovery_keeps_its_provider_without_inventing_a_source_
 #[tokio::test]
 async fn recovery_context_precedes_the_run_input_and_uses_a_stable_run_identity() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -3884,7 +3884,7 @@ async fn recovery_context_precedes_the_run_input_and_uses_a_stable_run_identity(
 async fn context_history_reads_canonical_full_bodies_with_exact_unicode_continuations() {
     use agent_protocol::handoff;
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let text = "日".repeat(4205);
     let session = create(&service, directory.path().to_str().unwrap(), Some(&text)).await;
@@ -3966,7 +3966,7 @@ async fn context_history_reads_canonical_full_bodies_with_exact_unicode_continua
 #[tokio::test]
 async fn context_history_inherits_only_the_selected_fork_prefix_with_source_identity() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let source = create(
         &service,
@@ -4025,7 +4025,7 @@ async fn context_history_inherits_only_the_selected_fork_prefix_with_source_iden
 #[tokio::test]
 async fn context_history_finds_an_omitted_item_by_its_canonical_id() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let session = create(
         &service,
@@ -4152,7 +4152,7 @@ async fn retry_failed_start(service: &HostRpcService, session: &SessionRef, ordi
 async fn later_input_carries_unsent_failed_requests_once_without_resending_their_inputs() {
     let directory = tempfile::tempdir().unwrap();
     let projects = directory.path().join("projects.json");
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     agent.create_gate.close();
     let service = HostRpcService::new([agent.backend()], projects.clone());
     let session = create(
@@ -4180,7 +4180,7 @@ async fn later_input_carries_unsent_failed_requests_once_without_resending_their
     );
     assert!(agent.inputs.lock().unwrap().is_empty());
     drop(service);
-    let resumed = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let resumed = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([resumed.backend()], projects);
     send(
         &service,
@@ -4265,7 +4265,7 @@ async fn later_input_carries_unsent_failed_requests_once_without_resending_their
 #[tokio::test]
 async fn a_spent_native_fork_uses_fresh_portable_context_without_an_extra_handoff_card() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let source = create(
         &service,
@@ -4388,7 +4388,7 @@ fn admit_before_worker(
 #[tokio::test]
 async fn a_source_busy_after_admission_keeps_its_native_plan_until_fresh_allocation_succeeds() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let source = create(
         &service,
@@ -4487,8 +4487,8 @@ async fn a_source_busy_after_admission_keeps_its_native_plan_until_fresh_allocat
 #[tokio::test]
 async fn failed_recovery_allocation_keeps_the_existing_native_reference_and_uncommitted_recovery() {
     let directory = tempfile::tempdir().unwrap();
-    let codex = NativeAgent::new(ProviderKind::Codex, directory.path().join("codex"));
-    let claude = NativeAgent::new(ProviderKind::Claude, directory.path().join("claude"));
+    let codex = NativeAgent::new(ProviderKind::Codex);
+    let claude = NativeAgent::new(ProviderKind::Claude);
     let service = HostRpcService::new(
         [codex.backend(), claude.backend()],
         directory.path().join("projects.json"),
@@ -4562,7 +4562,7 @@ mod codex_rollback {
 #[tokio::test]
 async fn a_native_rollback_refusal_is_public_and_does_not_cut_visible_or_native_history() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let session = create(&service, directory.path().to_str().unwrap(), Some("kept")).await;
     settled(&service, &session, 1).await;
@@ -4642,7 +4642,7 @@ async fn a_native_rollback_refusal_is_public_and_does_not_cut_visible_or_native_
 #[tokio::test]
 async fn claude_native_cursor_updates_keep_controls_callback_ownership_and_one_delivery() {
     let directory = tempfile::tempdir().unwrap();
-    let mut agent = NativeAgent::new(ProviderKind::Claude, directory.path().join("native"));
+    let mut agent = NativeAgent::new(ProviderKind::Claude);
     Arc::get_mut(&mut agent).unwrap().submit_gate = Some(tokio::sync::Semaphore::new(0));
     let _release = scopeguard::guard(agent.clone(), |agent| {
         agent.submit_gate.as_ref().unwrap().add_permits(1)

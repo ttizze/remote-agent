@@ -15,7 +15,7 @@ async fn explicit_project_import_reads_an_unowned_native_transcript_once(
     #[case] provider: ProviderKind,
 ) {
     let root = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(provider, root.path().join("native"));
+    let agent = NativeAgent::new(provider);
     let native = SessionRef::new(provider, "external".into()).unwrap();
     agent.records.lock().unwrap().insert(
         native.id.clone(),
@@ -124,7 +124,7 @@ async fn native_work_without_an_app_run_blocks_delivery_until_the_selected_sourc
         session::SessionChange,
     };
     let root = tempfile::tempdir().unwrap();
-    let mut agent = NativeAgent::new(ProviderKind::Codex, root.path().join("native"));
+    let mut agent = NativeAgent::new(ProviderKind::Codex);
     Arc::get_mut(&mut agent).unwrap().submit_gate = Some(tokio::sync::Semaphore::new(0));
     let native = SessionRef::new(ProviderKind::Codex, "external-busy".into()).unwrap();
     agent.records.lock().unwrap().insert(
@@ -347,7 +347,7 @@ async fn an_unknown_native_activity_can_resume_on_explicit_input_without_replayi
         operations::Input,
     };
     let root = tempfile::tempdir().unwrap();
-    let mut agent = NativeAgent::new(ProviderKind::Codex, root.path().join("native"));
+    let mut agent = NativeAgent::new(ProviderKind::Codex);
     Arc::get_mut(&mut agent).unwrap().submit_gate = Some(tokio::sync::Semaphore::new(0));
     let native = SessionRef::new(ProviderKind::Codex, "unloaded-history".into()).unwrap();
     agent.records.lock().unwrap().insert(
@@ -449,7 +449,7 @@ async fn external_native_turns_commit_real_provider_turns_without_application_ru
     #[case] terminal_body: bool,
 ) {
     let root = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, root.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "external-observer".into()).unwrap();
     agent.records.lock().unwrap().insert(
         native.id.clone(),
@@ -687,7 +687,7 @@ async fn native_command_output_streams_and_settles_without_a_final_item_body() {
         session::{SessionChange, TextField},
     };
     let root = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, root.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "live-command".into()).unwrap();
     let response = models::ThreadResponse {
         thread: models::Thread {
@@ -829,7 +829,7 @@ async fn native_command_output_streams_and_settles_without_a_final_item_body() {
 async fn project_import_cannot_replace_observed_native_work_without_an_application_run() {
     use crate::host_rpc::runtime::native_fixture::own;
     let root = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, root.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "observed-native-owner".into()).unwrap();
     let response = models::ThreadResponse {
         thread: models::Thread {
@@ -902,7 +902,7 @@ async fn project_import_preserves_a_pending_session_request_before_history_is_op
     use crate::host_rpc::runtime::native_fixture::{AnswerResource, own};
     use agent_protocol::requests::{Request, RequestBody, RequestTarget};
     let root = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, root.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let native = SessionRef::new(ProviderKind::Codex, "session-only-owner".into()).unwrap();
     let response = models::ThreadResponse {
         thread: models::Thread {

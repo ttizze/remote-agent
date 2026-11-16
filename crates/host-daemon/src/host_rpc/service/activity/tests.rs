@@ -75,7 +75,7 @@ async fn activity_uses_only_normal_conversations_even_with_saved_subagent_comple
         session::SessionChange,
     };
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (root, native, execution) =
         running(&service, &agent, directory.path().to_str().unwrap()).await;
@@ -160,7 +160,7 @@ async fn reading_on_either_device_broadcasts_to_both_and_reconnect_reads_the_sha
     use crate::host_rpc::runtime::native_fixture::{NativeAgent, call};
     use agent_protocol::conversation::{Command, InputContent, records};
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let phone = service.open_session();
     let desktop = service.open_session();
@@ -315,7 +315,7 @@ async fn live_activity_tracks_committed_work_after_disconnect_and_revocation_pre
     };
     let directory = tempfile::tempdir().unwrap();
     use crate::host_rpc::runtime::{Runtime, native_fixture::NativeAgent, t3_contract::running};
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let apns = crate::apns::Apns::testing();
     service.inner.router.set_apns(Some(apns.clone()));

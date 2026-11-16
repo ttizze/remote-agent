@@ -108,7 +108,7 @@ fn an_update_restart_marker_is_consumed_once_and_expires_after_one_minute() {
 async fn only_the_actual_continuation_provider_turn_confirms_restart_delivery() {
     use crate::host_rpc::runtime::{native_fixture::NativeAgent, t3_contract::running};
     let directory = tempfile::tempdir().unwrap();
-    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let agent = NativeAgent::new(ProviderKind::Codex);
     let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
     let (target, _, _) = running(&service, &agent, directory.path().to_str().unwrap()).await;
     let mut state = service
