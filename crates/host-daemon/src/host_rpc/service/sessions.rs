@@ -40,9 +40,8 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("invalid_session", error))?,
         )?;
         let deadline = tokio::time::Instant::now() + SESSION_LIST_TIMEOUT;
-        let mut threads = session_pages(
+        let mut threads = native_pages(
             agent.as_ref(),
-            "",
             SessionListScope::Descendants(&native.id),
             100,
             100,
@@ -58,7 +57,7 @@ impl HostRpcService {
                 .inner
                 .conversation
                 .storage
-                .native_summary(summary.thread)
+                .native_summary(summary)
                 .map_err(super::super::runtime::storage_failure)?
             else {
                 continue;

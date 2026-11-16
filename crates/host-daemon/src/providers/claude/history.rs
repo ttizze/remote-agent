@@ -164,7 +164,7 @@ pub(super) fn list_page(
                 {
                     continue;
                 }
-                Ok(Summary { thread, branch, .. }) => super::SessionSummary { thread, branch },
+                Ok(Summary { thread, .. }) => thread,
                 Err(error) => {
                     let mut thread = Thread {
                         id: Some(SessionRef {
@@ -181,36 +181,27 @@ pub(super) fn list_page(
                             agent_protocol::session::HistoryReadKind::Unavailable,
                             vec![format!("{error:#}")],
                         ));
-                    super::SessionSummary {
-                        thread,
-                        branch: None,
-                    }
+                    thread
                 }
             }
         } else {
-            super::SessionSummary {
-                thread: fallback.unwrap(),
-                branch: None,
-            }
+            fallback.unwrap()
         };
         if summary
-            .thread
             .id
             .as_ref()
             .is_some_and(|id| active.contains(&id.id))
         {
-            summary.thread.status = SessionStatus::Running;
+            summary.status = SessionStatus::Running;
         }
         if search.is_empty()
             || summary
-                .thread
                 .name
                 .as_deref()
                 .unwrap_or_default()
                 .to_lowercase()
                 .contains(&search)
             || summary
-                .thread
                 .preview
                 .as_deref()
                 .unwrap_or_default()
@@ -293,7 +284,6 @@ struct SummaryMetadata<'a> {
     #[serde(rename = "session_id")]
     alternate_session_id: Value,
     cwd: Value,
-    git_branch: Value,
     custom_title: Value,
     ai_title: Value,
     is_meta: Value,
@@ -306,7 +296,6 @@ struct SummaryMetadata<'a> {
 
 pub(super) struct Summary {
     pub thread: Thread,
-    pub branch: Option<String>,
     /// SDK runs can use a custom entrypoint; their first input still has SDK provenance.
     /// Host ownership distinguishes these from the person's Bex conversations.
     pub automated: bool,
@@ -352,7 +341,6 @@ pub(super) fn summary(path: &Path) -> Result<Summary> {
         status: agent_protocol::models::SessionStatus::Unknown,
         ..Default::default()
     };
-    let mut branch = None;
     let mut entrypoint = None;
     let mut sdk_input = None;
     for line in head.split(|byte| *byte == b'\n').chain(
@@ -378,9 +366,6 @@ pub(super) fn summary(path: &Path) -> Result<Summary> {
         if sdk_input.is_none() && value.kind == "user" {
             sdk_input = Some(value.prompt_source.as_str() == Some("sdk"));
         }
-        if let Some(saved_branch) = value.git_branch.as_str() {
-            branch = Some(saved_branch.to_owned());
-        }
         if let Some(cwd) = value.cwd.as_str() {
             thread.cwd = Some(cwd.into());
         }
@@ -402,7 +387,6 @@ pub(super) fn summary(path: &Path) -> Result<Summary> {
     }
     Ok(Summary {
         thread,
-        branch,
         automated: sdk_input == Some(true)
             || matches!(entrypoint.as_deref(), Some("sdk-cli" | "sdk-ts" | "sdk-py")),
     })
@@ -1168,7 +1152,7 @@ mod tests {
             first
                 .data
                 .iter()
-                .map(|t| t.thread.updated_at.unwrap() as u64)
+                .map(|t| t.updated_at.unwrap() as u64)
                 .collect::<Vec<_>>(),
             [8, 7, 6]
         );
@@ -1186,7 +1170,7 @@ mod tests {
             second
                 .data
                 .iter()
-                .map(|t| t.thread.updated_at.unwrap() as u64)
+                .map(|t| t.updated_at.unwrap() as u64)
                 .collect::<Vec<_>>(),
             [5, 4, 3]
         );
@@ -1270,7 +1254,7 @@ mod tests {
                     .unwrap()
                     .data
                     .into_iter()
-                    .map(|summary| summary.thread.preview.unwrap())
+                    .map(|summary| summary.preview.unwrap())
                     .collect();
             names.sort();
             names
@@ -1331,7 +1315,7 @@ mod tests {
                 .unwrap()
                 .data
                 .into_iter()
-                .map(|summary| summary.thread.preview.unwrap())
+                .map(|summary| summary.preview.unwrap())
                 .collect();
             names.sort();
             names
@@ -1497,7 +1481,6 @@ mod tests {
         let (_root, path) = fixture(&source);
         let summary = summary(&path).unwrap();
         assert_eq!(summary.thread.cwd.as_deref(), Some("/checkout"));
-        assert_eq!(summary.branch.as_deref(), Some("agent/task"));
         assert_eq!(summary.thread.preview.as_deref(), Some("question"));
         assert_eq!(fs::read_to_string(path).unwrap(), source);
     }
@@ -1532,7 +1515,6 @@ mod tests {
             let (_root, path) = fixture(&source);
             let summary = summary(&path).unwrap();
             assert_eq!(summary.thread.cwd.as_deref(), Some("/latest"));
-            assert_eq!(summary.branch.as_deref(), Some("feature"));
             assert_eq!(summary.thread.name.as_deref(), Some("Saved title"));
             assert_eq!(summary.thread.preview.as_deref(), Some("question"));
             assert_eq!(fs::read_to_string(path).unwrap(), source);

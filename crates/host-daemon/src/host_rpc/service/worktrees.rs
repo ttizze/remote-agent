@@ -216,21 +216,11 @@ impl HostRpcService {
         let mut warnings = std::collections::BTreeMap::new();
         let mut threads = Vec::new();
         for (provider, agent) in self.inner.providers.all() {
-            let pages = session_pages(
-                agent.as_ref(),
-                "",
-                SessionListScope::All,
-                100,
-                100,
-                None,
-                None,
-            );
+            let pages = native_pages(agent.as_ref(), SessionListScope::All, 100, 100, None, None);
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
                 match result {
-                    Ok(page) => {
-                        threads.extend(page.into_iter().map(|summary| (summary.thread, true)))
-                    }
+                    Ok(page) => threads.extend(page.into_iter().map(|summary| (summary, true))),
                     Err(error) if error.code == "invalid_session_list" => return Err(error),
                     Err(error) => {
                         warnings.insert(provider, error.to_string());

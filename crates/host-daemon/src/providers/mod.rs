@@ -184,35 +184,8 @@ impl From<ThreadResponse> for ForkResult {
     }
 }
 
-pub(crate) struct SessionSummary {
-    pub thread: Thread,
-    pub branch: Option<String>,
-}
-
-// Compile-time adapters for migrating the in-repository discovery consumers.
-// Removed together with SessionSummary after those callers use plain threads.
-impl From<Thread> for SessionSummary {
-    fn from(thread: Thread) -> Self {
-        Self {
-            thread,
-            branch: None,
-        }
-    }
-}
-impl From<SessionSummary> for Thread {
-    fn from(summary: SessionSummary) -> Self {
-        summary.thread
-    }
-}
-impl std::ops::Deref for SessionSummary {
-    type Target = Thread;
-    fn deref(&self) -> &Thread {
-        &self.thread
-    }
-}
-
 pub(crate) struct SessionPage {
-    pub data: Vec<SessionSummary>,
+    pub data: Vec<Thread>,
     pub next_cursor: Option<String>,
 }
 
@@ -221,8 +194,6 @@ pub(crate) enum SessionListScope<'a> {
     /// Tasks a person opened, including these Host-owned native sessions.
     /// Unowned SDK and noninteractive CLI runs belong to other agents or scripts.
     Roots(&'a [SessionRef]),
-    /// Tasks and their subagents, so a subagent match can surface its task.
-    WithSubagents(&'a [SessionRef]),
     /// Every native session, including agent-started runs whose activity
     /// still occupies a workspace.
     All,
@@ -239,15 +210,14 @@ pub(crate) struct SubmissionState {
 
 /// Preserve healthy pages on a later failure and reject repeated cursors.
 /// Filtered lists can widen follow-up reads without enlarging the first page.
-pub(crate) fn session_pages<'a>(
+pub(crate) fn native_pages<'a>(
     agent: &'a dyn Discovery,
-    search: &'a str,
     scope: SessionListScope<'a>,
     first_limit: u32,
     later_limit: u32,
     deadline: Option<tokio::time::Instant>,
     first_page: Option<Result<SessionPage, Failure>>,
-) -> impl Stream<Item = Result<Vec<SessionSummary>, Failure>> + 'a {
+) -> impl Stream<Item = Result<Vec<Thread>, Failure>> + 'a {
     futures_util::stream::try_unfold(
         Some((None, std::collections::HashSet::new(), first_page)),
         move |state| async move {
@@ -262,7 +232,7 @@ pub(crate) fn session_pages<'a>(
                 } else {
                     later_limit
                 };
-                let read = crate::providers::Discovery::list(agent, search, cursor, scope, limit);
+                let read = crate::providers::Discovery::catalog_page(agent, cursor, scope, limit);
                 if let Some(deadline) = deadline {
                     read_session_page(read, deadline).await?
                 } else {
@@ -285,6 +255,20 @@ pub(crate) fn session_pages<'a>(
         },
     )
     .fuse()
+}
+
+// Temporary compile adapter for the locked import consumer; removed after it
+// accepts the native catalog API without a search argument.
+pub(crate) fn session_pages<'a>(
+    agent: &'a dyn Discovery,
+    _: &'a str,
+    scope: SessionListScope<'a>,
+    first_limit: u32,
+    later_limit: u32,
+    deadline: Option<tokio::time::Instant>,
+    first_page: Option<Result<SessionPage, Failure>>,
+) -> impl Stream<Item = Result<Vec<Thread>, Failure>> + 'a {
+    native_pages(agent, scope, first_limit, later_limit, deadline, first_page)
 }
 
 pub(crate) async fn read_session_page(
@@ -400,18 +384,23 @@ pub(crate) trait Configuration: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Discovery: Send + Sync {
-    // No production consumer reads native homes as conversation authority.
-    // Allow fixture implementations to drop the obsolete method before removal.
-    fn storage_directory(&self) -> &Path {
-        unreachable!("native homes do not own canonical conversation storage")
-    }
-    async fn list(
+    async fn catalog_page(
         &self,
-        search: &str,
         cursor: Option<String>,
         scope: SessionListScope<'_>,
         limit: u32,
-    ) -> Result<SessionPage, Failure>;
+    ) -> Result<SessionPage, Failure> {
+        self.list("", cursor, scope, limit).await
+    }
+    async fn list(
+        &self,
+        _search: &str,
+        _cursor: Option<String>,
+        _scope: SessionListScope<'_>,
+        _limit: u32,
+    ) -> Result<SessionPage, Failure> {
+        unreachable!("native catalog implementations migrate to catalog_page")
+    }
     async fn open(
         &self,
         id: &str,
@@ -620,9 +609,8 @@ mod tests {
         let (_root, agent, _) = two_session_history().await;
         for first_limit in [2, 1] {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-            let mut titles = session_pages(
+            let mut titles = native_pages(
                 &agent,
-                "",
                 SessionListScope::All,
                 first_limit,
                 2,
@@ -702,9 +690,8 @@ mod tests {
             } else {
                 tokio::time::Instant::now() + Duration::from_secs(1)
             };
-            let pages = session_pages(
+            let pages = native_pages(
                 &agent,
-                "",
                 SessionListScope::All,
                 first_limit,
                 2,
@@ -717,14 +704,13 @@ mod tests {
             let mut actual: Vec<_> = pages
                 .into_iter()
                 .flatten()
-                .map(|summary| summary.thread.id.unwrap().id)
+                .map(|summary| summary.id.unwrap().id)
                 .collect();
             actual.sort();
             assert_eq!(actual, expected);
         }
-        let mut failed = session_pages(
+        let mut failed = native_pages(
             &agent,
-            "",
             SessionListScope::All,
             2,
             2,

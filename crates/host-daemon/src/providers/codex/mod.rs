@@ -50,7 +50,7 @@ struct ThreadListParams<'a> {
 
 use crate::providers::{
     Agent, AgentChange, AgentEvent, AnswerWrite, Identity, SessionListScope, SessionPage,
-    SessionSummary, SubmissionState, emit,
+    SubmissionState, emit,
 };
 use agent_transport::peer::PeerEvent;
 use futures_util::FutureExt;
@@ -84,7 +84,6 @@ pub struct Codex {
     accounts: Arc<tokio::sync::Mutex<Option<crate::providers::codex::accounts::Accounts>>>,
     list_access: tokio::sync::Semaphore,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
-    directory: PathBuf,
     instance: uuid::Uuid,
     process: Result<Arc<CodexAppServer>, String>,
     stopped: tokio_util::sync::CancellationToken,
@@ -126,16 +125,6 @@ impl Codex {
     }
 
     pub fn new(process: Result<Arc<CodexAppServer>, String>) -> Self {
-        let directory = process
-            .as_ref()
-            .ok()
-            .map(|server| server.initialize_response().codex_home.clone())
-            .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-            .unwrap_or_else(|| {
-                directories::BaseDirs::new()
-                    .map(|dirs| dirs.home_dir().join(".codex"))
-                    .unwrap_or_default()
-            });
         let scopes = Arc::new(super::scopes::Scopes::default());
         let (processed, progress) = tokio::sync::watch::channel(0);
         let stopped = tokio_util::sync::CancellationToken::new();
@@ -144,7 +133,6 @@ impl Codex {
             accounts: Arc::default(),
             list_access: tokio::sync::Semaphore::new(4),
             restoration_error: tokio::sync::watch::channel(None).0,
-            directory,
             instance: uuid::Uuid::new_v4(),
             process,
             stopped: stopped.clone(),
@@ -819,9 +807,6 @@ impl crate::providers::Configuration for Codex {
 
 #[async_trait::async_trait]
 impl crate::providers::Discovery for Codex {
-    fn storage_directory(&self) -> &std::path::Path {
-        &self.directory
-    }
     async fn list(
         &self,
         search: &str,
@@ -838,16 +823,6 @@ impl crate::providers::Discovery for Codex {
         let (source_kinds, ancestor_thread_id): (&'static [&'static str], Option<&str>) =
             match scope {
                 SessionListScope::Roots(_) => (&["cli", "vscode", "appServer", "unknown"], None),
-                SessionListScope::WithSubagents(_) => (
-                    &[
-                        "cli",
-                        "vscode",
-                        "appServer",
-                        "unknown",
-                        "subAgentThreadSpawn",
-                    ],
-                    None,
-                ),
                 SessionListScope::All => (
                     &[
                         "cli",
@@ -880,10 +855,7 @@ impl crate::providers::Discovery for Codex {
             data: page
                 .data
                 .into_iter()
-                .map(|value| {
-                    let branch = value["gitInfo"]["branch"].as_str().map(str::to_owned);
-                    native::parse_thread(value).map(|thread| SessionSummary { thread, branch })
-                })
+                .map(native::parse_thread)
                 .collect::<Result<_, _>>()?,
             next_cursor: page.next_cursor,
         })
@@ -1921,10 +1893,6 @@ rl.on('line', line => {
         for (scope, expected) in [
             (super::SessionListScope::Roots(&[]), vec!["task"]),
             (
-                super::SessionListScope::WithSubagents(&[]),
-                vec!["task", "helper"],
-            ),
-            (
                 super::SessionListScope::All,
                 vec!["task", "review", "helper"],
             ),
@@ -1935,7 +1903,7 @@ rl.on('line', line => {
             let ids: Vec<_> = page
                 .data
                 .iter()
-                .map(|summary| summary.thread.id.as_ref().unwrap().id.as_str())
+                .map(|summary| summary.id.as_ref().unwrap().id.as_str())
                 .collect();
             assert_eq!(ids, expected);
         }

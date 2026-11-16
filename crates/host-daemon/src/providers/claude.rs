@@ -48,7 +48,7 @@ use uuid::Uuid;
 
 use crate::providers::{
     Agent, AgentChange, AgentEvent, AnswerWrite, Failure, SessionListScope, SessionPage,
-    SessionSummary, SubmissionState, emit,
+    SubmissionState, emit,
 };
 use futures_util::FutureExt;
 use process::Event as SdkEvent;
@@ -2424,9 +2424,6 @@ impl crate::providers::Configuration for Claude {
 
 #[async_trait::async_trait]
 impl crate::providers::Discovery for Claude {
-    fn storage_directory(&self) -> &Path {
-        &self.native_home
-    }
     async fn list(
         &self,
         search: &str,
@@ -2441,7 +2438,7 @@ impl crate::providers::Discovery for Claude {
                     next_cursor: None,
                 });
             }
-            SessionListScope::Roots(owned) | SessionListScope::WithSubagents(owned) => Some(
+            SessionListScope::Roots(owned) => Some(
                 owned
                     .iter()
                     .filter(|id| id.provider == Some(ProviderKind::Claude))
@@ -2835,8 +2832,8 @@ pub(crate) mod execution_tests {
             1,
             "only a running task without a native transcript belongs in recent titles"
         );
-        assert_eq!(recent.data[0].thread.id.as_ref().unwrap().id, expected[0]);
-        assert_eq!(recent.data[0].thread.status, SessionStatus::Running);
+        assert_eq!(recent.data[0].id.as_ref().unwrap().id, expected[0]);
+        assert_eq!(recent.data[0].status, SessionStatus::Running);
     }
 
     #[tokio::test]
@@ -2871,10 +2868,6 @@ pub(crate) mod execution_tests {
             (SessionListScope::Roots(&[]), vec!["cli"]),
             (SessionListScope::Roots(&owned), vec!["cli", "sdk-ts"]),
             (
-                SessionListScope::WithSubagents(&owned),
-                vec!["cli", "sdk-ts"],
-            ),
-            (
                 SessionListScope::All,
                 vec!["cli", "sdk-cli", "sdk-py", "sdk-ts"],
             ),
@@ -2885,7 +2878,7 @@ pub(crate) mod execution_tests {
                     .unwrap()
                     .data
                     .into_iter()
-                    .map(|summary| summary.thread.preview.unwrap())
+                    .map(|summary| summary.preview.unwrap())
                     .collect();
             listed.sort();
             assert_eq!(listed, expected);

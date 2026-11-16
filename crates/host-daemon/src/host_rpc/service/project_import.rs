@@ -28,16 +28,13 @@ impl HostRpcService {
                     matches!(provider, ProviderKind::Codex | ProviderKind::Claude)
                 })
                 .map(|(provider, agent)| async move {
-                    let pages =
-                        session_pages(agent.as_ref(), "", scope, 100, 100, Some(deadline), None);
+                    let pages = native_pages(agent.as_ref(), scope, 100, 100, Some(deadline), None);
                     futures_util::pin_mut!(pages);
                     let mut threads = Vec::new();
                     let mut warning = None;
                     while let Some(page) = pages.next().await {
                         match page {
-                            Ok(page) => {
-                                threads.extend(page.into_iter().map(|summary| summary.thread))
-                            }
+                            Ok(page) => threads.extend(page),
                             Err(error) => {
                                 warning = Some(error.to_string());
                                 break;
@@ -337,7 +334,7 @@ mod tests {
         assert_eq!(
             page.data
                 .into_iter()
-                .map(|entry| entry.thread.id.unwrap().id)
+                .map(|entry| entry.id.unwrap().id)
                 .collect::<std::collections::HashSet<_>>(),
             expected
         );

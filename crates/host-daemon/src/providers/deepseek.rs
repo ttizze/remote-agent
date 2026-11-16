@@ -3,8 +3,7 @@
 use crate::providers::Discovery as _;
 use crate::providers::{
     AccountCommand, AccountReply, Agent, AgentChange, AgentEvent, AnswerSource, Failure, Identity,
-    RequestOrigin, SessionListScope, SessionPage, SessionSummary, SubmissionState,
-    SubmissionTarget, emit,
+    RequestOrigin, SessionListScope, SessionPage, SubmissionState, SubmissionTarget, emit,
 };
 use agent_protocol::{
     composer::ComposerCatalog,
@@ -1011,9 +1010,6 @@ impl crate::providers::Configuration for DeepSeek {
 
 #[async_trait::async_trait]
 impl crate::providers::Discovery for DeepSeek {
-    fn storage_directory(&self) -> &Path {
-        &self.0.directory
-    }
     async fn list(
         &self,
         search: &str,
@@ -1041,16 +1037,13 @@ impl crate::providers::Discovery for DeepSeek {
             .map(|(_, r)| {
                 let mut thread = r.thread.clone();
                 thread.turns = None;
-                SessionSummary {
-                    thread,
-                    branch: None,
-                }
+                thread
             })
             .collect();
         let next_cursor = if data.len() > limit.max(1) as usize {
             data.pop();
             data.last()
-                .and_then(|r| r.thread.id.as_ref())
+                .and_then(|r| r.id.as_ref())
                 .map(|id| id.id.clone())
         } else {
             None
@@ -1497,9 +1490,8 @@ mod tests {
                     .data
                     .into_iter()
                     .map(|row| {
-                        assert!(row.branch.is_none());
-                        assert!(row.thread.turns.is_none());
-                        row.thread
+                        assert!(row.turns.is_none());
+                        row
                     })
                     .collect::<Vec<_>>();
                 let expected = ids
@@ -1563,7 +1555,7 @@ mod tests {
                 result
                     .data
                     .iter()
-                    .map(|row| row.thread.id.as_ref().unwrap().id.as_str())
+                    .map(|row| row.id.as_ref().unwrap().id.as_str())
                     .collect::<Vec<_>>(),
                 ids
             );

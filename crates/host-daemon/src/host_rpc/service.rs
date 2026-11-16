@@ -11,7 +11,7 @@ mod worktrees;
 
 use super::routing::{HostReply, HostSession, SessionId, SessionRouter};
 use crate::ProjectStore;
-use crate::providers::{Agent, Backend, Failure, SessionListScope, session_pages};
+use crate::providers::{Agent, Backend, Failure, SessionListScope, native_pages};
 use agent_protocol::{
     models::Thread,
     operations as op,
