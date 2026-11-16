@@ -3350,6 +3350,18 @@ fn oversized_authored_bodies_have_an_explicit_lossless_hydration_contract() {
             .extend(body.as_object().unwrap().clone());
         serde_json::from_value(value).unwrap()
     };
+    // The existing binary item contract permits one MiB inline. A value
+    // exactly at that boundary remains complete; the next byte is deferred.
+    for (bytes, omitted) in [(1024 * 1024, false), (1024 * 1024 + 1, true)] {
+        let full = turn_item(
+            serde_json::json!({"type":"assistant_message","messageId":"boundary","text":"x".repeat(bytes),"attachments":[],"streaming":false}),
+        );
+        assert_eq!(
+            wire::item(&full).detail_omitted,
+            omitted,
+            "inline authored body boundary {bytes}"
+        );
+    }
     let text = "本文😀".repeat(200_000);
     for body in [
         serde_json::json!({"type":"assistant_message","messageId":"message","text":text,"attachments":[],"streaming":false}),

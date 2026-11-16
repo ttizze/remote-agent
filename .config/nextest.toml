@@ -10,10 +10,10 @@ threads-required = "num-test-threads"
 filter = 'binary(fixtures)'
 threads-required = "num-test-threads"
 
-# Resume must finish within 500 ms while history is held. Run its Host startup
-# without competing provider processes and keep the actual latency assertion.
+# Paired resume retains its 500 ms budget; the initial import deliberately
+# holds native history. Keep competing provider startups outside that budget.
 [[profile.default.overrides]]
-filter = 'test(=opening_a_task_uses_cached_history_while_the_host_read_is_pending)'
+filter = 'test(=initial_import_waits_and_cached_history_preserves_the_saved_body_and_draft)'
 threads-required = "num-test-threads"
 
 # Sidebar updates have a three-second propagation deadline for two clients.

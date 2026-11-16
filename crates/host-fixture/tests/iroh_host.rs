@@ -75,8 +75,10 @@ async fn start_host(directory: &Path) -> HostFixture {
     .unwrap()
 }
 
-async fn completed_chat(client: &Client, cwd: Option<String>) -> models::Thread {
-    let mut request = conversations::create_request(ProviderKind::Codex, cwd, None);
+async fn completed_chat(
+    client: &Client,
+    mut request: agent_protocol::conversation::records::Create,
+) -> models::Thread {
     request.initial = Some((
         next_submission_id().into(),
         agent_protocol::conversation::InputContent {
@@ -1004,7 +1006,7 @@ fn assert_submission_items(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn chat_preparation_recovers_in_the_same_conversation_after_reconnecting() {
+async fn failed_chat_creation_keeps_draft_and_retry_survives_reconnect() {
     use agent_core::{
         state::Intent,
         store::{Outcome, Store},
@@ -1399,7 +1401,7 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
     .expect("remote registration deadline");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
+async fn initial_import_waits_and_cached_history_preserves_the_saved_body_and_draft() {
     use agent_core::state::Intent;
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -1673,7 +1675,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn generated_images_are_visible_on_open_reopen_and_older_pages_without_expanding_work() {
+async fn native_import_keeps_text_without_image_tools_on_open_reopen_and_older_pages() {
     use agent_core::presentation::conversation::{
         ConversationRowContent, activity_is_expanded, project_conversation,
     };
@@ -1845,18 +1847,18 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
             .unwrap();
         let first_page = history.view();
         let turns = first_page.thread.turns.as_ref().unwrap();
-        // T3's threadHistoryPaging also caps a page at 500 items. This
-        // recording retains hundreds of intermediate messages, so that cap
-        // precedes the ten-user-turn limit; ordinary ten-turn windows are
-        // covered by a_cached_loading_window_resets_to_the_latest_ten_turns_after_import.
+        // This provider recording has 981 messages and 42 user boundaries.
+        // Its last ten inputs start at section 10/input 140 and contain 181
+        // messages, ending at section 14/progress 153. Native tool rows do not
+        // consume the imported message window.
         assert_eq!(
             turns
                 .iter()
                 .flat_map(|turn| turn.items.iter().flatten())
                 .count(),
-            500
+            181
         );
-        assert!(turns.len() <= 10);
+        assert_eq!(turns.len(), 10);
         assert!(turns.last().unwrap().items.iter().flatten().any(|item|item_text(item).is_some_and(|text|text.starts_with("Section 14, progress 153."))), "the latest provider-authored response must be present");
         while history.view().thread.history_has_more==Some(true) { history.extend(&mobile.peer).await; }
         let history = history.view();
@@ -1874,6 +1876,7 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
                 .len(),
             items.len()
         );
+        assert_eq!(items.len(), 981, "every recorded message must survive imported paging");
         assert!(items.iter().all(|item| !matches!(
             item.body(),
             agent_protocol::items::ItemBody::CommandExecution { .. }
@@ -2035,7 +2038,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let body = open_conversation(&mobile.peer, &json!({"provider":"codex","id":"p5-1"})).await.0;
         assert_eq!(body["thread"]["projectId"], json!({"Assigned":"project-5"}));
         assert_eq!(body_json(&body["thread"]["turns"][0]["items"][0])["assistantText"]["text"], "History for Project 05 conversation 01");
-        assert_eq!(body["thread"]["status"], "unknown");
+        assert_eq!(body["thread"]["status"], "idle", "an imported static transcript has no running native resource");
         assert!(agent_protocol::protocol::json_boundary::call("host/thread/watch", json!({"watchId":1,"threadId":{"provider":"codex","id":"p5-1"},"path":rollout})).is_err());
         threads.extend([
             json!({"id":"older-child","parentThreadId":"worktree","cwd":directory.path().join("worktree"),"name":null,"agentNickname":"Curie","canAcceptDirectInput":false,"updatedAt":-1}),
@@ -2104,7 +2107,15 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         .unwrap();
         let fixture = start_host(&root).await;
         let local = fixture.local().await.unwrap();
-        let initial = completed_chat(&local.peer, Some(workspace.to_str().unwrap().into())).await;
+        let initial = completed_chat(
+            &local.peer,
+            conversations::create_request(
+                ProviderKind::Codex,
+                Some(workspace.to_str().unwrap().into()),
+                None,
+            ),
+        )
+        .await;
         assert_eq!(initial.cwd.as_deref(), workspace.to_str());
         let destination = root.join("worktree storage");
         let settings = models::WorktreeSettings {
@@ -2127,8 +2138,15 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         let mut ids = Vec::new();
         let mut paths = Vec::new();
         for _ in 0..2 {
-            let thread =
-                completed_chat(&local.peer, Some(workspace.to_str().unwrap().into())).await;
+            let thread = completed_chat(
+                &local.peer,
+                conversations::create_request(
+                    ProviderKind::Codex,
+                    Some(workspace.to_str().unwrap().into()),
+                    None,
+                ),
+            )
+            .await;
             let cwd = PathBuf::from(thread.cwd.unwrap());
             assert_ne!(cwd, workspace);
             assert_project_directory(&cwd, &workspace, Some(&destination));
@@ -2155,8 +2173,20 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
             assert_eq!(read.thread.project_id.as_deref(), Some("workspace"));
         }
         let mut chat_ids = Vec::new();
-        for cwd in [None, Some("  ".into()), Some(String::new())] {
-            let thread = completed_chat(&local.peer, cwd).await;
+        for (cwd, explicit_worktree) in [
+            (None, false),
+            (Some("  ".into()), false),
+            (Some(String::new()), false),
+            (None, true),
+        ] {
+            let mut request = conversations::create_request(ProviderKind::Codex, cwd, None);
+            if explicit_worktree {
+                request.workspace = Some(agent_protocol::workspace::WorkspaceStrategy::Worktree {
+                    base_ref: "HEAD".into(),
+                    start_from_origin: true,
+                });
+            }
+            let thread = completed_chat(&local.peer, request).await;
             assert_eq!(thread.cwd.as_deref(), root.join("bex-chats").to_str());
             assert!(thread.project_id.is_none());
             chat_ids.push(thread.id.unwrap());
@@ -2308,7 +2338,7 @@ async fn daemon_exposes_project_roots_and_structured_tool_results() {
         assert_eq!(list.projects[0].roots[0].path, directory.path().to_str().unwrap());
         assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["body"]["inline"]["body"]["toolCall"]["result"].is_object()));
         let reopened = serde_json::from_value::<models::ThreadResponse>(history).unwrap().thread;
-        let tool_ids = reopened.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten()).filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::ToolCall { tool, .. } if matches!(tool.as_str(),"lookup" | "fixture"))).map(|item| item.id.clone()).collect::<std::collections::HashSet<_>>();
+        let tool_ids = reopened.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten()).filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::ToolCall { tool, .. } if matches!(tool.as_str(),"lookup" | "fixture.lookup" | "fixture"))).map(|item| item.id.clone()).collect::<std::collections::HashSet<_>>();
         let snapshot = agent_core::state::Snapshot::default();
         let rendered = agent_core::presentation::conversation::project_conversation(
             agent_core::localization::UiLanguage::Japanese,
@@ -3181,8 +3211,15 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
             .unwrap();
         let mut checkouts = Vec::new();
         for name in ["running", "terminal", "dirty", "clean"] {
-            let response =
-                completed_chat(&local.peer, Some(project.to_str().unwrap().into())).await;
+            let response = completed_chat(
+                &local.peer,
+                conversations::create_request(
+                    ProviderKind::Codex,
+                    Some(project.to_str().unwrap().into()),
+                    None,
+                ),
+            )
+            .await;
             let id = response.id.unwrap();
             let path = PathBuf::from(response.cwd.unwrap());
             git(&path, &["commit", "--allow-empty", "-m", name]);
@@ -3736,7 +3773,7 @@ async fn session_open_delivers_a_snapshot_before_updates_and_reopens_current_sta
 }
 
 #[tokio::test]
-async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
+async fn gallery_preserves_live_images_without_backfilling_native_history() {
     let directory = tempfile::tempdir().unwrap();
     let fixture = start_host(directory.path()).await;
     let mobile = fixture.local().await.unwrap();
@@ -4239,4 +4276,30 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
         local.close().await;
         fixture.close().await.unwrap();
     }).await.expect("native history classification deadline");
+}
+
+#[tokio::test]
+async fn gallery_hydrates_a_large_saved_assistant_body_before_extracting_its_last_image() {
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("after-preview.png");
+    std::fs::write(&image, b"private image bytes").unwrap();
+    let text = "x".repeat(2 * 1024 * 1024) + &format!("\n![last image]({})", image.display());
+    std::fs::write(directory.path().join("list-fixture.json"),json!([{"id":"large-gallery","cwd":directory.path(),"historyMode":"paginated","turns":[{"id":"turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":text}]}]}]).to_string()).unwrap();
+    let fixture = start_host(directory.path()).await;
+    let local = fixture.local().await.unwrap();
+    let id = SessionRef::new(ProviderKind::Codex, "large-gallery".into()).unwrap();
+    let images = local
+        .peer
+        .session_images(&id, Some(&local.session))
+        .await
+        .unwrap();
+    assert_eq!(
+        images.len(),
+        1,
+        "gallery must read beyond the initial transport preview"
+    );
+    assert_eq!(images[0].source, image.to_str().unwrap());
+    assert!(!images[0].encoded);
+    local.close().await;
+    fixture.close().await.unwrap();
 }

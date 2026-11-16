@@ -685,9 +685,8 @@ fn a_paged_rewind_restores_only_the_selected_conversations_original_input() {
     let response=serde_json::from_value(serde_json::json!({"thread":{"id":id,"turns":[
         {"id":"old-run","status":"completed","items":[{"id":"old-input","status":"completed","body":{"inline":{"body":{"userMessage":{"text":"owned paged input","content":[]}}}}}]}
     ]}})).unwrap();
-    let mut projection = crate::test_conversations::opened(response, &mut state)
-        .projection
-        .projection;
+    let mut canonical = crate::test_conversations::opened(response, &mut state).projection;
+    let projection = &mut canonical.projection;
     let own = projection
         .turn_items
         .iter()
@@ -711,11 +710,17 @@ fn a_paged_rewind_restores_only_the_selected_conversations_original_input() {
             item: Arc::new(foreign),
         },
     );
+    Arc::make_mut(&mut state.sessions.projections).insert(id.clone(), Arc::new(canonical));
     assert_eq!(
-        sent_input(&projection, &"old-run".into())
-            .unwrap()
-            .unwrap()
-            .0,
+        RewindSession {
+            thread_id: id.clone(),
+            turn_id: "old-run".into()
+        }
+        .capture(&state, "")
+        .unwrap()
+        .original
+        .unwrap()
+        .0,
         "owned paged input"
     );
 }
@@ -762,5 +767,67 @@ fn a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences() {
     assert_eq!(
         after.input.drafts[&session.into()].attachments,
         vec![file.clone(), file]
+    );
+}
+
+#[test]
+fn rewind_never_recalls_an_omitted_or_stale_input_preview() {
+    use agent_protocol::orchestration::TurnItemBody;
+    let id = SessionRef::new(ProviderKind::Codex, "large-owned-input".into()).unwrap();
+    let mut state = Snapshot::default();
+    let text = "Complete user input😀".repeat(90_000);
+    let response=serde_json::from_value(serde_json::json!({"thread":{"id":id,"turns":[
+        {"id":"large-run","status":"completed","items":[{"id":"large-input","status":"completed","body":{"inline":{"body":{"userMessage":{"text":text,"content":[]}}}}}]}
+    ]}})).unwrap();
+    let mut canonical = crate::test_conversations::opened(response, &mut state).projection;
+    let mut full = canonical
+        .projection
+        .turn_items
+        .iter()
+        .find(|item| matches!(item.body, TurnItemBody::UserMessage { .. }))
+        .unwrap()
+        .clone();
+    let complete = Arc::make_mut(&mut full);
+    complete.detail_omitted = false;
+    if let TurnItemBody::UserMessage { text: body, .. } = &mut complete.body {
+        *body = text.clone();
+    }
+    for item in canonical.projection.turn_items.iter_mut().chain(
+        canonical
+            .projection
+            .visible_turn_items
+            .iter_mut()
+            .map(|row| &mut row.item),
+    ) {
+        if item.id == full.id {
+            let item = Arc::make_mut(item);
+            item.detail_omitted = true;
+            if let TurnItemBody::UserMessage { text, .. } = &mut item.body {
+                *text = "transport preview".into();
+            }
+        }
+    }
+    Arc::make_mut(&mut state.sessions.projections).insert(id.clone(), Arc::new(canonical));
+    let operation = RewindSession {
+        thread_id: id,
+        turn_id: "large-run".into(),
+    };
+    assert!(
+        operation.capture(&state, "").is_err(),
+        "native rewind cannot start while the original input is only a preview"
+    );
+    let key = (full.thread_id.clone(), full.id.clone());
+    let mut stale = full.as_ref().clone();
+    stale.updated_at = "2099-01-01T00:00:00.000Z".into();
+    Arc::make_mut(&mut state.sessions.item_details).insert(key.clone(), Arc::new(stale));
+    assert!(
+        operation.capture(&state, "").is_err(),
+        "a stale hydration cannot authorize recalling the preview"
+    );
+    Arc::make_mut(&mut state.sessions.item_details).insert(key, full);
+    assert_eq!(
+        operation.capture(&state, "").unwrap().original.unwrap().0,
+        text,
+        "rewind must recall the complete original input"
     );
 }

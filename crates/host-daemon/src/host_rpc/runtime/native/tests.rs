@@ -407,3 +407,69 @@ fn strong_native_item_ids_keep_the_pinned_global_identity_and_match_text_updates
         assert_eq!(reference.strength, model::NativeRefStrength::Strong);
     }
 }
+
+#[test]
+fn codex_dynamic_and_mcp_output_reaches_canonical_items_without_losing_content() {
+    let context = Context {
+        thread_id: "app".into(),
+        run_id: Some("run".into()),
+        root_node_id: "root".into(),
+        provider_thread_id: "provider-thread".into(),
+        provider_turn_id: "provider-turn".into(),
+        native_turn_id: "native-turn".into(),
+        native_thread_id: "native".into(),
+        provider: ProviderKind::Codex,
+        now: "2026-11-14T00:00:00.000Z".into(),
+        completed: true,
+    };
+    // codexDynamicToolOutput/projectCodexDynamicToolItem and
+    // mcpToolResultOutput at pinned T3 1a12c4a define these values.
+    let cases = [
+        (
+            json!({"type":"dynamicToolCall","tool":"exec","namespace":" plugin ","contentItems":[{"type":"inputImage","imageUrl":"data:IMAGE/PNG;base64,aW1hZ2U="}]}),
+            "plugin.exec",
+            json!([{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]),
+        ),
+        (
+            json!({"type":"dynamicToolCall","tool":"exec","contentItems":[{"type":"inputText","text":"answer"},{"type":"future","data":7}]}),
+            "exec",
+            json!([{"type":"inputText","text":"answer"},{"type":"future","data":7}]),
+        ),
+        (
+            json!({"type":"dynamicToolCall","tool":"exec","contentItems":[{"type":"inputImage","imageUrl":"https://example.invalid/image.png"}]}),
+            "exec",
+            json!([{"type":"inputImage","imageUrl":"https://example.invalid/image.png"}]),
+        ),
+        (
+            json!({"type":"dynamicToolCall","tool":"exec","success":false}),
+            "exec",
+            json!({"success":false}),
+        ),
+        (
+            json!({"type":"mcpToolCall","server":"fixture","tool":"lookup","result":{"content":[{"type":"text","text":"answer"}],"structuredContent":{}}}),
+            "fixture.lookup",
+            json!([{"type":"text","text":"answer"}]),
+        ),
+        (
+            json!({"type":"mcpToolCall","server":"fixture","tool":"lookup","result":{"content":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}],"structuredContent":{"value":7}}}),
+            "fixture.lookup",
+            json!({"content":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}],"structuredContent":{"value":7}}),
+        ),
+        (
+            json!({"type":"mcpToolCall","server":"fixture","tool":"lookup","result":{"content":[],"structuredContent":{"value":7}},"error":{"message":"failed"}}),
+            "fixture.lookup",
+            json!({"error":"failed","result":{"value":7}}),
+        ),
+    ];
+    for (mut native, name, expected) in cases {
+        native["id"] = json!("tool");
+        native["status"] = json!("completed");
+        let item = crate::providers::codex::native::parse_item(native).unwrap();
+        let artifacts = context.item(&item).unwrap();
+        assert!(
+            matches!(&artifacts[0].item.body, model::TurnItemBody::DynamicTool {tool_name:Some(actual),output:Some(output),..} if actual==name && output==&expected),
+            "expected {name}: {expected}; got {:?}",
+            artifacts[0].item.body
+        );
+    }
+}
