@@ -28,7 +28,9 @@
       "host_rpc::service::titles::tests::canonical_search_reserves_message_slots_after_ranked_titles_before_limiting",
       "host_rpc::storage::tests::search_finds_an_old_saved_message_beyond_twenty_thousand_streaming_rows_after_reopen",
       "host_rpc::runtime::native::tests::native_tool_outputs_preserve_provider_names_and_canonical_content",
-      "host_rpc::storage::shell::tests::shell_preserves_plain_session_errors_and_only_classifies_the_matching_root_failure"
+      "host_rpc::storage::shell::tests::shell_preserves_plain_session_errors_and_only_classifies_the_matching_root_failure",
+      "host_rpc::runtime::ingress_tests::codex_text_burst_survives_a_blocked_real_database::case_1_cold",
+      "host_rpc::runtime::ingress_tests::codex_text_burst_survives_a_blocked_real_database::case_2_warm"
     ],
     "agent-core": [
       "state::operations::sessions::tests::a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences",

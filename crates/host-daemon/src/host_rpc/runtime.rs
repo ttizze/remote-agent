@@ -20,6 +20,8 @@ mod commands;
 mod events;
 mod executor;
 mod imports;
+#[cfg(all(test, unix))]
+mod ingress_tests;
 pub(in crate::host_rpc) mod list;
 mod native;
 #[cfg(test)]
