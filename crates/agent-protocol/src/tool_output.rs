@@ -8,26 +8,29 @@ pub fn blocks(result: &Value) -> &[Value] {
         .map_or_else(|| std::slice::from_ref(result), Vec::as_slice)
 }
 
-/// Borrow raster image data without copying base64 just to classify a result.
-/// Other blocks remain available as ordinary tool output.
-pub fn image_data(block: &Value) -> Option<(&'static str, &str)> {
+/// Identify supported raster image blocks, including metadata whose image
+/// data remains behind hydration. Rendering separately requires actual bytes.
+pub fn image_mime(block: &Value) -> Option<&'static str> {
     if block.get("type")?.as_str()? != "image" {
         return None;
     }
-    let (mime, data) = match block.get("source") {
-        Some(source) if source.get("type")?.as_str()? == "base64" => (
-            source.get("media_type")?.as_str()?,
-            source.get("data")?.as_str()?,
-        ),
+    let mime = match block.get("source") {
+        Some(source) if source.get("type")?.as_str()? == "base64" => {
+            source.get("media_type")?.as_str()?
+        }
         Some(_) => return None,
-        None => (
-            block.get("mimeType")?.as_str()?,
-            block.get("data")?.as_str()?,
-        ),
+        None => block.get("mimeType")?.as_str()?,
     };
-    let mime = ["image/png", "image/jpeg", "image/gif", "image/webp"]
+    ["image/png", "image/jpeg", "image/gif", "image/webp"]
         .into_iter()
-        .find(|supported| supported.eq_ignore_ascii_case(mime))?;
+        .find(|supported| supported.eq_ignore_ascii_case(mime))
+}
+
+/// Borrow raster image data without copying base64 just to classify a result.
+/// Other blocks remain available as ordinary tool output.
+pub fn image_data(block: &Value) -> Option<(&'static str, &str)> {
+    let mime = image_mime(block)?;
+    let data = block.get("source").unwrap_or(block).get("data")?.as_str()?;
     (!data.is_empty()).then_some((mime, data))
 }
 

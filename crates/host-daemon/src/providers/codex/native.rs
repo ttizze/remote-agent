@@ -356,6 +356,60 @@ fn background_command_report(
     })
 }
 
+// CodexAdapterV2.codexDynamicToolOutput preserves every content block. In
+// particular, converting through a display-only Text/Image enum loses future
+// blocks and keeps image results out of the canonical output entirely.
+fn dynamic_tool_output(content: Option<&[Value]>, success: Option<bool>) -> Option<Value> {
+    static IMAGE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i-u)^data:(image/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$").unwrap()
+    });
+    if let Some(content) = content {
+        return Some(Value::Array(content.iter().map(|block| {
+            if block.get("type").and_then(Value::as_str)==Some("inputImage")
+                && let Some(url)=block.get("imageUrl").and_then(Value::as_str)
+                && let Some(image)=IMAGE.captures(url) {
+                return serde_json::json!({"type":"image","mimeType":image[1].to_ascii_lowercase(),"data":&image[2]});
+            }
+            block.clone()
+        }).collect()));
+    }
+    (success == Some(false)).then(|| serde_json::json!({"success":false}))
+}
+
+// MCP structured data replaces plain content, except image blocks must remain
+// alongside it. Empty structured objects/arrays do not hide the content.
+fn mcp_tool_output(result: Option<&Value>, error: Option<&Value>) -> Option<Value> {
+    let output = result.and_then(|result| {
+        let content = result.get("content").filter(|value| !value.is_null());
+        let structured = result.get("structuredContent").filter(|value| match value {
+            Value::Null => false,
+            Value::Array(array) => !array.is_empty(),
+            Value::Object(object) => !object.is_empty(),
+            _ => true,
+        });
+        if let Some(structured) = structured
+            && content.is_some_and(|value| {
+                agent_protocol::tool_output::blocks(value)
+                    .iter()
+                    .any(|block| agent_protocol::tool_output::image_mime(block).is_some())
+            })
+        {
+            return Some(serde_json::json!({"content":content,"structuredContent":structured}));
+        }
+        structured.or(content).cloned()
+    });
+    match error.filter(|value| !value.is_null()) {
+        Some(error) => {
+            let message = error.get("message").unwrap_or(error);
+            Some(match output {
+                Some(result) => serde_json::json!({"error":message,"result":result}),
+                None => serde_json::json!({"error":message}),
+            })
+        }
+        None => output,
+    }
+}
+
 pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
     let id = field(&value, "id")?;
     let status = item_status(value["status"].as_str());
@@ -412,28 +466,19 @@ pub(crate) fn parse_item(mut value: Value) -> Result<Item, serde_json::Error> {
             server: field(&value, "server")?,
             namespace: field(&value, "namespace")?,
             arguments: take_value(&mut value, "arguments"),
-            result: value
-                .get_mut("result")
-                .filter(|v| !v.is_null())
-                .map(Value::take),
-            error: value
-                .get_mut("error")
-                .filter(|v| !v.is_null())
-                .map(Value::take),
-            content: value["contentItems"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| match v["type"].as_str() {
-                    Some("inputText") => Some(agent_protocol::requests::ToolContent::Text {
-                        text: string(v, "text"),
-                    }),
-                    Some("inputImage") => Some(agent_protocol::requests::ToolContent::Image {
-                        data_url: string(v, "imageUrl"),
-                    }),
-                    _ => None,
-                })
-                .collect(),
+            result: if value["type"] == "mcpToolCall" {
+                mcp_tool_output(value.get("result"), value.get("error"))
+            } else {
+                dynamic_tool_output(
+                    value
+                        .get("contentItems")
+                        .and_then(Value::as_array)
+                        .map(Vec::as_slice),
+                    field(&value, "success")?,
+                )
+            },
+            error: None,
+            content: Vec::new(),
             success: field(&value, "success")?,
             duration_ms: field(&value, "durationMs")?,
         },
@@ -1067,7 +1112,7 @@ mod tests {
         );
         let tool = parse_item(json!({"id":"t","type":"mcpToolCall","tool":"read","server":"server","arguments":{},"mcpAppResourceUri":"ui://tool","pluginId":"plugin","result":{"content":[{"type":"text","text":"result"}]}})).unwrap();
         assert!(
-            matches!(tool.body(),ItemBody::ToolCall {resource_uri:Some(uri),plugin_id:Some(plugin),result:Some(result),..} if uri == "ui://tool" && plugin == "plugin" && result["content"][0]["text"] == "result")
+            matches!(tool.body(),ItemBody::ToolCall {resource_uri:Some(uri),plugin_id:Some(plugin),result:Some(result),..} if uri == "ui://tool" && plugin == "plugin" && result[0]["text"] == "result")
         );
         let subagent = parse_item(json!({"id":"s","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"same","receiverThreadIds":["same"],"agentsStates":{"same":{"status":"pendingInit"}}})).unwrap();
         assert!(
@@ -1135,10 +1180,10 @@ mod tests {
                 matches!(summary[5].body(), ItemBody::ImageView { path } if path == "file:///tmp/blog.png")
             );
             assert!(
-                matches!(summary[6].body(), ItemBody::ToolCall { result:Some(result),.. } if result["content"][0]["data"] == "aW1hZ2U=")
+                matches!(summary[6].body(), ItemBody::ToolCall { result:Some(result),.. } if result[0]["data"] == "aW1hZ2U=")
             );
             assert!(
-                matches!(summary[7].body(), ItemBody::ToolCall { content,.. } if matches!(&content[0], agent_protocol::requests::ToolContent::Image { data_url } if data_url == "data:image/png;base64,aW1hZ2U="))
+                matches!(summary[7].body(), ItemBody::ToolCall { result:Some(result),content,.. } if content.is_empty() && result==&json!([{"type":"image","mimeType":"image/png","data":"aW1hZ2U="}]))
             );
         }
         assert!(summary_items(vec![]).is_empty());

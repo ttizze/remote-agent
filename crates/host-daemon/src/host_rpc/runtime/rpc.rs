@@ -269,7 +269,8 @@ impl Runtime {
         }
         let selected =
             Self::default_selection(service, request.provider, &request.selection).await?;
-        let cwd = match request.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) {
+        let selected_cwd = request.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty());
+        let cwd = match selected_cwd {
             Some(cwd) => cwd.to_owned(),
             None => service
                 .inner
@@ -288,12 +289,14 @@ impl Runtime {
             agent_protocol::models::ProjectMembership::Assigned(id) => Some(id),
             _ => None,
         };
-        let requested = request.workspace.clone().or_else(|| {
-            request
-                .cwd
-                .is_none()
-                .then_some(agent_protocol::workspace::WorkspaceStrategy::Root)
-        });
+        // T3 normalizes Scratch worktree launches to root before allocation.
+        // Missing, empty and whitespace cwd all select Bex's ordinary chat folder.
+        let requested = match (&request.workspace, selected_cwd) {
+            (None | Some(agent_protocol::workspace::WorkspaceStrategy::Worktree { .. }), None) => {
+                Some(agent_protocol::workspace::WorkspaceStrategy::Root)
+            }
+            _ => request.workspace.clone(),
+        };
         let configuration = service
             .workspace_preparation(cwd.clone(), requested)
             .await?;

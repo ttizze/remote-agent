@@ -108,7 +108,20 @@ fn cap_files(files: &mut Vec<CheckpointFileSummary>, total: &mut Option<Checkpoi
 
 pub fn item(item: &TurnItem) -> TurnItem {
     let mut projected = item.clone();
+    // A queued input is also the composer's control record. Its original text
+    // stays inline so editing cannot recall a transport preview.
+    let inline_control = matches!(&projected.body, TurnItemBody::UserMessage {input_intent,..} if input_intent=="queued_turn");
     match &mut projected.body {
+        TurnItemBody::UserMessage { text, .. }
+        | TurnItemBody::AssistantMessage { text, .. }
+        | TurnItemBody::Reasoning { text, .. } => {
+            // T3 sends authored text intact. Native Bex RPC frames have a
+            // fixed budget; the saved row is still hydrated without loss.
+            if !inline_control && text.len() > crate::models::MAX_INLINE_ITEM_BYTES {
+                *text = truncate(text, 4096);
+                projected.detail_omitted = true;
+            }
+        }
         TurnItemBody::CommandExecution {
             output,
             exit_code,

@@ -1280,6 +1280,7 @@ fn collaboration(
 }
 
 fn needs_detail(item: &model::TurnItem) -> bool {
-    item.body.has_omitted_detail()
+    item.detail_omitted
+        || item.body.has_omitted_detail()
         || matches!(&item.body,model::TurnItemBody::DynamicTool {input,viewed_image_path:None,..} if input.get("truncated")==Some(&serde_json::Value::Bool(true)))
 }

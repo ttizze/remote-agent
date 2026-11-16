@@ -403,7 +403,8 @@ impl ClientExt for Client {
                     continue;
                 }
                 let pending = snapshot.projection.visible_turn_items.iter().find(|row| {
-                matches!(&row.item.body, model::TurnItemBody::DynamicTool {tool_name, output_omitted:Some(true),..} if tool_name.as_deref() == Some("image_gen.imagegen"))
+                (row.item.detail_omitted && matches!(&row.item.body, model::TurnItemBody::AssistantMessage {..})
+                    || matches!(&row.item.body, model::TurnItemBody::DynamicTool {tool_name, output_omitted:Some(true),..} if tool_name.as_deref() == Some("image_gen.imagegen")))
                     && !details.get(&(row.source_thread_id.clone(), row.source_item_id.clone()))
                         .is_some_and(|detail| crate::orchestration::same_detail_revision(&row.item, detail))
             }).map(|row| (row.source_thread_id.clone(), row.source_item_id.clone()));

@@ -25,7 +25,11 @@ pub fn same_detail_revision(first: &model::TurnItem, second: &model::TurnItem) -
     };
     first.thread_id == second.thread_id
         && first.id == second.id
-        && if live(first.status) {
+        && if first.detail_omitted {
+            // A complete authored-body hydration must describe this preview's
+            // revision, including while its assistant is still streaming.
+            first.updated_at == second.updated_at && live(first.status) == live(second.status)
+        } else if live(first.status) {
             live(second.status)
         } else {
             !live(second.status) && first.updated_at == second.updated_at

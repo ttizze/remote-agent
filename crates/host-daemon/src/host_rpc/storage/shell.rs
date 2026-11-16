@@ -125,30 +125,40 @@ fn unfinished_tasks(
     Ok(tasks)
 }
 
-fn last_failure(
+fn run_failure(
+    connection: &Connection,
+    thread_id: &str,
+    terminal_run: Option<(&str, Option<&str>)>,
+) -> Result<Option<model::ProviderFailure>, String> {
+    let Some((run, root)) = terminal_run else {
+        return Ok(None);
+    };
+    // latestRootProviderFailure: a child or completed error is not the
+    // terminal run's root failure. A run may fail before it has a root node.
+    let body=connection.query_row("SELECT json_extract(i.payload_json,'$.failure')
+        FROM orchestration_v2_projection_turn_items i
+        WHERE i.thread_id=?1 AND i.run_id=?2 AND i.type='error' AND i.status='failed' AND i.node_id IS ?3
+        ORDER BY julianday(i.updated_at) DESC,i.ordinal DESC,i.turn_item_id DESC LIMIT 1",
+        params![thread_id,run,root],|row|row.get::<_,String>(0)).optional().map_err(failure)?;
+    body.map(|body| serde_json::from_str(&body).map_err(failure))
+        .transpose()
+}
+
+fn session_error(
     connection: &Connection,
     thread_id: &str,
     provider_id: &str,
-    terminal_run: Option<(&str, &str)>,
-) -> Result<Option<model::ProviderFailure>, String> {
-    if let Some((run, root)) = terminal_run {
-        let body=connection.query_row("SELECT json_extract(i.payload_json,'$.failure')
-            FROM orchestration_v2_projection_turn_items i
-            LEFT JOIN orchestration_v2_projection_nodes n ON n.node_id=i.node_id
-            WHERE i.thread_id=?1 AND i.run_id=?2 AND i.type='error' AND (i.node_id=?3 OR n.root_node_id=?3)
-            ORDER BY julianday(i.updated_at) DESC,i.ordinal DESC LIMIT 1",
-            params![thread_id,run,root],|row|row.get::<_,String>(0)).optional().map_err(failure)?;
-        if let Some(body) = body {
-            return serde_json::from_str(&body).map(Some).map_err(failure);
-        }
-    }
-    let body=connection.query_row("SELECT json_extract(s.payload_json,'$.lastError')
-        FROM orchestration_v2_projection_provider_sessions s WHERE s.provider_instance_id=?1 AND EXISTS(
-            SELECT 1 FROM orchestration_v2_projection_provider_session_bindings b WHERE b.provider_session_id=s.provider_session_id AND b.thread_id=?2)
+) -> Result<Option<String>, String> {
+    // ProviderSession.lastError is plain text, including text that resembles
+    // JSON. The newest bound session owns it; a null value clears an old error.
+    // Keep the thread's bindings outermost, as ProjectionStore does; one
+    // provider instance can otherwise scan every conversation's sessions.
+    connection.query_row("SELECT json_extract(s.payload_json,'$.lastError')
+        FROM orchestration_v2_projection_provider_session_bindings b
+        CROSS JOIN orchestration_v2_projection_provider_sessions s ON s.provider_session_id=b.provider_session_id
+        WHERE b.thread_id=?2 AND s.provider_instance_id=?1
         ORDER BY julianday(s.updated_at) DESC,s.provider_session_id DESC LIMIT 1",
-        params![provider_id,thread_id],|row|row.get::<_,Option<String>>(0)).optional().map_err(failure)?.flatten();
-    body.map(|body| serde_json::from_str(&body).map_err(failure))
-        .transpose()
+        params![provider_id,thread_id],|row|row.get::<_,Option<String>>(0)).optional().map_err(failure).map(Option::flatten)
 }
 
 fn background(
@@ -252,17 +262,19 @@ pub(super) fn thread(
     let terminal_run = latest
         .as_ref()
         .filter(|run| run.status == model::RunStatus::Failed)
-        .and_then(|run| {
-            run.root_node_id
-                .as_deref()
-                .map(|root| (run.id.as_str(), root))
-        });
-    let failure = last_failure(
-        connection,
-        &thread.id,
-        &thread.provider_instance_id,
-        terminal_run,
-    )?;
+        .map(|run| (run.id.as_str(), run.root_node_id.as_deref()));
+    let failure = run_failure(connection, &thread.id, terminal_run)?;
+    let session_error = session_error(connection, &thread.id, &thread.provider_instance_id)?;
+    let last_error = session_error
+        .clone()
+        .or_else(|| failure.as_ref().map(|failure| failure.message.clone()));
+    // T3 threadErrorSummary: a newer session error replaces the message and
+    // clears classification left by a different historical root error.
+    let failure = failure.filter(|failure| {
+        session_error
+            .as_ref()
+            .is_none_or(|message| message == &failure.message)
+    });
     let native_status = thread
         .active_provider_thread_id
         .as_deref()
@@ -297,10 +309,12 @@ pub(super) fn thread(
         status: latest
             .as_ref()
             .map_or(ShellStatus::Idle, |run| run.status.into()),
-        last_error: failure.as_ref().map(|failure| failure.message.clone()),
+        last_error,
         last_error_class: failure.as_ref().map(|failure| failure.class.clone()),
         last_error_code: failure.as_ref().and_then(|failure| failure.code.clone()),
-        usage_limit_reset_at: failure.and_then(|failure| failure.reset_at),
+        usage_limit_reset_at: failure
+            .filter(|failure| failure.class == "usage_limit")
+            .and_then(|failure| failure.reset_at),
         pending_runtime_request,
         latest_visible_message: None,
         latest_user_message_at,

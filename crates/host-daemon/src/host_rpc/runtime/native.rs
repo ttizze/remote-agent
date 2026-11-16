@@ -340,6 +340,9 @@ impl Context {
             }
             ItemBody::ToolCall {
                 tool,
+                kind,
+                server,
+                namespace,
                 arguments,
                 result,
                 error,
@@ -347,7 +350,24 @@ impl Context {
             } => (
                 Kind::ToolCall,
                 Body::DynamicTool {
-                    tool_name: Some(tool.clone()),
+                    tool_name: Some(match (self.provider, kind, server.as_deref()) {
+                        (
+                            ProviderKind::Codex,
+                            agent_protocol::items::ToolKind::Mcp,
+                            Some(server),
+                        ) => format!("{server}.{tool}"),
+                        (
+                            ProviderKind::Claude,
+                            agent_protocol::items::ToolKind::Mcp,
+                            Some(server),
+                        ) => format!("mcp__{server}__{tool}"),
+                        (ProviderKind::Codex, _, _) => namespace
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|prefix| !prefix.is_empty())
+                            .map_or_else(|| tool.clone(), |prefix| format!("{prefix}.{tool}")),
+                        _ => tool.clone(),
+                    }),
                     input: arguments.clone(),
                     output: result.clone().or_else(|| {
                         error

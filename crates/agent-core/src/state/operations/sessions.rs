@@ -81,6 +81,7 @@ pub(crate) fn item_detail(
             item.body(),
             crate::models::ItemBody::UserMessage { .. }
                 | crate::models::ItemBody::AssistantText { .. }
+                | crate::models::ItemBody::Reasoning { .. }
                 | crate::models::ItemBody::ImageGeneration { .. }
                 | crate::models::ItemBody::ImageView { .. }
         ))
@@ -534,10 +535,11 @@ pub use agent_protocol::operations::RewindSession;
 /// The canonical input retains attachment names that image display parts omit.
 fn sent_input(
     projection: &agent_protocol::orchestration::projection::ThreadProjection,
+    details: &BTreeMap<(String, String), Arc<agent_protocol::orchestration::TurnItem>>,
     turn: &agent_protocol::ids::TurnId,
 ) -> Result<Option<(String, Vec<Attachment>)>, String> {
     use agent_protocol::{items::MessagePart, orchestration::TurnItemBody};
-    let Some((text, images, context)) = projection
+    let Some((omitted, text, images, context)) = projection
         .turn_items
         .iter()
         .map(AsRef::as_ref)
@@ -550,18 +552,27 @@ fn sent_input(
         .filter(|item| {
             item.thread_id == projection.thread.id && item.run_id.as_deref() == Some(turn.as_str())
         })
+        .map(|item| {
+            details
+                .get(&(item.thread_id.clone(), item.id.clone()))
+                .filter(|detail| crate::orchestration::same_detail_revision(item, detail))
+                .map_or(item, AsRef::as_ref)
+        })
         .find_map(|item| match &item.body {
             TurnItemBody::UserMessage {
                 text,
                 attachments,
                 context,
                 ..
-            } => Some((text, attachments, context)),
+            } => Some((item.detail_omitted, text, attachments, context)),
             _ => None,
         })
     else {
         return Ok(None);
     };
+    if omitted {
+        return Err("Wait for the original message to finish loading before rewinding.".into());
+    }
     let mut attachments = crate::orchestration::attachments(images)?;
     attachments.extend(
         crate::orchestration::context_parts(context.as_ref())?
@@ -598,7 +609,13 @@ impl Operation for RewindSession {
             .sessions
             .projections
             .get(&self.thread_id)
-            .map(|snapshot| sent_input(&snapshot.projection, &self.turn_id))
+            .map(|projection| {
+                sent_input(
+                    &projection.projection,
+                    &snapshot.sessions.item_details,
+                    &self.turn_id,
+                )
+            })
             .transpose()
             .map_err(PeerError::InvalidMessage)?
             .flatten();
