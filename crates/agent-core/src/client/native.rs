@@ -683,7 +683,8 @@ mod tests {
                 // Finish the conversation before the lists; no reload invalidates another.
                 writer.reply(open, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
                 writer.reply(&requests["host/model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":{"provider": "codex", "id": "fresh-model"},"displayName":"Fresh", "settings": {"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}}],"nextCursor":null}})).await.unwrap();
-                writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"reloaded"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}})).await.unwrap();
+                // The independently current header must agree with this title-search hit.
+                writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"retained search"}],"projects":[],"hasMore":false,"hasMoreProjects":false,"limit":5,}})).await.unwrap();
                 writer.reply(&requests["host/list/search"],json!({"result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"retained search"}],"projects":[],"limit":10000,"hasMore":false,"hasMoreProjects":false}})).await.unwrap();
                 accounts_released.await.unwrap();
                 writer.reply(&requests["host/account/list"], json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
