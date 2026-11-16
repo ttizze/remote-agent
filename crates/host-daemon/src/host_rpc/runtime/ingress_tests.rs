@@ -96,10 +96,17 @@ async fn codex_text_burst_survives_a_blocked_real_database(#[case] warm: bool) {
                 .unwrap();
             agent.state(&native.id).await.unwrap();
         }
+        let item_id = super::native::text_item_id(
+            ProviderKind::Codex,
+            "wire-turn",
+            "wire-answer",
+            agent_protocol::session::TextField::AssistantText,
+        );
         let publication = if warm {
             let source = service.inner.conversation.resources.lock().unwrap()[&native].clone();
             let service = service.clone();
             let public = public.clone();
+            let item_id = item_id.clone();
             let (publish, start) = std::sync::mpsc::channel();
             let (entered, waiting) = tokio::sync::oneshot::channel();
             let task = tokio::task::spawn_blocking(move || {
@@ -111,12 +118,6 @@ async fn codex_text_burst_survives_a_blocked_real_database(#[case] warm: bool) {
                 // The real publisher begins with this full-item SQL query.
                 // Stall at that boundary even if its earlier seed was already
                 // published; no mock database or final snapshot is substituted.
-                let item_id = super::native::text_item_id(
-                    ProviderKind::Codex,
-                    "wire-turn",
-                    "wire-answer",
-                    agent_protocol::session::TextField::AssistantText,
-                );
                 service
                     .inner
                     .conversation
@@ -194,12 +195,6 @@ async fn codex_text_burst_survives_a_blocked_real_database(#[case] warm: bool) {
             .storage
             .thread_state(&public.id, &[])
             .unwrap();
-        let item_id = super::native::text_item_id(
-            ProviderKind::Codex,
-            "wire-turn",
-            "wire-answer",
-            agent_protocol::session::TextField::AssistantText,
-        );
         let item = service
             .inner
             .conversation

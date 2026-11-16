@@ -98,14 +98,13 @@ struct State {
     sequence: u64,
     pending: HashMap<u64, Pending>,
     closed: Option<String>,
-    events: Option<Vec<mpsc::UnboundedSender<PeerEvent>>>,
+    events: Vec<mpsc::UnboundedSender<PeerEvent>>,
     initial: Option<mpsc::UnboundedReceiver<PeerEvent>>,
 }
 impl State {
     fn publish(&mut self, event: PeerEvent) {
-        if let Some(events) = &mut self.events {
-            events.retain(|receiver| receiver.send(event.clone()).is_ok());
-        }
+        self.events
+            .retain(|receiver| receiver.send(event.clone()).is_ok());
     }
 }
 type WriterStatus = Option<Result<(), String>>;
@@ -141,7 +140,7 @@ impl RpcPeer {
                     sequence: 0,
                     pending: HashMap::new(),
                     closed: None,
-                    events: Some(vec![events]),
+                    events: vec![events],
                     initial: Some(initial),
                 })),
                 permits: Arc::new(Semaphore::new(max_requests)),
@@ -197,8 +196,8 @@ impl RpcPeer {
             return initial;
         }
         let (sender, receiver) = mpsc::unbounded_channel();
-        if let Some(events) = &mut state.events {
-            events.push(sender);
+        if state.closed.is_none() {
+            state.events.push(sender);
         }
         receiver
     }
@@ -534,7 +533,7 @@ fn terminate(
         }
         state.closed = Some(reason.clone());
         state.publish(PeerEvent::Closed(reason.clone()));
-        state.events = None;
+        state.events.clear();
         std::mem::take(&mut state.pending)
     };
     permits.close();

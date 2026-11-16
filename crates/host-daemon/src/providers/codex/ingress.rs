@@ -1,6 +1,6 @@
 //! T3 ProviderTextDeltaCoalescer: raw JSONL reception only updates memory and
 //! enqueues ordered batches. Host persistence and its receipts run downstream.
-use agent_transport::peer::{PeerEvent, Reply};
+use agent_transport::peer::{PeerEvent, Reply, RpcMessage, RpcMessageKind};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::mpsc, time::Instant};
@@ -40,21 +40,23 @@ impl Pending {
         let PeerEvent::Message(message) = event else {
             return false;
         };
+        // Classify on the borrowed envelope; only text deltas are materialized.
+        if !RpcMessage::parse(&message.value).is_ok_and(|envelope| {
+            envelope.kind() == RpcMessageKind::Notification
+                && matches!(
+                    envelope.method(),
+                    Some(
+                        "item/agentMessage/delta"
+                            | "item/reasoning/textDelta"
+                            | "item/reasoning/summaryTextDelta"
+                    )
+                )
+        }) {
+            return false;
+        }
         let Ok(mut envelope) = serde_json::from_str::<Value>(&message.value) else {
             return false;
         };
-        if envelope.get("id").is_some()
-            || !matches!(
-                envelope["method"].as_str(),
-                Some(
-                    "item/agentMessage/delta"
-                        | "item/reasoning/textDelta"
-                        | "item/reasoning/summaryTextDelta"
-                )
-            )
-        {
-            return false;
-        }
         let Some(params) = envelope.get_mut("params").and_then(Value::as_object_mut) else {
             return false;
         };
