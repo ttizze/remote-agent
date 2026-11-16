@@ -205,6 +205,7 @@ fn request_artifact(
         completed_at: None,
     };
     let item = model::TurnItem {
+        detail_omitted: false,
         id: model::derived_id("turn-item", &[request_id]),
         thread_id: node.thread_id.clone(),
         run_id: node.run_id.clone(),

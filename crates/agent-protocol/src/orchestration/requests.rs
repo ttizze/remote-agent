@@ -423,6 +423,7 @@ pub fn response_failed(state: &State, request_id: &str, message: &str, now: &str
         return Decision::default();
     };
     let failure = TurnItem {
+        detail_omitted: false,
         id: format!("turn-item:runtime-request-delivery-failure:{request_id}"),
         thread_id: node.thread_id.clone(),
         run_id: node.run_id.clone(),

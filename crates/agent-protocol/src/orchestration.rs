@@ -720,6 +720,11 @@ pub struct ExecutionNode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnItem {
+    /// Transport-only: the full database row remains available through hydration.
+    /// Ordinary T3 bodies have no omission marker; native clients also bound
+    /// authored text that exceeds their binary RPC frame budget.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detail_omitted: bool,
     pub id: String,
     pub thread_id: String,
     pub run_id: Option<String>,

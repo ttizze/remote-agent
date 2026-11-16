@@ -149,6 +149,7 @@ pub(super) fn workspace_result(
 
 pub(super) fn item(run: &Run, root: &ExecutionNode, now: &str) -> TurnItem {
     TurnItem {
+        detail_omitted: false,
         id: id(&run.id, "workspace-preparation"),
         thread_id: root.thread_id.clone(),
         run_id: Some(run.id.clone()),

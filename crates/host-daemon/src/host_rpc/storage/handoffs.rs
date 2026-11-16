@@ -170,6 +170,7 @@ impl Storage {
             let mut decision=model::Decision{changes,effects:Vec::new()};
             if let Some(error) = fork_failure {
                 decision.changes.push(model::Change::TurnItem(model::TurnItem {
+                    detail_omitted: false,
                     id:model::derived_id("turn-item", &["run",&run.id,"signal","native-fork-fallback"]),
                     thread_id:state.thread.id.clone(),run_id:Some(run.id.clone()),node_id:Some(attempt.root_node_id.clone()),provider_thread_id:Some(thread.id.clone()),provider_turn_id:None,native_item_ref:None,parent_item_id:None,ordinal:0,status:model::TurnItemStatus::Completed,title:Some("Native fork failed".into()),started_at:Some(now.into()),completed_at:Some(now.into()),updated_at:now.into(),
                     body:model::TurnItemBody::SystemNotice {message:format!("Could not fork the source conversation natively ({error}). Started a fresh session with its history.")},
@@ -681,6 +682,7 @@ fn prepare(
     }
     let planned_id = id.clone();
     let item = (!runtime_fork).then(|| model::TurnItem {
+        detail_omitted: false,
         id: if fresh {
             model::derived_id(
                 "turn-item",

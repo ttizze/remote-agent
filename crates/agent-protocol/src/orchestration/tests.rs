@@ -249,6 +249,7 @@ fn completed_foreground_keeps_known_background_work_and_process_loss_fences_its_
             ..root.clone()
         };
         let item = TurnItem {
+            detail_omitted: false,
             id: id.into(),
             thread_id: state.thread.id.clone(),
             run_id: Some(run.clone()),
@@ -1425,6 +1426,7 @@ fn proposal_body_has_one_owner_and_its_lifecycle_outlives_the_stream() {
     let (state, run, attempt) = running();
     let attempt_row = &state.run_attempts[&attempt];
     let item = TurnItem {
+        detail_omitted: false,
         id: "plan-item".into(),
         thread_id: state.thread.id.clone(),
         run_id: Some(run),
@@ -1491,6 +1493,7 @@ fn approval() -> (State, String, String) {
     let (state, run, attempt) = running();
     let native = &state.run_attempts[&attempt];
     let item = TurnItem {
+        detail_omitted: false,
         id: "approval-item".into(),
         thread_id: state.thread.id.clone(),
         run_id: Some(run),
@@ -3334,5 +3337,57 @@ fn rewind_distinguishes_an_active_answer_from_settled_background_and_old_native_
     assert!(
         rewind(&state, &run, context("rewind", &state)).is_ok(),
         "old physical-resource activity cannot block the current resource"
+    );
+}
+
+#[test]
+fn oversized_authored_bodies_have_an_explicit_lossless_hydration_contract() {
+    let turn_item = |body: serde_json::Value| -> TurnItem {
+        let mut value = serde_json::json!({"id":"oversized","threadId":"thread","runId":null,"nodeId":null,"providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":1,"status":"completed","title":null,"startedAt":null,"completedAt":null,"updatedAt":NOW});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(body.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    };
+    let text = "本文😀".repeat(200_000);
+    for body in [
+        serde_json::json!({"type":"assistant_message","messageId":"message","text":text,"attachments":[],"streaming":false}),
+        serde_json::json!({"type":"user_message","messageId":"message","createdBy":"user","creationSource":"mobile","inputIntent":"turn_start","text":text,"attachments":[]}),
+        serde_json::json!({"type":"reasoning","text":text,"streaming":false}),
+    ] {
+        let full = turn_item(body);
+        let sent = wire::item(&full);
+        assert!(
+            sent.detail_omitted,
+            "oversized text requires an explicit hydration witness"
+        );
+        assert!(
+            crate::protocol::encode(&sent).unwrap().len() < 8192,
+            "the initial binary frame must contain only a preview"
+        );
+        assert_eq!(
+            wire::item(&sent),
+            sent,
+            "the transport projection must be idempotent"
+        );
+        assert_eq!(
+            serde_json::to_value(&full).unwrap()["text"],
+            text,
+            "projection must not destroy the persisted full body"
+        );
+        let encoded = crate::protocol::encode(&sent).unwrap();
+        let round_trip: TurnItem = crate::protocol::decode(&encoded).unwrap();
+        assert!(
+            round_trip.detail_omitted,
+            "binary round trips must preserve the hydration witness"
+        );
+    }
+    let full = turn_item(
+        serde_json::json!({"type":"assistant_message","messageId":"literal","text":"ordinary authored text\n… output truncated for transport","attachments":[],"streaming":false}),
+    );
+    assert!(
+        !wire::item(&full).detail_omitted,
+        "provider-authored text must not be mistaken for a transport marker"
     );
 }

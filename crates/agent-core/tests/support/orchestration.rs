@@ -299,6 +299,7 @@ fn add_requests(
         push_item(
             projection,
             model::TurnItem {
+                detail_omitted: false,
                 id: format!("request-item:{id}"),
                 thread_id: projection.thread.id.clone(),
                 run_id: run,
@@ -379,6 +380,7 @@ pub fn item_record(
         ItemStatus::Interrupted => model::TurnItemStatus::Interrupted,
     };
     model::TurnItem {
+        detail_omitted: false,
         id: item
             .client_input_id
             .as_ref()

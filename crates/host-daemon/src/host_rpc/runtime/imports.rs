@@ -233,6 +233,7 @@ impl Runtime {
                     continue;
                 }
                 items.push(model::TurnItem {
+                    detail_omitted: false,
                     id: format!("agent-session-import:v2:turn-item:{id}:{suffix}"),
                     thread_id: id.clone(),
                     run_id: None,

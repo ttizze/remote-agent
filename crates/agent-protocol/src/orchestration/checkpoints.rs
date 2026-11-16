@@ -98,6 +98,7 @@ pub fn checkpoint_captured(
     let mut changes = vec![
         Change::Checkpoint(checkpoint.clone()),
         Change::TurnItem(TurnItem {
+            detail_omitted: false,
             id: id(&checkpoint.id, "turn-item"),
             thread_id: state.thread.id.clone(),
             run_id: Some(run.id.clone()),

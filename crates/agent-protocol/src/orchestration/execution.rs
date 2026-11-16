@@ -862,6 +862,7 @@ pub fn uncertain_delivery(
         });
     }
     let item = TurnItem {
+        detail_omitted: false,
         id: format!("turn-item:delivery-uncertain:{effect_id}"),
         thread_id: state.thread.id.clone(),
         run_id: Some(run.id.clone()),
@@ -1167,6 +1168,7 @@ pub(super) fn finish_run(
     if let Completion::Failed(failure) = completion {
         let error_id = id(context.command_id, "error-item");
         changes.push(Change::TurnItem(TurnItem {
+            detail_omitted: false,
             id: error_id,
             thread_id: state.thread.id.clone(),
             run_id: Some(run.id.clone()),
@@ -1259,6 +1261,7 @@ pub fn interrupt(state: &State, run_id: &str, context: Context<'_>) -> Result<De
         return finish_run(state, &attempt.id, Completion::Cancelled, context);
     }
     let request = TurnItem {
+        detail_omitted: false,
         id: id(context.command_id, "interrupt-request"),
         thread_id: state.thread.id.clone(),
         run_id: Some(run.id.clone()),

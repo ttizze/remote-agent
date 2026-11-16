@@ -4,7 +4,8 @@
     "agent-protocol": [
       "orchestration::tests::claude_empty_baseline_replaces_the_logical_native_owner_and_fences_old_callbacks",
       "orchestration::tests::claude_resume_pin_survives_admission_and_errors_but_successful_completion_clears_it",
-      "orchestration::tests::rewind_distinguishes_an_active_answer_from_settled_background_and_old_native_work"
+      "orchestration::tests::rewind_distinguishes_an_active_answer_from_settled_background_and_old_native_work",
+      "orchestration::tests::oversized_authored_bodies_have_an_explicit_lossless_hydration_contract"
     ],
     "host-daemon": [
       "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_1",

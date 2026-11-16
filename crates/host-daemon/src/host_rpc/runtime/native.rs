@@ -149,6 +149,7 @@ impl Context {
                 completed_at: terminal.then(|| self.now.clone()),
             },
             item: model::TurnItem {
+                detail_omitted: false,
                 id: item_identity("turn-item", self.provider, &self.native_turn_id, key),
                 thread_id: self.thread_id.clone(),
                 run_id: self.run_id.clone(),

@@ -638,6 +638,7 @@ mod tests {
         save(&tx, Some("thread"), &run).unwrap();
         tx.commit().unwrap();
         let item = model::TurnItem {
+            detail_omitted: false,
             id: "foreign".into(),
             thread_id: "other".into(),
             run_id: Some("run".into()),

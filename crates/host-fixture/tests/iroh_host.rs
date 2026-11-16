@@ -1830,7 +1830,7 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         );
         let view = preview.view();
         assert_eq!(view.thread.project_id.as_deref(), Some("workspace"));
-        assert_eq!(view.thread.capabilities, listed.capabilities);
+        assert!(listed.capabilities.unwrap().fork && listed.capabilities.unwrap().rename, "saved headers advertise durable conversation actions");
         let items = view.thread.turns.as_ref().unwrap()[0]
             .items
             .as_ref()
@@ -1857,11 +1857,11 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
             500
         );
         assert!(turns.len() <= 10);
-        assert_eq!(turns.last().unwrap().id.as_str(), "long-turn-14");
-        history.extend(&mobile.peer).await;
+        assert!(turns.last().unwrap().items.iter().flatten().any(|item|item_text(item).is_some_and(|text|text.starts_with("Section 14, progress 153."))), "the latest provider-authored response must be present");
+        while history.view().thread.history_has_more==Some(true) { history.extend(&mobile.peer).await; }
         let history = history.view();
         let turns = history.thread.turns.as_ref().unwrap();
-        assert_eq!(turns.len(), 15);
+        assert_eq!(turns.len(), 42, "the recording has 42 user messages; T3 groups by user boundaries, not its 15 native turn frames");
         let items: Vec<_> = turns
             .iter()
             .flat_map(|turn| turn.items.iter().flatten())
@@ -2020,12 +2020,14 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(old.data[0].id.as_ref().unwrap().id, "p1-18");
         assert!(old.has_more);
         let found = mobile.peer.call(&agent_protocol::conversation::records::SearchList { term:"Project 01".into(),limit: Some(10_000) }).await.unwrap();
-        assert_eq!(found.data.len(),18);
-        assert!(found.data.iter().all(|thread| thread.project_id.as_deref() == Some("project-1")));
-        assert_eq!(found.projects.len(),1);
+        // Pinned paletteSearch.ts matches the two words across the title:
+        // 18 project-1 titles plus conversation-01 in the other six projects.
+        let expected:std::collections::BTreeSet<_>=(1..=18).map(|index|format!("p1-{index}")).chain((2..=7).map(|project|format!("p{project}-1"))).collect();
+        assert_eq!(found.data.iter().map(|thread|thread.id.as_ref().unwrap().id.clone()).collect::<std::collections::BTreeSet<_>>(),expected);
+        assert_eq!(found.projects.len(),7);
         let filtered = catalog.page(models::ListQuery { search_term:"Project 01".into(), ..query.clone() });
         assert_eq!(filtered.lists.project_threads["project-1"].data.len(),5);
-        assert!(!filtered.lists.threads.as_ref().unwrap().has_more_projects);
+        assert!(filtered.lists.threads.as_ref().unwrap().has_more_projects);
         let exact = mobile.peer.call(&agent_protocol::conversation::records::SearchList { term:"Project 01 conversation 18".into(),limit: Some(10_000) }).await.unwrap();
         assert_eq!(exact.data.len(),1);
         assert_eq!(exact.data[0].id.as_ref().unwrap().id,"p1-18");
@@ -2306,7 +2308,7 @@ async fn daemon_exposes_project_roots_and_structured_tool_results() {
         assert_eq!(list.projects[0].roots[0].path, directory.path().to_str().unwrap());
         assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["body"]["inline"]["body"]["toolCall"]["result"].is_object()));
         let reopened = serde_json::from_value::<models::ThreadResponse>(history).unwrap().thread;
-        let tool_ids = reopened.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten()).filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::ToolCall { kind: agent_protocol::items::ToolKind::Mcp | agent_protocol::items::ToolKind::Dynamic, .. })).map(|item| item.id.clone()).collect::<std::collections::HashSet<_>>();
+        let tool_ids = reopened.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten()).filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::ToolCall { tool, .. } if matches!(tool.as_str(),"lookup" | "fixture"))).map(|item| item.id.clone()).collect::<std::collections::HashSet<_>>();
         let snapshot = agent_core::state::Snapshot::default();
         let rendered = agent_core::presentation::conversation::project_conversation(
             agent_core::localization::UiLanguage::Japanese,

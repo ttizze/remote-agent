@@ -110,6 +110,7 @@ fn user_item(
     context: Context<'_>,
 ) -> TurnItem {
     TurnItem {
+        detail_omitted: false,
         id: user_item_id(thread_id, &input.message_id),
         thread_id: thread_id.to_owned(),
         run_id: Some(run_id.to_owned()),

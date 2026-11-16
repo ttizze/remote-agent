@@ -334,6 +334,7 @@ fn inherited_run_ids<'a>(
 
 fn fork_marker(thread: &model::Thread, source_thread_id: &str) -> IndexedItem {
     let marker = Arc::new(model::TurnItem {
+        detail_omitted: false,
         id: format!("turn-item:fork:{}", thread.id),
         thread_id: thread.id.clone(),
         run_id: None,

@@ -124,6 +124,7 @@ pub fn project_generated_images(
         *streaming = false;
     }
     let item = TurnItem {
+        detail_omitted: false,
         id: item_id,
         thread_id: state.thread.id.clone(),
         run_id: Some(attempt.run_id.clone()),
