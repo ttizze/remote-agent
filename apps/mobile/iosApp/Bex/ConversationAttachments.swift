@@ -12,7 +12,7 @@ struct ComposerAttachmentStrip: View {
     var body: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 12) {
-                ForEach(Array(attachments.enumerated()), id: \.element.path) { index, attachment in
+                ForEach(Array(attachments.enumerated()), id: \.offset) { index, attachment in
                     Group {
                         if attachment.isImage {
                             ConversationImage(source: SessionImage(reference: attachment.path),

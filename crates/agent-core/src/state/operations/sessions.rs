@@ -643,11 +643,7 @@ impl Operation for RewindSession {
                 }
                 draft.text.push_str(&text);
             }
-            for attachment in attachments {
-                if !draft.attachments.contains(&attachment) {
-                    draft.attachments.push(attachment);
-                }
-            }
+            draft.attachments.extend(attachments);
         }
         let effects = if current && !snapshot.sessions.subscriptions.contains_key(&id) {
             vec![Effect::execute(ReadThread::open(id))]

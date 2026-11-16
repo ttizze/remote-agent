@@ -21,22 +21,9 @@ pub fn rollback_target(
         .selected_native_thread()
         .filter(|thread| thread.id == provider_thread_id)
         .ok_or("active provider changed before rewind")?;
-    if thread.status == ProviderThreadStatus::Active
-        || !thread.pending_background_tasks.is_empty()
-        || state.nodes.values().any(|node| {
-            node.provider_thread_id.as_ref() == Some(&thread.id)
-                && node.kind != NodeKind::RootTurn
-                && matches!(
-                    node.status,
-                    NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
-                )
-                && node
-                    .run_id
-                    .as_ref()
-                    .and_then(|id| state.runs.get(id))
-                    .is_none_or(|run| run.status != RunStatus::Queued)
-        })
-    {
+    // Like T3's adapter, foreground admission blocks rewind. A settled query
+    // may still own background work; native rollback closes that query first.
+    if thread.status == ProviderThreadStatus::Active {
         return Err("native work is still running".into());
     }
     let session = thread

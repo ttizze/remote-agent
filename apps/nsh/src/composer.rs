@@ -896,9 +896,19 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                         )
                     })
                     .child(view().flex_row().items_start().gap_3().p_2().child(each(
-                        move || composer.with(|c| c.draft.attachments.clone()),
-                        |file: &agent_core::state::Attachment| file.path.clone(),
+                        move || {
+                            composer.with(|c| {
+                                c.draft
+                                    .attachments
+                                    .iter()
+                                    .cloned()
+                                    .enumerate()
+                                    .collect::<Vec<_>>()
+                            })
+                        },
+                        |(index, _)| *index,
                         move |file, index| {
+                            let file = computed(move || file.with(|(_, file)| file.clone()));
                             attachment(connection, preview, files, file, move || {
                                 connection.dispatch(Intent::RemoveAttachment {
                                     draft_key: controls
@@ -1038,7 +1048,7 @@ fn attachment(
     connection: Connection,
     preview: crate::media::Preview,
     files: crate::files::Browser,
-    file: ReadSignal<agent_core::state::Attachment>,
+    file: Memo<agent_core::state::Attachment>,
     remove: impl Fn() + 'static,
 ) -> impl IntoElement {
     use crate::ui::{self, Icon, colors};
