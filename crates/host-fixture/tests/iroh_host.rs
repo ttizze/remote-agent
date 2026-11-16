@@ -154,6 +154,16 @@ async fn imported(fixture: &HostFixture, session: &SessionRef) {
     );
     local.close().await;
 }
+async fn import_fixture_threads(fixture: &HostFixture, directory: &Path) {
+    let threads: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(directory.join("list-fixture.json")).unwrap())
+            .unwrap();
+    for thread in threads {
+        let session =
+            SessionRef::new(ProviderKind::Codex, thread["id"].as_str().unwrap().into()).unwrap();
+        imported(fixture, &session).await;
+    }
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_active_sessions() {
     tokio::time::timeout(Duration::from_secs(45), async {
@@ -974,8 +984,14 @@ fn assert_submission_items(
         _ => None,
     });
     if let Some(path) = uploaded {
-        assert_eq!(images.next().unwrap(), path);
-        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        let source = images.next().unwrap();
+        let file = agent_protocol::paths::attachment_file_name(source)
+            .expect("canonical attachment reference");
+        assert_eq!(
+            std::fs::read(Path::new(path).parent().unwrap().join(file)).unwrap(),
+            bytes,
+            "the durable attachment must retain the uploaded bytes"
+        );
     }
     assert!(images.next().is_none());
     assert!(items.iter().any(|item| matches!(
@@ -997,42 +1013,126 @@ async fn chat_preparation_recovers_in_the_same_conversation_after_reconnecting()
         let directory = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(directory.path()).unwrap();
         let fixture = start_host(&root).await;
-        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
-        let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None, "Fixture device", None).await.unwrap();
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
+        let store = Store::connect(
+            &endpoint,
+            &fixture.ticket,
+            codex_chat_snapshot(),
+            None,
+            "Fixture device",
+            None,
+        )
+        .await
+        .unwrap();
         let blocked = root.join("bex-chats");
         std::fs::write(&blocked, "not a directory").unwrap();
-        store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
-        store.dispatch(Intent::SetDraftText { thread_id: store.snapshot().panes.primary().navigation.draft_key.clone(), text: "[success] recover preparation".into() }).await.unwrap();
-        assert!(matches!(store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: input_id("recover-chat"), alternate: false }).await.unwrap(), Outcome::StartedThread { .. }));
-        let id = store.snapshot().panes.primary().navigation.thread_id.clone().unwrap();
-        let mut updates = store.subscribe();
-        loop {
-            let snapshot = updates.borrow_and_update().clone();
-            if let Some(preparation) = snapshot.sessions.conversations[&id].preparations.iter().find(|preparation| matches!(preparation.status, agent_protocol::session::PreparationStatus::Failed { .. })) {
-                assert!(preparation.submission.input.iter().any(|input| matches!(input, rpc::Input::Text { text } if text == "[success] recover preparation")));
-                assert_eq!(snapshot.sessions.conversations[&id].submissions.get(&input_id("recover-chat")), Some(&agent_protocol::session::SubmissionDelivery::Rejected));
-                assert!(snapshot.selected_directory(snapshot.panes.primary()).is_empty());
-                break;
-            }
-            updates.changed().await.unwrap();
-        }
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let key = store
+            .snapshot()
+            .panes
+            .primary()
+            .navigation
+            .draft_key
+            .clone();
+        let prompt = "[success] recover preparation";
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: key.clone(),
+                text: prompt.into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .dispatch(Intent::Submit {
+                    thread_id: None,
+                    client_user_message_id: input_id("recover-chat"),
+                    alternate: false
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.snapshot().input.drafts[&key].text,
+            prompt,
+            "a creation failure must retain the user's input"
+        );
         std::fs::remove_file(&blocked).unwrap();
         store.disconnect().await.unwrap();
-        store.reconnect(&endpoint, &fixture.ticket, None, "Fixture device").await.unwrap();
-        store.dispatch(Intent::RetryPreparation(op::RetryPreparation { thread_id: id.clone(), input_id: input_id("recover-chat"), work_locally: false })).await.unwrap();
-        loop {
-            let snapshot = updates.borrow_and_update().clone();
-            if snapshot.sessions.conversations[&id].preparations.is_empty() && snapshot.sessions.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 1 && turns[0].status == agent_protocol::execution::TurnStatus::Completed) {
-                assert_eq!(snapshot.panes.primary().navigation.thread_id.as_ref(), Some(&id));
-                assert_eq!(Path::new(&snapshot.panes.primary().navigation.cwd), blocked);
-                break;
-            }
-            updates.changed().await.unwrap();
-        }
+        store
+            .reconnect(&endpoint, &fixture.ticket, None, "Fixture device")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .dispatch(Intent::Submit {
+                    thread_id: None,
+                    client_user_message_id: input_id("recover-chat"),
+                    alternate: false
+                })
+                .await
+                .unwrap(),
+            Outcome::StartedThread { .. }
+        ));
+        let id = store
+            .snapshot()
+            .panes
+            .primary()
+            .navigation
+            .thread_id
+            .clone()
+            .unwrap();
+        let mut updates = store.subscribe();
+        updates
+            .wait_for(|snapshot| {
+                snapshot.sessions.conversations[&id]
+                    .turns
+                    .iter()
+                    .flatten()
+                    .any(|turn| turn.status == agent_protocol::execution::TurnStatus::Completed)
+            })
+            .await
+            .unwrap();
+        store.disconnect().await.unwrap();
+        store
+            .reconnect(&endpoint, &fixture.ticket, None, "Fixture device")
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+            .await
+            .unwrap();
+        let snapshot = store.snapshot();
+        let thread = &snapshot.sessions.conversations[&id];
+        assert_eq!(
+            thread.turns.as_ref().unwrap().len(),
+            1,
+            "retry must not duplicate admission"
+        );
+        assert_eq!(
+            snapshot.panes.primary().navigation.thread_id.as_ref(),
+            Some(&id)
+        );
+        assert_eq!(Path::new(&snapshot.panes.primary().navigation.cwd), blocked);
+        assert!(
+            thread
+                .turns
+                .iter()
+                .flatten()
+                .flat_map(|turn| turn.items.iter().flatten())
+                .any(|item| item_text(item) == Some(prompt))
+        );
         store.close().await.unwrap();
         endpoint.close().await;
         fixture.close().await.unwrap();
-    }).await.unwrap();
+    })
+    .await
+    .expect("chat creation recovery deadline");
 }
 
 #[rstest::rstest]
@@ -1325,8 +1425,8 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
             };
             assert_eq!(store.snapshot().sessions.conversations.contains_key(&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() }), cached);
             if cached {
-                // The imported transcript answers; a native change made outside
-                // the Host waits for the project to be imported again.
+                // A saved canonical transcript ignores subsequent native changes,
+                // including when its project is imported again.
                 imported(&fixture, &agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() }).await;
                 std::fs::write(root.join("background-reply"), "Latest reply from another client").unwrap();
             } else {
@@ -1341,20 +1441,19 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
                 while !root.join("history-read-held").exists() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                tokio::time::timeout(Duration::from_millis(500), &mut opening).await.expect("subscribe does not wait for import").unwrap();
-                assert_eq!(store.snapshot().sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(ProviderKind::Codex), id: "selected".into() }].history_read_state.as_ref().unwrap().kind, agent_protocol::session::HistoryReadKind::Loading);
+                assert!(tokio::time::timeout(Duration::from_millis(100), &mut opening).await.is_err(), "the first subscription must not certify an unfinished import");
             } else {
                 let thread = &store.snapshot().sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(agent_protocol::session::ProviderKind::Codex), id: "selected".into() }];
                 assert_eq!(item_text(&(thread.turns.as_ref().unwrap().last().unwrap().items.as_ref().unwrap()[0])), Some("History for Selected task"));
             }
             // List refresh shares the production transport but must not wait for history.
             store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
-            assert!(store.snapshot().lists.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("selected")));
+            assert_eq!(store.snapshot().lists.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("selected")), cached, "an unfinished import is not a saved conversation");
             if !cached {
                 std::fs::remove_file(root.join("hold-history-reads")).unwrap();
                 std::fs::remove_file(root.join("history-read-held")).unwrap();
             }
-            if cached { opening.await.unwrap(); }
+            opening.await.unwrap();
             let mut ready = store.subscribe();
             ready.wait_for(|snapshot| snapshot.sessions.conversations[&agent_protocol::session::SessionRef { provider: Some(ProviderKind::Codex), id: "selected".into() }].turns.as_ref().is_some_and(|turns| !turns.is_empty())).await.unwrap();
             let current = store.snapshot();
@@ -1380,98 +1479,17 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = start_host(directory.path()).await;
-        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
-            .await
-            .unwrap();
-        let store = Store::connect(
-            &endpoint,
-            &fixture.ticket,
-            codex_chat_snapshot(),
-            None,
-            "Fixture device",
-            None,
-        )
-        .await
-        .unwrap();
-        store
-            .dispatch(Intent::NewChat {
-                cwd: directory.path().to_str().unwrap().into(),
-            })
-            .await
-            .unwrap();
-        let key = store
-            .snapshot()
-            .panes
-            .primary()
-            .navigation
-            .draft_key
-            .clone();
-        store
-            .dispatch(Intent::SetDraftText {
-                thread_id: key,
-                text: "[duplicate] Preserve both persisted responses".into(),
-            })
-            .await
-            .unwrap();
-        store
-            .dispatch(Intent::Submit {
-                thread_id: None,
-                client_user_message_id: input_id("duplicate-message"),
-                alternate: false,
-            })
-            .await
-            .unwrap();
-        let id = store
-            .snapshot()
-            .panes
-            .primary()
-            .navigation
-            .thread_id
-            .clone()
-            .unwrap();
-        let mut updates = store.subscribe();
-        loop {
-            let snapshot = updates.borrow_and_update().clone();
-            let thread = &snapshot.sessions.conversations[&id];
-            if thread.preparations.is_empty()
-                && thread.turns.as_ref().is_some_and(|turns| {
-                    turns.first().is_some_and(|turn| {
-                        turn.status == agent_protocol::execution::TurnStatus::Completed
-                    })
-                })
-            {
-                break;
-            }
-            updates.changed().await.unwrap();
-        }
-        let management = fixture.local().await.unwrap();
-        let cwd = store.snapshot().sessions.conversations[&id]
-            .cwd
-            .clone()
-            .unwrap();
-        management
-            .peer
-            .request::<agent_protocol::project_import::ProjectImportResult>(
-                &agent_protocol::protocol::Call::ImportProjects(
-                    agent_protocol::project_import::ImportProjects { paths: vec![cwd] },
-                ),
-            )
-            .await
-            .unwrap();
-        let mut imported_updates = store.subscribe();
-        imported_updates
-            .wait_for(|snapshot| {
-                snapshot.sessions.conversations[&id]
-                    .turns
-                    .iter()
-                    .flatten()
-                    .flat_map(|turn| turn.items.iter().flatten())
-                    .any(|item| item_text(item) == Some("Older AI response must remain visible."))
-            })
-            .await
-            .unwrap();
-        management.close().await;
+        let turns = ["Older AI response must remain visible.", "シミュレータで完了しました。"].into_iter().enumerate().map(|(index,text)|json!({
+            "id":"repeated-native-turn","status":"completed","items":[
+                {"id":format!("user-{index}"),"type":"userMessage","content":[{"type":"text","text":format!("question {index}")}]},
+                {"id":format!("reply-{index}"),"type":"agentMessage","text":text,"phase":"final_answer"}]
+        })).collect::<Vec<_>>();
+        std::fs::write(directory.path().join("list-fixture.json"),json!([{"id":"duplicate-history","cwd":directory.path(),"historyMode":"paginated","turns":turns}]).to_string()).unwrap();
+        let fixture=start_host(directory.path()).await;
+        let endpoint=Endpoint::bind(fixture.credentials.local_identity().await,Relays::Disabled).await.unwrap();
+        let store=Store::connect(&endpoint,&fixture.ticket,codex_chat_snapshot(),None,"Fixture device",None).await.unwrap();
+        let id=SessionRef::new(ProviderKind::Codex,"duplicate-history".into()).unwrap();
+        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
         let mut store = store;
         for restore in [false, true] {
             store.dispatch(Intent::ShowThreadList).await.unwrap();
@@ -1571,9 +1589,9 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
     tokio::time::timeout(Duration::from_secs(45), async {
         let directory = tempfile::tempdir().unwrap();
         let turns = (0..12).map(|turn| json!({"id":format!("turn-{turn}"),"status":"completed",
-            "items":(0..if turn == 11 { 620 } else { 1 }).map(|item| json!({
+            "items":std::iter::once(json!({"id":format!("question-{turn}"),"type":"userMessage","content":[{"type":"text","text":format!("question {turn}")}]})).chain((0..if turn == 11 { 620 } else { 1 }).map(|item| json!({
                 "id":format!("item-{turn}-{item}"),"type":"agentMessage","text":format!("answer {turn}/{item}")
-            })).collect::<Vec<_>>()
+            }))).collect::<Vec<_>>()
         })).collect::<Vec<_>>();
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([{
             "id":"history","name":"History pagination","cwd":directory.path(),"historyMode":"paginated","turns":turns
@@ -1619,7 +1637,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         assert_eq!(thread.history_has_more, Some(true));
         let latest = thread.turns.as_ref().unwrap().last().unwrap();
         assert_eq!(latest.items.as_ref().unwrap().len(), 75);
-        assert_eq!(latest.items.as_ref().unwrap().last().unwrap().id, "item-11-619".into());
+        assert_eq!(item_text(latest.items.as_ref().unwrap().last().unwrap()), Some("answer 11/619"));
         let rendered = agent_core::presentation::conversation::project_conversation(agent_core::localization::UiLanguage::Japanese, &snapshot.panes.primary().navigation.draft_key, &snapshot.sessions.pending_submissions, thread.clone(), &None);
         assert_eq!(rendered.turns.len(), 1);
         for _ in 0..20 {
@@ -1638,12 +1656,13 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
             let loaded = thread.turns.as_ref().unwrap();
             assert_eq!(loaded.len(), turns.len());
             for (loaded, expected) in loaded.iter().zip(&turns) {
-                assert_eq!(json!(loaded.id), expected["id"]);
+                assert_eq!(item_text(&loaded.items.as_ref().unwrap()[0]), Some(format!("question {}", expected["id"].as_str().unwrap().strip_prefix("turn-").unwrap()).as_str()));
 
                 let actual = loaded.items.as_ref().unwrap();
                 let expected = expected["items"].as_array().unwrap();
                 assert_eq!(actual.len(), expected.len());
-                for (actual, expected) in actual.iter().zip(expected) {assert_eq!(json!(actual.id),expected["id"]); assert!(matches!(actual.body(),agent_protocol::items::ItemBody::AssistantText {text,..} if text == expected["text"].as_str().unwrap()));}
+                for (actual, expected) in actual.iter().skip(1).zip(expected.iter().skip(1)) { assert_eq!(item_text(actual), expected["text"].as_str()); }
+                assert_eq!(actual.iter().map(|item| &item.id).collect::<std::collections::HashSet<_>>().len(), actual.len(), "canonical occurrences must be distinct");
             }
             assert_eq!(snapshot.panes.primary().error, None);
         }
@@ -1695,9 +1714,8 @@ async fn generated_images_are_visible_on_open_reopen_and_older_pages_without_exp
                     ConversationRowContent::Activity { .. } => panic!("work details were loaded"),
                     _ => None,
                 }).collect();
-                assert_eq!(images.len(), 2, "images must be visible before work is expanded");
-                assert_eq!(images[0].data.image_sources, [format!("/generated-{index}.png")]);
-                assert_eq!(images[1].data.image_sources, [format!("data:image/png;base64,{data}")]);
+                assert!(images.is_empty(), "T3's one-time importer copies messages without native image/tool attachments");
+                assert!(turn.rows.iter().any(|row| matches!(&row.content, ConversationRowContent::Response { item, .. } if item.data.body.as_deref()==Some("Here are the images"))), "message {index} was lost");
             }
         }
         let trace = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap();
@@ -1732,15 +1750,11 @@ async fn summary_history_rejects_repeated_cursors_and_oversized_pages() {
         let _catalog=conversations::Catalog::open(&local.peer).await;
         for (id, _, message) in cases {
             let result=conversations::Conversation::open(&local.peer,&SessionRef::new(ProviderKind::Codex,id.into()).unwrap()).await;
-            let thread = result.unwrap().view().thread;
-            let failure = thread.history_read_state.unwrap();
-            assert_eq!(failure.kind, agent_protocol::session::HistoryReadKind::Unavailable, "invalid summary was accepted: {id}");
-            assert_eq!(failure.issues, [message]);
-            assert!(thread.turns.unwrap().is_empty());
+            let error = result.err().expect("invalid native summary must fail admission").to_string();
+            assert!(error.contains("history_unavailable") && error.contains(message), "{id}: {error}");
         }
-        let failure=conversations::Conversation::open(&local.peer,&SessionRef::new(ProviderKind::Codex,"loop".into()).unwrap()).await.unwrap().view().thread.history_read_state.unwrap();
-        assert_eq!(failure.kind,agent_protocol::session::HistoryReadKind::Unavailable);
-        assert!(failure.issues[0].contains("history cursor repeated"));
+        let error=conversations::Conversation::open(&local.peer,&SessionRef::new(ProviderKind::Codex,"loop".into()).unwrap()).await.err().expect("repeated native cursor must fail").to_string();
+        assert!(error.contains("history_unavailable") && error.contains("history cursor repeated"));
         local.close().await;
         fixture.close().await.unwrap();
     }).await.expect("summary validation exceeded its deadline");
@@ -1792,6 +1806,7 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         ]).to_string()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
+        import_fixture_threads(&fixture, directory.path()).await;
         let mut catalog = conversations::Catalog::open(&mobile.peer).await;
         catalog.wait_rows(2).await;
         let id = SessionRef::new(ProviderKind::Codex, "large".into()).unwrap();
@@ -1909,16 +1924,8 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         assert_eq!(items.len(), 2);
         let original = std::fs::read(directory.path().join("fixture image.png")).unwrap();
         for item in items {
-            let (full, _, _) = images
-                .hydrate(&mobile.peer, &mobile.session, &item.id)
-                .await;
-            let agent_protocol::items::ItemBody::ImageGeneration {
-                data: Some(data), ..
-            } = full.body()
-            else {
-                panic!("image body missing")
-            };
-            assert_eq!(STANDARD.decode(data).unwrap(), original);
+            let agent_protocol::items::ItemBody::ImageGeneration { saved_path:Some(source), .. }=item.body() else {panic!("generated image source missing")};
+            assert_eq!(std::fs::read(source).unwrap(), original, "the live image asset must preserve its bytes");
         }
         mobile.close().await;
         fixture.close().await.unwrap();
@@ -1966,6 +1973,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
 
         use agent_core::state::{Event, Intent, reduce};
         let query = models::ListQuery { limit:5, project_limit:5, ..Default::default() };
+        import_fixture_threads(&fixture, directory.path()).await;
         let mut catalog = conversations::Catalog::open(&mobile.peer).await;
         catalog.wait_rows(threads.len()).await;
         let mut initial = catalog.page(query.clone());
@@ -2291,10 +2299,13 @@ async fn daemon_exposes_project_roots_and_structured_tool_results() {
         completed_turn(&mut events).await;
         let catalog = conversations::Catalog::open(&local.peer).await;
         let list = catalog.page(Default::default()).lists.threads.unwrap();
-        let history = open_conversation(&local.peer, thread_id).await.0;
+        let (_, mut history) = open_conversation(&local.peer, thread_id).await;
+        let deferred: Vec<_> = history.view().thread.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten()).filter(|item| item.is_deferred()).map(|item|item.id.clone()).collect();
+        for item in deferred { history.hydrate(&local.peer, &local.session, &item).await; }
+        let history=json!(history.view());
         assert_eq!(list.projects[0].roots[0].path, directory.path().to_str().unwrap());
         assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["body"]["inline"]["body"]["toolCall"]["result"].is_object()));
-        let reopened = conversations::Conversation::open(&local.peer, &serde_json::from_value(thread_id.clone()).unwrap()).await.unwrap().view().thread;
+        let reopened = serde_json::from_value::<models::ThreadResponse>(history).unwrap().thread;
         let tool_ids = reopened.turns.iter().flatten().flat_map(|turn| turn.items.iter().flatten()).filter(|item| matches!(item.body(), agent_protocol::items::ItemBody::ToolCall { kind: agent_protocol::items::ToolKind::Mcp | agent_protocol::items::ToolKind::Dynamic, .. })).map(|item| item.id.clone()).collect::<std::collections::HashSet<_>>();
         let snapshot = agent_core::state::Snapshot::default();
         let rendered = agent_core::presentation::conversation::project_conversation(
@@ -2380,6 +2391,17 @@ async fn upstream_exit_keeps_host_management_connected() {
             .unwrap();
         assert!(store.snapshot().connection.connected);
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
+        let probe = fixture.local().await.unwrap();
+        assert!(
+            probe
+                .peer
+                .call(&rpc::ListAgents {
+                    thread_id: SessionRef::new(ProviderKind::Codex, "exit-probe".into()).unwrap()
+                })
+                .await
+                .is_err()
+        );
+        probe.close().await;
         store
             .dispatch(Intent::ListSessions(Default::default()))
             .await
@@ -2921,7 +2943,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                     let mut initial = client.subscribe();
                     while initial.borrow_and_update().lists.threads.is_none() || !initial.borrow().operations.is_empty() { initial.changed().await.unwrap(); }
                 }
-                let list_reads = || std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap().lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).filter(|entry| entry["method"] == "thread/list").count();
+                let list_reads = || std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap_or_default().lines().map(|line| serde_json::from_str::<Value>(line).unwrap()).filter(|entry| entry["method"] == "thread/list").count();
                 let before = list_reads();
                 store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                 if scoped {
@@ -2999,7 +3021,10 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         let mut updates = store.subscribe();
         let turn_id = loop {
             let snapshot = updates.borrow_and_update().clone();
-            if let Some(turn) = snapshot.sessions.conversations[&id].turns.as_ref().and_then(|turns| turns.first()) { break turn.id.clone(); }
+            if snapshot.sessions.conversations[&id].preparations.is_empty()
+                && let Some(turn) = snapshot.sessions.conversations[&id].turns.as_ref().and_then(|turns| turns.first())
+                && turn.status == agent_protocol::execution::TurnStatus::Running
+                && !snapshot.panes.primary().navigation.cwd.is_empty() { break turn.id.clone(); }
             updates.changed().await.unwrap();
         };
         let path = store.snapshot().panes.primary().navigation.cwd.clone();
@@ -3729,8 +3754,8 @@ async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
     let (_, mut events) = open_conversation(&mobile.peer, id).await;
     conversations::submit(&mobile.peer,&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"[generated-images] [gallery] Browse all generated images"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
     completed_turn(&mut events).await;
-    // Native history the turn added outside its live stream arrives when the
-    // project is imported again.
+    // T3 never reimports an owned conversation. Only its observed live images
+    // appear, even though the fixture also wrote six native-only older images.
     let session: agent_protocol::session::SessionRef = serde_json::from_value(id.clone()).unwrap();
     imported(&fixture, &session).await;
     mobile
@@ -3751,15 +3776,15 @@ async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
             .session_images(&session, Some(&mobile.session))
             .await
             .unwrap();
-        if images.len() == 8 {
+        if images.len() == 2 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(
         images.len(),
-        8,
-        "native older turns and earlier item pages remain accessible"
+        2,
+        "live images remain available and reimport must not backfill native-only history"
     );
     peer.close().await;
     mobile.session.close();
@@ -3769,98 +3794,48 @@ async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without_reconnecting() {
-    tokio::time::timeout(Duration::from_secs(120), async {
-        let directory = tempfile::tempdir().unwrap();
+    tokio::time::timeout(Duration::from_secs(120),async {
+        let directory=tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("oversized-history")).unwrap();
-        std::fs::write(directory.path().join("list-fixture.json"), json!([{
-            "id":"oversized", "cwd":directory.path().join("oversized-history"), "historyMode":"paginated"
-        }]).to_string()).unwrap();
-        let fixture = start_host(directory.path()).await;
-        let mobile = fixture.local().await.unwrap();
-        let mut catalog = conversations::Catalog::open(&mobile.peer).await;
-        catalog.wait_rows(1).await;
-        let thread_id = SessionRef::new(ProviderKind::Codex, "oversized".into()).unwrap();
-        let mut conversation = conversations::Conversation::open(&mobile.peer, &thread_id).await.unwrap();
-        for read in 0..2 {
-            if read > 0 {
-                conversation = conversations::Conversation::open(&mobile.peer, &thread_id).await.unwrap();
-            }
-            let opened = serde_json::to_value(conversation.view()).unwrap();
-            assert!(agent_protocol::protocol::encode(&conversation.projection.snapshot).unwrap().len() < 16 * 1024);
-            let turn = &opened["thread"]["turns"][0];
-            // An import copies messages and images; past tool activity stays native.
-            let deferred = ["oversized-text", "oversized-image"];
-            assert_eq!(
-                turn["items"].as_array().unwrap().iter().filter(|item| item["body"]["deferred"].is_object()).map(|item| item["id"].as_str().unwrap()).collect::<Vec<_>>(),
-                deferred
-            );
-            assert!(
-                body_json(&turn["items"][1])["imageGeneration"]["data"].is_null(),
-                "base64 must be absent, never truncated"
-            );
+        std::fs::write(directory.path().join("list-fixture.json"),json!([{"id":"oversized","cwd":directory.path().join("oversized-history"),"historyMode":"paginated"}]).to_string()).unwrap();
+        let fixture=start_host(directory.path()).await;
+        let mobile=fixture.local().await.unwrap();
+        let id=SessionRef::new(ProviderKind::Codex,"oversized".into()).unwrap();
+        let mut expected=None;
+        for _ in 0..2 {
+            let mut conversation=conversations::Conversation::open(&mobile.peer,&id).await.unwrap();
+            assert!(agent_protocol::protocol::encode(&conversation.projection.snapshot).unwrap().len()<16*1024);
+            let view=conversation.view();
+            let items=view.thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap();
+            assert_eq!(items.len(),1,"T3 imports the message, not native image and command tools");
+            assert!(items[0].is_deferred(),"a 17 MiB body cannot travel in the initial frame");
+            let item_id=items[0].id.clone();
+            if let Some(expected)=&expected {assert_eq!(&item_id,expected,"canonical identity must survive reopen");}
+            expected=Some(item_id.clone());
+            let (item,wire_bytes,transfer_size)=conversation.hydrate(&mobile.peer,&mobile.session,&item_id).await;
+            assert!(transfer_size.unwrap()>16*1024*1024);
+            assert!(wire_bytes<16*1024);
+            let text=item_text(&item).unwrap();
+            assert_eq!(text.len(),17*1024*1024);
+            assert!(text.bytes().all(|byte|byte==b'x'));
         }
-        for (id, kind, field, byte) in [
-            ("oversized-text", "assistantText", "text", b'x'),
-            ("oversized-image", "imageGeneration", "data", b'A'),
-        ] {
-            let (item, wire_bytes, transfer_size) = conversation.hydrate(&mobile.peer, &mobile.session, &id.into()).await;
-            assert!(transfer_size.unwrap() > 16 * 1024 * 1024);
-            assert!(wire_bytes < 16 * 1024);
-            let item = serde_json::to_value(item).unwrap();
-            let body = body_json(&item)[kind][field].as_str().unwrap();
-            assert_eq!(body.len(), 17 * 1024 * 1024);
-            assert!(body.bytes().all(|value| value == byte));
-        }
-        // Visible messages and images hydrate through the shared Store path
-        // used by all native clients.
-        use agent_core::state::Intent;
-        use agent_core::store::Store;
-        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
-            .await
-            .unwrap();
-        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None, "Fixture device", None)
-            .await
-            .unwrap();
-        let mut updates = store.subscribe();
-        store
-            .dispatch(Intent::ReadThread(op::ReadThread::open(thread_id.clone())))
-            .await
-            .unwrap();
+        use agent_core::{state::Intent,store::Store};
+        let endpoint=Endpoint::bind(fixture.credentials.local_identity().await,Relays::Disabled).await.unwrap();
+        let store=Store::connect(&endpoint,&fixture.ticket,Default::default(),None,"Fixture device",None).await.unwrap();
+        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+        let mut updates=store.subscribe();
         loop {
-            let snapshot = updates.borrow_and_update().clone();
-            assert!(snapshot.panes.primary().error.is_none(), "{:?}", snapshot.panes.primary().error);
-            let items = &snapshot.sessions.conversations[&thread_id].turns.as_ref().unwrap()[0]
-                .items
-                .as_ref()
-                .unwrap();
-            // The summary's body can finish loading before the detail stream
-            // delivers the remaining item metadata.
-            if let [text, image, ..] = items.as_slice()
-                && item_text(text).is_some_and(|text| text.len() == 17 * 1024 * 1024)
-                && matches!(image.body(), agent_protocol::items::ItemBody::ImageGeneration { data: Some(data), .. } if data.len() == 17 * 1024 * 1024)
-            {
-                break;
-            }
+            let snapshot=updates.borrow_and_update().clone();
+            assert!(snapshot.panes.primary().error.is_none(),"{:?}",snapshot.panes.primary().error);
+            let items=snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
+            assert_eq!(items.len(),1);
+            if let Some(text)=item_text(&items[0]) && text.len()==17*1024*1024 {assert!(text.bytes().all(|byte|byte==b'x'));break;}
             updates.changed().await.unwrap();
         }
-        assert_eq!(
-            store.snapshot().sessions.conversations[&thread_id].turns.as_ref().unwrap()[0].items.as_ref().unwrap().len(),
-            2,
-            "imported turn details hold messages and images"
-        );
-        store.close().await.unwrap();
-        endpoint.close().await;
-        mobile
-            .peer
-            .call(&rpc::ReadHostStatus {})
-            .await
-            .map(|output| serde_json::to_value(output).unwrap())
-            .unwrap();
-        mobile.close().await;
-        fixture.close().await.unwrap();
-    })
-    .await
-    .expect("large item transfers exceeded deadline");
+        store.close().await.unwrap();endpoint.close().await;
+        mobile.peer.call(&rpc::ReadHostStatus {}).await.unwrap();
+        mobile.close().await;fixture.close().await.unwrap();
+    }).await.expect("large canonical item transfer deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4057,6 +4032,19 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
         let first_turn = events
             .input_turn(&input.client_user_message_id, false)
             .await;
+        while !events
+            .projection
+            .snapshot
+            .projection
+            .provider_turns
+            .iter()
+            .any(|turn| {
+                turn.status == agent_protocol::orchestration::ProviderTurnStatus::Running
+                    && turn.native_turn_ref.is_some()
+            })
+        {
+            events.next().await;
+        }
         let follow_up = rpc::Submission {
             client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
             input: vec![rpc::Input::Text {
@@ -4231,8 +4219,8 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        let mut catalog = conversations::Catalog::open(&local.peer).await;
-        catalog.wait_rows(cases.len()).await;
+        let catalog = conversations::Catalog::open(&local.peer).await;
+        assert!(catalog.snapshot.threads.is_empty(), "list subscriptions cannot import native sources");
         for ((_, id, _, succeeds, _), native) in cases.iter().zip(&threads) {
             let result = conversations::Conversation::open(&local.peer, &SessionRef::new(ProviderKind::Codex, id.to_string()).unwrap()).await;
             if *succeeds {
@@ -4242,11 +4230,8 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
                 assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Complete);
                 assert!(state.issues.is_empty());
             } else {
-                let thread = result.unwrap().view().thread;
-                let failure = thread.history_read_state.unwrap();
-                assert_eq!(failure.kind, agent_protocol::session::HistoryReadKind::Unavailable, "native history failure was replaced with empty history: {id}");
-                assert_eq!(failure.issues[0],native["fixtureHistoryError"]["message"]);
-                assert!(thread.turns.unwrap().is_empty());
+                let error = result.err().expect("native history failure must fail import").to_string();
+                assert!(error.contains("history_unavailable") && error.contains(native["fixtureHistoryError"]["message"].as_str().unwrap()), "{id}: {error}");
             }
         }
         local.close().await;
