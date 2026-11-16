@@ -23,7 +23,19 @@ pub fn rollback_target(
         .ok_or("active provider changed before rewind")?;
     // Like T3's adapter, foreground admission blocks rewind. A settled query
     // may still own background work; native rollback closes that query first.
-    if thread.status == ProviderThreadStatus::Active {
+    let active_answer = state.provider_turns.values().any(|turn| {
+        turn.provider_thread_id == thread.id
+            && turn.native_thread_ref == thread.native_thread_ref
+            && !turn.status.is_terminal()
+            && !state.is_rolled_back_attempt(turn.run_attempt_id.as_deref())
+    });
+    // Bex also observes work started outside its app runs. Unexplained Active
+    // activity is not proof of a settled query; only a known background roster
+    // can account for that resource status without an active answer.
+    if active_answer
+        || thread.status == ProviderThreadStatus::Active
+            && thread.pending_background_tasks.is_empty()
+    {
         return Err("native work is still running".into());
     }
     let session = thread
