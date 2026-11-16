@@ -2568,7 +2568,16 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
 async fn a_late_list_reply_cannot_replace_a_new_search() {
     use agent_protocol::models::ListQuery;
     for failure in [false, true] {
-        let (store, mut reader, writer) = setup(Snapshot::default()).await;
+        let (store, mut reader, writer) = setup(Snapshot {
+            lists: agent_core::state::Lists {
+                threads: Some(Arc::new(serde_json::from_value(json!({
+                    "data":[{"id":{"provider":"codex","id":"old"},"name":"old"},{"id":{"provider":"codex","id":"new"},"name":"new"}],
+                    "projects":[],"limit":5,"hasMore":false,"hasMoreProjects":false
+                })).unwrap())),
+                ..Default::default()
+            },
+            ..Default::default()
+        }).await;
         let old = store.dispatch(Intent::ListSessions(ListQuery {
             search_term: "old".into(),
             ..Default::default()
@@ -4303,7 +4312,12 @@ async fn initial_titles_wait_for_scope_verification_and_use_the_current_query() 
                         "host/list/search" => {
                             assert_eq!(request["params"]["term"], "new query");
                             assert_eq!(request["params"]["limit"], 50);
-                            titles("fresh")["result"].clone()
+                            // The opaque title matches in saved message text, as the
+                            // real Host's search reply attests. The list snapshot
+                            // supplies the independently current canonical header.
+                            let mut result = titles("fresh")["result"].clone();
+                            result["messageMatches"] = json!([{"provider":"codex","id":"fresh"}]);
+                            result
                         },
                         "host/model/list" => json!({"data":[],"nextCursor":null}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),

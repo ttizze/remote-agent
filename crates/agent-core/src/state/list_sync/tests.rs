@@ -738,3 +738,50 @@ fn search_reply_distinguishes_saved_message_matches_from_stale_titles_and_remove
         "canonical source/header fences differ for (body_match,removed): {differences:?}"
     );
 }
+
+#[test]
+fn placed_saved_shortcuts_use_word_boundaries_without_requiring_a_canonical_header() {
+    let mut snapshot = Snapshot::default();
+    seed(
+        &mut snapshot,
+        serde_json::from_value(serde_json::json!({
+            "data":[],"projects":[{"id":"project","name":"Workspace","roots":[]}],
+            "limit":5,"hasMore":false,"hasMoreProjects":false
+        }))
+        .unwrap(),
+    );
+    let id = crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "saved".into())
+        .unwrap();
+    snapshot.lists.project_preferences = Arc::new(
+        [(
+            snapshot.connection.storage_scope.clone(),
+            [(
+                "project".into(),
+                crate::state::projects::ProjectPreferences {
+                    placed_chats: vec![crate::state::projects::PlacedChat {
+                        id: id.clone(),
+                        title: "Drafts".into(),
+                    }],
+                    ..Default::default()
+                },
+            )]
+            .into(),
+        )]
+        .into(),
+    );
+    for (term, expected) in [("draft", vec![id.clone()]), ("fts", vec![])] {
+        Arc::make_mut(&mut snapshot.lists.list_query).search_term = term.into();
+        let rows = snapshot
+            .thread_list()
+            .unwrap()
+            .projects
+            .into_iter()
+            .find(|p| p.id == "project")
+            .unwrap()
+            .threads;
+        assert_eq!(
+            rows.into_iter().map(|row| row.id).collect::<Vec<_>>(),
+            expected
+        );
+    }
+}

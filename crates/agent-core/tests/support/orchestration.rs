@@ -20,13 +20,16 @@ pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
         .or(identity.provider)
         .unwrap_or(ProviderKind::Codex);
     let id = identity.application_id();
-    // Native discoveries without a membership field belong to their discovered
-    // root project. An explicit null remains unassigned.
+    // Only external native discoveries infer a project from their native root.
+    // App-created IDs need the Host's explicit membership; an unregistered
+    // folder does not invent a project absent from the canonical catalog.
     let project = match &thread.project_id {
-        agent_protocol::models::ProjectMembership::Unknown {} => thread
-            .cwd
-            .as_ref()
-            .map(|cwd| model::derived_id("project", &[cwd])),
+        agent_protocol::models::ProjectMembership::Unknown {} if identity.provider.is_some() => {
+            thread
+                .cwd
+                .as_ref()
+                .map(|cwd| model::derived_id("project", &[cwd]))
+        }
         _ => thread.project_id.as_deref().map(str::to_owned),
     };
     let selected_model = selection(

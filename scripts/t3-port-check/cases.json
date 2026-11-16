@@ -32,7 +32,8 @@
       "state::list_sync::tests::canonical_search_results_do_not_reintroduce_short_token_substring_false_positives",
       "state::list_sync::tests::empty_projects_keep_registration_order_and_subagents_stay_out_of_search",
       "state::list_sync::tests::ranked_search_order_reaches_the_rendered_conversation_list",
-      "state::list_sync::tests::search_reply_distinguishes_saved_message_matches_from_stale_titles_and_removed_headers"
+      "state::list_sync::tests::search_reply_distinguishes_saved_message_matches_from_stale_titles_and_removed_headers",
+      "state::list_sync::tests::placed_saved_shortcuts_use_word_boundaries_without_requiring_a_canonical_header"
     ]
   },
   "guards": {
