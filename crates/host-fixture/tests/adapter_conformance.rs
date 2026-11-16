@@ -2154,3 +2154,181 @@ async fn claude_no_assistant_boundaries_preserve_retained_user_prompts(#[case] m
     local.close().await;
     host.close().await.unwrap();
 }
+
+#[rstest::rstest]
+#[case::same_host(false)]
+#[case::restart_before_first_query(true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn imported_claude_history_reaches_a_fresh_native_baseline_without_reimport(
+    #[case] restart: bool,
+) {
+    // T3 shouldPrepareLegacyImportHandoff keeps imported, run-less messages
+    // available when no completed app run owns a native prefix. After a fresh
+    // baseline the actual SDK input must contain that prefix, not the cut run.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let native = uuid::Uuid::new_v4().to_string();
+    let user = uuid::Uuid::new_v4().to_string();
+    let assistant = uuid::Uuid::new_v4().to_string();
+    let key: String = root
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let project = root.join("claude-native/projects").join(key);
+    std::fs::create_dir_all(&project).unwrap();
+    let original = project.join(format!("{native}.jsonl"));
+    let rows = [
+        serde_json::json!({"type":"user","uuid":user,"parentUuid":null,"sessionId":native,"cwd":root,"version":"2.1.266","timestamp":"2026-11-16T00:00:00.000Z","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"imported-prefix-must-survive"}]}}),
+        serde_json::json!({"type":"assistant","uuid":assistant,"parentUuid":user,"sessionId":native,"cwd":root,"version":"2.1.266","timestamp":"2026-11-16T00:00:01.000Z","isSidechain":false,"message":{"id":"msg_imported_answer","model":"default","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"provider-saved-answer"}]}}),
+    ];
+    std::fs::write(
+        &original,
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let memory = Arc::new(Memory::default());
+    let host = start(&root, memory.clone()).await;
+    let local = host.local().await.unwrap();
+    let imported: agent_protocol::project_import::ProjectImportResult = local
+        .peer
+        .request(&Call::ImportProjects(
+            agent_protocol::project_import::ImportProjects {
+                paths: vec![root.to_str().unwrap().into()],
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(imported.errors.is_empty(), "{:?}", imported.errors);
+    let session = SessionRef::new(ProviderKind::Claude, native.clone()).unwrap();
+    let (_, mut events) = open(&local.peer, &session).await;
+    assert_eq!(
+        events.projection.snapshot.projection.thread.history_origin,
+        Some(agent_protocol::orchestration::ThreadHistoryOrigin::V1Import)
+    );
+    assert!(
+        events.projection.snapshot.projection.runs.is_empty(),
+        "provider history is not fabricated as app runs"
+    );
+    assert!(events.view().thread.turns.iter().flatten().flat_map(|turn|turn.items.iter().flatten()).any(|item|matches!(item.body(),ItemBody::AssistantText {text,..} if text=="provider-saved-answer")));
+    let input = submission(&session, "discard-imported-continuation");
+    submit(&local.peer, &input).await.unwrap();
+    let discarded = events.input_turn(&input.client_user_message_id, true).await;
+    assert_eq!(discarded.status, TurnStatus::Completed, "{discarded:?}");
+    assert_eq!(
+        conversations::native_source(&root, &session, ProviderKind::Claude),
+        native,
+        "initial import continues the original native resource"
+    );
+    conversations::command(
+        &local.peer,
+        &session,
+        uuid::Uuid::new_v4(),
+        Command::Rewind(discarded.id.clone()),
+    )
+    .await
+    .unwrap();
+    while events
+        .view()
+        .thread
+        .turns
+        .iter()
+        .flatten()
+        .any(|turn| turn.id == discarded.id)
+    {
+        assert!(
+            events
+                .projection
+                .snapshot
+                .projection
+                .thread
+                .rollback_failure
+                .is_none(),
+            "{:?}",
+            events
+                .projection
+                .snapshot
+                .projection
+                .thread
+                .rollback_failure
+        );
+        events.next().await;
+    }
+    let replacement = conversations::native_source(&root, &session, ProviderKind::Claude);
+    assert_ne!(
+        replacement, native,
+        "a baseline without a native fork head allocates a fresh physical resource"
+    );
+    if restart {
+        local.close().await;
+        host.close().await.unwrap();
+        let host = start(&root, memory).await;
+        let local = host.local().await.unwrap();
+        let (_, events) = open(&local.peer, &session).await;
+        verify_imported_reset_input(&root, &local.peer, &session, events, &replacement).await;
+        local.close().await;
+        host.close().await.unwrap();
+    } else {
+        verify_imported_reset_input(&root, &local.peer, &session, events, &replacement).await;
+        local.close().await;
+        host.close().await.unwrap();
+    }
+    assert!(
+        std::fs::read_to_string(original)
+            .unwrap()
+            .contains("imported-prefix-must-survive"),
+        "the provider's original transcript stays intact"
+    );
+}
+
+async fn verify_imported_reset_input(
+    root: &Path,
+    client: &Client,
+    session: &SessionRef,
+    mut events: Conversation,
+    native: &str,
+) {
+    let input = submission(session, "after-native-reset");
+    submit(client, &input).await.unwrap();
+    let answer = events.input_turn(&input.client_user_message_id, true).await;
+    assert_eq!(answer.status, TurnStatus::Completed);
+    assert_eq!(
+        conversations::native_source(root, session, ProviderKind::Claude),
+        native
+    );
+    let rows = claude_native_rows(root, native);
+    let texts = rows
+        .iter()
+        .filter(|row| row["type"] == "user")
+        .flat_map(|row| row["message"]["content"].as_array().unwrap())
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        texts.contains("imported-prefix-must-survive"),
+        "the actual SDK input to the fresh native resource must carry retained imported history"
+    );
+    assert!(texts.contains("provider-saved-answer"));
+    assert!(texts.contains("after-native-reset"));
+    assert!(
+        !texts.contains("discard-imported-continuation"),
+        "the discarded app run cannot leak back through context recovery"
+    );
+    assert_eq!(
+        events.projection.snapshot.projection.thread.history_origin,
+        Some(agent_protocol::orchestration::ThreadHistoryOrigin::V1Import)
+    );
+    assert_eq!(
+        events
+            .projection
+            .snapshot
+            .projection
+            .runs
+            .iter()
+            .filter(|run| run.status != agent_protocol::orchestration::RunStatus::RolledBack)
+            .count(),
+        1
+    );
+}

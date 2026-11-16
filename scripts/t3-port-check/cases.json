@@ -2683,7 +2683,9 @@
       "claude_no_assistant_boundaries_preserve_retained_user_prompts::case_1_latest_fork",
       "claude_no_assistant_boundaries_preserve_retained_user_prompts::case_2_compact_rewind_fork",
       "claude_no_assistant_boundaries_preserve_retained_user_prompts::case_3_plain_retained_prompt",
-      "claude_no_assistant_boundaries_preserve_retained_user_prompts::case_4_missing_previous_cursor"
+      "claude_no_assistant_boundaries_preserve_retained_user_prompts::case_4_missing_previous_cursor",
+      "imported_claude_history_reaches_a_fresh_native_baseline_without_reimport::case_1_same_host",
+      "imported_claude_history_reaches_a_fresh_native_baseline_without_reimport::case_2_restart_before_first_query"
     ]
   }
 }
