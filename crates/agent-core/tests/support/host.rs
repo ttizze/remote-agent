@@ -617,7 +617,7 @@ impl State {
         let item = ShellStreamItem::ThreadUpdated {
             sequence: self.sequence,
             location: ShellLocation::Active,
-            thread: rows::shell_thread(response.thread),
+            thread: rows::shell_thread(response.thread).into(),
         };
         self.list_shell =
             agent_core::orchestration::shell::receive(Some(shell), item.clone(), false)

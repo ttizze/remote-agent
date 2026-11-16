@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 fn thread(id: &str) -> ThreadShell {
     crate::test_conversations::shell_thread(crate::models::Thread {
@@ -18,7 +19,7 @@ fn snapshot() -> ShellSnapshot {
 }
 fn update(thread: ThreadShell, sequence: u64, location: ShellLocation) -> ShellStreamItem {
     ShellStreamItem::ThreadUpdated {
-        thread,
+        thread: thread.into(),
         sequence,
         location,
     }

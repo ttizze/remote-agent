@@ -40,7 +40,7 @@ fn delta(thread: ThreadShell, sequence: u64) -> ShellStreamItem {
     ShellStreamItem::ThreadUpdated {
         sequence,
         location: ShellLocation::Active,
-        thread,
+        thread: thread.into(),
     }
 }
 fn list() -> Snapshot {

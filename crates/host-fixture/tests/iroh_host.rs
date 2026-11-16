@@ -4313,7 +4313,7 @@ async fn large_saved_reasoning_finishes_loading_through_the_shared_store() {
         loop {
             let snapshot=updates.borrow_and_update().clone();
             assert!(snapshot.panes.primary().error.is_none(),"{:?}",snapshot.panes.primary().error);
-            if snapshot.sessions.conversations[&id].turns.iter().flatten().flat_map(|turn|turn.items.iter().flatten()).any(|item|!item.is_deferred() && matches!(item.body(),agent_protocol::items::ItemBody::Reasoning {content,..} if content==&[text.clone()])) {break;}
+            if snapshot.sessions.conversations[&id].turns.iter().flatten().flat_map(|turn|turn.items.iter().flatten()).any(|item|!item.is_deferred() && matches!(item.body(),agent_protocol::items::ItemBody::Reasoning {content,..} if content.as_slice()==std::slice::from_ref(&text))) {break;}
             updates.changed().await.unwrap();
         }
         store.close().await.unwrap();endpoint.close().await;fixture.close().await.unwrap();

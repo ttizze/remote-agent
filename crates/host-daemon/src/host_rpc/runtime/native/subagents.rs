@@ -1,5 +1,14 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+struct Spawn<'a> {
+    item_id: &'a str,
+    prompt: Option<&'a str>,
+    reported_model: Option<&'a str>,
+    native_task: Option<&'a str>,
+    result: Option<&'a serde_json::Value>,
+}
+
 impl Runtime {
     pub(in crate::host_rpc::runtime) async fn native_parent(
         service: &HostRpcService,
@@ -168,21 +177,23 @@ impl Runtime {
         if children.is_empty() && context.provider == ProviderKind::Codex {
             return Ok(());
         }
+        let spawn = Spawn {
+            item_id: item.id.as_str(),
+            prompt: prompt.as_deref(),
+            reported_model: model.as_deref(),
+            native_task: agent_id.as_deref(),
+            result: result.as_ref(),
+        };
         if children.is_empty() {
             let status = super::item_status(item.status, context.completed);
             return Self::commit_subagent(
                 service,
-                source,
+                &source.session_id,
                 attempt,
                 context,
-                item,
-                None,
+                spawn,
                 None,
                 status,
-                prompt.as_deref(),
-                model.as_deref(),
-                agent_id.as_deref(),
-                result.as_ref(),
             );
         }
         for child_native in children {
@@ -212,17 +223,15 @@ impl Runtime {
                 .map(|message| json!(message));
             Self::commit_subagent(
                 service,
-                source,
+                &source.session_id,
                 attempt,
                 context,
-                item,
-                Some((&child, &provider)),
-                Some(&child_native.id),
+                Spawn {
+                    result: message.as_ref().or(result.as_ref()),
+                    ..spawn
+                },
+                Some((&child, &provider, child_native.id.as_str())),
                 status,
-                prompt.as_deref(),
-                model.as_deref(),
-                agent_id.as_deref(),
-                message.as_ref().or(result.as_ref()),
             )?;
         }
         Ok(())
@@ -257,7 +266,7 @@ impl Runtime {
         storage
             .observe_thread(
                 &context.thread_id,
-                &[item_id.clone()],
+                std::slice::from_ref(&item_id),
                 &context.now,
                 |state| {
                     let owns_source = attempt.map_or_else(
@@ -299,23 +308,26 @@ impl Runtime {
 
     fn commit_subagent(
         service: &HostRpcService,
-        source: &resources::Source,
+        session_id: &str,
         attempt: Option<&str>,
         context: &Context,
-        raw: &Item,
-        child: Option<(&SessionRef, &model::ProviderThread)>,
-        child_native_id: Option<&str>,
+        Spawn {
+            item_id: native_item_id,
+            prompt,
+            reported_model,
+            native_task,
+            result,
+        }: Spawn<'_>,
+        child: Option<(&SessionRef, &model::ProviderThread, &str)>,
         status: model::TurnItemStatus,
-        prompt: Option<&str>,
-        reported_model: Option<&str>,
-        native_task: Option<&str>,
-        result: Option<&serde_json::Value>,
     ) -> Result<(), String> {
-        let key = child_native_id
-            .map_or_else(|| raw.id.to_string(), |child| format!("{}:{child}", raw.id));
+        let key = child.map_or_else(
+            || native_item_id.to_owned(),
+            |(_, _, native)| format!("{native_item_id}:{native}"),
+        );
         let id = child.map_or_else(
             || super::item_identity("node", context.provider, &context.native_turn_id, &key),
-            |(child, _)| {
+            |(child, _, _)| {
                 model::derived_id(
                     "node",
                     &[
@@ -332,7 +344,7 @@ impl Runtime {
         storage
             .observe_thread(
                 &context.thread_id,
-                &[item_id.clone()],
+                std::slice::from_ref(&item_id),
                 &context.now,
                 |state| {
                     if attempt.is_some_and(|attempt| {
@@ -380,7 +392,7 @@ impl Runtime {
                             origin: "provider_native".into(),
                             driver: context.provider.driver().into(),
                             provider_instance_id: context.provider.key().into(),
-                            child_thread_id: child.map(|(child, _)| child.application_id()),
+                            child_thread_id: child.map(|(child, _, _)| child.application_id()),
                             prompt: prompt.unwrap_or_default().into(),
                             result: result.map(result_text),
                             progress: None,
@@ -388,9 +400,9 @@ impl Runtime {
                     );
                     artifact.node.id = id.clone();
                     artifact.node.counts_for_run = false;
-                    artifact.item.id = item_id;
+                    artifact.item.id = item_id.clone();
                     artifact.item.node_id = Some(id.clone());
-                    if let Some((_, provider)) = child {
+                    if let Some((_, provider, _)) = child {
                         artifact.node.provider_thread_id = Some(provider.id.clone());
                         artifact.item.provider_thread_id = Some(provider.id.clone());
                     }
@@ -407,8 +419,8 @@ impl Runtime {
                         created_by: "agent".into(),
                         driver: context.provider.driver().into(),
                         provider_instance_id: context.provider.key().into(),
-                        provider_thread_id: child.map(|(_, provider)| provider.id.clone()),
-                        child_thread_id: child.map(|(child, _)| child.application_id()),
+                        provider_thread_id: child.map(|(_, provider, _)| provider.id.clone()),
+                        child_thread_id: child.map(|(child, _, _)| child.application_id()),
                         native_task_ref: Some(model::ProviderRef {
                             driver: context.provider.driver().into(),
                             native_id: Some(native_task.unwrap_or(&key).into()),
@@ -431,7 +443,7 @@ impl Runtime {
                         updated_at: context.now.clone(),
                     };
                     let mut resources = state.clone();
-                    if let Some((_, provider)) = child {
+                    if let Some((_, provider, _)) = child {
                         resources
                             .provider_threads
                             .insert(provider.id.clone(), provider.clone());
@@ -440,7 +452,7 @@ impl Runtime {
                         model::observe_subagent(
                             &resources,
                             attempt,
-                            &source.session_id,
+                            session_id,
                             task,
                             artifact.item,
                         )?

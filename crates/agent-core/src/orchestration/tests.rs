@@ -125,7 +125,7 @@ fn canonical_subagents_keep_public_child_links_models_and_status_without_opening
     else {
         panic!("canonical task presentation");
     };
-    assert_eq!(receivers, &[child.clone()]);
+    assert_eq!(receivers, std::slice::from_ref(&child));
     assert_eq!(states[0].session, child);
     assert_eq!(states[0].status, execution::TurnStatus::Completed);
     assert_eq!(states[0].message.as_deref(), Some("review completed"));

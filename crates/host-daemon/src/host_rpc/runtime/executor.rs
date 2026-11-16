@@ -83,61 +83,61 @@ struct LoadedNative {
 async fn load_native_start(
     service: &HostRpcService,
     agent: &dyn crate::providers::Agent,
-    provider: ProviderKind,
     target: &SessionRef,
     cwd: &str,
-    model: &str,
+    model: &agent_protocol::models::ModelRef,
     native_id: Option<&str>,
     fork: Option<(
         &model::ProviderThreadFork,
         Option<&model::ContextSourcePoint>,
+        bool,
     )>,
-    will_retry: bool,
 ) -> Result<LoadedNative, Failure> {
-    if let Some(id) = native_id {
-        if let Ok(current) = agent.state(id).await {
-            let expected = SessionRef::new(provider, id.into())
-                .map_err(|error| Failure::new("invalid_session", error))?;
-            op::validate_thread(&current.response, Some(&expected))
-                .map_err(|error| Failure::new("invalid_thread", error))?;
-            if current.response.thread.status == agent_protocol::execution::SessionStatus::Running
-                || !current.response.thread.requests.is_empty()
-            {
-                return Err(Failure::new(
-                    "provider_switch_busy",
-                    "切り替え先のAIがまだ実行中です。完了を待ってください。",
-                ));
-            }
-            // An explicitly incomplete native transcript cannot prove that
-            // the already-delivered prefix remains in this native context.
-            // Reconstruct it in a fresh resource from canonical history.
-            if current
-                .response
-                .thread
-                .history_read_state
-                .as_ref()
-                .is_none_or(|read| {
-                    matches!(
-                        read.kind,
-                        agent_protocol::session::HistoryReadKind::Complete
-                            | agent_protocol::session::HistoryReadKind::Partial
-                    )
-                })
-            {
-                return Ok(LoadedNative {
-                    native: expected,
-                    needs_reload: current.needs_reload
-                        || current.response.thread.cwd.as_deref() != Some(cwd),
-                    forked: fork.is_some(),
-                    fork_failure: None,
-                    fork_head: None,
-                });
-            }
+    let provider = model.provider;
+    if let Some(id) = native_id
+        && let Ok(current) = agent.state(id).await
+    {
+        let expected = SessionRef::new(provider, id.into())
+            .map_err(|error| Failure::new("invalid_session", error))?;
+        op::validate_thread(&current.response, Some(&expected))
+            .map_err(|error| Failure::new("invalid_thread", error))?;
+        if current.response.thread.status == agent_protocol::execution::SessionStatus::Running
+            || !current.response.thread.requests.is_empty()
+        {
+            return Err(Failure::new(
+                "provider_switch_busy",
+                "切り替え先のAIがまだ実行中です。完了を待ってください。",
+            ));
+        }
+        // An explicitly incomplete native transcript cannot prove that
+        // the already-delivered prefix remains in this native context.
+        // Reconstruct it in a fresh resource from canonical history.
+        if current
+            .response
+            .thread
+            .history_read_state
+            .as_ref()
+            .is_none_or(|read| {
+                matches!(
+                    read.kind,
+                    agent_protocol::session::HistoryReadKind::Complete
+                        | agent_protocol::session::HistoryReadKind::Partial
+                )
+            })
+        {
+            return Ok(LoadedNative {
+                native: expected,
+                needs_reload: current.needs_reload
+                    || current.response.thread.cwd.as_deref() != Some(cwd),
+                forked: fork.is_some(),
+                fork_failure: None,
+                fork_head: None,
+            });
         }
     }
     let browser = service.browser_config(&target.to_string())?;
     let mut fork_failure = None;
-    let forked = if let Some((origin, point)) = fork {
+    let forked = if let Some((origin, point, will_retry)) = fork {
         match fork_native(service, agent, provider, origin, point, browser.clone()).await {
             Ok(result) => result,
             Err(error) if will_retry || point.is_none() => {
@@ -156,7 +156,7 @@ async fn load_native_start(
         Some(result) => (result.response, result.head_id),
         None => (
             agent
-                .create(cwd, Some(model), browser)
+                .create(cwd, Some(&model.id), browser)
                 .await
                 .map_err(Failure::before_submission)?,
             None,
@@ -575,13 +575,11 @@ impl Runtime {
         service.require_not_updating()?;
         let provider =
             ProviderKind::from_instance_id(&run.provider_instance_id).map_err(storage_failure)?;
-        let agent = service.creation_agent(
+        let model = agent_protocol::models::ModelRef {
             provider,
-            Some(&agent_protocol::models::ModelRef {
-                provider,
-                id: run.model_selection.model.clone(),
-            }),
-        )?;
+            id: run.model_selection.model.clone(),
+        };
+        let agent = service.creation_agent(provider, Some(&model))?;
         let cwd = state
             .thread
             .worktree_path
@@ -662,16 +660,20 @@ impl Runtime {
         let loaded = load_native_start(
             service,
             agent.as_ref(),
-            provider,
             &target,
             &cwd,
-            &run.model_selection.model,
+            &model,
             thread
                 .native_thread_ref
                 .as_ref()
                 .and_then(|reference| reference.native_id.as_deref()),
-            origin.map(|origin| (origin, pending_fork.map(|fork| &fork.source_point))),
-            effect.attempt_count < MAX_ATTEMPTS,
+            origin.map(|origin| {
+                (
+                    origin,
+                    pending_fork.map(|fork| &fork.source_point),
+                    effect.attempt_count < MAX_ATTEMPTS,
+                )
+            }),
         )
         .await?;
         reload |= loaded.needs_reload;
@@ -693,15 +695,18 @@ impl Runtime {
             updated_at: now.clone(),
             last_error: None,
         };
+        let allocation = super::super::storage::NativeAllocation {
+            session,
+            reference: native_ref(provider, &native.id),
+            forked: loaded.forked,
+            fork_head: loaded.fork_head,
+        };
         if !runtime
             .storage
             .bind_native_start(
                 effect,
                 worker,
-                session.clone(),
-                native_ref(provider, &native.id),
-                loaded.forked,
-                loaded.fork_head.as_deref(),
+                allocation.clone(),
                 loaded.fork_failure.as_deref(),
                 &now,
             )
@@ -716,10 +721,7 @@ impl Runtime {
                     effect,
                     &thread.id,
                     expected_native.as_ref(),
-                    session,
-                    native_ref(provider, &native.id),
-                    loaded.forked,
-                    loaded.fork_head.as_deref(),
+                    allocation,
                     &now,
                 )
                 .map_err(storage_failure)?;
@@ -739,8 +741,9 @@ impl Runtime {
         if !current.accepts_observation(&attempt.id, &source.session_id) {
             return Ok(None);
         }
-        let message=current.turn_items.values().find(|item|matches!(&item.body,model::TurnItemBody::UserMessage {message_id,..} if message_id==&run.user_message_id))
-            .ok_or_else(||Failure::new("invalid_run","run input is missing"))?;
+        let message = current
+            .user_message_item(&run.user_message_id)
+            .ok_or_else(|| Failure::new("invalid_run", "run input is missing"))?;
         let mut input =
             Self::native_submission(service, &native, &cwd, &run.model_selection, message).await?;
         let before_write = commands::at();
@@ -827,19 +830,11 @@ impl Runtime {
         if submitted
             .as_ref()
             .is_err_and(|error| error.delivery == agent_protocol::error::Delivery::NotSent)
-            && let Some((handoffs, history)) = &inline
+            && let Some(selection) = &inline
         {
             runtime
                 .storage
-                .context_delivery(
-                    effect,
-                    worker,
-                    &native,
-                    handoffs,
-                    history,
-                    None,
-                    &commands::at(),
-                )
+                .context_delivery(effect, worker, &native, selection, None, &commands::at())
                 .map_err(storage_failure)?;
         }
         Ok(submitted?
@@ -1010,7 +1005,7 @@ impl Runtime {
     ) -> Result<Option<(Vec<model::ContextHandoff>, model::handoffs::SelectedHistory)>, Failure>
     {
         let storage = &service.inner.conversation.storage;
-        let Some((handoffs, selected)) = storage
+        let Some(selection) = storage
             .pending_context(effect, worker, native, &service.history_command(target))
             .map_err(storage_failure)?
         else {
@@ -1021,8 +1016,7 @@ impl Runtime {
                 effect,
                 worker,
                 native,
-                &handoffs,
-                &selected,
+                &selection,
                 Some(model::HandoffDeliveryStatus::Pending),
                 &commands::at(),
             )
@@ -1039,7 +1033,7 @@ impl Runtime {
         let injected = agent
             .inject_history(
                 &native.id,
-                &model::handoffs::native_items(&selected.messages, &selected.context),
+                &model::handoffs::native_items(&selection.1.messages, &selection.1.context),
             )
             .await
             .map_err(|error| Failure::new("context_delivery_uncertain", error.message))?;
@@ -1049,15 +1043,14 @@ impl Runtime {
                     effect,
                     worker,
                     native,
-                    &handoffs,
-                    &selected,
+                    &selection,
                     Some(model::HandoffDeliveryStatus::Injected),
                     &commands::at(),
                 )
                 .map_err(storage_failure)?;
             Ok(None)
         } else {
-            Ok(Some((handoffs, selected)))
+            Ok(Some(selection))
         }
     }
 

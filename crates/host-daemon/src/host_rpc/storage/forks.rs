@@ -267,7 +267,7 @@ pub(super) fn native_origin(
     }
     let provider_id = run
         .and_then(|run| run.provider_thread_id.as_ref())
-        .or_else(|| match &target.thread.forked_from {
+        .or(match &target.thread.forked_from {
             Some(model::ThreadForkSource::ProviderThread {
                 provider_thread_id, ..
             }) => Some(provider_thread_id),

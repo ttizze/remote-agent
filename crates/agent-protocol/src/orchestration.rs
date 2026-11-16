@@ -195,7 +195,6 @@ status!(CheckpointStatus {
     Error,
     Stale
 });
-status!(NativeRefStrength { Strong, Weak, None });
 status!(TurnItemStatus {
     Idle,
     Pending,

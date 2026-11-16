@@ -228,10 +228,11 @@ pub fn admit(
     {
         return Err("message is already accepted".into());
     }
-    if admission == Admission::Steer && context.can_steer {
-        if let Some(decision) = steer(state, &input, context) {
-            return Ok(decision);
-        }
+    if admission == Admission::Steer
+        && context.can_steer
+        && let Some(decision) = steer(state, &input, context)
+    {
+        return Ok(decision);
     }
     let active = state.active_run();
     let queued =
@@ -463,7 +464,8 @@ pub fn edit_queued(
     if text.trim().is_empty() {
         return Err("queued messages need nonempty text".into());
     }
-    let item=state.turn_items.values().find(|item|matches!(&item.body,TurnItemBody::UserMessage {message_id,..} if message_id==&run.user_message_id))
+    let item = state
+        .user_message_item(&run.user_message_id)
         .ok_or("queued message is missing")?;
     let mut item = item.clone();
     if let TurnItemBody::UserMessage {
@@ -576,7 +578,8 @@ pub fn promote_queued(
     if !context.can_steer || active.provider_instance_id != run.provider_instance_id {
         return Err("active run cannot receive this queued message".into());
     }
-    let item=state.turn_items.values().find(|item|matches!(&item.body,TurnItemBody::UserMessage {message_id,..} if message_id==&run.user_message_id))
+    let item = state
+        .user_message_item(&run.user_message_id)
         .ok_or("queued message is missing")?;
     let TurnItemBody::UserMessage {
         created_by,

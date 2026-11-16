@@ -66,16 +66,15 @@ where
             ))
         };
     }
-    if let Some(retained) = retained {
-        if turns
+    if let Some(retained) = retained
+        && turns
             .iter()
             .position(|turn| turn == retained)
             .is_none_or(|index| index <= boundary.unwrap())
-        {
-            return Err(invalid(
-                "The retained native turn is not before the rollback boundary",
-            ));
-        }
+    {
+        return Err(invalid(
+            "The retained native turn is not before the rollback boundary",
+        ));
     }
     let response = call(
         "thread/revert",

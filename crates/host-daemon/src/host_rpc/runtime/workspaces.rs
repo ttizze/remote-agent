@@ -74,8 +74,7 @@ impl Runtime {
                 cancel.clone(),
             )
             .await
-            {
-                if let Err(failed) = Self::fail_workspace(
+                && let Err(failed) = Self::fail_workspace(
                     &service,
                     &target,
                     generation,
@@ -83,9 +82,8 @@ impl Runtime {
                     cancel.is_cancelled(),
                 )
                 .await
-                {
-                    tracing::error!(target:"agent",operation="workspace.prepare",%failed);
-                }
+            {
+                tracing::error!(target:"agent",operation="workspace.prepare",%failed);
             }
         });
         Ok(())

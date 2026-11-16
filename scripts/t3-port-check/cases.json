@@ -1598,7 +1598,9 @@
       "workspace::tests::cancellation_freezes_running_stages_and_submodules_are_inserted_once_in_execution_order",
       "workspace::tests::completion_marks_only_running_stages_and_expires_after_thirty_seconds",
       "workspace::tests::live_output_is_bounded_without_splitting_unicode",
-      "workspace::tests::workspace_selection_accepts_refs_and_absolute_host_paths_but_rejects_option_and_path_injection"
+      "workspace::tests::workspace_selection_accepts_refs_and_absolute_host_paths_but_rejects_option_and_path_injection",
+      "orchestration::tests::provider_transfers_preserve_message_and_native_recovery_lifecycles",
+      "orchestration::tests::handoff_source_keeps_explicit_fork_boundaries_and_prior_delivered_runs"
     ],
     "agent-protocol::items": [
       "deferred_deltas_invalidate_only_the_body_transfer",

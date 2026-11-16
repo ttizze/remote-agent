@@ -343,7 +343,7 @@ fn canonical_agents(
                 let row = session_agent(
                     language,
                     &child,
-                    &title,
+                    title,
                     status,
                     active.get(&child).copied(),
                     unread.contains(&child),

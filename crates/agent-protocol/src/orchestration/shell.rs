@@ -34,13 +34,12 @@ pub fn public_session_ref(id: &str) -> Result<crate::session::SessionRef, String
             .collect()
         });
     for (provider, prefix) in PREFIXES.iter() {
-        if let Some(native) = id.strip_prefix(prefix) {
-            if let Ok(candidate) =
+        if let Some(native) = id.strip_prefix(prefix)
+            && let Ok(candidate) =
                 SessionRef::new(*provider, crate::paths::decode_link_path(native))
-                && candidate.application_id() == id
-            {
-                return Ok(candidate);
-            }
+            && candidate.application_id() == id
+        {
+            return Ok(candidate);
         }
     }
     SessionRef::new(None, id.to_owned()).map_err(str::to_owned)
@@ -371,7 +370,7 @@ pub enum ShellStreamItem {
     #[serde(rename = "project.updated")]
     ProjectUpdated {
         sequence: u64,
-        project: ProjectShell,
+        project: Box<ProjectShell>,
     },
     #[serde(rename = "project.removed")]
     ProjectRemoved { sequence: u64, project_id: String },
@@ -379,7 +378,7 @@ pub enum ShellStreamItem {
     ThreadUpdated {
         sequence: u64,
         location: ShellLocation,
-        thread: ThreadShell,
+        thread: Box<ThreadShell>,
     },
     #[serde(rename = "thread.removed")]
     ThreadRemoved {

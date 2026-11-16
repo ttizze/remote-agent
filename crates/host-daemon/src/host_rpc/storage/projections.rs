@@ -296,12 +296,11 @@ pub(super) fn apply(
         }
         Change::ProviderTurn(value) => save(transaction, Some(thread_id), value),
         Change::TurnItem(value) => {
-            if let Some(previous) = read::<model::TurnItem>(transaction, &value.id)? {
-                if previous.run_id != value.run_id
-                    && !promoted_message(transaction, &previous, value)?
-                {
-                    return Err("item belongs to another run".into());
-                }
+            if let Some(previous) = read::<model::TurnItem>(transaction, &value.id)?
+                && previous.run_id != value.run_id
+                && !promoted_message(transaction, &previous, value)?
+            {
+                return Err("item belongs to another run".into());
             }
             save(transaction, Some(thread_id), value)
         }

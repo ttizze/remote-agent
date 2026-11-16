@@ -274,7 +274,7 @@ async fn recorded_claude_query_responses_cross_the_sdk_reader_and_conversation_w
                 .then(|| frame["uuid"].as_str().map(str::to_owned))
                 .flatten()
             })
-            .last()
+            .next_back()
             .expect("the reference has a real root assistant UUID");
         let stored = service
             .inner

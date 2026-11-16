@@ -1189,15 +1189,15 @@ pub(super) fn finish_run(
             },
         }));
     }
-    if matches!(run_status, RunStatus::Completed | RunStatus::Interrupted) {
-        if let Some(scope_id) = scope_id {
-            effects.push(checkpoints::capture_effect(
-                context,
-                &state.thread.id,
-                &run.id,
-                &scope_id,
-            ));
-        }
+    if matches!(run_status, RunStatus::Completed | RunStatus::Interrupted)
+        && let Some(scope_id) = scope_id
+    {
+        effects.push(checkpoints::capture_effect(
+            context,
+            &state.thread.id,
+            &run.id,
+            &scope_id,
+        ));
     }
     if run_status == RunStatus::Cancelled {
         effects.extend(state.effects.values().filter(|effect|matches!(&effect.request,EffectRequest::ProviderTurnStart {run_id} if run_id==&run.id)
@@ -1395,7 +1395,7 @@ pub fn observe_native_status(
 
 pub(super) fn settle_item(item: &TurnItem, status: TurnItemStatus, now: &str) -> TurnItem {
     let mut item = TurnItem {
-        status: status,
+        status,
         completed_at: Some(now.into()),
         updated_at: now.into(),
         ..item.clone()

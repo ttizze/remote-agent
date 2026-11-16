@@ -264,10 +264,12 @@ impl Runtime {
                     source,
                     native,
                     super::super::text::Owner::Attempt(execution),
-                    &context.native_turn_id,
-                    item_id.as_str(),
-                    field,
-                    &delta,
+                    super::super::text::Delta {
+                        turn: &context.native_turn_id,
+                        item: item_id.as_str(),
+                        field,
+                        text: &delta,
+                    },
                 )?;
             }
             SessionChange::Background { mut tasks } => {

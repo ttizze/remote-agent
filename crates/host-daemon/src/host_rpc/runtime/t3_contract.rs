@@ -2767,7 +2767,10 @@ async fn switching_back_reuses_native_history_or_recovers_uncertain_injection(#[
             "the provider thread retains each prepared handoff link"
         );
         if handoff.strategy == model::HandoffStrategy::FullThreadSummary {
-            assert_eq!(handoff.from_provider_thread_ids, [owner.id.clone()]);
+            assert_eq!(
+                handoff.from_provider_thread_ids,
+                std::slice::from_ref(&owner.id)
+            );
         }
     }
 

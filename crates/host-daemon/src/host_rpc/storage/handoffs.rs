@@ -3,6 +3,14 @@
 use super::*;
 use agent_protocol::orchestration::{self as model, handoffs as history};
 
+#[derive(Clone)]
+pub(in crate::host_rpc) struct NativeAllocation {
+    pub session: model::ProviderSession,
+    pub reference: model::ProviderRef,
+    pub forked: bool,
+    pub fork_head: Option<String>,
+}
+
 impl Storage {
     /// Allocation may return after its start was settled. Keep the physical
     /// identity private, but only a user-cancelled start can retain a ready
@@ -12,12 +20,15 @@ impl Storage {
         effect: &model::Effect,
         provider_thread_id: &str,
         expected: Option<&model::ProviderRef>,
-        mut session: model::ProviderSession,
-        native: model::ProviderRef,
-        native_fork: bool,
-        fork_head: Option<&str>,
+        allocation: NativeAllocation,
         now: &str,
     ) -> Result<(), String> {
+        let NativeAllocation {
+            mut session,
+            reference: native,
+            forked: native_fork,
+            fork_head,
+        } = allocation;
         self.with(|connection| {
             let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
             let status: Option<String> = tx.query_row(
@@ -30,7 +41,7 @@ impl Storage {
                 session.status=model::ProviderSessionStatus::Error;
             }
             let decision = model::native_resource_loaded(&state,provider_thread_id,expected,session,native,native_fork,now)?;
-            let decision=with_native_fork_head(decision,provider_thread_id,fork_head);
+            let decision=with_native_fork_head(decision,provider_thread_id,fork_head.as_deref());
             commands::append_decision(&tx,&state,decision,None,now)?;
             tx.commit().map_err(failure)
         })
@@ -124,13 +135,16 @@ impl Storage {
         &self,
         effect: &model::Effect,
         worker: &str,
-        session: model::ProviderSession,
-        native: model::ProviderRef,
-        native_fork: bool,
-        fork_head: Option<&str>,
+        allocation: NativeAllocation,
         fork_failure: Option<&str>,
         now: &str,
     ) -> Result<bool, String> {
+        let NativeAllocation {
+            session,
+            reference: native,
+            forked: native_fork,
+            fork_head,
+        } = allocation;
         self.with(|connection| {
             let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(failure)?;
             let state = projections::load(&tx, &effect.thread_id, &[])?;
@@ -165,7 +179,7 @@ impl Storage {
             let prepared=state.apply(&model::Decision{changes:changes.clone(),effects:Vec::new()});
             let loaded=model::native_resource_loaded(&prepared,&thread.id,prepared_thread.native_thread_ref.as_ref(),session,native.clone(),native_fork,now)?;
             if loaded.changes.is_empty(){return Ok(false);}
-            changes.extend(with_native_fork_head(loaded,&thread.id,fork_head).changes);
+            changes.extend(with_native_fork_head(loaded,&thread.id,fork_head.as_deref()).changes);
             changes.push(model::Change::RunAttempt(model::RunAttempt{native_thread_ref:Some(native),..attempt.clone()}));
             let mut decision=model::Decision{changes,effects:Vec::new()};
             if let Some(error) = fork_failure {
@@ -243,8 +257,7 @@ impl Storage {
         effect: &model::Effect,
         worker: &str,
         native: &SessionRef,
-        handoffs: &[model::ContextHandoff],
-        selected: &history::SelectedHistory,
+        (handoffs, selected): &(Vec<model::ContextHandoff>, history::SelectedHistory),
         status: Option<model::HandoffDeliveryStatus>,
         now: &str,
     ) -> Result<bool, String> {
@@ -442,24 +455,11 @@ fn prepare(
         .map(|fork| projections::metadata(connection, &fork.source_thread_id))
         .transpose()?;
     let source = fork_source.as_ref().unwrap_or(state);
-    let latest = if let Some(fork) = fork {
-        fork.source_point
-            .run_id
-            .as_ref()
-            .map(|id| {
-                source
-                    .runs
-                    .get(id)
-                    .ok_or("fork context source run is missing")
-            })
-            .transpose()?
-    } else {
-        source
-            .runs
-            .values()
-            .filter(|source| source.ordinal < run.ordinal && source.is_handoff_source())
-            .max_by_key(|source| source.ordinal)
-    };
+    let latest = history::source_run(
+        &source.runs,
+        fork.map(|fork| &fork.source_point),
+        run.ordinal,
+    )?;
     let switched =
         latest.is_some_and(|source| source.provider_instance_id != run.provider_instance_id);
     // T3 prepares imported run-less history until an app run completes, even
@@ -633,49 +633,48 @@ fn prepare(
         created_at: now.into(),
         updated_at: now.into(),
     };
-    let actor = state
-        .turn_items
-        .values()
-        .find_map(|item| match &item.body {
-            model::TurnItemBody::UserMessage {
-                message_id,
-                created_by,
-                ..
-            } if message_id == &run.user_message_id => Some(*created_by),
-            _ => None,
-        })
-        .ok_or("context target input is missing")?;
-    let point = latest
-        .filter(|_| !fresh)
-        .map(|run| source.context_source_point(run))
-        .unwrap_or(model::ContextSourcePoint {
-            thread_id: source.thread.id.clone(),
-            run_id: None,
-            checkpoint_id: None,
-            turn_item_id: None,
-            provider_thread_ref: None,
-            provider_turn_ref: None,
-        });
-    let base = source
-        .runs
-        .values()
-        .find(|run| run.ordinal == after)
-        .map(|run| source.context_source_point(run));
-    let transfer = history::provider_transfer(
-        &handoff,
-        point,
-        base,
-        if fresh {
-            Some(thread.provider_instance_id.clone())
+    let transfer = if let Some(fork) = fork {
+        history::resolve_fork_transfer(&handoff, fork, &run.provider_instance_id, now)
+    } else {
+        let delivery = if fresh {
+            history::TransferDelivery::Recovery
         } else {
-            latest.map(|run| run.provider_instance_id.clone())
-        },
-        &run.provider_instance_id,
-        actor,
-        fork,
-        fresh,
-        now,
-    );
+            let item = state
+                .user_message_item(&run.user_message_id)
+                .ok_or("context target input is missing")?;
+            let model::TurnItemBody::UserMessage { created_by, .. } = &item.body else {
+                unreachable!()
+            };
+            history::TransferDelivery::Message(*created_by)
+        };
+        let point = latest
+            .filter(|_| !fresh)
+            .map(|run| source.context_source_point(run))
+            .unwrap_or(model::ContextSourcePoint {
+                thread_id: source.thread.id.clone(),
+                run_id: None,
+                checkpoint_id: None,
+                turn_item_id: None,
+                provider_thread_ref: None,
+                provider_turn_ref: None,
+            });
+        let base = source
+            .runs
+            .values()
+            .find(|run| run.ordinal == after)
+            .map(|run| source.context_source_point(run));
+        history::provider_transfer(
+            &handoff,
+            point,
+            base,
+            fresh
+                .then(|| thread.provider_instance_id.clone())
+                .or_else(|| latest.map(|run| run.provider_instance_id.clone())),
+            &run.provider_instance_id,
+            delivery,
+            now,
+        )
+    };
     let mut handoff_ids = thread.handoff_ids.clone();
     if !handoff_ids.contains(&id) {
         handoff_ids.push(id.clone());
@@ -775,7 +774,9 @@ fn context_budget(
     thread: &model::ProviderThread,
     native: Option<&str>,
 ) -> Result<usize, String> {
-    let item=state.turn_items.values().find(|item|matches!(&item.body,model::TurnItemBody::UserMessage {message_id,..} if message_id==&run.user_message_id)).ok_or("context target input is missing")?;
+    let item = state
+        .user_message_item(&run.user_message_id)
+        .ok_or("context target input is missing")?;
     let model::TurnItemBody::UserMessage {
         text, attachments, ..
     } = &item.body

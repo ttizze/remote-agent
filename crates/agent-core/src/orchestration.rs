@@ -391,13 +391,12 @@ pub fn merge_older_history(
             row.item = item.clone();
         }
         keys.insert(key);
-        if row.visibility == Visibility::Local || row.source_thread_id == projection.thread.id {
-            if let std::collections::btree_map::Entry::Vacant(entry) =
+        if (row.visibility == Visibility::Local || row.source_thread_id == projection.thread.id)
+            && let std::collections::btree_map::Entry::Vacant(entry) =
                 items.entry(row.source_item_id.clone())
-            {
-                entry.insert(row.item.clone());
-                turn_items.push(row.item.clone());
-            }
+        {
+            entry.insert(row.item.clone());
+            turn_items.push(row.item.clone());
         }
         page.push(row);
     }

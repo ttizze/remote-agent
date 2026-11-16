@@ -2855,18 +2855,7 @@ mod handoff_tests {
         let old = "2026-11-13T00:00:00.000Z";
         let original:ContextTransfer=serde_json::from_value(serde_json::json!({"id":"transfer","type":"fork","sourceThreadId":"source","targetThreadId":"target","sourcePoint":{"threadId":"source","runId":"source-run"},"basePoint":null,"sourceProviderInstanceId":"codex","targetProviderInstanceId":"codex","targetRunId":"failed-run","status":"pending","resolution":null,"createdBy":"user","error":"weak native source","createdAt":old,"updatedAt":old,"consumedAt":null})).unwrap();
         let handoff:ContextHandoff=serde_json::from_value(serde_json::json!({"id":"handoff","transferId":"transfer","threadId":"target","targetRunId":"retry-run","fromProviderThreadIds":["source-provider-thread"],"toProviderThreadId":"target-provider-thread","coveredRunOrdinals":{"from":1,"to":1},"strategy":"full_thread_summary","status":"ready","summaryMessageId":null,"detailInTurnItem":true,"createdByProviderInstanceId":null,"createdAt":NOW,"updatedAt":NOW})).unwrap();
-        let change = provider_transfer(
-            &handoff,
-            original.source_point.clone(),
-            None,
-            Some("codex".into()),
-            "claude",
-            Actor::Agent,
-            Some(&original),
-            false,
-            NOW,
-        )
-        .unwrap();
+        let change = resolve_fork_transfer(&handoff, &original, "claude", NOW).unwrap();
         let Change::ContextTransfer(updated) = change else {
             panic!("existing fork transfer is updated");
         };
@@ -3410,5 +3399,136 @@ fn oversized_authored_bodies_have_an_explicit_lossless_hydration_contract() {
     assert!(
         !wire::item(&full).detail_omitted,
         "provider-authored text must not be mistaken for a transport marker"
+    );
+}
+
+#[test]
+fn provider_transfers_preserve_message_and_native_recovery_lifecycles() {
+    let handoff:ContextHandoff=serde_json::from_value(serde_json::json!({"id":"handoff","transferId":"transfer","threadId":"target","targetRunId":"target-run","fromProviderThreadIds":[],"toProviderThreadId":"target-native","coveredRunOrdinals":{"from":1,"to":1},"strategy":"full_thread_summary","status":"ready","summaryMessageId":null,"detailInTurnItem":true,"createdByProviderInstanceId":null,"createdAt":NOW,"updatedAt":NOW})).unwrap();
+    let point: ContextSourcePoint =
+        serde_json::from_value(serde_json::json!({"threadId":"source","runId":"source-run"}))
+            .unwrap();
+    // Existing T3 records distinguish a newly consumed user/agent handoff
+    // from a system-owned native recovery. These expectations survive the
+    // internal API split between fork resolution and provider transfer.
+    for (recovery, actor, status, creator, consumed, created) in [
+        (
+            false,
+            Actor::Agent,
+            TransferStatus::Consumed,
+            Actor::Agent,
+            Some(NOW),
+            true,
+        ),
+        (
+            true,
+            Actor::User,
+            TransferStatus::ResolvedPortable,
+            Actor::System,
+            None,
+            false,
+        ),
+    ] {
+        let change = handoffs::provider_transfer(
+            &handoff,
+            point.clone(),
+            None,
+            Some("codex".into()),
+            "claude",
+            if recovery {
+                handoffs::TransferDelivery::Recovery
+            } else {
+                handoffs::TransferDelivery::Message(actor)
+            },
+            NOW,
+        )
+        .unwrap();
+        let record = match change {
+            Change::ContextTransferCreated(record) => {
+                assert!(created);
+                record
+            }
+            Change::ContextTransfer(record) => {
+                assert!(!created);
+                record
+            }
+            _ => panic!("context transfer event"),
+        };
+        assert_eq!(record.id, "transfer");
+        assert_eq!(record.kind, TransferType::ProviderHandoff);
+        assert_eq!(record.source_point, point);
+        assert_eq!(record.source_provider_instance_id.as_deref(), Some("codex"));
+        assert_eq!(
+            record.target_provider_instance_id.as_deref(),
+            Some("claude")
+        );
+        assert_eq!(record.target_run_id.as_deref(), Some("target-run"));
+        assert_eq!(record.status, status);
+        assert_eq!(record.created_by, creator);
+        assert_eq!(record.created_at, NOW);
+        assert_eq!(record.updated_at, NOW);
+        assert_eq!(record.consumed_at.as_deref(), consumed);
+    }
+}
+
+#[test]
+fn handoff_source_keeps_explicit_fork_boundaries_and_prior_delivered_runs() {
+    let state = initial();
+    let state = state.apply(
+        &admit(
+            &state,
+            input(1),
+            Admission::Queue,
+            context("source", &state),
+        )
+        .unwrap(),
+    );
+    let template = state.runs.values().next().unwrap();
+    let runs: std::collections::BTreeMap<_, _> = [
+        ("old", 1, RunStatus::Completed),
+        ("newer", 3, RunStatus::Failed),
+        ("never-sent", 4, RunStatus::Cancelled),
+        ("future", 5, RunStatus::Completed),
+    ]
+    .into_iter()
+    .map(|(id, ordinal, status)| {
+        (
+            id.into(),
+            Run {
+                id: id.into(),
+                ordinal,
+                status,
+                started_at: None,
+                ..template.clone()
+            },
+        )
+    })
+    .collect();
+    assert_eq!(
+        handoffs::source_run(&runs, None, 5).unwrap().unwrap().id,
+        "newer"
+    );
+    assert!(handoffs::source_run(&runs, None, 1).unwrap().is_none());
+    let mut source: ContextSourcePoint =
+        serde_json::from_value(serde_json::json!({"threadId":"thread","runId":"old"})).unwrap();
+    assert_eq!(
+        handoffs::source_run(&runs, Some(&source), 0)
+            .unwrap()
+            .unwrap()
+            .id,
+        "old",
+        "an explicit fork does not advance to a newer source run"
+    );
+    source.run_id = None;
+    assert!(
+        handoffs::source_run(&runs, Some(&source), 5)
+            .unwrap()
+            .is_none(),
+        "run-less imported forks cannot inherit unrelated app runs"
+    );
+    source.run_id = Some("missing".into());
+    assert!(
+        handoffs::source_run(&runs, Some(&source), 5).is_err(),
+        "missing explicit source is an error, never an invitation to use another run"
     );
 }

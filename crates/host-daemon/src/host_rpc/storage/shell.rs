@@ -578,7 +578,7 @@ fn delta(current: &ShellSnapshot, change: &Dirty) -> Vec<ShellStreamItem> {
         {
             Some(project) => ShellStreamItem::ProjectUpdated {
                 sequence: change.sequence,
-                project: project.as_ref().clone(),
+                project: project.as_ref().clone().into(),
             },
             None => ShellStreamItem::ProjectRemoved {
                 sequence: change.sequence,
@@ -601,7 +601,7 @@ fn delta(current: &ShellSnapshot, change: &Dirty) -> Vec<ShellStreamItem> {
         Some((thread, location)) => vec![ShellStreamItem::ThreadUpdated {
             sequence: change.sequence,
             location,
-            thread: thread.as_ref().clone(),
+            thread: thread.as_ref().clone().into(),
         }],
         None => vec![
             ShellStreamItem::ThreadRemoved {

@@ -53,7 +53,7 @@ impl Runtime {
                         None
                     };
                     let output = output.as_deref().unwrap_or_default();
-                    let tail = agent_protocol::sync::Output::new(0, &output);
+                    let tail = agent_protocol::sync::Output::new(0, output);
                     let (initial, updates) = match service.inner.conversation.outputs.subscribe(
                         &records::OutputKey {
                             session: SessionRef::new(None, request.key.session.application_id())

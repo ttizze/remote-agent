@@ -33,7 +33,7 @@ impl Storage {
                 let run = (snapshot.latest_run_id.as_deref() == Some(receipt))
                     .then(|| receipt.to_owned());
                 let completed_at =
-                    chrono::DateTime::parse_from_rfc3339(&completed).map_err(failure)?;
+                    chrono::DateTime::parse_from_rfc3339(completed).map_err(failure)?;
                 let visited = thread
                     .last_visited_at
                     .as_deref()

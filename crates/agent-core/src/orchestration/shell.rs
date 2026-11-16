@@ -1,7 +1,6 @@
 //! Shell data has its own application cursor; transcript events never become
 //! sidebar rows. Subscription generations remain owned by the store.
 use agent_protocol::orchestration::shell::*;
-use std::sync::Arc;
 
 pub(crate) fn project(project: &ProjectShell) -> crate::models::Project {
     crate::models::Project {
@@ -57,11 +56,11 @@ pub fn receive(
                 .iter_mut()
                 .find(|saved| saved.id == project.id)
             {
-                if previous.as_ref() != &project {
-                    *previous = Arc::new(project);
+                if previous.as_ref() != project.as_ref() {
+                    *previous = project.into();
                 }
             } else {
-                snapshot.projects.push(Arc::new(project));
+                snapshot.projects.push(project.into());
             }
         }
         ShellStreamItem::ProjectRemoved { project_id, .. } => {
@@ -79,11 +78,11 @@ pub fn receive(
                 .iter_mut()
                 .find(|saved| saved.thread.id == thread.thread.id)
             {
-                if previous.as_ref() != &thread {
-                    *previous = Arc::new(thread);
+                if previous.as_ref() != thread.as_ref() {
+                    *previous = thread.into();
                 }
             } else {
-                target.push(Arc::new(thread));
+                target.push(thread.into());
             }
         }
         ShellStreamItem::ThreadRemoved {

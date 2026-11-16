@@ -123,7 +123,7 @@ async fn unchanged_metadata_is_resent_after_five_seconds_and_real_changes_are_im
     let item = ShellStreamItem::ThreadUpdated {
         sequence: 2,
         location: agent_protocol::orchestration::shell::ShellLocation::Active,
-        thread: thread.clone(),
+        thread: thread.clone().into(),
     };
     subscription.publish(item.clone(), now + Duration::from_millis(4999));
     assert!(subscription.pending.is_empty());
@@ -135,7 +135,7 @@ async fn unchanged_metadata_is_resent_after_five_seconds_and_real_changes_are_im
         ShellStreamItem::ThreadUpdated {
             sequence: 3,
             location: agent_protocol::orchestration::shell::ShellLocation::Active,
-            thread,
+            thread: thread.into(),
         },
         now + Duration::from_millis(5001),
     );

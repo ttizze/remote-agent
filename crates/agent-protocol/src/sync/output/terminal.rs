@@ -240,14 +240,13 @@ impl Line {
         }
     }
     fn pop_front(&mut self) {
-        if let Some(old) = self.cells.pop_front() {
-            if self
+        if let Some(old) = self.cells.pop_front()
+            && self
                 .cells
                 .front()
                 .is_none_or(|next| old.style != next.style)
-            {
-                self.runs = self.runs.saturating_sub(1);
-            }
+        {
+            self.runs = self.runs.saturating_sub(1);
         }
     }
     fn bound_styles(&mut self) {

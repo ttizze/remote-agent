@@ -82,7 +82,7 @@ impl Subscription {
                     return;
                 }
                 self.sent
-                    .insert(thread.thread.id.clone(), (thread.clone(), now));
+                    .insert(thread.thread.id.clone(), (thread.as_ref().clone(), now));
             }
             ShellStreamItem::ThreadRemoved { thread_id, .. } => {
                 self.sent.remove(thread_id);

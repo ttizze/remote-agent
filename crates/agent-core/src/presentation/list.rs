@@ -1313,7 +1313,7 @@ mod tests {
             project.title = "Renamed project".into();
             let message = agent_protocol::orchestration::shell::ShellStreamItem::ProjectUpdated {
                 sequence: snapshot.lists.shell.as_ref().unwrap().snapshot_sequence + 1,
-                project,
+                project: project.into(),
             };
             snapshot = crate::state::list_sync::received(
                 &snapshot,

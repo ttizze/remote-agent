@@ -74,7 +74,7 @@ pub(in crate::host_rpc) fn records(
     let updated = summary
         .updated_at
         .filter(|at| at.is_finite() && *at >= 0.0)
-        .map(|at| timestamp(Some((at * 1000.0) as u64), &now))
+        .map(|at| timestamp(Some((at * 1000.0) as u64), now))
         .unwrap_or_else(|| now.to_owned());
     let created = summary.turns.iter().flatten().find_map(|turn| {
         turn.started_at_ms
@@ -91,7 +91,7 @@ pub(in crate::host_rpc) fn records(
         } else {
             model::CreationSource::Server
         },
-        project_id: project_id,
+        project_id,
         title: summary
             .name
             .clone()

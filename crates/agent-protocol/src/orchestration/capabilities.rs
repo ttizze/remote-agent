@@ -1,5 +1,4 @@
 //! Provider capability records from T3 Code 1a12c4af.
-use super::NativeRefStrength;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,10 +9,13 @@ pub enum RuntimeEnforcement {
     ClientBoundary,
 }
 
-impl Default for NativeRefStrength {
-    fn default() -> Self {
-        Self::None
-    }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeRefStrength {
+    Strong,
+    Weak,
+    #[default]
+    None,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

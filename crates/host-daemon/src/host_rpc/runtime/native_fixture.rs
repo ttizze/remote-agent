@@ -165,6 +165,8 @@ impl Transcript {
     }
 }
 
+type HistoryInjection = (String, Vec<Value>);
+
 /// Independent native sessions, including persisted history and provider
 /// acknowledgements. Assertions observe the Host boundary, not a reimplementation
 /// of its handoff/routing decisions.
@@ -180,7 +182,7 @@ pub(in crate::host_rpc) struct NativeAgent {
     pub(in crate::host_rpc) unreadable: Mutex<std::collections::HashSet<String>>,
     pub(in crate::host_rpc) inputs: Arc<Mutex<Vec<op::Submission>>>,
     pub(in crate::host_rpc) interrupts: Mutex<Vec<(String, TurnId)>>,
-    pub(in crate::host_rpc) injected: Arc<Mutex<Vec<(String, Vec<Value>)>>>,
+    pub(in crate::host_rpc) injected: Arc<Mutex<Vec<HistoryInjection>>>,
     pub(in crate::host_rpc) released: Arc<Mutex<Vec<String>>>,
     pub(in crate::host_rpc) unload_gate: tokio::sync::Semaphore,
     pub(in crate::host_rpc) next: Arc<AtomicUsize>,

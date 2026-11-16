@@ -7,6 +7,13 @@ use tokio::{
     time::{Duration, Instant},
 };
 
+pub(super) struct Delta<'a> {
+    pub turn: &'a str,
+    pub item: &'a str,
+    pub field: TextField,
+    pub text: &'a str,
+}
+
 #[derive(Clone)]
 pub(super) enum Owner {
     Attempt(Uuid),
@@ -302,7 +309,18 @@ impl Runtime {
         let Some(owner) = owner else {
             return Ok(false);
         };
-        Self::text_delta(service, &source, native, owner, turn, item, field, delta)?;
+        Self::text_delta(
+            service,
+            &source,
+            native,
+            owner,
+            Delta {
+                turn,
+                item,
+                field,
+                text: delta,
+            },
+        )?;
         Ok(true)
     }
 
@@ -311,10 +329,12 @@ impl Runtime {
         source: &Arc<resources::Source>,
         native: &SessionRef,
         owner: Owner,
-        turn: &str,
-        item: &str,
-        field: TextField,
-        delta: &str,
+        Delta {
+            turn,
+            item,
+            field,
+            text: delta,
+        }: Delta<'_>,
     ) -> Result<(), String> {
         let id = super::native::text_item_id(
             native.native_provider().map_err(str::to_owned)?,
@@ -340,19 +360,6 @@ impl Runtime {
         if field == TextField::FileOutput {
             return Ok(());
         }
-        Self::buffer_delta(service, source, native, owner, turn, id, field, delta)
-    }
-
-    fn buffer_delta(
-        service: &HostRpcService,
-        source: &Arc<resources::Source>,
-        native: &SessionRef,
-        owner: Owner,
-        turn: &str,
-        id: ItemId,
-        field: TextField,
-        delta: &str,
-    ) -> Result<(), String> {
         // The resource update lock serializes producers and its flush worker.
         let key = (id, field);
         let pending = source.text.lock().unwrap().pending.remove(&key);

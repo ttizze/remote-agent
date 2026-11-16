@@ -411,10 +411,17 @@ impl State {
             && self.native_thread_matches(attempt_id, driver, native_id)
     }
 
+    /// Canonical input lookup, shared by queued editing, start admission and
+    /// context delivery. Native/transcript IDs do not identify an app input.
+    pub fn user_message_item(&self, message_id: &str) -> Option<&TurnItem> {
+        self.turn_items.values().find(|item| {
+            matches!(&item.body,
+            TurnItemBody::UserMessage {message_id:id,..} if id == message_id)
+        })
+    }
+
     pub(super) fn owned_attempt(&self, attempt_id: &str, session_id: &str) -> Option<&RunAttempt> {
-        let Some(attempt) = self.run_attempts.get(attempt_id) else {
-            return None;
-        };
+        let attempt = self.run_attempts.get(attempt_id)?;
         self.runs
             .get(&attempt.run_id)
             .filter(|run| {

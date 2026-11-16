@@ -219,8 +219,7 @@ pub fn respond(
         decision,
         feedback: Some(feedback),
     } = &response
-    {
-        if *decision != ApprovalDecision::Decline
+        && (*decision != ApprovalDecision::Decline
             || feedback.trim().is_empty()
             || !matches!(
                 request.response_capability,
@@ -228,12 +227,9 @@ pub fn respond(
                     supports_feedback: Some(true),
                     ..
                 }
-            )
-        {
-            return Err(
-                "feedback requires a supported live approval and a decline decision".into(),
-            );
-        }
+            ))
+    {
+        return Err("feedback requires a supported live approval and a decline decision".into());
     }
     if request.response_capability == ResponseCapability::Message {
         return message_response(state, request, item, response, driver, context);

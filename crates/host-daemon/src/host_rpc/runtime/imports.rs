@@ -136,7 +136,7 @@ impl Runtime {
                 .project_membership(response.thread.cwd.as_deref())
                 .as_ref()
                 .cloned(),
-            &now,
+            now,
         )?;
         thread.id = id.clone();
         if thread.lineage.parent_thread_id.is_none() {

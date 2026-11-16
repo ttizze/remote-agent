@@ -294,40 +294,84 @@ pub fn distinct_model_selections<'a>(
     models
 }
 
-/// Provider switches, portable forks and native recovery share these transfer
-/// records. The writer supplies source points and the actual message actor.
+/// A fork uses its explicit source boundary, including a run-less imported
+/// source. A provider handoff uses the latest eligible run before its input.
+pub fn source_run<'a>(
+    runs: &'a std::collections::BTreeMap<String, Run>,
+    fork_source: Option<&ContextSourcePoint>,
+    before: u64,
+) -> Result<Option<&'a Run>, String> {
+    if let Some(source) = fork_source {
+        return source
+            .run_id
+            .as_ref()
+            .map(|id| {
+                runs.get(id)
+                    .ok_or_else(|| "fork context source run is missing".into())
+            })
+            .transpose();
+    }
+    Ok(runs
+        .values()
+        .filter(|run| run.ordinal < before && run.is_handoff_source())
+        .max_by_key(|run| run.ordinal))
+}
+
+/// The writer's intent: recovery has no message actor to forward.
+#[derive(Debug, Clone, Copy)]
+pub enum TransferDelivery {
+    Message(Actor),
+    Recovery,
+}
+
+fn transfer_resolution(id: &str, strategy: HandoffStrategy) -> ContextTransferResolution {
+    if strategy == HandoffStrategy::DeltaSinceTargetLastSeen {
+        ContextTransferResolution::DeltaContext {
+            context_handoff_id: id.into(),
+        }
+    } else {
+        ContextTransferResolution::PortableContext {
+            context_handoff_id: id.into(),
+        }
+    }
+}
+
+/// Rebind an existing fork's target; its source, creator and creation time remain
+/// owned by the original transfer, independent of current provider history.
+pub fn resolve_fork_transfer(
+    handoff: &ContextHandoff,
+    fork: &ContextTransfer,
+    target_provider_instance_id: &str,
+    now: &str,
+) -> Option<Change> {
+    handoff.transfer_id.as_ref()?;
+    Some(Change::ContextTransfer(ContextTransfer {
+        target_provider_instance_id: Some(target_provider_instance_id.into()),
+        target_run_id: Some(handoff.target_run_id.clone()),
+        status: TransferStatus::ResolvedPortable,
+        resolution: Some(transfer_resolution(&handoff.id, handoff.strategy)),
+        error: None,
+        updated_at: now.into(),
+        ..fork.clone()
+    }))
+}
+
+/// Construct a provider handoff from the selected source facts. Native recovery
+/// uses system ownership, while a new message retains its canonical actor.
 pub fn provider_transfer(
     handoff: &ContextHandoff,
     source_point: ContextSourcePoint,
     base_point: Option<ContextSourcePoint>,
     source_provider_instance_id: Option<String>,
     target_provider_instance_id: &str,
-    created_by: Actor,
-    fork: Option<&ContextTransfer>,
-    recovery: bool,
+    delivery: TransferDelivery,
     now: &str,
 ) -> Option<Change> {
     let id = handoff.transfer_id.clone()?;
-    let resolution = if handoff.strategy == HandoffStrategy::DeltaSinceTargetLastSeen {
-        ContextTransferResolution::DeltaContext {
-            context_handoff_id: handoff.id.clone(),
-        }
-    } else {
-        ContextTransferResolution::PortableContext {
-            context_handoff_id: handoff.id.clone(),
-        }
+    let (created_by, status, consumed_at) = match delivery {
+        TransferDelivery::Recovery => (Actor::System, TransferStatus::ResolvedPortable, None),
+        TransferDelivery::Message(actor) => (actor, TransferStatus::Consumed, Some(now.into())),
     };
-    if let Some(fork) = fork {
-        return Some(Change::ContextTransfer(ContextTransfer {
-            target_provider_instance_id: Some(target_provider_instance_id.into()),
-            target_run_id: Some(handoff.target_run_id.clone()),
-            status: TransferStatus::ResolvedPortable,
-            resolution: Some(resolution),
-            error: None,
-            updated_at: now.into(),
-            ..fork.clone()
-        }));
-    }
     let transfer = ContextTransfer {
         id,
         kind: TransferType::ProviderHandoff,
@@ -338,21 +382,16 @@ pub fn provider_transfer(
         source_provider_instance_id,
         target_provider_instance_id: Some(target_provider_instance_id.into()),
         target_run_id: Some(handoff.target_run_id.clone()),
-        status: if recovery {
-            TransferStatus::ResolvedPortable
-        } else {
-            TransferStatus::Consumed
-        },
-        resolution: Some(resolution),
-        created_by: if recovery { Actor::System } else { created_by },
+        status,
+        resolution: Some(transfer_resolution(&handoff.id, handoff.strategy)),
+        created_by,
         error: None,
         created_at: now.into(),
         updated_at: now.into(),
-        consumed_at: (!recovery).then(|| now.into()),
+        consumed_at,
     };
-    Some(if recovery {
-        Change::ContextTransfer(transfer)
-    } else {
-        Change::ContextTransferCreated(transfer)
+    Some(match delivery {
+        TransferDelivery::Recovery => Change::ContextTransfer(transfer),
+        TransferDelivery::Message(_) => Change::ContextTransferCreated(transfer),
     })
 }

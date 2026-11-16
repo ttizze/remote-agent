@@ -17,6 +17,7 @@ mod event_store;
 pub mod fixture;
 mod forks;
 mod handoffs;
+pub(in crate::host_rpc) use handoffs::NativeAllocation;
 mod lifecycle;
 mod message_search;
 mod native_bindings;

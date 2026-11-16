@@ -140,8 +140,7 @@ fn request_artifact(
     attempt_id: Option<&str>,
     target: &agent_protocol::requests::RequestTarget,
     request_id: &str,
-    kind: model::NodeKind,
-    body: model::TurnItemBody,
+    (kind, body): (model::NodeKind, model::TurnItemBody),
     now: &str,
 ) -> Result<Artifact, String> {
     let provider =
@@ -332,8 +331,7 @@ impl Runtime {
             attempt_id.as_deref(),
             &request.target,
             &request_id,
-            node_kind,
-            body,
+            (node_kind, body),
             &now,
         )?;
         let record = model::RuntimeRequest {

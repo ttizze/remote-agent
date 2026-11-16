@@ -181,14 +181,13 @@ impl HostRpcService {
                     if let Some(inner) = owner.upgrade() {
                         let service = HostRpcService { inner };
                         for header in headers {
-                            if let Some(workspace) = header.workspace_launch {
-                                if let Ok(id) =
+                            if let Some(workspace) = header.workspace_launch
+                                && let Ok(id) =
                                     agent_protocol::orchestration::shell::public_session_ref(
                                         &header.id,
                                     )
-                                {
-                                    service.schedule_setup_expiry(id, *workspace);
-                                }
+                            {
+                                service.schedule_setup_expiry(id, *workspace);
                             }
                         }
                     }
