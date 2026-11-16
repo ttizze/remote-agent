@@ -850,3 +850,96 @@ async fn canonical_title_search_preserves_pinned_t3_matching_and_rank_order() {
         "title matches/ranking differ from pinned T3: {differences:?}"
     );
 }
+
+#[tokio::test]
+async fn canonical_search_reserves_message_slots_after_ranked_titles_before_limiting() {
+    use super::*;
+    use crate::host_rpc::runtime::{
+        Runtime,
+        native_fixture::{NativeAgent, own},
+    };
+    use agent_protocol::{
+        execution::ItemStatus,
+        items::{AssistantPhase, Item, ItemBody},
+        models::{Thread, ThreadResponse},
+        session::{SessionChange, SessionRef},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    for i in 0..10 {
+        let native = SessionRef::new(ProviderKind::Codex, format!("native-{i}")).unwrap();
+        let public =
+            SessionRef::new(None, uuid::Uuid::from_u128(2000 + i as u128).to_string()).unwrap();
+        own(
+            &service,
+            &public,
+            &ThreadResponse {
+                thread: Thread {
+                    id: Some(native.clone()),
+                    name: Some(if i < 5 {
+                        format!("Needle task {i}")
+                    } else {
+                        format!("opaque task {i}")
+                    }),
+                    cwd: Some(directory.path().to_str().unwrap().into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+        if i >= 5 {
+            Runtime::observe(
+                &service,
+                crate::providers::AgentChange::Session {
+                    session: native,
+                    change: SessionChange::Item {
+                        turn_id: format!("turn-{i}").into(),
+                        item: Arc::new(Item::new(
+                            format!("answer-{i}").into(),
+                            ItemStatus::Completed,
+                            ItemBody::AssistantText {
+                                text: "Needle".into(),
+                                phase: AssistantPhase::Final,
+                            },
+                        )),
+                    },
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        }
+    }
+    // Pinned ThreadSearch.searchThreads reserves a fifth of the slots for
+    // messages after excluding titles, before applying the requested limit.
+    for (limit, title_count) in [(5, 4), (1, 1)] {
+        let result = service
+            .search_list(&agent_protocol::conversation::records::SearchList {
+                term: "Needle".into(),
+                limit: Some(limit),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.data.len(), limit as usize);
+        assert!(
+            result.data[..title_count].iter().all(|thread| thread
+                .name
+                .as_deref()
+                .unwrap()
+                .starts_with("Needle task"))
+        );
+        assert!(
+            result.data[title_count..].iter().all(|thread| thread
+                .name
+                .as_deref()
+                .unwrap()
+                .starts_with("opaque task"))
+        );
+        assert!(
+            result.has_more,
+            "the Bex list contract retains knowledge of additional canonical matches"
+        );
+    }
+}

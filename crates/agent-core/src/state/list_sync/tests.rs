@@ -445,7 +445,7 @@ fn an_idle_catalog_update_releases_an_unselected_subscription_after_completion()
 }
 
 #[test]
-fn empty_projects_keep_registration_order_and_child_matches_only_show_in_search() {
+fn empty_projects_keep_registration_order_and_subagents_stay_out_of_search() {
     let mut state = Snapshot::default();
     let mut child = row(99, true);
     child.thread.title = "needle child".into();
@@ -482,16 +482,16 @@ fn empty_projects_keep_registration_order_and_child_matches_only_show_in_search(
     Arc::make_mut(&mut state.lists.list_query).search_term = "needle".into();
     project(&mut state, false);
     let page = state.lists.threads.as_ref().unwrap();
-    assert_eq!(
-        page.projects
-            .iter()
-            .map(|p| p.id.as_str())
-            .collect::<Vec<_>>(),
-        ["project"]
-    );
-    assert_eq!(
-        state.lists.project_threads["project"].data[0].id,
-        Some(address(99))
+    // T3 ThreadSearch filters subagents before matching/limits. Local title
+    // matching must not reintroduce a row excluded by the canonical search.
+    assert!(page.projects.is_empty());
+    assert!(page.data.is_empty());
+    assert!(
+        state
+            .lists
+            .project_threads
+            .values()
+            .all(|page| page.data.is_empty())
     );
 }
 
@@ -625,5 +625,64 @@ fn canonical_search_results_do_not_reintroduce_short_token_substring_false_posit
     assert!(
         state.lists.threads.as_ref().unwrap().data.is_empty(),
         "T3 short tokens must start a word: a canonical empty result cannot be undone by client substring matching"
+    );
+}
+
+#[test]
+fn ranked_search_order_reaches_the_rendered_conversation_list() {
+    use crate::state::operations::Operation;
+    let mut state = list();
+    let shell = Arc::make_mut(state.lists.shell.as_mut().unwrap());
+    for (i, title) in ["Storage", "Storage recovery", "A storage task"]
+        .into_iter()
+        .enumerate()
+    {
+        Arc::make_mut(&mut shell.threads[i]).thread.title = title.into();
+    }
+    Arc::make_mut(&mut state.lists.list_query).search_term = "storage".into();
+    let data = (0..3)
+        .map(|i| {
+            agent_protocol::orchestration::shell::summary(
+                &state.lists.shell.as_ref().unwrap().threads[i],
+                None,
+            )
+            .unwrap()
+        })
+        .collect();
+    SearchCatalog {
+        term: "storage".into(),
+    }
+    .apply(
+        &mut state,
+        "",
+        ThreadList {
+            data,
+            ..Default::default()
+        },
+    );
+    // The pinned reference's first captured title case puts the exact title
+    // before its two whole-word matches, regardless of recent header updates.
+    let expected = vec![address(0), address(1), address(2)];
+    assert_eq!(
+        state
+            .lists
+            .threads
+            .as_ref()
+            .unwrap()
+            .data
+            .iter()
+            .map(|thread| thread.id.clone().unwrap())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        state
+            .thread_list()
+            .unwrap()
+            .threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect::<Vec<_>>(),
+        expected
     );
 }

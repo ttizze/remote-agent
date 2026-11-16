@@ -1,6 +1,36 @@
 {
-  "reference": "T3 Code 1a12c4afae998925b4a29417f2dc436c0ccd0969 packages/shared/src/paletteSearch.ts",
+  "reference": "T3 Code 1a12c4afae998925b4a29417f2dc436c0ccd0969 packages/shared/src/paletteSearch.ts and ThreadSearch.ts rendered-label projection",
   "messages": [
+    {
+      "query": "secreturl",
+      "text": "the [visible label](https://secreturl.example)",
+      "quality": null
+    },
+    {
+      "query": "visible",
+      "text": "the [visible label](https://secreturl.example)",
+      "quality": 1
+    },
+    {
+      "query": "secretimage",
+      "text": "![photo](https://secretimage.example/a.png)",
+      "quality": null
+    },
+    {
+      "query": "photo",
+      "text": "![photo](https://secretimage.example/a.png)",
+      "quality": 1
+    },
+    {
+      "query": "rendered",
+      "text": "**rendered**",
+      "quality": 1
+    },
+    {
+      "query": "code",
+      "text": "`code`",
+      "quality": 1
+    },
     {
       "query": "fts",
       "text": "drafts",
