@@ -3,7 +3,8 @@
   "scenarios": {
     "agent-protocol": [
       "orchestration::tests::claude_empty_baseline_replaces_the_logical_native_owner_and_fences_old_callbacks",
-      "orchestration::tests::claude_resume_pin_survives_admission_and_errors_but_successful_completion_clears_it"
+      "orchestration::tests::claude_resume_pin_survives_admission_and_errors_but_successful_completion_clears_it",
+      "orchestration::tests::rewind_distinguishes_an_active_answer_from_settled_background_and_old_native_work"
     ],
     "host-daemon": [
       "providers::claude::execution_tests::native_claude_rollback_keeps_real_cursors_and_allocates_only_empty_baselines::case_1",
@@ -20,10 +21,13 @@
       "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_1",
       "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_2",
       "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_3",
-      "providers::claude::execution_tests::native_fork_without_a_cursor_reaches_full_copy_authentication"
+      "providers::claude::execution_tests::native_fork_without_a_cursor_reaches_full_copy_authentication",
+      "host_rpc::service::titles::tests::canonical_message_search_matches_pinned_t3_word_boundaries_and_unicode",
+      "host_rpc::service::titles::tests::canonical_title_search_preserves_pinned_t3_matching_and_rank_order"
     ],
     "agent-core": [
-      "state::operations::sessions::tests::a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences"
+      "state::operations::sessions::tests::a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences",
+      "state::list_sync::tests::canonical_search_results_do_not_reintroduce_short_token_substring_false_positives"
     ]
   },
   "guards": {
@@ -2287,7 +2291,8 @@
       "worktrees::tests::settings_persist_and_control_checkout_copying",
       "worktrees::tests::work_pushed_to_the_remote_default_branch_is_unchanged",
       "host_rpc::runtime::executor::fork_tests::native_fork_serializes_and_revalidates_the_source::case_1_unchanged",
-      "host_rpc::runtime::executor::fork_tests::native_fork_serializes_and_revalidates_the_source::case_2_changed"
+      "host_rpc::runtime::executor::fork_tests::native_fork_serializes_and_revalidates_the_source::case_2_changed",
+      "host_rpc::runtime::t3_contract::codex_rollback::rollback_replays_real_codex_metadata_cursor_and_revert_response"
     ],
     "host-daemon::bin/host-daemon": [
       "command_line::tests::invitation_lifetime_defaults_to_a_week_and_is_bounded",

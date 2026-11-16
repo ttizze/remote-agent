@@ -1,0 +1,1005 @@
+{
+  "reference": "T3 Code 1a12c4afae998925b4a29417f2dc436c0ccd0969 packages/shared/src/paletteSearch.ts",
+  "messages": [
+    {
+      "query": "fts",
+      "text": "drafts",
+      "quality": null
+    },
+    {
+      "query": "draft",
+      "text": "drafts",
+      "quality": 0.8
+    },
+    {
+      "query": "a",
+      "text": "alphabet",
+      "quality": null
+    },
+    {
+      "query": "git",
+      "text": "GitHub",
+      "quality": 1
+    },
+    {
+      "query": "hub",
+      "text": "GitHub",
+      "quality": 1
+    },
+    {
+      "query": "検索",
+      "text": "会話を検索する",
+      "quality": 1
+    },
+    {
+      "query": "検索 会話",
+      "text": "会話を検索する",
+      "quality": 1.1
+    },
+    {
+      "query": "cafe",
+      "text": "Café menu",
+      "quality": 1
+    },
+    {
+      "query": "'cafe'",
+      "text": "Cafe",
+      "quality": 1
+    },
+    {
+      "query": "foo bar",
+      "text": "bar then foo",
+      "quality": 1.1
+    },
+    {
+      "query": "abc",
+      "text": "0123abc4567",
+      "quality": null
+    },
+    {
+      "query": "abc",
+      "text": "abc012345",
+      "quality": 1
+    },
+    {
+      "query": "σ",
+      "text": "ΟΣ",
+      "quality": null
+    },
+    {
+      "query": "οσ",
+      "text": "ΟΣ",
+      "quality": null
+    },
+    {
+      "query": "οσο",
+      "text": "ΟΣΟΣ",
+      "quality": 0.8
+    },
+    {
+      "query": "CAFÉ",
+      "text": "cafe menu",
+      "quality": 1
+    },
+    {
+      "query": "cafe",
+      "text": "Café menu",
+      "quality": 1
+    },
+    {
+      "query": "i̇stanbul",
+      "text": "İstanbul",
+      "quality": 1
+    },
+    {
+      "query": "user's",
+      "text": "user’s guide",
+      "quality": 1
+    },
+    {
+      "query": "menu café",
+      "text": "Café menu",
+      "quality": 1.1
+    },
+    {
+      "query": "a café",
+      "text": "Café",
+      "quality": null
+    },
+    {
+      "query": "a café",
+      "text": "a Café",
+      "quality": 1.25
+    },
+    {
+      "query": ".ts",
+      "text": "file.ts",
+      "quality": 1
+    },
+    {
+      "query": ".ts",
+      "text": "file.tsx",
+      "quality": 0.8
+    },
+    {
+      "query": "map",
+      "text": "JSONMap",
+      "quality": 1
+    },
+    {
+      "query": "123",
+      "text": "abc123",
+      "quality": 1
+    },
+    {
+      "query": "cafe",
+      "text": "7cafe52bb8",
+      "quality": null
+    },
+    {
+      "query": "7cafe52",
+      "text": "7cafe52bb8",
+      "quality": 1
+    },
+    {
+      "query": "😀",
+      "text": "a 😀",
+      "quality": null
+    },
+    {
+      "query": "😀 test",
+      "text": "😀 Test",
+      "quality": 1.25
+    },
+    {
+      "query": "검색",
+      "text": "한국어 검색",
+      "quality": 1
+    },
+    {
+      "query": "é",
+      "text": "Éclair",
+      "quality": null
+    },
+    {
+      "query": "é car",
+      "text": "É car",
+      "quality": 1.25
+    },
+    {
+      "query": "café",
+      "text": "a cafeteria and Café",
+      "quality": 1
+    },
+    {
+      "query": "foo bar",
+      "text": "foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo foo bar",
+      "quality": 1.25
+    },
+    {
+      "query": "foo bar",
+      "text": "foo bar",
+      "quality": 1.25
+    },
+    {
+      "query": "foo bar",
+      "text": "foobar",
+      "quality": null
+    },
+    {
+      "query": "abc 12",
+      "text": "abc012",
+      "quality": null
+    },
+    {
+      "query": "foo \"bar\"",
+      "text": "foo \"bar\"",
+      "quality": 1.25
+    },
+    {
+      "query": " \"FOO  bar\" ",
+      "text": "bar and foo",
+      "quality": 1.1
+    },
+    {
+      "query": "ﬁle",
+      "text": "file",
+      "quality": null
+    },
+    {
+      "query": "straße",
+      "text": "STRASSE",
+      "quality": null
+    },
+    {
+      "query": "test",
+      "text": "aTest",
+      "quality": 1
+    },
+    {
+      "query": "JSON",
+      "text": "JSONSchema",
+      "quality": 1
+    },
+    {
+      "query": "schema",
+      "text": "JSONSchema",
+      "quality": 1
+    }
+  ],
+  "titles": [
+    {
+      "query": "storage",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "Storage",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "Storage recovery",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 1000,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "A storage task",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 2000,
+          "opens": null
+        },
+        {
+          "id": "subject-3",
+          "title": "Restore data",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 3000,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-0",
+        "subject-1",
+        "subject-2"
+      ],
+      "matches": [
+        {
+          "id": "subject-0",
+          "quality": 1.5,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-1",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-2",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": true
+        }
+      ]
+    },
+    {
+      "query": "storave",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "Storage",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "Story",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "Storable",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-3",
+          "title": "Data",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-0"
+      ],
+      "matches": [
+        {
+          "id": "subject-0",
+          "quality": 0.45,
+          "strong": false,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "githbu",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "GitHub integration",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "Git hub",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "Other",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-0"
+      ],
+      "matches": [
+        {
+          "id": "subject-0",
+          "quality": 0.45,
+          "strong": false,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "vscode",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "VS Code",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "VS Code fixes",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "Visual studio code",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-3",
+          "title": "Vscode helper",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-3",
+        "subject-0",
+        "subject-1"
+      ],
+      "matches": [
+        {
+          "id": "subject-3",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-0",
+          "quality": 0.6,
+          "strong": false,
+          "wholeWords": false
+        },
+        {
+          "id": "subject-1",
+          "quality": 0.6,
+          "strong": false,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "gomod",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "go mod",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "a go mod",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "a go model",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-3",
+          "title": "other",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-0",
+        "subject-1",
+        "subject-2"
+      ],
+      "matches": [
+        {
+          "id": "subject-0",
+          "quality": 0.6,
+          "strong": false,
+          "wholeWords": false
+        },
+        {
+          "id": "subject-1",
+          "quality": 0.6,
+          "strong": false,
+          "wholeWords": false
+        },
+        {
+          "id": "subject-2",
+          "quality": 0.6,
+          "strong": false,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "inth",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "in thread",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "a note in thread",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "in the",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-3",
+          "title": "other",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-0",
+        "subject-2"
+      ],
+      "matches": [
+        {
+          "id": "subject-0",
+          "quality": 0.6,
+          "strong": false,
+          "wholeWords": false
+        },
+        {
+          "id": "subject-2",
+          "quality": 0.6,
+          "strong": false,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "fix the sidebar",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "Fix sidebar",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "Fix the sidebar",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "Fix sideboard",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-3",
+          "title": "Another",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-1",
+        "subject-0"
+      ],
+      "matches": [
+        {
+          "id": "subject-1",
+          "quality": 1.5,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-0",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": true
+        }
+      ]
+    },
+    {
+      "query": "del",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "model",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "Delete",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "a deleted entry",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-1",
+        "subject-2"
+      ],
+      "matches": [
+        {
+          "id": "subject-1",
+          "quality": 0.7999999999999999,
+          "strong": true,
+          "wholeWords": false
+        },
+        {
+          "id": "subject-2",
+          "quality": 0.7857142857142857,
+          "strong": true,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "cafe",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "Café",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "Cafe menu",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "cafeteria",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-0",
+        "subject-1",
+        "subject-2"
+      ],
+      "matches": [
+        {
+          "id": "subject-0",
+          "quality": 1.5,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-1",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-2",
+          "quality": 0.7888888888888889,
+          "strong": true,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "検索",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "会話を検索する",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "検索",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "Other",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-1",
+        "subject-0"
+      ],
+      "matches": [
+        {
+          "id": "subject-1",
+          "quality": 1.5,
+          "strong": true,
+          "wholeWords": false
+        },
+        {
+          "id": "subject-0",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "123",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "124",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "123",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "a123b",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-3",
+          "title": "1234",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-1",
+        "subject-2",
+        "subject-3"
+      ],
+      "matches": [
+        {
+          "id": "subject-1",
+          "quality": 1.5,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-2",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-3",
+          "quality": 0.85,
+          "strong": true,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "restore",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "a restore",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "Restored",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "restore",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-2",
+        "subject-0",
+        "subject-1"
+      ],
+      "matches": [
+        {
+          "id": "subject-2",
+          "quality": 1.5,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-0",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-1",
+          "quality": 0.875,
+          "strong": true,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "foo bar",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "foo",
+          "branch": "bar",
+          "projectTitle": "",
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "opaque",
+          "branch": "foo",
+          "projectTitle": "bar",
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "bar foo",
+          "branch": "",
+          "projectTitle": "",
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-2",
+        "subject-0",
+        "subject-1"
+      ],
+      "matches": [
+        {
+          "id": "subject-2",
+          "quality": 1,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-0",
+          "quality": 0.8,
+          "strong": true,
+          "wholeWords": false
+        },
+        {
+          "id": "subject-1",
+          "quality": 0.425,
+          "strong": false,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "t3/storage",
+      "subjects": [
+        {
+          "id": "subject-0",
+          "title": "opaque",
+          "branch": "t3/storage",
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-1",
+          "title": "Storage",
+          "branch": "",
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        },
+        {
+          "id": "subject-2",
+          "title": "Other",
+          "branch": "",
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "subject-1",
+        "subject-0"
+      ],
+      "matches": [
+        {
+          "id": "subject-1",
+          "quality": 1.5,
+          "strong": true,
+          "wholeWords": true
+        },
+        {
+          "id": "subject-0",
+          "quality": 0.6,
+          "strong": true,
+          "wholeWords": false
+        }
+      ]
+    },
+    {
+      "query": "1234abcd",
+      "subjects": [
+        {
+          "id": "thread-1234abcd-5678",
+          "title": "opaque",
+          "branch": null,
+          "projectTitle": null,
+          "activityAt": 0,
+          "opens": null
+        }
+      ],
+      "order": [
+        "thread-1234abcd-5678"
+      ],
+      "matches": [
+        {
+          "id": "thread-1234abcd-5678",
+          "quality": 0.6,
+          "strong": true,
+          "wholeWords": false
+        }
+      ]
+    }
+  ]
+}

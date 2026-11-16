@@ -612,3 +612,18 @@ fn forks_remain_independent_threads_while_subagents_and_side_chats_remain_nested
         );
     }
 }
+
+#[test]
+fn canonical_search_results_do_not_reintroduce_short_token_substring_false_positives() {
+    let mut state = list();
+    let shell = Arc::make_mut(state.lists.shell.as_mut().unwrap());
+    let row = Arc::make_mut(&mut shell.threads[0]);
+    row.thread.title = "drafts".into();
+    Arc::make_mut(&mut state.lists.list_query).search_term = "fts".into();
+    state.lists.search_results = Some(("fts".into(), Arc::new(ThreadList::default())));
+    project(&mut state, false);
+    assert!(
+        state.lists.threads.as_ref().unwrap().data.is_empty(),
+        "T3 short tokens must start a word: a canonical empty result cannot be undone by client substring matching"
+    );
+}

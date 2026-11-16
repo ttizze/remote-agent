@@ -1,11 +1,14 @@
 // The real Codex adapter and app-server transport, with only the native SDK
-// process replaced by a strict recorded protocol peer. Expected requests come
+// process replaced by a strict synthetic protocol peer. Expected requests come
 // from T3's CodexAdapterV2 and CodexThreadRevert, not a Rust helper replica.
-use crate::providers::{Agent, codex::{Codex, Config}};
+use crate::providers::{
+    Agent,
+    codex::{Codex, Config},
+};
 use codex_app_server::CodexAppServer;
 use serde_json::Value;
-use std::sync::Arc;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
 
 #[rstest::rstest]
 #[case("success", true, 1)]
@@ -80,15 +83,23 @@ rl.on('line',line=>{
     // Production Host starts this pump before any request: Codex waits for
     // notifications preceding a response to be fully processed.
     let _events = agent.event_stream().unwrap();
-    let mut result = tokio::time::timeout(std::time::Duration::from_secs(5), agent
-        .rollback("source", Some("kept"), Some("removed"), "/fixture", None)).await.expect("native rollback response and event pump settle");
+    let mut result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.rollback("source", Some("kept"), Some("removed"), "/fixture", None),
+    )
+    .await
+    .expect("native rollback response and event pump settle");
     if mode == "lost_ack" {
         assert!(
             result.is_err(),
             "lost acknowledgement cannot certify success"
         );
-        result = tokio::time::timeout(std::time::Duration::from_secs(5), agent
-            .rollback("source", Some("kept"), Some("removed"), "/fixture", None)).await.expect("idempotent native rollback retry settles");
+        result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            agent.rollback("source", Some("kept"), Some("removed"), "/fixture", None),
+        )
+        .await
+        .expect("idempotent native rollback retry settles");
     }
     assert_eq!(
         result.is_ok(),
@@ -129,4 +140,103 @@ rl.on('line',line=>{
             .all(|m| !matches!(m["method"].as_str(), Some("thread/fork" | "thread/start")))
     );
     agent.shutdown().await;
+}
+
+#[tokio::test]
+async fn rollback_replays_real_codex_metadata_cursor_and_revert_response() {
+    // The recorded page contains the removed turn and an opaque next cursor.
+    // The older page is assembled from the recording's first completed turn:
+    // T3 requested one turn; Bex resolves the retained ID before writing.
+    let rows: Vec<Value> = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/providers/fixtures/thread_rollback/codex_transcript.ndjson"
+    ))
+    .lines()
+    .map(|line| serde_json::from_str(line).unwrap())
+    .collect();
+    let inbound = |label: &str| {
+        rows.iter()
+            .find(|row| row["type"] == "emit_inbound" && row["label"] == label)
+            .unwrap()["frame"]
+            .clone()
+    };
+    let revert = rows
+        .iter()
+        .find(|row| row["type"] == "expect_outbound" && row["label"] == "thread/revert")
+        .unwrap()["frame"]["params"]
+        .clone();
+    let first = inbound("turn/completed")["params"]["turn"].clone();
+    let native = revert["threadId"].as_str().unwrap();
+    let retained = first["id"].as_str().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("recording.json"),serde_json::to_vec(&serde_json::json!({"metadata":inbound("thread/read")["result"],"page":inbound("thread/turns/list")["result"],"older":first,"revert":revert,"result":inbound("thread/revert")["result"],"notification":inbound("thread/reverted")})).unwrap()).unwrap();
+    let program = directory.path().join("recorded-codex");
+    std::fs::write(&program,r##"#!/usr/bin/env node
+const fs=require('node:fs'), path=require('node:path'), assert=require('node:assert/strict');
+const recording=JSON.parse(fs.readFileSync(path.join(__dirname,'recording.json'),'utf8'));
+const rl=require('node:readline').createInterface({input:process.stdin});
+rl.on('line',line=>{
+ const m=JSON.parse(line);if(m.id===undefined)return;
+ fs.appendFileSync(path.join(__dirname,'requests.jsonl'),JSON.stringify(m)+'\n');
+ let result;
+ if(m.method==='initialize')result={userAgent:'recorded-codex',codexHome:process.env.CODEX_HOME};
+ else {
+  assert.equal(m.params.threadId,recording.revert.threadId);
+  if(m.method==='thread/read'){assert.equal(m.params.includeTurns,false);result=recording.metadata;}
+  else if(m.method==='thread/turns/list'){
+   assert.equal(m.params.sortDirection,'desc');assert.equal(m.params.itemsView,'summary');
+   assert.ok(m.params.limit>=1&&m.params.limit<=100);
+   if(m.params.cursor==null)result=recording.page;
+   else {assert.equal(m.params.cursor,recording.page.nextCursor);result={data:[recording.older],nextCursor:null};}
+  } else {assert.equal(m.method,'thread/revert');assert.deepEqual(m.params,recording.revert);result=recording.result;}
+ }
+ process.stdout.write(JSON.stringify({id:m.id,result})+'\n');
+ if(m.method==='thread/revert')process.stdout.write(JSON.stringify(recording.notification)+'\n');
+});
+"##).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server = Arc::new(
+        CodexAppServer::spawn(Config {
+            program,
+            codex_home: Some(directory.path().join("codex")),
+            ..Default::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let agent = Codex::new(Ok(server));
+    let _events = agent.event_stream().unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        agent.rollback(
+            native,
+            Some(retained),
+            revert["beforeTurnId"].as_str(),
+            "/fixture",
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.native_id, native);
+    assert_eq!(result.head_id.as_deref(), Some(retained));
+    let requests: Vec<Value> = std::fs::read_to_string(directory.path().join("requests.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let writes: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "thread/revert")
+        .collect();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0]["params"], revert);
+    assert!(
+        requests
+            .iter()
+            .any(|request| request["method"] == "thread/turns/list"
+                && request["params"]["cursor"]
+                    == inbound("thread/turns/list")["result"]["nextCursor"])
+    );
 }

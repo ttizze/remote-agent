@@ -661,3 +661,192 @@ async fn search_reads_saved_message_bodies_without_discovering_native_threads() 
         vec![public]
     );
 }
+
+#[tokio::test]
+async fn canonical_message_search_matches_pinned_t3_word_boundaries_and_unicode() {
+    use super::*;
+    use crate::host_rpc::runtime::{
+        Runtime,
+        native_fixture::{NativeAgent, own},
+    };
+    use agent_protocol::{
+        execution::ItemStatus,
+        items::{AssistantPhase, Item, ItemBody},
+        models::{Thread, ThreadResponse},
+        session::{SessionChange, SessionRef},
+    };
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/t3-port-check/search-fixtures.json"
+    )))
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+    let service = HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+    let cases = fixture["messages"].as_array().unwrap();
+    let mut ids = Vec::new();
+    for (i, case) in cases.iter().enumerate() {
+        let native = SessionRef::new(ProviderKind::Codex, format!("message-{i}")).unwrap();
+        let public =
+            SessionRef::new(None, uuid::Uuid::from_u128(1000 + i as u128).to_string()).unwrap();
+        own(
+            &service,
+            &public,
+            &ThreadResponse {
+                thread: Thread {
+                    id: Some(native.clone()),
+                    name: Some("opaque-label".into()),
+                    cwd: Some(directory.path().to_str().unwrap().into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+        Runtime::observe(
+            &service,
+            crate::providers::AgentChange::Session {
+                session: native,
+                change: SessionChange::Item {
+                    turn_id: format!("turn-{i}").into(),
+                    item: Arc::new(Item::new(
+                        format!("answer-{i}").into(),
+                        ItemStatus::Completed,
+                        ItemBody::AssistantText {
+                            text: case["text"].as_str().unwrap().into(),
+                            phase: AssistantPhase::Final,
+                        },
+                    )),
+                },
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        ids.push(public);
+    }
+    let mut differences = Vec::new();
+    for (case, id) in cases.iter().zip(&ids) {
+        let result = service
+            .search_list(&agent_protocol::conversation::records::SearchList {
+                term: case["query"].as_str().unwrap().into(),
+                limit: Some(1000),
+            })
+            .await
+            .unwrap();
+        if result
+            .data
+            .iter()
+            .any(|thread| thread.id.as_ref() == Some(id))
+            != !case["quality"].is_null()
+        {
+            differences.push(case.clone());
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "message matches differ from pinned T3: {differences:?}"
+    );
+}
+
+#[tokio::test]
+async fn canonical_title_search_preserves_pinned_t3_matching_and_rank_order() {
+    use super::*;
+    use crate::host_rpc::runtime::native_fixture::{NativeAgent, own};
+    use agent_protocol::{
+        models::{Project, ProjectRoot, Thread, ThreadResponse},
+        session::SessionRef,
+    };
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/t3-port-check/search-fixtures.json"
+    )))
+    .unwrap();
+    let mut differences = Vec::new();
+    for (group, case) in fixture["titles"].as_array().unwrap().iter().enumerate() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = NativeAgent::new(ProviderKind::Codex, directory.path().join("native"));
+        let service =
+            HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
+        let subjects = case["subjects"].as_array().unwrap();
+        let roots: Vec<_> = (0..subjects.len())
+            .map(|i| directory.path().join(format!("subject-{i}")))
+            .collect();
+        for root in &roots {
+            std::fs::create_dir(root).unwrap();
+        }
+        let projects: Vec<_> = subjects
+            .iter()
+            .zip(&roots)
+            .enumerate()
+            .filter_map(|(i, (subject, root))| {
+                subject["projectTitle"]
+                    .as_str()
+                    .filter(|title| !title.is_empty())
+                    .map(|title| Project {
+                        id: format!("project-{i}"),
+                        name: title.into(),
+                        roots: vec![ProjectRoot {
+                            path: root.to_str().unwrap().into(),
+                        }],
+                        ..Default::default()
+                    })
+            })
+            .collect();
+        service
+            .inner
+            .conversation
+            .storage
+            .replace_projects(&projects)
+            .unwrap();
+        for (index, (subject, root)) in subjects.iter().zip(&roots).enumerate() {
+            let native =
+                SessionRef::new(ProviderKind::Codex, format!("native-{group}-{index}")).unwrap();
+            let public = SessionRef::new(None, subject["id"].as_str().unwrap().into()).unwrap();
+            own(
+                &service,
+                &public,
+                &ThreadResponse {
+                    thread: Thread {
+                        id: Some(native),
+                        name: Some(subject["title"].as_str().unwrap().into()),
+                        git_branch: subject["branch"].as_str().map(str::to_owned),
+                        cwd: Some(root.to_str().unwrap().into()),
+                        updated_at: Some(subject["activityAt"].as_f64().unwrap() / 1000.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+        let result = service
+            .search_list(&agent_protocol::conversation::records::SearchList {
+                term: case["query"].as_str().unwrap().into(),
+                limit: Some(1000),
+            })
+            .await
+            .unwrap();
+        let actual: Vec<_> = result
+            .data
+            .iter()
+            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
+            .collect();
+        let expected: Vec<_> = case["order"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap())
+            .collect();
+        if actual != expected {
+            differences.push(format!(
+                "query={} expected={expected:?} actual={actual:?}",
+                case["query"]
+            ));
+        }
+    }
+    assert!(
+        differences.is_empty(),
+        "title matches/ranking differ from pinned T3: {differences:?}"
+    );
+}

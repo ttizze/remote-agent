@@ -3285,3 +3285,54 @@ fn claude_resume_pin_survives_admission_and_errors_but_successful_completion_cle
         );
     }
 }
+
+#[test]
+fn rewind_distinguishes_an_active_answer_from_settled_background_and_old_native_work() {
+    // The pinned adapter checks the answer, rather than aggregate resource
+    // liveness. Bex can still observe Active while a settled query owns work.
+    let (state, run, attempt) = running();
+    let mut state = rewind_ready(
+        state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("done", &state),
+            )
+            .unwrap(),
+        ),
+    );
+    let native = state.thread.active_provider_thread_id.clone().unwrap();
+    state.provider_threads.get_mut(&native).unwrap().status = ProviderThreadStatus::Active;
+    state
+        .provider_threads
+        .get_mut(&native)
+        .unwrap()
+        .pending_background_tasks = vec![
+        serde_json::from_value(serde_json::json!({"kind":"command","taskId":"background"}))
+            .unwrap(),
+    ];
+    let before = state.clone();
+    assert!(
+        rewind(&state, &run, context("rewind", &state)).is_ok(),
+        "a completed answer can retire its known background query before rewind"
+    );
+    assert_eq!(state, before);
+    let mut wake = state.provider_turns.values().next().unwrap().clone();
+    wake.id = "external-answer".into();
+    wake.ordinal += 1;
+    wake.run_attempt_id = None;
+    wake.status = ProviderTurnStatus::Running;
+    state.provider_turns.insert(wake.id.clone(), wake.clone());
+    assert!(
+        rewind(&state, &run, context("rewind", &state)).is_err(),
+        "an active same-resource answer is still refused"
+    );
+    wake.native_thread_ref.as_mut().unwrap().native_id = Some("retired-native".into());
+    state.provider_turns.insert(wake.id.clone(), wake);
+    assert!(
+        rewind(&state, &run, context("rewind", &state)).is_ok(),
+        "old physical-resource activity cannot block the current resource"
+    );
+}
