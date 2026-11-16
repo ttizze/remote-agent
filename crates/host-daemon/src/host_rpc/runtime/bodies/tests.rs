@@ -318,7 +318,9 @@ async fn unreadable_message_history_is_atomic_and_can_be_retried_without_importi
         agent.unreadable.lock().unwrap().insert("answer".into());
         let service =
             HostRpcService::new([agent.backend()], directory.path().join("projects.json"));
-        let imported = Runtime::native_history(&service, &native).await.unwrap();
+        let (imported, _) = Runtime::native_history(&service, &native, None)
+            .await
+            .unwrap();
         let items = imported.thread.turns.as_ref().unwrap()[0]
             .items
             .as_ref()
@@ -331,15 +333,17 @@ async fn unreadable_message_history_is_atomic_and_can_be_retried_without_importi
             agent_protocol::session::HistoryReadKind::Partial
         );
         assert!(
-            Runtime::import_native_response(&service, &public, &native, &imported)
+            Runtime::import_native_response(&service, &public, &native, &imported, 0)
                 .await
                 .is_err()
         );
         let storage = &service.inner.conversation.storage;
         assert!(storage.thread_header(&public).unwrap().is_none());
         agent.unreadable.lock().unwrap().clear();
-        let imported = Runtime::native_history(&service, &native).await.unwrap();
-        Runtime::import_native_response(&service, &public, &native, &imported)
+        let (imported, _) = Runtime::native_history(&service, &native, None)
+            .await
+            .unwrap();
+        Runtime::import_native_response(&service, &public, &native, &imported, 0)
             .await
             .unwrap();
         let state = storage.thread_state(&public.application_id(), &[]).unwrap();

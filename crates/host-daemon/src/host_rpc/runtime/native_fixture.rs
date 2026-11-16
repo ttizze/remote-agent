@@ -61,12 +61,10 @@ pub(in crate::host_rpc) fn bound_execution(
     )
 }
 
-/// Inspect the same canonical snapshots, history pages and full-item queries as
-/// clients. This intentionally has no fallback to the replaced row storage.
-pub(in crate::host_rpc) fn history(
+pub(in crate::host_rpc) fn canonical_snapshot(
     service: &HostRpcService,
     target: &SessionRef,
-) -> Result<ThreadResponse, String> {
+) -> Result<agent_protocol::orchestration::projection::ThreadSnapshot, String> {
     use agent_protocol::orchestration::projection::ThreadStreamItem;
     let storage = &service.inner.conversation.storage;
     let mut snapshot = storage
@@ -86,6 +84,17 @@ pub(in crate::host_rpc) fn history(
         snapshot = agent_core::orchestration::receive_history(&snapshot, &cursor, page)
             .ok_or("history cursor changed")?;
     }
+    Ok(snapshot)
+}
+
+/// Inspect the same canonical snapshots, history pages and full-item queries as
+/// clients. This intentionally has no fallback to the replaced row storage.
+pub(in crate::host_rpc) fn history(
+    service: &HostRpcService,
+    target: &SessionRef,
+) -> Result<ThreadResponse, String> {
+    let storage = &service.inner.conversation.storage;
+    let snapshot = canonical_snapshot(service, target)?;
     let provider =
         ProviderKind::from_instance_id(&snapshot.projection.thread.provider_instance_id)?;
     let caps = service
@@ -173,6 +182,8 @@ type HistoryInjection = (String, Vec<Value>);
 pub(in crate::host_rpc) struct NativeAgent {
     provider: ProviderKind,
     pub(in crate::host_rpc) discovery_reads: Arc<AtomicUsize>,
+    pub(in crate::host_rpc) body_reads: Arc<AtomicUsize>,
+    pub(in crate::host_rpc) history_activity: Mutex<Vec<bool>>,
     pub(in crate::host_rpc) records: Arc<Mutex<HashMap<String, ThreadResponse>>>,
     pub(in crate::host_rpc) idle_warning: Option<&'static str>,
     pub(in crate::host_rpc) deferred_history: bool,
@@ -219,6 +230,8 @@ impl NativeAgent {
         Arc::new(Self {
             provider,
             discovery_reads: Arc::default(),
+            body_reads: Default::default(),
+            history_activity: Default::default(),
             records: Default::default(),
             idle_warning: None,
             deferred_history: false,
@@ -259,6 +272,8 @@ impl NativeAgent {
         Arc::new(Self {
             provider: self.provider,
             discovery_reads: self.discovery_reads.clone(),
+            body_reads: self.body_reads.clone(),
+            history_activity: Default::default(),
             records: self.records.clone(),
             idle_warning: self.idle_warning,
             deferred_history: self.deferred_history,
@@ -370,9 +385,9 @@ impl crate::providers::Configuration for NativeAgent {
 impl crate::providers::Discovery for NativeAgent {
     async fn catalog_page(
         &self,
-        _: Option<String>,
+        cursor: Option<String>,
         scope: SessionListScope<'_>,
-        _: u32,
+        limit: u32,
     ) -> Result<SessionPage, Failure> {
         self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         if self.fail_list.swap(0, Ordering::SeqCst) != 0 {
@@ -398,9 +413,28 @@ impl crate::providers::Discovery for NativeAgent {
         };
         page.data
             .sort_by(|a, b| b.updated_at.partial_cmp(&a.updated_at).unwrap());
+        let start = cursor
+            .as_deref()
+            .unwrap_or("0")
+            .parse::<usize>()
+            .map_err(|_| Failure::new("invalid_cursor", "invalid fixture catalog cursor"))?;
+        let end = start.saturating_add(limit as usize).min(page.data.len());
+        page.next_cursor = (end < page.data.len()).then(|| end.to_string());
+        page.data = page
+            .data
+            .into_iter()
+            .skip(start)
+            .take(limit as usize)
+            .collect();
         Ok(page)
     }
-    async fn open(&self, id: &str, limit: usize, _: bool) -> Result<ThreadResponse, Failure> {
+    async fn open(
+        &self,
+        id: &str,
+        limit: usize,
+        include_activity: bool,
+    ) -> Result<ThreadResponse, Failure> {
+        self.history_activity.lock().unwrap().push(include_activity);
         self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         let _permit = self.open_gate.acquire().await.unwrap();
         let mut response = self
@@ -420,7 +454,13 @@ impl crate::providers::Discovery for NativeAgent {
         }
         Ok(response)
     }
-    async fn read_history(&self, id: &str, cursor: &str, _: bool) -> Result<HistoryPage, Failure> {
+    async fn read_history(
+        &self,
+        id: &str,
+        cursor: &str,
+        include_activity: bool,
+    ) -> Result<HistoryPage, Failure> {
+        self.history_activity.lock().unwrap().push(include_activity);
         self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         let response = self
             .records
@@ -442,6 +482,7 @@ impl crate::providers::Discovery for NativeAgent {
         &self,
         params: &op::ReadItem,
     ) -> Result<agent_protocol::models::Item, Failure> {
+        self.body_reads.fetch_add(1, Ordering::SeqCst);
         self.discovery_reads.fetch_add(1, Ordering::SeqCst);
         if self
             .unreadable

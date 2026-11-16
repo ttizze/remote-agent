@@ -461,7 +461,7 @@ async fn recorded_codex_frames_cross_the_native_adapter_and_conversation_writer(
                     // The recorded creation/read response supplies its actual
                     // complete prefix now, including a genuinely empty new
                     // thread. Use the production importer for that snapshot.
-                    Runtime::import_native_response(&service, native, native, &response)
+                    Runtime::import_native_response(&service, native, native, &response, 0)
                         .await
                         .unwrap();
                 }

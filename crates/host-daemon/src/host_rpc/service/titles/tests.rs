@@ -207,8 +207,26 @@ async fn prefetched_project_titles_continue_past_the_first_native_page() {
             .unwrap()
             .threads
             .len(),
+        100,
+        "T3 project imports at most 100 unowned transcripts per request"
+    );
+    crate::host_rpc::runtime::Runtime::import_project_threads(
+        &service,
+        &[cwd.to_string_lossy().into_owned()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        service
+            .inner
+            .conversation
+            .storage
+            .shell_snapshot()
+            .unwrap()
+            .threads
+            .len(),
         expected.len(),
-        "explicit import must commit the complete native page sequence before search"
+        "another import discovers the remaining unowned transcripts before search"
     );
     let page = service
         .search_list(&agent_protocol::conversation::records::SearchList {

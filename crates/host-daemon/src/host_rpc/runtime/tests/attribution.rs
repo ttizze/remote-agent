@@ -163,7 +163,7 @@ async fn imported_recency_uses_user_turns_and_subagent_prompts_belong_to_the_par
             },
             ..Default::default()
         };
-        Runtime::import_native_response(&service, &public, &native, &response)
+        Runtime::import_native_response(&service, &public, &native, &response, 0)
             .await
             .unwrap();
         let state = service

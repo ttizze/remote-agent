@@ -1803,7 +1803,20 @@ async fn explicit_project_import_is_visible_as_a_canonical_thread_without_invent
                 name: Some("Native catalog marker".into()),
                 cwd: Some(directory.path().to_str().unwrap().into()),
                 updated_at: Some(1.0),
-                turns: Some(vec![]),
+                // T3 imports transcripts with a human message, not empty catalog headers.
+                turns: Some(vec![Arc::new(agent_protocol::models::Turn {
+                    id: "imported-turn".into(),
+                    status: agent_protocol::models::TurnStatus::Completed,
+                    items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                        "imported-user".into(),
+                        agent_protocol::execution::ItemStatus::Completed,
+                        agent_protocol::items::ItemBody::UserMessage {
+                            text: Some("native input".into()),
+                            content: vec![],
+                        },
+                    ))]),
+                    ..Default::default()
+                })]),
                 ..Default::default()
             },
             ..Default::default()
@@ -1836,7 +1849,7 @@ async fn explicit_project_import_is_visible_as_a_canonical_thread_without_invent
                 .find(|thread| thread["id"] == native.application_id())
             {
                 assert_eq!(thread["title"], "Native catalog marker");
-                assert_eq!(thread["itemCount"], 0);
+                assert_eq!(thread["itemCount"], 1);
                 break;
             }
             tokio::task::yield_now().await;
@@ -2189,7 +2202,19 @@ async fn importing_a_discovered_project_lists_its_existing_native_conversations(
                 name: Some("project import marker".into()),
                 cwd: Some(directory.path().to_str().unwrap().into()),
                 updated_at: Some(1.0),
-                turns: Some(vec![]),
+                turns: Some(vec![Arc::new(agent_protocol::models::Turn {
+                    id: "imported-turn".into(),
+                    status: agent_protocol::execution::TurnStatus::Completed,
+                    items: Some(vec![Arc::new(agent_protocol::items::Item::new(
+                        "imported-question".into(),
+                        agent_protocol::execution::ItemStatus::Completed,
+                        agent_protocol::items::ItemBody::UserMessage {
+                            text: Some("project import question".into()),
+                            content: vec![],
+                        },
+                    ))]),
+                    ..Default::default()
+                })]),
                 ..Default::default()
             },
             ..Default::default()

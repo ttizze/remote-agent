@@ -465,7 +465,7 @@ impl Runtime {
                         "native history has no selected source",
                     )
                 })?;
-            return Self::import_native(service, target, &source).await;
+            return Self::import_native(service, target, &source, None).await;
         }
         if target.provider.is_none() {
             return Err(Failure::new(
@@ -473,20 +473,23 @@ impl Runtime {
                 "conversation does not exist",
             ));
         }
-        Self::import_native(service, target, target).await
+        Self::import_native(service, target, target, None).await
     }
 
     pub(super) async fn native_history(
         service: &HostRpcService,
         target: &SessionRef,
-    ) -> Result<agent_protocol::models::ThreadResponse, Failure> {
+        message_limit: Option<usize>,
+    ) -> Result<(agent_protocol::models::ThreadResponse, usize), Failure> {
         let agent = service.inner.providers.discovery(
             target
                 .native_provider()
                 .map_err(|error| Failure::new("invalid_session", error))?,
         )?;
         let mut response = agent
-            .open(&target.id, 10, true)
+            // Codex's compact view drops intermediate assistant messages too.
+            // Import full metadata, then hydrate only the retained text items.
+            .open(&target.id, usize::MAX, true)
             .await
             .map_err(|error| Failure::new("history_unavailable", error.message))?;
         op::validate_thread(&response, Some(target))
@@ -532,6 +535,15 @@ impl Runtime {
             }
             state.issues.sort();
             state.issues.dedup();
+        }
+        let mut omitted = 0;
+        if let Some(limit) = message_limit {
+            let (turns, skipped) = super::imports::project_messages(
+                response.thread.turns.take().unwrap_or_default(),
+                limit,
+            );
+            response.thread.turns = Some(turns);
+            omitted = skipped;
         }
         let is_message = |item: &agent_protocol::items::Item| {
             matches!(
@@ -587,6 +599,14 @@ impl Runtime {
             }
             state.issues.extend(issues);
         }
+        if let Some(limit) = message_limit {
+            let (turns, skipped) = super::imports::project_messages(
+                response.thread.turns.take().unwrap_or_default(),
+                limit,
+            );
+            response.thread.turns = Some(turns);
+            omitted += skipped;
+        }
         response.thread.capabilities = Some(records::capabilities(
             service
                 .inner
@@ -598,6 +618,6 @@ impl Runtime {
                 )?
                 .capabilities(),
         ));
-        Ok(response)
+        Ok((response, omitted))
     }
 }

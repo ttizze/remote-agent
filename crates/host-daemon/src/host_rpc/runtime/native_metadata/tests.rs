@@ -30,14 +30,25 @@ async fn explicit_project_import_reads_an_unowned_native_transcript_once(
                     id: "native-turn".into(),
                     status: TurnStatus::Completed,
                     started_at_ms: Some(10_000),
-                    items: Some(vec![Arc::new(Item::new(
-                        "native-answer".into(),
-                        ItemStatus::Completed,
-                        ItemBody::AssistantText {
-                            text: "the native answer".into(),
-                            phase: Default::default(),
-                        },
-                    ))]),
+                    // T3 project imports require a human message in the source.
+                    items: Some(vec![
+                        Arc::new(Item::new(
+                            "native-question".into(),
+                            ItemStatus::Completed,
+                            ItemBody::UserMessage {
+                                text: Some("the native question".into()),
+                                content: vec![],
+                            },
+                        )),
+                        Arc::new(Item::new(
+                            "native-answer".into(),
+                            ItemStatus::Completed,
+                            ItemBody::AssistantText {
+                                text: "the native answer".into(),
+                                phase: Default::default(),
+                            },
+                        )),
+                    ]),
                     ..Default::default()
                 })]),
                 ..Default::default()
@@ -73,7 +84,7 @@ async fn explicit_project_import_reads_an_unowned_native_transcript_once(
         header.thread.history_origin,
         Some(model::ThreadHistoryOrigin::V1Import)
     );
-    assert_eq!(header.item_count, 1);
+    assert_eq!(header.item_count, 2);
     assert!(
         storage
             .thread_state(&native.application_id(), &[])
@@ -94,9 +105,9 @@ async fn explicit_project_import_reads_an_unowned_native_transcript_once(
     let model::projection::ThreadStreamItem::Snapshot(snapshot) = &stream[0] else {
         panic!("snapshot")
     };
-    assert_eq!(snapshot.projection.turn_items.len(), 1);
+    assert_eq!(snapshot.projection.turn_items.len(), 2);
     assert!(
-        matches!(&snapshot.projection.turn_items[0].body,model::TurnItemBody::AssistantMessage {text,..} if text=="the native answer")
+        matches!(&snapshot.projection.turn_items[1].body,model::TurnItemBody::AssistantMessage {text,..} if text=="the native answer")
     );
     assert!(snapshot.projection.turn_items[0].run_id.is_none());
     let _blocked = agent.open_gate.acquire().await.unwrap();
