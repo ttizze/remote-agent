@@ -13,9 +13,12 @@ use std::{
 };
 mod follow;
 pub use follow::{ScrollPosition, away_from_end, follows_end};
+mod activity;
+pub mod attempts;
 mod images;
 pub mod rows;
 mod timeline;
+pub use activity::ActivityDecoration;
 pub use timeline::{TurnRow, plan_export, turn_rows};
 mod work;
 pub use work::{LiveActivity, WorkRowLabel};
@@ -533,6 +536,15 @@ impl PartialEq for RenderedItem {
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl RenderedItem {
+    pub fn collapses_user_text(&self) -> bool {
+        self.data.kind == "user"
+            && self
+                .data
+                .body
+                .as_deref()
+                .is_some_and(should_collapse_user_message)
+    }
+
     pub fn unknown_submission_id(&self) -> Option<String> {
         self.delivery_unknown.then(|| self.data.id.clone())
     }
@@ -609,12 +621,14 @@ impl RenderedItem {
                     .unwrap_or(item.id.as_str())
                     .to_owned(),
                 native_id,
+                author: item.author.clone(),
                 timestamp_ms,
                 kind: presentation.kind.into(),
                 title: presentation.title,
                 collapsible: presentation.collapsible,
                 body: body.text,
                 image_sources: body.images,
+                contexts: body.contexts,
                 image_placeholder,
                 deferred,
                 preview: body::reasoning_preview(item),
@@ -643,6 +657,7 @@ impl RenderedItem {
             data: ItemPresentation {
                 id: id.into(),
                 native_id: None,
+                author: None,
                 timestamp_ms: pending.submitted_at_ms,
                 kind: "user".into(),
                 title: pending
@@ -651,6 +666,7 @@ impl RenderedItem {
                 collapsible: false,
                 body: body.text,
                 image_sources: body.images,
+                contexts: body.contexts,
                 image_placeholder: false,
                 deferred: false,
                 preview: None,
@@ -1125,6 +1141,7 @@ mod preparation_tests {
         let id = SessionRef::new(ProviderKind::Codex, "startup".into()).unwrap();
         let mut preparation = SessionPreparation {
             submission: Submission {
+                fresh_context: false,
                 thread_id: id,
                 client_user_message_id: "input".into(),
                 input: Vec::new(),
@@ -1179,6 +1196,7 @@ mod preparation_tests {
             id: Some(id.clone()),
             preparations: vec![SessionPreparation {
                 submission: Submission {
+                    fresh_context: false,
                     thread_id: id.clone(),
                     client_user_message_id: "input".into(),
                     input: vec![Input::Text {
@@ -1981,11 +1999,13 @@ pub type PendingItems = Vec<(agent_protocol::ids::ClientInputId, Arc<PendingSubm
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ItemPresentation {
+    pub author: Option<Box<agent_protocol::attribution::Author>>,
     pub id: String,
     pub native_id: Option<agent_protocol::ids::ItemId>,
     pub timestamp_ms: Option<u64>,
     pub body: Option<String>,
     pub image_sources: Vec<String>,
+    pub contexts: Vec<agent_protocol::context::MessageContext>,
     pub image_placeholder: bool,
     pub deferred: bool,
     pub kind: String,

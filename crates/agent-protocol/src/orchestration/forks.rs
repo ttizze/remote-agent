@@ -11,17 +11,32 @@ impl ContextTransfer {
     }
 }
 
+/// Bex numbers a fork after its source title, skipping titles already used.
+pub fn fork_title(source: &str, existing: &std::collections::BTreeSet<String>) -> String {
+    (1..=existing.len() + 1)
+        .map(|number| format!("{source} ({number})"))
+        .find(|title| !existing.contains(title))
+        .expect("one more candidate than existing titles")
+}
+
+/// The thread a fork creates.
+#[derive(Debug, Clone)]
+pub struct ForkTarget<'a> {
+    pub id: &'a str,
+    pub transfer_id: &'a str,
+    pub title: String,
+}
+
 /// ThreadForkService: freeze the source point, inherit the header, and leave
 /// provider resources unresolved until the fork receives its first input.
 pub fn fork_thread(
     source: &Thread,
     run: &Run,
     point: ContextSourcePoint,
-    target_id: &str,
-    transfer_id: &str,
+    target: ForkTarget<'_>,
     now: &str,
 ) -> Result<(Thread, ContextTransfer), String> {
-    if source.id == target_id
+    if source.id == target.id
         || run.thread_id != source.id
         || point.run_id.as_ref() != Some(&run.id)
         || point.thread_id != source.id
@@ -48,8 +63,7 @@ pub fn fork_thread(
         },
         &run.provider_instance_id,
         point,
-        target_id,
-        transfer_id,
+        target,
         now,
     )
 }
@@ -60,11 +74,10 @@ pub fn fork_native_thread(
     provider: &ProviderThread,
     turn: Option<&ProviderTurn>,
     point: ContextSourcePoint,
-    target_id: &str,
-    transfer_id: &str,
+    target: ForkTarget<'_>,
     now: &str,
 ) -> Result<(Thread, ContextTransfer), String> {
-    if source.id == target_id
+    if source.id == target.id
         || source.deleted_at.is_some()
         || provider.app_thread_id.as_deref() != Some(&source.id)
         || point.thread_id != source.id
@@ -105,8 +118,7 @@ pub fn fork_native_thread(
         },
         &provider.provider_instance_id,
         point,
-        target_id,
-        transfer_id,
+        target,
         now,
     )
 }
@@ -116,13 +128,12 @@ fn plan_fork(
     boundary: ThreadForkSource,
     provider_instance_id: &str,
     point: ContextSourcePoint,
-    target_id: &str,
-    transfer_id: &str,
+    fork: ForkTarget<'_>,
     now: &str,
 ) -> Result<(Thread, ContextTransfer), String> {
     let target = Thread {
-        id: target_id.into(),
-        title: format!("{} fork", source.title),
+        id: fork.id.into(),
+        title: fork.title,
         created_by: Actor::User,
         creation_source: CreationSource::Mobile,
         active_provider_thread_id: None,
@@ -150,10 +161,10 @@ fn plan_fork(
         .is_none_or(|reference| reference.strength != NativeRefStrength::Strong)
         .then(|| "Source provider thread does not expose a strong native thread ref.".into());
     let transfer = ContextTransfer {
-        id: transfer_id.into(),
+        id: fork.transfer_id.into(),
         kind: TransferType::Fork,
         source_thread_id: source.id.clone(),
-        target_thread_id: target_id.into(),
+        target_thread_id: fork.id.into(),
         source_point: point,
         base_point: None,
         source_provider_instance_id: Some(provider_instance_id.into()),

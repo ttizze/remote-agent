@@ -486,6 +486,7 @@ async fn failed_provider_preparation_keeps_the_owned_checkout_for_retry() {
             initial: Some((
                 input.to_string().into(),
                 InputContent {
+                    fresh_context: false,
                     parts: vec![op::Input::Text {
                         text: "keep this input".into(),
                     }],

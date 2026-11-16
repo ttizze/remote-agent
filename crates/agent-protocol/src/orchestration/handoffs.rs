@@ -46,7 +46,24 @@ pub fn historical_message(
     run_status: Option<RunStatus>,
 ) -> Option<HistoricalText> {
     let (kind, text) = match &item.body {
-        TurnItemBody::UserMessage { text, .. } => ("user_message", text.clone()),
+        // Structured context travels beside the text, as providers receive it.
+        TurnItemBody::UserMessage { text, context, .. } => (
+            "user_message",
+            std::iter::once(text.clone())
+                .chain(
+                    crate::context::stored_contexts(context.as_ref())
+                        .into_iter()
+                        .filter_map(|record| match record {
+                            crate::context::StoredContext::Context(context) => {
+                                Some(context.provider_text())
+                            }
+                            _ => None,
+                        }),
+                )
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         TurnItemBody::AssistantMessage { text, .. } => ("assistant_message", text.clone()),
         TurnItemBody::CommandExecution {
             input,

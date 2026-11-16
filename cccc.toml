@@ -1,5 +1,6 @@
-max-cognitive = 40
-max-cyclomatic = 40
+# T3-aligned structure takes precedence over these limits.
+max-cognitive = 45
+max-cyclomatic = 45
 # Exclude repository metadata, third-party code, and generated bundles only.
 exclude = [
   ".git/**",

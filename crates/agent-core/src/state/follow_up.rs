@@ -56,6 +56,15 @@ pub fn requested(preference: FollowUp, alternate: bool) -> FollowUp {
     }
 }
 
+/// A fresh context always begins its own turn, independently of the steer preference.
+pub fn for_context(requested: FollowUp, fresh_context: bool) -> FollowUp {
+    if fresh_context {
+        FollowUp::Queue
+    } else {
+        requested
+    }
+}
+
 /// Whether input sent to `thread` now waits in the Host's queue, as the Host
 /// routes it: a running turn takes only a steer it can accept, and nothing
 /// overtakes input already waiting unless a stop holds that input.

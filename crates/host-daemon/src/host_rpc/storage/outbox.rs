@@ -335,6 +335,8 @@ mod tests {
         let mut admitted = model::admit(
             &state,
             model::Input {
+                fresh_context: false,
+                scheduled_task_id: None,
                 message_id: "first-input".into(),
                 created_by: model::Actor::User,
                 creation_source: model::CreationSource::Mobile,

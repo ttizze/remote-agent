@@ -41,6 +41,7 @@ pub(super) fn native_context(
             .and_then(|reference| reference.native_id.clone())
             .ok_or("native attempt source is missing")?,
         provider: ProviderKind::from_instance_id(&attempt.provider_instance_id)?,
+        prompt_actor: state.thread.native_prompt_actor(),
         now: now.into(),
         completed,
     })

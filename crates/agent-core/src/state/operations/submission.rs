@@ -191,10 +191,12 @@ impl Operation for StartSubmission {
                 initial: Some((
                     self.client_user_message_id.clone(),
                     agent_protocol::conversation::InputContent {
+                        fresh_context: self.draft.fresh_context,
                         parts: submission_input(
                             &self.draft.text,
                             &self.draft.attachments,
                             &self.draft.invocations,
+                            &self.draft.contexts,
                             Some(self.provider),
                         ),
                         model: self.draft.model.clone(),
@@ -262,10 +264,12 @@ impl Operation for SendSubmission {
                 command: agent_protocol::conversation::Command::Submit {
                     id: self.client_user_message_id.clone(),
                     content: agent_protocol::conversation::InputContent {
+                        fresh_context: self.draft.fresh_context,
                         parts: submission_input(
                             &self.draft.text,
                             &self.draft.attachments,
                             &self.draft.invocations,
+                            &self.draft.contexts,
                             provider,
                         ),
                         model: self.draft.model.clone(),
@@ -304,6 +308,7 @@ fn submission_input(
     text: &str,
     attachments: &[Attachment],
     invocations: &[agent_protocol::composer::Invocation],
+    contexts: &[agent_protocol::context::MessageContext],
     provider: Option<crate::session::ProviderKind>,
 ) -> Vec<Input> {
     let mut input = Vec::with_capacity(attachments.len() + usize::from(!text.is_empty()));
@@ -328,6 +333,9 @@ fn submission_input(
             }
         }
     }));
+    input.extend(contexts.iter().cloned().map(|context| Input::Context {
+        context: Box::new(context),
+    }));
     input
 }
 
@@ -336,6 +344,7 @@ fn submission_input(
 pub struct UploadAttachment {
     pub draft_key: DraftKey,
     pub attachment: Attachment,
+    pub snapshot: Option<crate::composer::snapshot::SnapShotCapture>,
 }
 
 impl Operation for UploadAttachment {
@@ -346,7 +355,24 @@ impl Operation for UploadAttachment {
     }
     no_input!();
     type Output = String;
-    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
+    fn prepare(&mut self, snapshot: &mut Snapshot, _pane_id: &str) -> Result<(), String> {
+        if let Some(capture) = &self.snapshot {
+            let current = snapshot
+                .input
+                .drafts
+                .get(&self.draft_key)
+                .map_or(&[][..], |draft| draft.contexts.as_slice());
+            capture
+                .clone()
+                .append(
+                    current,
+                    self.attachment.path.clone(),
+                    self.attachment.is_image,
+                )
+                .map_err(str::to_owned)?;
+        }
+        Ok(())
+    }
     async fn run(
         &self,
         _: Self::Input,
@@ -365,16 +391,40 @@ impl Operation for UploadAttachment {
         .map_err(PeerError::from)?;
         Ok(uploaded.path)
     }
-    fn apply(mut self, snapshot: &mut Snapshot, _pane_id: &str, path: Self::Output) -> Vec<Effect> {
+    fn complete(
+        mut self,
+        snapshot: &mut Snapshot,
+        _pane_id: &str,
+        path: Self::Output,
+        _current: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
+        // Navigation can retire the requesting pane; the upload still belongs
+        // to its original draft. Validate both additions before publishing either.
+        let contexts = if let Some(capture) = self.snapshot.take() {
+            let current = snapshot
+                .input
+                .drafts
+                .get(&self.draft_key)
+                .map_or(&[][..], |draft| draft.contexts.as_slice());
+            Some(
+                capture
+                    .append(current, path.clone(), self.attachment.is_image)
+                    .map_err(|reason| PeerError::InvalidMessage(reason.into()))?,
+            )
+        } else {
+            None
+        };
         self.attachment.path = path;
-        Arc::make_mut(
+        let draft = Arc::make_mut(
             Arc::make_mut(&mut snapshot.input.drafts)
                 .entry(self.draft_key)
                 .or_default(),
-        )
-        .attachments
-        .push(self.attachment);
-        Vec::new()
+        );
+        if let Some(contexts) = contexts {
+            draft.contexts = contexts;
+        }
+        draft.attachments.push(self.attachment);
+        Ok(Vec::new())
     }
 }
 

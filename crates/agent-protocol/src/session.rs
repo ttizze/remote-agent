@@ -537,6 +537,7 @@ fn merge_turn(previous: Option<&Turn>, incoming: &Turn, completed: bool) -> Opti
     }
     let mut merged = previous.unwrap_or(incoming).clone();
     merged.queued |= incoming.queued;
+    merged.fresh_context |= incoming.fresh_context;
     macro_rules! field { ($($field:ident),* $(,)?) => { $(if incoming.$field.is_some() { merged.$field = incoming.$field.clone(); })* }; }
     field!(
         provider,
@@ -1164,6 +1165,7 @@ pub fn prepend_history(older: &[Arc<Turn>], current: &[Arc<Turn>]) -> Vec<Arc<Tu
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Capabilities {
+    pub feedback: bool,
     /// Input can join a running turn (T3 Code's active steering). Every
     /// provider can queue input behind one; the Host owns that queue.
     pub steer: bool,

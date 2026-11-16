@@ -273,6 +273,8 @@ mod tests {
             change: SessionChange::Item {
                 turn_id: "turn".into(),
                 item: Arc::new(Item {
+                    attempt: None,
+                    author: None,
                     id: "command".into(),
                     status,
                     client_input_id: None,

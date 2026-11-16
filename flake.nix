@@ -28,6 +28,7 @@
         relax = pkgs.callPackage ./tools/relax/package.nix { };
       } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
         node-runtime = pkgs.callPackage ./tools/node-runtime/package.nix { };
+        simslim = pkgs.callPackage ./tools/simslim/package.nix { };
       });
       devShells = forEachSystem (pkgs:
         let
@@ -65,6 +66,7 @@
             '';
           };
           nodeRuntime = pkgs.callPackage ./tools/node-runtime/package.nix { };
+          simslim = pkgs.callPackage ./tools/simslim/package.nix { };
           androidSdk = (pkgs.androidenv.composeAndroidPackages {
             platformVersions = [ "37.0" ];
             buildToolsVersions = [ "36.0.0" ];
@@ -132,7 +134,8 @@
             shellHook = appleSdkHook;
           };
           ios-test = pkgs.mkShellNoCC {
-            packages = with pkgs; [ just gitMinimal nodejs gh zsh ];
+            packages = with pkgs; [ just gitMinimal nodejs gh zsh ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ simslim ];
             shellHook = appleSdkHook + runtimeShellHook;
           };
           android-test = pkgs.mkShell {
@@ -168,6 +171,7 @@
             ]) ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
               pkgs.swiftlint
               pkgs.swiftformat
+              simslim
             ];
 
             shellHook = appleSdkHook;

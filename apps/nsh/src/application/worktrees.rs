@@ -289,6 +289,7 @@ mod tests {
         let selection_path = root.join("connection-selection.json");
         let explorer_width_path = root.join("file-explorer-width.json");
         let sidebar_projects_path = root.join("sidebar-projects.json");
+        let file_rendering_path = root.join("file-rendering.json");
         let (runtime, client, _) = crate::client::Client::new(root, None).unwrap();
         let (state, _) = tokio::sync::watch::channel(Arc::new(State::default()));
         let app = Arc::new(Application {
@@ -298,10 +299,11 @@ mod tests {
             stop: tokio_util::sync::CancellationToken::new(),
             runtime: runtime.handle().clone(),
             jobs: Default::default(),
-            selection_path: Some(selection_path),
+            selection_path,
             #[cfg(desktop)]
             onboarding_path: std::path::PathBuf::new(),
             explorer_width_path,
+            file_rendering_path,
             sidebar_projects_path,
             #[cfg(desktop)]
             updater: None,

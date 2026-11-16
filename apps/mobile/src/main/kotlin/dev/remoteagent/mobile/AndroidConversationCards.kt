@@ -165,11 +165,12 @@ internal fun ThreadMessageCard(
         content.body
             ?.takeIf { it.isNotEmpty() }
             ?.let { body ->
+                val blocks = remember(body) { dev.remoteagent.core.markdownBlocks(body) }
                 if (isUser) {
                     Card(Modifier.widthIn(max = 520.dp)) {
-                        Column(Modifier.padding(14.dp)) { ConversationBody(body, cwd, perform) }
+                        Column(Modifier.padding(14.dp)) { ConversationBlocks(blocks, cwd, perform) }
                     }
-                } else ConversationBody(body, cwd, perform)
+                } else ConversationBlocks(blocks, cwd, perform)
             }
         if (isUser || showActions)
             MessageFooter(content.body.orEmpty(), timestampMs ?: content.timestampMs, fork, forkPhase)

@@ -1,5 +1,15 @@
 fn main() {
     let manifest = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rerun-if-changed=windows.manifest");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        // GetWindowSubclass is exported by the v6 common-controls assembly.
+        // Embed the dependency in the app and its native-control test binaries.
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
+            manifest.join("windows.manifest").display()
+        );
+    }
     println!("cargo:rerun-if-changed=ios-simulator.entitlements");
     // `desktop`: the window shell the Mac and Windows apps share.
     println!("cargo::rustc-check-cfg=cfg(desktop)");

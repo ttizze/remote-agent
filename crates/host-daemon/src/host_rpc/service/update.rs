@@ -90,6 +90,7 @@ impl HostRpcService {
                     .unwrap_or_else(|| session.clone()),
                 cwd: state.thread.worktree_path.clone(),
                 submission: op::Submission {
+                    fresh_context: false,
                     thread_id: session,
                     client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
                     input: vec![op::Input::Text {

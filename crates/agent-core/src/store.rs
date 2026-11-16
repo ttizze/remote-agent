@@ -34,6 +34,12 @@ const MAX_ITEM_TRANSFERS: usize = 4;
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Outcome {
+    Automations {
+        details: agent_protocol::automations::Reply,
+    },
+    PullRequests {
+        details: agent_protocol::pull_requests::Reply,
+    },
     LiveActivityRegistered {
         enabled: bool,
     },

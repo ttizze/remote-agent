@@ -443,7 +443,79 @@ impl State {
     }
 }
 
+impl State {
+    /// T3 contextBoundaryOrdinal: runs before the latest started fresh-context
+    /// run never reach a provider again.
+    pub fn context_boundary_ordinal(&self) -> u64 {
+        self.runs
+            .values()
+            .filter(|run| run.starts_context())
+            .map(|run| run.ordinal)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// T3 rootProviderThreadsForProvider: this thread's latest root native
+    /// conversation for the instance, excluding any predating the boundary.
+    pub fn root_provider_thread(&self, instance: &str, boundary: u64) -> Option<&ProviderThread> {
+        self.provider_threads
+            .values()
+            .filter(|thread| {
+                thread.app_thread_id.as_deref() == Some(self.thread.id.as_str())
+                    && thread.provider_instance_id == instance
+                    && thread.owner_node_id.is_none()
+                    && !thread.predates(boundary)
+            })
+            .max_by(|a, b| {
+                a.last_run_ordinal
+                    .unwrap_or(0)
+                    .cmp(&b.last_run_ordinal.unwrap_or(0))
+                    .then_with(|| a.updated_at.cmp(&b.updated_at))
+                    .then_with(|| a.id.cmp(&b.id))
+            })
+    }
+}
+
+impl Thread {
+    /// A provider-native subagent thread: read-only, and its prompts come from
+    /// the parent agent rather than from the user.
+    pub fn is_provider_subagent(&self) -> bool {
+        self.creation_source == CreationSource::Provider
+            && self.lineage.relationship_to_parent.as_deref() == Some("subagent")
+    }
+
+    /// T3 createdBy of a native user message in this thread.
+    pub fn native_prompt_actor(&self) -> Actor {
+        if self.is_provider_subagent() {
+            Actor::Agent
+        } else {
+            Actor::User
+        }
+    }
+}
+
+impl ProviderThread {
+    /// T3 providerThreadPredatesBoundary.
+    pub fn predates(&self, boundary: u64) -> bool {
+        boundary > 0 && self.first_run_ordinal.is_none_or(|first| first < boundary)
+    }
+}
+
 impl Run {
+    /// T3 cancelledBeforeStart: a stopped run that never reached a provider.
+    pub fn cancelled_before_start(&self) -> bool {
+        self.status == RunStatus::Cancelled
+            && self.started_at.is_none()
+            && self.restart_continuation_of_run_id.is_none()
+    }
+
+    /// A fresh start that took effect. A rewound fresh start never happened.
+    pub fn starts_context(&self) -> bool {
+        self.fresh_context
+            && !matches!(self.status, RunStatus::Queued | RunStatus::RolledBack)
+            && !self.cancelled_before_start()
+    }
+
     pub fn is_handoff_source(&self) -> bool {
         matches!(
             self.status,

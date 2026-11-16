@@ -43,6 +43,8 @@ pub(crate) struct TextFile {
     pub id: u64,
     pub path: String,
     pub line: Option<u32>,
+    /// Which opening named `line`: the same line opened again is shown again.
+    pub line_request: Option<u64>,
 }
 
 impl Browser {
@@ -75,13 +77,16 @@ impl Browser {
                 let surface = state
                     .selected()
                     .filter(|surface| state.open && surface.kind == PanelKind::File)?;
+                let (line, line_request) = line
+                    .get()
+                    .filter(|(id, ..)| *id == surface.id)
+                    .and_then(|(_, line, opening)| Some((line?, opening)))
+                    .unzip();
                 Some(TextFile {
                     id: surface.id,
                     path: surface.path.clone()?,
-                    line: line
-                        .get()
-                        .filter(|(id, _)| *id == surface.id)
-                        .and_then(|(_, line)| line),
+                    line,
+                    line_request,
                 })
             })
         });

@@ -3,8 +3,12 @@ use crate::host_rpc::runtime::native_fixture::{NativeAgent, call};
 use agent_protocol::protocol::{self, Call, Response};
 use agent_protocol::{conversation as decision, orchestration as model};
 
+mod attribution;
+mod fresh;
+
 fn content() -> decision::InputContent {
     decision::InputContent {
+        fresh_context: false,
         parts: vec![op::Input::Text {
             text: "run once".into(),
         }],
@@ -1146,13 +1150,18 @@ async fn sibling_forks_continue_the_selected_native_prefix_in_independent_resour
             serde_json::to_value(&continued.thread.turns.as_ref().unwrap()[0]).unwrap();
         let mut original_prefix =
             serde_json::to_value(&original.thread.turns.as_ref().unwrap()[0]).unwrap();
-        // Only the local action eligibility differs; every transcript field,
-        // provider attribution, fork action and timing fact stays identical.
-        inherited.as_object_mut().unwrap().remove("supportsRewind");
-        original_prefix
-            .as_object_mut()
-            .unwrap()
-            .remove("supportsRewind");
+        // Only local execution facts differ: rewind eligibility and, as T3's
+        // resolveAttempt reads the displayed thread's own attempts, the source's
+        // attempts. Every transcript field, provider attribution, fork action
+        // and timing fact stays identical.
+        for turn in [&mut inherited, &mut original_prefix] {
+            let turn = turn.as_object_mut().unwrap();
+            turn.remove("supportsRewind");
+            turn.remove("attempts");
+            for item in turn["items"].as_array_mut().unwrap() {
+                item.as_object_mut().unwrap().remove("attempt");
+            }
+        }
         assert_eq!(inherited, original_prefix);
         let native = service
             .inner

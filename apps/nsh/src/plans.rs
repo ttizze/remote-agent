@@ -37,7 +37,7 @@ impl Saver {
         }
     }
 
-    fn open(self, host: String, cwd: String, markdown: String) {
+    pub(crate) fn open(self, host: String, cwd: String, markdown: String) {
         if self.submission.busy.get_untracked() {
             return;
         }
@@ -132,7 +132,7 @@ impl Saver {
         .into_element()
     }
 
-    fn download(self, filename: String, text: String) {
+    pub(crate) fn download(self, filename: String, text: String) {
         self.submission.owner.run(move || {
             #[cfg(not(target_os = "ios"))]
             download(filename, text);
@@ -151,49 +151,6 @@ impl Saver {
             });
         });
     }
-}
-
-pub(crate) fn actions(
-    saver: Saver,
-    connection: Connection,
-    markdown: impl Fn() -> Option<String> + Copy + 'static,
-) -> NativeView {
-    native::menu(
-        "ellipsis",
-        tr("計画の操作"),
-        move || {
-            let enabled = saver.submission.busy.try_get() == Some(false)
-                && connection
-                    .composer
-                    .try_get()
-                    .is_some_and(|p| p.controls.connected && !p.controls.navigation.cwd.is_empty());
-            serde_json::json!([
-                {"id":"copy", "title":tr("クリップボードにコピー")},
-                {"id":"download", "title":tr("Markdownとして保存…")},
-                {"id":"workspace", "title":tr("ワークスペースに保存…"), "enabled":enabled}
-            ])
-        },
-        move |id| {
-            let Some(markdown) = markdown() else {
-                return;
-            };
-            let (filename, text) = plan_export(&markdown);
-            match id {
-                "copy" => set_clipboard(text),
-                "download" => saver.download(filename, text),
-                "workspace" => saver.open(
-                    connection.host.get_untracked(),
-                    connection
-                        .composer
-                        .with_untracked(|p| p.controls.navigation.cwd.clone()),
-                    text,
-                ),
-                _ => {}
-            }
-        },
-    )
-    .w(px(24.0))
-    .h(px(24.0))
 }
 
 #[cfg(not(target_os = "ios"))]

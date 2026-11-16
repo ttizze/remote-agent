@@ -1,7 +1,10 @@
 //! What the map pairs nothing for: per state, the texts and labels only one
 //! client shows, from the whole of each capture, so a difference outside the
 //! map's elements still reaches the report.
-use super::map::State;
+use super::{
+    compare::{self, NshCapture},
+    map::State,
+};
 use std::{collections::BTreeSet, fs, path::Path};
 
 pub fn render(records: &Path, states: &[&State]) -> String {
@@ -9,10 +12,13 @@ pub fn render(records: &Path, states: &[&State]) -> String {
     for state in states {
         let directory = records.join(&state.name);
         let read = |name: &str| fs::read_to_string(directory.join(name)).ok();
-        let (Some(outline), Some(tree)) = (read("t3-outline.txt"), read("nsh-tree.txt")) else {
+        let (Some(outline), Some(capture)) = (read("t3-outline.txt"), read("nsh.json")) else {
             continue;
         };
-        let (t3, nsh) = (t3_texts(&outline), nsh_texts(&tree));
+        let Ok(capture) = serde_json::from_str(&capture) else {
+            continue;
+        };
+        let (t3, nsh) = (t3_texts(&outline), nsh_texts(&capture));
         text.push_str(&format!(
             "\n### {}\n\nOnly in T3: {}\n\nOnly in NSH: {}\n",
             state.name,
@@ -83,11 +89,26 @@ fn aria_label(line: &str) -> Option<String> {
     Some(words.collect::<Vec<_>>().join(" "))
 }
 
-/// Every quoted value of `nsh-tree.txt`: labels, values and placeholders.
-fn nsh_texts(tree: &str) -> BTreeSet<String> {
-    tree.lines()
-        .flat_map(|line| line.split("=\"").skip(1))
-        .map(|rest| rest.split('"').next().unwrap_or_default().trim().to_owned())
+/// Visible labels, values and placeholders; identifiers name implementation
+/// nodes and are not text the user sees.
+fn nsh_texts(capture: &NshCapture) -> BTreeSet<String> {
+    capture
+        .views
+        .iter()
+        .enumerate()
+        .filter(|(index, view)| {
+            compare::shown(&capture.views, *index)
+                && view.frame[0] < capture.width
+                && view.frame[1] < capture.height
+                && view.frame[0] + view.frame[2] > 0.0
+                && view.frame[1] + view.frame[3] > 0.0
+        })
+        .flat_map(|(_, view)| {
+            view.texts
+                .iter()
+                .filter(|(key, _)| key.as_str() != "identifier")
+                .map(|(_, value)| value.trim().to_owned())
+        })
         .filter(|text| worded(text))
         .collect()
 }
@@ -119,10 +140,16 @@ mod tests {
     }
 
     #[test]
-    fn nsh_lines_give_their_quoted_values() {
-        let tree = "AXWindow label=\"Bex\"\n  AXTextField placeholder=\"Ask AI\" value=\"\"\n";
+    fn nsh_inventory_omits_identifiers_and_hidden_or_offscreen_text() {
+        let node = |frame, alpha, texts| serde_json::json!({"parent":null,"class":"View","frame":frame,"hidden":false,"alpha":alpha,"role":null,"texts":texts,"layer":null});
+        let capture = serde_json::from_value(serde_json::json!({"width":100,"height":100,"views":[
+            node([0,0,100,100],1,serde_json::json!({"label":"Bex","identifier":"implementation.detail"})),
+            node([10,10,80,24],1,serde_json::json!({"placeholder":"Ask AI","value":""})),
+            node([10,50,80,24],0,serde_json::json!({"label":"Hidden action"})),
+            node([10,150,80,24],1,serde_json::json!({"label":"Outside window"})),
+        ]})).unwrap();
         let expected: BTreeSet<String> = ["Bex", "Ask AI"].map(String::from).into();
-        assert_eq!(nsh_texts(tree), expected);
+        assert_eq!(nsh_texts(&capture), expected);
     }
 
     #[test]

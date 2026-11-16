@@ -43,27 +43,33 @@ impl<'a> Workspace<'a> {
 /// Relabels every chip of the document: a basename, the parent that tells it
 /// apart from another chip's same basename, and its position.
 pub(in crate::presentation::markdown) fn label_parents(blocks: &mut [MarkdownBlock]) {
-    fn chips(blocks: &mut [MarkdownBlock]) -> impl Iterator<Item = &mut MarkdownRun> {
+    fn runs(blocks: &mut [MarkdownBlock]) -> Vec<&mut MarkdownRun> {
         blocks
             .iter_mut()
             .flat_map(|block| match block {
-                MarkdownBlock::Paragraph { runs, .. } => vec![runs],
+                MarkdownBlock::Paragraph { runs, .. } => runs.iter_mut().collect(),
                 MarkdownBlock::Table { rows, .. } => rows
                     .iter_mut()
                     .flatten()
-                    .map(|cell| &mut cell.runs)
+                    .flat_map(|cell| &mut cell.runs)
                     .collect(),
+                MarkdownBlock::Disclosure {
+                    summary, blocks, ..
+                } => summary.iter_mut().chain(runs(blocks)).collect(),
+                MarkdownBlock::Callout { blocks, .. } => runs(blocks),
                 MarkdownBlock::Visualization { .. } => Vec::new(),
             })
-            .flatten()
-            .filter(|run| run.file.is_some())
+            .collect()
     }
-    let paths: Vec<_> = chips(blocks)
+    let paths: Vec<_> = runs(blocks)
+        .into_iter()
         .filter_map(|run| run.file.as_ref().map(|file| file.path.clone()))
         .collect();
     let labels = file_labels(paths.iter().map(String::as_str));
-    for run in chips(blocks) {
-        let file = run.file.as_mut().expect("chips have a file");
+    for run in runs(blocks) {
+        let Some(file) = run.file.as_mut() else {
+            continue;
+        };
         let parent = labels.get(&file.path.replace('\\', "/"));
         file.label = file_label(
             &file.path,

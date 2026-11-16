@@ -186,6 +186,7 @@ async fn native_work_without_an_app_run_blocks_delivery_until_the_selected_sourc
             command: Command::Submit {
                 id: operation.to_string().into(),
                 content: InputContent {
+                    fresh_context: false,
                     parts: vec![Input::Text {
                         text: "send only when the native conversation is idle".into(),
                     }],
@@ -398,6 +399,7 @@ async fn an_unknown_native_activity_can_resume_on_explicit_input_without_replayi
         command: Command::Submit {
             id: operation.to_string().into(),
             content: InputContent {
+                fresh_context: false,
                 parts: vec![Input::Text {
                     text: "continue this conversation".into(),
                 }],

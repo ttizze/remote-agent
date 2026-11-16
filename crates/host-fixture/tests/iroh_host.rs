@@ -82,6 +82,7 @@ async fn completed_chat(
     request.initial = Some((
         next_submission_id().into(),
         agent_protocol::conversation::InputContent {
+            fresh_context: false,
             parts: vec![rpc::Input::Text {
                 text: "[success] [immediate] prepare workspace".into(),
             }],
@@ -484,6 +485,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         .unwrap();
         store
             .dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                snapshot: None,
                 draft_key: "transfer-draft".into(),
                 attachment: Attachment {
                     path: source.to_str().unwrap().into(),
@@ -545,6 +547,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         assert!(store.snapshot().panes.primary().navigation.cwd.is_empty());
         store
             .dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                snapshot: None,
                 draft_key: "unscoped-draft".into(),
                 attachment: Attachment {
                     path: source.to_str().unwrap().into(),
@@ -600,6 +603,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
             [&agent_core::state::DraftKey::from("transfer-draft")]
             .clone();
         let retry = op::UploadAttachment {
+            snapshot: None,
             draft_key: "transfer-draft".into(),
             attachment: Attachment {
                 path: directory
@@ -1191,6 +1195,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
             store.dispatch(Intent::SetDraftText { thread_id: key.clone(), text: prompt.clone() }).await.unwrap();
             let uploaded = if photo {
                 store.dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                    snapshot: None,
                     draft_key: key,
                     attachment: Attachment { path: source.to_str().unwrap().into(), name: "photo.png".into(), is_image: true },
                 })).await.unwrap();
@@ -1900,6 +1905,7 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         conversations::submit(
             &mobile.peer,
             &rpc::Submission {
+                fresh_context: false,
                 thread_id: image_id.clone(),
                 client_user_message_id: next_submission_id().into(),
                 input: vec![rpc::Input::Text {
@@ -3109,6 +3115,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "advance main"]);
         let mut events=conversations::Conversation::open(&local.peer,&id).await.unwrap();
         conversations::submit(&local.peer,&rpc::Submission {
+                fresh_context: false,
             thread_id: id.clone(),
             client_user_message_id: input_id("after-removal"),
             input: vec![rpc::Input::Text { text: "[success] continue after removal".into() }],
@@ -3227,6 +3234,7 @@ async fn unchanged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() 
         conversations::submit(
             &local.peer,
             &rpc::Submission {
+                fresh_context: false,
                 thread_id: active.clone(),
                 client_user_message_id: input_id("cleanup-running"),
                 input: vec![rpc::Input::Text {
@@ -4030,6 +4038,7 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
         .id
         .unwrap();
         let input = rpc::Submission {
+            fresh_context: false,
             thread_id: thread.clone(),
             client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
             input: vec![rpc::Input::Text {

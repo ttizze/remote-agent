@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 mod bodies;
 mod commands;
+pub(in crate::host_rpc) use commands::{Origin, at};
 mod events;
 mod executor;
 mod imports;

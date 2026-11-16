@@ -12,6 +12,8 @@ pub struct Input {
     pub message_id: String,
     pub created_by: Actor,
     pub creation_source: CreationSource,
+    /// T3 scheduledTaskId: the Host automation that sent this message.
+    pub scheduled_task_id: Option<String>,
     pub text: String,
     pub attachments: Vec<Value>,
     pub context: Option<Value>,
@@ -20,6 +22,8 @@ pub struct Input {
     pub workspace_preparation: Option<WorkspacePreparation>,
     /// Fork provenance resolved by the Host from the selected source run.
     pub fork_origin: Option<ProviderThreadFork>,
+    /// T3 message.dispatch freshContext. Never steers.
+    pub fresh_context: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +132,7 @@ fn user_item(
         body: TurnItemBody::UserMessage {
             created_by: input.created_by,
             creation_source: input.creation_source,
+            scheduled_task_id: input.scheduled_task_id.clone(),
             message_id: input.message_id.clone(),
             input_intent: intent.to_owned(),
             text: input.text.clone(),
@@ -191,9 +196,7 @@ pub fn admit(
     if state.thread.archived_at.is_some() || state.thread.deleted_at.is_some() {
         return Err("thread is not active".into());
     }
-    if state.thread.creation_source == CreationSource::Provider
-        && state.thread.lineage.relationship_to_parent.as_deref() == Some("subagent")
-    {
+    if state.thread.is_provider_subagent() {
         return Err("provider-native subagent threads are read-only".into());
     }
     if state.has_uncertain_input() {
@@ -228,6 +231,18 @@ pub fn admit(
     {
         return Err("message is already accepted".into());
     }
+    let fork = state.pending_fork();
+    if input.fresh_context && fork.is_some() {
+        return Err(
+            "A fresh session can't start while a fork or merge is still being applied.".into(),
+        );
+    }
+    // T3 turns a fresh start's steer into a queue after the active run.
+    let admission = if input.fresh_context {
+        Admission::Queue
+    } else {
+        admission
+    };
     if admission == Admission::Steer
         && context.can_steer
         && let Some(decision) = steer(state, &input, context)
@@ -237,7 +252,6 @@ pub fn admit(
     let active = state.active_run();
     let queued =
         active.is_some() || state.native_work_blocks_delivery() || state.has_pending_rollback();
-    let fork = state.pending_fork();
     let run_id = id(context.command_id, "run");
     let mut item = user_item(
         &state.thread.id,
@@ -246,29 +260,23 @@ pub fn admit(
         if queued { "queued_turn" } else { "turn_start" },
         context,
     );
-    let mut provider_thread = state
-        .thread
-        .active_provider_thread_id
-        .as_ref()
-        .and_then(|id| state.provider_threads.get(id))
-        .filter(|thread| thread.provider_instance_id == input.model_selection.instance_id)
-        .or_else(|| {
+    // A fresh start never reuses a provider thread; others continue the
+    // latest conversation since the context boundary.
+    let boundary = state.context_boundary_ordinal();
+    let instance = input.model_selection.instance_id.as_str();
+    let mut provider_thread = (!input.fresh_context)
+        .then(|| {
             state
-                .provider_threads
-                .values()
+                .thread
+                .active_provider_thread_id
+                .as_ref()
+                .and_then(|id| state.provider_threads.get(id))
                 .filter(|thread| {
-                    thread.app_thread_id.as_deref() == Some(state.thread.id.as_str())
-                        && thread.provider_instance_id == input.model_selection.instance_id
-                        && thread.owner_node_id.is_none()
+                    thread.provider_instance_id == instance && !thread.predates(boundary)
                 })
-                .max_by(|a, b| {
-                    a.last_run_ordinal
-                        .unwrap_or(0)
-                        .cmp(&b.last_run_ordinal.unwrap_or(0))
-                        .then_with(|| a.updated_at.cmp(&b.updated_at))
-                        .then_with(|| a.id.cmp(&b.id))
-                })
+                .or_else(|| state.root_provider_thread(instance, boundary))
         })
+        .flatten()
         .cloned()
         .unwrap_or_else(|| ProviderThread {
             id: id(context.command_id, "provider-thread"),
@@ -350,6 +358,7 @@ pub fn admit(
         usage_limit_continuation_of_run_id: None,
         work_started_at: None,
         workspace_preparation: input.workspace_preparation,
+        fresh_context: input.fresh_context,
     };
     let attempt = RunAttempt {
         id: attempt_id,
@@ -601,6 +610,7 @@ pub fn promote_queued(
         message_id: run.user_message_id.clone(),
         created_by: *created_by,
         creation_source: *creation_source,
+        scheduled_task_id: None,
         text: text.clone(),
         attachments: attachments.clone(),
         context: message_context.clone(),
@@ -608,6 +618,7 @@ pub fn promote_queued(
         driver: provider_thread.driver.clone(),
         workspace_preparation: None,
         fork_origin: None,
+        fresh_context: false,
     };
     if input.text.trim().eq_ignore_ascii_case("/compact") && input.attachments.is_empty() {
         return Err("context compaction must run as a separate turn".into());

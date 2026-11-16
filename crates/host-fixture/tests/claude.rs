@@ -474,6 +474,7 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
             conversations::submit(
                 &local.peer,
                 &rpc::Submission {
+                    fresh_context: false,
                     thread_id: id.clone(),
                     client_user_message_id: input_id(&format!("delegate-{model}")),
                     input: vec![rpc::Input::Text {
@@ -542,6 +543,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                     std::fs::write(&path, include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png")).unwrap();
                 } else { std::fs::write(&path, "attachment content").unwrap(); }
                 store.dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                    snapshot: None,
                     draft_key: key,
                     attachment: Attachment { path: path.to_str().unwrap().into(), name: path.file_name().unwrap().to_str().unwrap().into(), is_image: attachment == "image" },
                 })).await.unwrap();

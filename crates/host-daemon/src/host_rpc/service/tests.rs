@@ -387,6 +387,7 @@ async fn host_names_do_not_depend_on_provider_availability_and_failed_input_is_n
         command: Command::Submit {
             id: input.to_string().into(),
             content: InputContent {
+                fresh_context: false,
                 parts: vec![op::Input::Text {
                     text: "unsent".into(),
                 }],
@@ -493,6 +494,7 @@ async fn conversation_rpc_failures_are_logged_once_without_request_payloads() {
         command: agent_protocol::conversation::Command::Submit {
             id: input.to_string().into(),
             content: agent_protocol::conversation::InputContent {
+                fresh_context: false,
                 parts: vec![agent_protocol::operations::Input::Text {
                     text: "private request title".into(),
                 }],

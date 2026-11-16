@@ -8,6 +8,7 @@ use agent_protocol::{orchestration as model, protocol::Call};
 
 fn input(provider: ProviderKind, text: &str) -> decision::InputContent {
     decision::InputContent {
+        fresh_context: false,
         parts: vec![op::Input::Text { text: text.into() }],
         model: Some(agent_protocol::models::ModelRef {
             provider,
@@ -3380,6 +3381,8 @@ async fn provider_handoff_uses_the_message_actor_for_agent_created_input() {
                 model::admit(
                     state,
                     model::Input {
+                        fresh_context: false,
+                        scheduled_task_id: None,
                         message_id: operation.clone(),
                         created_by: model::Actor::Agent,
                         creation_source: model::CreationSource::Server,
@@ -4368,6 +4371,8 @@ fn admit_before_worker(
                 model::admit(
                     state,
                     model::Input {
+                        fresh_context: false,
+                        scheduled_task_id: None,
                         message_id: operation.clone(),
                         created_by: model::Actor::User,
                         creation_source: model::CreationSource::Mobile,

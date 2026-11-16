@@ -149,6 +149,7 @@ process.stdin.destroy();
     adapter
         .submit(
             &op::Submission {
+                fresh_context: false,
                 thread_id: native.clone(),
                 client_user_message_id: Uuid::new_v4().to_string().into(),
                 input: vec![op::Input::Text {

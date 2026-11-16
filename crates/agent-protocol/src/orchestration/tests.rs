@@ -197,6 +197,7 @@ fn input(seed: u128) -> Input {
         message_id: Uuid::from_u128(seed).to_string(),
         created_by: Actor::User,
         creation_source: CreationSource::Mobile,
+        scheduled_task_id: None,
         text: format!("input {seed}"),
         attachments: Vec::new(),
         context: None,
@@ -204,6 +205,7 @@ fn input(seed: u128) -> Input {
         driver: "codex".into(),
         workspace_preparation: None,
         fork_origin: None,
+        fresh_context: false,
     }
 }
 
@@ -1408,8 +1410,11 @@ fn a_fork_does_not_inherit_its_parents_rollback_request_or_failure() {
         &state.thread,
         run,
         state.context_source_point(run),
-        "child",
-        "transfer",
+        ForkTarget {
+            id: "child",
+            transfer_id: "transfer",
+            title: "Source (1)".into(),
+        },
         NOW,
     )
     .unwrap();
@@ -2422,8 +2427,11 @@ mod fork_tests {
                 provider,
                 Some(&turn),
                 point.clone(),
-                "target",
-                "transfer",
+                ForkTarget {
+                    id: "target",
+                    transfer_id: "transfer",
+                    title: "Source (1)".into(),
+                },
                 NOW,
             );
             assert_eq!(result.is_ok(), allowed, "{status:?}");
@@ -2477,8 +2485,11 @@ mod fork_tests {
                     &provider,
                     Some(&turn),
                     point,
-                    target,
-                    "transfer",
+                    ForkTarget {
+                        id: target,
+                        transfer_id: "transfer",
+                        title: "Source (1)".into()
+                    },
                     NOW
                 )
                 .is_err(),
@@ -2497,8 +2508,11 @@ mod fork_tests {
                 provider,
                 None,
                 point.clone(),
-                "target",
-                "transfer",
+                ForkTarget {
+                    id: "target",
+                    transfer_id: "transfer",
+                    title: "Source (1)".into()
+                },
                 NOW
             )
             .is_ok()
@@ -2509,8 +2523,11 @@ mod fork_tests {
                 provider,
                 None,
                 point,
-                "target",
-                "transfer",
+                ForkTarget {
+                    id: "target",
+                    transfer_id: "transfer",
+                    title: "Source (1)".into()
+                },
                 NOW
             )
             .is_err()
@@ -2520,8 +2537,18 @@ mod fork_tests {
     fn undelivered_fork() -> (State, String) {
         let (source, mut run, point) = fork_source_fixture();
         run.status = RunStatus::Completed;
-        let (target, transfer) =
-            fork_thread(&source, &run, point, "target", "transfer", NOW).unwrap();
+        let (target, transfer) = fork_thread(
+            &source,
+            &run,
+            point,
+            ForkTarget {
+                id: "target",
+                transfer_id: "transfer",
+                title: "Source (1)".into(),
+            },
+            NOW,
+        )
+        .unwrap();
         let state = State::new(target).apply(&Decision {
             changes: vec![Change::ContextTransfer(transfer)],
             effects: vec![],
@@ -2632,7 +2659,17 @@ mod fork_tests {
         ] {
             let (thread, mut run, point) = fork_source_fixture();
             run.status = status;
-            let fork = fork_thread(&thread, &run, point.clone(), "target", "transfer", NOW);
+            let fork = fork_thread(
+                &thread,
+                &run,
+                point.clone(),
+                ForkTarget {
+                    id: "target",
+                    transfer_id: "transfer",
+                    title: "Source (1)".into(),
+                },
+                NOW,
+            );
             assert_eq!(fork.is_ok(), allowed);
             if let Ok((target, transfer)) = fork {
                 assert_eq!(target.lineage.parent_thread_id.as_ref(), Some(&thread.id));
@@ -2675,7 +2712,20 @@ mod fork_tests {
                 "deleted" => thread.deleted_at = Some(NOW.into()),
                 _ => {}
             }
-            assert!(fork_thread(&thread, &run, point, &target, "transfer", NOW).is_err());
+            assert!(
+                fork_thread(
+                    &thread,
+                    &run,
+                    point,
+                    ForkTarget {
+                        id: &target,
+                        transfer_id: "transfer",
+                        title: "Source (1)".into()
+                    },
+                    NOW
+                )
+                .is_err()
+            );
         }
     }
 
@@ -2691,8 +2741,18 @@ mod fork_tests {
                 fingerprint: None,
                 ordinal: None,
             });
-            let (_, transfer) =
-                fork_thread(&thread, &run, point, "target", "transfer", NOW).unwrap();
+            let (_, transfer) = fork_thread(
+                &thread,
+                &run,
+                point,
+                ForkTarget {
+                    id: "target",
+                    transfer_id: "transfer",
+                    title: "Source (1)".into(),
+                },
+                NOW,
+            )
+            .unwrap();
             assert_eq!(
                 transfer.error.is_none(),
                 strength == NativeRefStrength::Strong
@@ -2713,10 +2773,20 @@ mod fork_tests {
         source.settled_override = Some("settled".into());
         source.settled_at = Some(source.created_at.clone());
         source.last_visited_at = Some(source.created_at.clone());
-        let (target, transfer) =
-            fork_thread(&source, &run, point, "target", "transfer", NOW).unwrap();
+        let (target, transfer) = fork_thread(
+            &source,
+            &run,
+            point,
+            ForkTarget {
+                id: "target",
+                transfer_id: "transfer",
+                title: "Source (1)".into(),
+            },
+            NOW,
+        )
+        .unwrap();
         assert_eq!(target.id, "target");
-        assert_eq!(target.title, "Source fork");
+        assert_eq!(target.title, "Source (1)");
         assert_eq!(target.created_by, Actor::User);
         assert_eq!(target.creation_source, CreationSource::Mobile);
         assert_eq!(target.created_at, NOW);
@@ -3528,5 +3598,110 @@ fn handoff_source_keeps_explicit_fork_boundaries_and_prior_delivered_runs() {
     assert!(
         handoffs::source_run(&runs, Some(&source), 5).is_err(),
         "missing explicit source is an error, never an invitation to use another run"
+    );
+}
+
+#[test]
+fn fork_titles_number_after_the_source_and_skip_used_titles() {
+    let used = |titles: &[&str]| titles.iter().map(|title| title.to_string()).collect();
+    assert_eq!(fork_title("Plan", &used(&[])), "Plan (1)");
+    assert_eq!(fork_title("Plan", &used(&["Plan", "Plan (1)"])), "Plan (2)");
+    assert_eq!(
+        fork_title("Plan", &used(&["Plan (1)", "Plan (3)", "Other (2)"])),
+        "Plan (2)"
+    );
+    assert_eq!(fork_title("Plan (1)", &used(&["Plan (1)"])), "Plan (1) (1)");
+}
+
+#[test]
+fn provider_handoff_preserves_structured_context_beside_the_user_text() {
+    let context = crate::context::MessageContext {
+        id: "terminal".into(),
+        label: "Build".into(),
+        content: crate::context::ContextContent::Terminal {
+            terminal_id: "build".into(),
+            terminal_label: "Build".into(),
+            line_start: 1,
+            line_end: 2,
+            text: "output to preserve".into(),
+        },
+    };
+    for text in ["", "question"] {
+        let item: TurnItem = serde_json::from_value(serde_json::json!({
+            "id":"input","threadId":"thread","runId":"run","nodeId":null,"providerThreadId":null,
+            "providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":1,
+            "status":"completed","title":null,"startedAt":null,"completedAt":null,"updatedAt":NOW,
+            "type":"user_message","messageId":"input","createdBy":"user","creationSource":"mobile",
+            "inputIntent":"turn_start","text":text,"attachments":[],
+            "context":{"version":1,"records":[context.record()]},
+        }))
+        .unwrap();
+        let message = handoffs::historical_message(&item, None).unwrap();
+        let expected = if text.is_empty() {
+            context.provider_text()
+        } else {
+            format!("{text}\n{}", context.provider_text())
+        };
+        assert_eq!(message.text, expected);
+        assert_eq!(message.message.role, "user");
+    }
+}
+
+#[test]
+fn a_fresh_start_queues_instead_of_steering_in_a_new_provider_thread_and_sets_the_boundary() {
+    let state = accepted(&initial(), 1, Admission::Queue);
+    let first = state.runs.values().next().unwrap().clone();
+    let mut fresh = input(2);
+    fresh.fresh_context = true;
+    let state = state.apply(&admit(&state, fresh, Admission::Steer, context("2", &state)).unwrap());
+    let run = state
+        .runs
+        .values()
+        .find(|run| run.user_message_id == Uuid::from_u128(2).to_string())
+        .unwrap()
+        .clone();
+    assert!(run.fresh_context);
+    assert_eq!(run.status, RunStatus::Queued);
+    assert_ne!(run.provider_thread_id, first.provider_thread_id);
+    // Queued fresh starts, rewound ones and those stopped before starting set no boundary.
+    assert_eq!(state.context_boundary_ordinal(), 0);
+    let with = |status, started: Option<&str>| {
+        let mut state = state.clone();
+        let saved = state.runs.get_mut(&run.id).unwrap();
+        saved.status = status;
+        saved.started_at = started.map(str::to_owned);
+        state.context_boundary_ordinal()
+    };
+    assert_eq!(with(RunStatus::Completed, Some(NOW)), run.ordinal);
+    assert_eq!(with(RunStatus::Cancelled, Some(NOW)), run.ordinal);
+    assert_eq!(with(RunStatus::Cancelled, None), 0);
+    assert_eq!(with(RunStatus::RolledBack, Some(NOW)), 0);
+    // A later ordinary input never continues a conversation predating it.
+    let mut started = state.clone();
+    started.runs.get_mut(&run.id).unwrap().status = RunStatus::Completed;
+    started.runs.get_mut(&first.id).unwrap().status = RunStatus::Completed;
+    let old = first.provider_thread_id.clone().unwrap();
+    started
+        .provider_threads
+        .get_mut(&old)
+        .unwrap()
+        .first_run_ordinal = Some(first.ordinal);
+    let fresh_thread = run.provider_thread_id.clone().unwrap();
+    started
+        .provider_threads
+        .get_mut(&fresh_thread)
+        .unwrap()
+        .first_run_ordinal = Some(run.ordinal);
+    started.thread.active_provider_thread_id = Some(old.clone());
+    let next = started
+        .apply(&admit(&started, input(3), Admission::Queue, context("3", &started)).unwrap());
+    let later = next
+        .runs
+        .values()
+        .find(|candidate| candidate.user_message_id == Uuid::from_u128(3).to_string())
+        .unwrap();
+    assert_eq!(
+        later.provider_thread_id.as_deref(),
+        Some(fresh_thread.as_str())
     );
 }

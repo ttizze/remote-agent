@@ -15,12 +15,20 @@ use std::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", uniffi(default = None))]
+    pub triage: Option<Box<agent_protocol::triage::Context>>,
+    #[serde(default)]
+    #[cfg_attr(feature = "bindings", uniffi(default = false))]
+    pub fresh_context: bool,
     #[cfg_attr(feature = "bindings", uniffi(default = None))]
     pub workspace: Option<agent_protocol::workspace::WorkspaceStrategy>,
     pub text: String,
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub invocations: Vec<agent_protocol::composer::Invocation>,
+    #[serde(default)]
+    pub contexts: Vec<agent_protocol::context::MessageContext>,
     pub model: Option<crate::models::ModelRef>,
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,12 +41,19 @@ pub struct Draft {
 }
 fn merge_recovered_draft(recovered: &Draft, current: &Draft) -> Draft {
     let mut draft = current.clone();
+    draft.fresh_context |= recovered.fresh_context;
+    draft.triage = draft.triage.or_else(|| recovered.triage.clone());
     let mut text = recovered.text.clone();
     append_transcript(&mut text, &current.text);
     draft.text = text;
     for invocation in &recovered.invocations {
         if !draft.invocations.contains(invocation) {
             draft.invocations.push(invocation.clone());
+        }
+    }
+    for context in &recovered.contexts {
+        if !draft.contexts.iter().any(|value| value.id == context.id) {
+            draft.contexts.push(context.clone());
         }
     }
     for attachment in &recovered.attachments {
@@ -439,6 +454,8 @@ group! {
         pub activity: Arc<Activity>,
         #[serde(skip)]
         pub task_activity: Option<Arc<agent_protocol::live_activity::TaskActivityState>>,
+        #[serde(skip)]
+        pub project_clones: Option<Arc<agent_protocol::project_clone::ProjectClones>>,
         /// Device-owned organization, scoped by Host storage identity and registered project ID.
         #[serde(default)]
         pub project_preferences: Arc<BTreeMap<String, BTreeMap<String, ProjectPreferences>>>,
@@ -463,6 +480,8 @@ group! {
     pub struct Sessions {
         #[serde(skip)]
         pub metadata: Arc<BTreeMap<crate::session::SessionRef, ConversationMetadata>>,
+        #[serde(skip)]
+        pub feedback: Arc<BTreeMap<crate::session::SessionRef, op::FeedbackSubmission>>,
         #[serde(skip)]
         pub live_outputs: Arc<BTreeMap<agent_protocol::conversation::records::OutputKey, (uuid::Uuid, agent_protocol::sync::Output)>>,
         #[serde(skip)]
@@ -492,6 +511,8 @@ group! {
         pub new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
         #[serde(with = "crate::persistence::entries")]
         pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+        #[serde(default)]
+        pub stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
         /// Answers composed for awaiting questions; local to this device.
         #[serde(skip)]
         pub question_drafts:
@@ -748,6 +769,7 @@ pub struct ScopedData {
     #[serde(with = "crate::persistence::entries")]
     pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
     #[serde(default)]
+    pub stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
     pub new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
     pub pending_submissions:
         Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
@@ -876,6 +898,9 @@ fn reduce_intent(
         return (next, Vec::new());
     };
     if matches!(&intent, Intent::QuoteSelection { storage_scope, .. }
+        | Intent::Stash { storage_scope, .. }
+        | Intent::ChangeContext { storage_scope, .. }
+        | Intent::UseArtifactTemplate { storage_scope, .. }
         if storage_scope != &previous.connection.storage_scope)
     {
         return (next, Vec::new());
@@ -903,15 +928,48 @@ fn reduce_intent(
         StartTerminal, StartAccountTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ResolveFile, ResolveFileReference, ReadFile,
         ReadFileOpenCapabilities, OpenInEditor,
+        PullRequests,
+        PrepareTriage,
+        Automations,
         SaveFile, WriteWorkspaceFile, ReviewWorkspace, ChangeWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree,
-        ListAgents, AddProject, ScanProjects, ImportProjects, RetryPreparation,
+        ListAgents, AddProject, ScanProjects, ImportProjects, CloneProject, ReadProjectClones, ChangeProjectClone, RetryPreparation,
         ReadThread, OpenRequest, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
         LoadHostName, LoadHostManagement, LoadModels, ReadModelSettings,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
+        Intent::ReadAttempt { thread_id, attempt } => {
+            let effects = previous.sessions.conversations.get(&thread_id).into_iter()
+                .flat_map(|thread| crate::presentation::conversation::attempts::deferred_attempt_reads(thread, attempt))
+                .map(Effect::execute).collect();
+            return (next, effects);
+        }
+        Intent::UploadFeedback(params) => {
+            if params.storage_scope != previous.connection.storage_scope { return (next,Vec::new()); }
+            let key = op::OperationKey::Feedback {session:params.thread_id.clone()};
+            if previous.operation_running(key)
+                || previous.sessions.feedback.get(&params.thread_id).is_some_and(|submission| submission.id == params.id) {
+                return (next, Vec::new());
+            }
+            return prepare(next, pane_id, params);
+        }
+        Intent::SetFreshContext {storage_scope, session, enabled} => {
+            let key: DraftKey = session.clone().into();
+            if !storage_scope.is_empty() && storage_scope == previous.connection.storage_scope
+                && (if enabled { previous.fresh_context_available(session) } else { previous.input.drafts.contains_key(&key) }) {
+                Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(key).or_default()).fresh_context = enabled;
+            }
+        }
+        Intent::DismissFeedback {storage_scope,session,id} => {
+            let key = op::OperationKey::Feedback {session:session.clone()};
+            if storage_scope == previous.connection.storage_scope && !previous.operation_running(key.clone())
+                && previous.sessions.feedback.get(&session).is_some_and(|submission| submission.id == id) {
+                Arc::make_mut(&mut next.sessions.feedback).remove(&session);
+                Arc::make_mut(&mut next.operations).remove(&key);
+            }
+        }
         Intent::RefreshModels => return (next, op::refresh_models()),
         Intent::SetConnectionEnabled { enabled } => next.connection.connection_disabled = !enabled,
         // Store commits this device-owned value after admitting the action.
@@ -1078,7 +1136,12 @@ fn reduce_intent(
             if previous.input.drafts.get(&draft_key).is_some_and(|draft| index < draft.attachments.len())
                 && let Some(draft) = shared_mut(&mut next.input.drafts, &draft_key)
             {
-                draft.attachments.remove(index);
+                let removed = draft.attachments.remove(index);
+                if !draft.attachments.iter().any(|attachment| attachment.path == removed.path) {
+                    let ids = draft.contexts.iter().filter(|context| context.content.image_path() == Some(removed.path.as_str()))
+                        .map(|context| context.id.clone()).collect::<Vec<_>>();
+                    draft.contexts = agent_protocol::context::remove_contexts(&draft.contexts, &ids);
+                }
             }
         }
 
@@ -1229,8 +1292,39 @@ fn reduce_intent(
             }
         }
 
+        Intent::UseArtifactTemplate { thread_id, template, .. } => {
+            let current = previous.input.drafts.get(&thread_id).map_or("", |draft| draft.text.as_str());
+            let busy = previous.operation_running(op::OperationKey::Submission {draft_key:thread_id.clone()})
+                || previous.operation_running(op::OperationKey::Attachment {draft_key:thread_id.clone()})
+                || previous.operation_running(op::OperationKey::Dictation {draft_key:thread_id.clone()})
+                || matches!(&thread_id, DraftKey::Session {session} if previous.input.queued_edits.contains_key(session));
+            match crate::composer::template::append(current, &template, busy) {
+                Ok(text) if text != current => Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default()).text = text,
+                Ok(_) => {},
+                Err(reason) => Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists")).error = Some(reason.into()),
+            }
+        }
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.input.drafts).insert(thread_id, Arc::new(draft));
+        }
+        Intent::Stash {thread_id,action,..} => {
+            let empty = Draft::default();
+            let draft = previous.input.drafts.get(&thread_id).map(AsRef::as_ref).unwrap_or(&empty);
+            let busy = previous.operation_running(op::OperationKey::Attachment {draft_key:thread_id.clone()})
+                || previous.operation_running(op::OperationKey::Dictation {draft_key:thread_id.clone()})
+                || matches!(&thread_id, DraftKey::Session {session} if previous.input.queued_edits.contains_key(session));
+            match crate::composer::stash::change(&previous.input.stashes,draft,busy,action) {
+                Ok(change) => next.input.apply_stash_change(thread_id, change),
+                Err(reason) => Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists")).error = Some(reason.into()),
+            }
+        }
+        Intent::ChangeContext { thread_id, action, .. } => {
+            let current = previous.input.drafts.get(&thread_id).map_or(&[][..], |draft| &draft.contexts);
+            match crate::composer::context::change(current, action) {
+                Ok(contexts) if contexts != current => Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default()).contexts = contexts,
+                Ok(_) => {}
+                Err(reason) => Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists")).error = Some(reason.into()),
+            }
         }
         Intent::SelectWorkspace { thread_id, workspace } => {
             Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default()).workspace = workspace;
@@ -1470,6 +1564,8 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 return (next, Vec::new());
             }
             next.project_import = Arc::default();
+            next.lists.project_clones = None;
+            next.sessions.feedback = Arc::default();
             next.terminals = Arc::default();
             Arc::make_mut(next.panes.primary_mut()).observed_agents = None;
             next.catalog.provider_settings = None;
@@ -1483,6 +1579,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 let archived = ScopedData {
                     input_recoveries: std::mem::take(&mut next.input.input_recoveries),
                     drafts: std::mem::take(&mut next.input.drafts),
+                    stashes: std::mem::take(&mut next.input.stashes),
                     new_drafts: std::mem::take(&mut next.input.new_drafts),
                     pending_submissions: std::mem::take(&mut next.sessions.pending_submissions),
                     file_drafts: std::mem::take(&mut next.files.file_drafts),
@@ -1495,6 +1592,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 if let Some(saved) = Arc::make_mut(&mut next.lists.archived_scopes).remove(&scope) {
                     next.input.input_recoveries = saved.input_recoveries.clone();
                     next.input.drafts = saved.drafts.clone();
+                    next.input.stashes = saved.stashes.clone();
                     next.input.new_drafts = saved.new_drafts.clone();
                     next.sessions.pending_submissions = saved.pending_submissions.clone();
                     next.files.file_drafts = saved.file_drafts.clone();
@@ -1592,7 +1690,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
 
 impl Snapshot {
     fn prepare_connection_refresh(&mut self) -> Vec<Effect> {
-        let mut effects = Vec::new();
+        let mut effects = vec![Effect::execute(op::ReadProjectClones {})];
         if self.catalog.provider_settings.take().is_some() {
             effects.push(Effect::execute(op::ReadProviderSettings {}));
         }
@@ -2001,6 +2099,7 @@ fn submission(
         );
         return (next, Vec::new());
     }
+    let requested = follow_up::for_context(requested, draft.fresh_context);
     if thread_id.is_none() && !matches!(draft_key, DraftKey::Session { .. }) {
         let mut next = previous.clone();
         next.fail_operation(
@@ -2010,9 +2109,22 @@ fn submission(
         return (next, Vec::new());
     }
     let mut next = previous.clone();
+    if let Err(reason) = agent_protocol::context::validate_contexts(&draft.contexts) {
+        next.fail_operation(
+            op::OperationKey::Submission {
+                draft_key: draft_key.clone(),
+            },
+            reason.into(),
+        );
+        return (next, Vec::new());
+    }
     if let Some(reason) = thread_id
         .as_ref()
         .and_then(|id| previous.submission_unavailable_reason(id, provider))
+        .or_else(|| {
+            cwd.as_deref()
+                .and_then(|cwd| previous.project_clone_block_reason(cwd))
+        })
     {
         next.fail_operation(
             op::OperationKey::Submission {
@@ -2024,6 +2136,7 @@ fn submission(
     }
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
     if let Some(current) = shared_mut(&mut next.input.drafts, &draft_key) {
+        current.fresh_context &= !cleared.fresh_context;
         if current.text == cleared.text {
             current.text.clear();
             current.invocations.clear();
@@ -2034,6 +2147,9 @@ fn submission(
                 .iter()
                 .any(|sent| sent.path == attachment.path)
         });
+        current
+            .contexts
+            .retain(|context| !cleared.contexts.contains(context));
     }
     let anchor = thread_id
         .as_ref()

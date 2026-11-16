@@ -193,6 +193,7 @@ async fn reading_on_either_device_broadcasts_to_both_and_reconnect_reads_the_sha
                 command: Command::Submit {
                     id: input.to_string().into(),
                     content: InputContent {
+                        fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "complete".into(),
                         }],

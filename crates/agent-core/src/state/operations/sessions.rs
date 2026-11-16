@@ -532,12 +532,21 @@ impl Operation for ForkSession {
 
 pub use agent_protocol::operations::RewindSession;
 
+/// A rewound run's input as the composer restores it.
+#[derive(Debug)]
+struct Recalled {
+    text: String,
+    attachments: Vec<Attachment>,
+    contexts: Vec<agent_protocol::context::MessageContext>,
+    fresh_context: bool,
+}
+
 /// The canonical input retains attachment names that image display parts omit.
 fn sent_input(
     projection: &agent_protocol::orchestration::projection::ThreadProjection,
     details: &BTreeMap<(String, String), Arc<agent_protocol::orchestration::TurnItem>>,
     turn: &agent_protocol::ids::TurnId,
-) -> Result<Option<(String, Vec<Attachment>)>, String> {
+) -> Result<Option<Recalled>, String> {
     use agent_protocol::{items::MessagePart, orchestration::TurnItemBody};
     let Some((omitted, text, images, context)) = projection
         .turn_items
@@ -574,26 +583,34 @@ fn sent_input(
         return Err("Wait for the original message to finish loading before rewinding.".into());
     }
     let mut attachments = crate::orchestration::attachments(images)?;
-    attachments.extend(
-        crate::orchestration::context_parts(context.as_ref())?
-            .into_iter()
-            .filter_map(|part| match part {
-                MessagePart::Attachment { name, path } => Some(Attachment {
-                    name,
-                    path,
-                    is_image: false,
-                }),
-                _ => None,
+    let mut contexts = Vec::new();
+    for part in crate::orchestration::context_parts(context.as_ref()) {
+        match part {
+            MessagePart::Attachment { name, path } => attachments.push(Attachment {
+                name,
+                path,
+                is_image: false,
             }),
-    );
-    Ok(Some((text.clone(), attachments)))
+            MessagePart::Context { context } => contexts.push(*context),
+            _ => {}
+        }
+    }
+    Ok(Some(Recalled {
+        text: text.clone(),
+        attachments,
+        contexts,
+        fresh_context: projection
+            .runs
+            .iter()
+            .any(|run| run.id == turn.as_str() && run.fresh_context),
+    }))
 }
 
 #[derive(Debug)]
 pub struct RewindCapture {
     scope: String,
     epoch: u64,
-    original: Option<(String, Vec<Attachment>)>,
+    original: Option<Recalled>,
 }
 
 impl Operation for RewindSession {
@@ -649,18 +666,28 @@ impl Operation for RewindSession {
             return Ok(Vec::new());
         }
         let id = self.thread_id;
-        if let Some((text, attachments)) = captured.original {
+        if let Some(recalled) = captured.original {
             let drafts = Arc::make_mut(&mut snapshot.input.drafts);
             let draft = Arc::make_mut(drafts.entry(id.clone().into()).or_default());
             // T3 chatViewSend.ts reads the latest prompt after native success.
             // Keep input typed while waiting and append the recalled message.
-            if !text.is_empty() {
+            if !recalled.text.is_empty() {
                 if !draft.text.is_empty() {
                     draft.text.push_str("\n\n");
                 }
-                draft.text.push_str(&text);
+                draft.text.push_str(&recalled.text);
             }
-            draft.attachments.extend(attachments);
+            draft.attachments.extend(recalled.attachments);
+            for context in recalled.contexts {
+                if !draft
+                    .contexts
+                    .iter()
+                    .any(|current| current.id == context.id)
+                {
+                    draft.contexts.push(context);
+                }
+            }
+            draft.fresh_context |= recalled.fresh_context;
         }
         let effects = if current && !snapshot.sessions.subscriptions.contains_key(&id) {
             vec![Effect::execute(ReadThread::open(id))]

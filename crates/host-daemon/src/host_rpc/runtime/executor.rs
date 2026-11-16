@@ -728,7 +728,8 @@ impl Runtime {
             return Ok(None);
         }
         drop(catalog);
-        Self::release_previous_native_sources(service, effect, worker, provider)
+        let fresh = run.fresh_context.then_some(thread.id.as_str());
+        Self::release_previous_native_sources(service, effect, worker, provider, fresh)
             .await
             .map_err(Failure::before_submission)?;
         let Some(current) = runtime
@@ -871,11 +872,14 @@ impl Runtime {
     // Native teardown is part of the leased start, before the new prompt. Keep
     // the old attachment until teardown succeeds, so a failed probe/unload
     // cannot orphan its background callbacks or publish a false detachment.
+    /// Release native sessions this start replaces: another provider's, and on a
+    /// T3 fresh start, the same provider's earlier conversations as well.
     async fn release_previous_native_sources(
         service: &HostRpcService,
         effect: &model::Effect,
         worker: &str,
         destination: ProviderKind,
+        fresh: Option<&str>,
     ) -> Result<(), Failure> {
         let runtime = &service.inner.conversation;
         let Some(state) = runtime
@@ -887,9 +891,17 @@ impl Runtime {
         };
         let target = SessionRef::new(None, effect.thread_id.clone())
             .map_err(|error| storage_failure(error.into()))?;
+        let busy = if fresh.is_some() {
+            "The current session is still running background agents or commands, and a fresh session would end them. Wait for them to finish, or press Stop, then send the message again."
+        } else {
+            "The previous provider still has running background work"
+        };
         for thread in state.provider_threads.values().filter(|thread| {
             thread.app_thread_id.as_deref() == Some(&effect.thread_id)
-                && thread.provider_instance_id != destination.key()
+                && fresh.map_or(
+                    thread.provider_instance_id != destination.key(),
+                    |current| thread.id != current,
+                )
                 && state.provider_session(&thread.id).is_some()
         }) {
             let Some(reference) = thread.native_thread_ref.as_ref() else {
@@ -950,10 +962,7 @@ impl Runtime {
                         })
                 })
             {
-                return Err(Failure::new(
-                    "provider_background_running",
-                    "The previous provider still has running background work",
-                ));
+                return Err(Failure::new("provider_background_running", busy));
             }
             let agent = service.inner.providers.get(provider)?;
             // Claude can own native children without a saved roster. A failed
@@ -963,10 +972,7 @@ impl Runtime {
                 || !live.response.thread.requests.is_empty()
                 || live.response.thread.status != agent_protocol::execution::SessionStatus::Idle
             {
-                return Err(Failure::new(
-                    "provider_background_running",
-                    "The previous provider still has running background work",
-                ));
+                return Err(Failure::new("provider_background_running", busy));
             }
             if runtime
                 .storage
@@ -1096,60 +1102,41 @@ impl Runtime {
                 });
             }
         }
-        if let Some(records) = context
-            .as_ref()
-            .and_then(|context| context.get("records"))
-            .and_then(serde_json::Value::as_array)
+        let records = agent_protocol::context::stored_contexts(context.as_ref());
+        let catalog = if records
+            .iter()
+            .any(|record| matches!(record, agent_protocol::context::StoredContext::Skill { .. }))
         {
-            let catalog = if records.iter().any(|record| {
-                record.get("kind").and_then(serde_json::Value::as_str) == Some("skill")
-            }) {
-                Some(service.inner.providers.catalog(cwd).await)
-            } else {
-                None
-            };
-            for record in records {
-                match record.get("kind").and_then(serde_json::Value::as_str) {
-                    Some("mention") => {
-                        let path = record
-                            .get("path")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| {
-                                Failure::new("invalid_context", "mention has no path")
-                            })?;
-                        input.push(op::Input::Mention {
-                            path: path.into(),
-                            name: record
-                                .get("label")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or(path)
-                                .into(),
-                        });
-                    }
-                    Some("skill") => {
-                        let name = record
-                            .get("name")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| Failure::new("invalid_context", "skill has no name"))?;
-                        let candidate = catalog
-                            .as_ref()
-                            .and_then(|catalog| {
-                                catalog.candidates.iter().find(|candidate| {
-                                    Some(candidate.invocation.provider) == native.provider
-                                        && candidate.invocation.kind
-                                            == agent_protocol::composer::InvocationKind::Skill
-                                        && candidate.invocation.name == name
-                                })
+            Some(service.inner.providers.catalog(cwd).await)
+        } else {
+            None
+        };
+        for record in records {
+            match record {
+                agent_protocol::context::StoredContext::Mention { path, label } => {
+                    input.push(op::Input::Mention { path, name: label });
+                }
+                agent_protocol::context::StoredContext::Context(context) => {
+                    input.push(op::Input::Context { context });
+                }
+                agent_protocol::context::StoredContext::Skill { name } => {
+                    let candidate = catalog
+                        .as_ref()
+                        .and_then(|catalog| {
+                            catalog.candidates.iter().find(|candidate| {
+                                Some(candidate.invocation.provider) == native.provider
+                                    && candidate.invocation.kind
+                                        == agent_protocol::composer::InvocationKind::Skill
+                                    && candidate.invocation.name == name
                             })
-                            .ok_or_else(|| {
-                                Failure::new(
-                                    "skill_unavailable",
-                                    format!("Skill {name} is unavailable"),
-                                )
-                            })?;
-                        input.push(candidate.invocation.input());
-                    }
-                    _ => return Err(Failure::new("invalid_context", "unknown message context")),
+                        })
+                        .ok_or_else(|| {
+                            Failure::new(
+                                "skill_unavailable",
+                                format!("Skill {name} is unavailable"),
+                            )
+                        })?;
+                    input.push(candidate.invocation.input());
                 }
             }
         }
@@ -1159,6 +1146,7 @@ impl Runtime {
         Ok(op::Submission {
             thread_id: native.clone(),
             client_user_message_id: message_id.clone().into(),
+            fresh_context: false,
             input,
             model: Some(agent_protocol::models::ModelRef {
                 provider,

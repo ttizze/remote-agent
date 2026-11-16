@@ -79,7 +79,10 @@ pub(crate) struct State {
     /// Each Host's observed navigation survives sidebar and language remounts.
     #[cfg(any(desktop, test))]
     sidebar_routes: BTreeMap<String, agent_core::presentation::sidebar::ProjectReveal>,
-    pub file_line: Option<(u64, Option<u32>)>,
+    /// The file panel last opened, the line its link names, and which opening
+    /// it was: opening the same line again is a new request to show it.
+    pub file_line: Option<(u64, Option<u32>, u64)>,
+    file_openings: u64,
     pub side_chats: BTreeMap<u64, SideChat>,
     pub browser_renderer: String,
     pub worktrees: Option<WorktreeEditor>,
@@ -88,6 +91,8 @@ pub(crate) struct State {
     /// The width the user gave the file list beside an open file.
     #[cfg(any(desktop, test))]
     pub explorer_width: f32,
+    /// Which files show rendered instead of as their source.
+    pub file_rendering: agent_core::presentation::files::FileRenderingPreferences,
     /// This app's own update, on the desktop.
     #[cfg(desktop)]
     pub update: Option<agent_core::updates::UpdateState>,
@@ -119,6 +124,7 @@ impl Default for State {
             #[cfg(any(desktop, test))]
             sidebar_routes: BTreeMap::new(),
             file_line: None,
+            file_openings: 0,
             side_chats: BTreeMap::new(),
             browser_renderer: String::new(),
             worktrees: None,
@@ -126,6 +132,7 @@ impl Default for State {
             contrast: agent_core::presentation::appearance::DEFAULT_CONTRAST,
             #[cfg(any(desktop, test))]
             explorer_width: agent_core::presentation::files::EXPLORER_DEFAULT_WIDTH,
+            file_rendering: Default::default(),
             #[cfg(desktop)]
             update: None,
             #[cfg(desktop)]
@@ -251,11 +258,12 @@ pub(crate) struct Application {
     stop: CancellationToken,
     runtime: tokio::runtime::Handle,
     jobs: tokio_util::task::TaskTracker,
-    selection_path: Option<PathBuf>,
+    selection_path: PathBuf,
     #[cfg(desktop)]
     onboarding_path: PathBuf,
     #[cfg(any(desktop, test))]
     explorer_width_path: PathBuf,
+    file_rendering_path: PathBuf,
     #[cfg(any(desktop, test))]
     sidebar_projects_path: PathBuf,
     #[cfg(desktop)]
@@ -274,35 +282,8 @@ impl Application {
         root: PathBuf,
         local: Option<agent_local_host::launch::HostScope>,
     ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
-        Self::start(root, local, None)
-    }
-
-    #[cfg(any(target_os = "ios", test))]
-    pub(crate) fn embedded(
-        root: PathBuf,
-        borrowed: crate::client::BorrowedSession,
-    ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
-        Self::start(root, None, Some(borrowed))
-    }
-
-    fn start(
-        root: PathBuf,
-        local: Option<agent_local_host::launch::HostScope>,
-        borrowed: Option<crate::client::BorrowedSession>,
-    ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
-        let selection_path = borrowed
-            .is_none()
-            .then(|| root.join("connection-selection.json"));
-        let selection = match &selection_path {
-            Some(path) => connections::load_selection(path)?,
-            None => agent_core::presentation::connection_list::ConnectionSelection {
-                host_id: borrowed.as_ref().map(|borrowed| borrowed.host.clone()),
-                all: false,
-            },
-        };
-        let language = borrowed
-            .as_ref()
-            .map(|borrowed| borrowed.session.snapshot().catalog.ui_language);
+        let selection_path = root.join("connection-selection.json");
+        let selection = connections::load_selection(&selection_path)?;
         #[cfg(any(desktop, test))]
         let explorer_width_path = root.join("file-explorer-width.json");
         #[cfg(any(desktop, test))]
@@ -321,14 +302,20 @@ impl Application {
                 agent_core::presentation::files::EXPLORER_DEFAULT_WIDTH,
                 |width| agent_core::presentation::files::explorer_width(width, f32::INFINITY),
             );
+        // As the width, an unreadable choice is the default's.
+        let file_rendering_path = root.join("file-rendering.json");
+        let file_rendering = crate::storage::read(&file_rendering_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
         #[cfg(desktop)]
         let onboarding_path = root.join(onboarding::COMPLETED);
         #[cfg(desktop)]
         let scope = local.clone();
-        let (runtime, client, incoming) = Client::start(root, local, borrowed)?;
+        let (runtime, client, incoming) = Client::start(root, local)?;
         // The device's language, which Core's copy follows too; an unreadable
         // choice is the default, as on a first launch.
-        let language = language.unwrap_or_else(|| client.device.language());
+        let language = client.device.language();
         crate::l10n::set(language);
         let contrast = client.device.contrast();
         crate::ui::colors::set_contrast(contrast);
@@ -347,6 +334,7 @@ impl Application {
             contrast,
             #[cfg(any(desktop, test))]
             explorer_width,
+            file_rendering,
             #[cfg(any(desktop, test))]
             sidebar_projects,
             #[cfg(desktop)]
@@ -367,6 +355,7 @@ impl Application {
             onboarding_path,
             #[cfg(any(desktop, test))]
             explorer_width_path,
+            file_rendering_path,
             #[cfg(any(desktop, test))]
             sidebar_projects_path,
             #[cfg(desktop)]
@@ -532,6 +521,22 @@ impl Application {
         self.state.send_modify(|state| {
             let state = Arc::make_mut(state);
             state.explorer_width = width;
+            if let Err(reason) = saved {
+                state.failure = Some(reason.to_string());
+            }
+        });
+    }
+
+    /// Saves which files show rendered and publishes it, as the file list's
+    /// width.
+    pub fn set_file_rendering(
+        &self,
+        preferences: agent_core::presentation::files::FileRenderingPreferences,
+    ) {
+        let saved = agent_local_host::save_private_json(&self.file_rendering_path, &preferences);
+        self.state.send_modify(|state| {
+            let state = Arc::make_mut(state);
+            state.file_rendering = preferences;
             if let Err(reason) = saved {
                 state.failure = Some(reason.to_string());
             }
@@ -710,7 +715,6 @@ impl Application {
     }
 
     /// Asks side chat `id` to explain `text` in a conversation of its own.
-    #[cfg(any(desktop, target_os = "ios"))]
     pub fn explain_in_side_chat(&self, id: u64, text: String) {
         self.state.send_modify(|state| {
             if let Some(chat) = Arc::make_mut(state).side_chats.get_mut(&id) {
@@ -764,7 +768,8 @@ impl Application {
             let state = Arc::make_mut(state);
             state.panels = next.panels;
             if kind == PanelKind::File {
-                state.file_line = Some((next.id, line));
+                state.file_openings += 1;
+                state.file_line = Some((next.id, line, state.file_openings));
             }
         });
     }
@@ -819,7 +824,7 @@ impl Application {
             let state = Arc::make_mut(state);
             state.panels = panels;
             state.side_chats.remove(&id);
-            if state.file_line.is_some_and(|(file, _)| file == id) {
+            if state.file_line.is_some_and(|(file, ..)| file == id) {
                 state.file_line = None;
             }
             true
@@ -856,12 +861,9 @@ impl Application {
         self.jobs.close();
         self.jobs.wait().await;
         // Producer jobs have stopped; include changes accepted during a save.
-        let saved = match &self.selection_path {
-            Some(path) => {
-                connections::save_selection(path.clone(), self.snapshot().selection()).await
-            }
-            None => Ok(()),
-        };
+        let saved =
+            connections::save_selection(self.selection_path.clone(), self.snapshot().selection())
+                .await;
         let closed = self.client.shutdown().await;
         closed.and(saved)
     }
@@ -1180,7 +1182,7 @@ mod tests {
         let first = sidebar.borrow_and_update().clone();
         let second = tools.borrow_and_update().clone();
         assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(first.file_line, Some((id, Some(7))));
+        assert_eq!(first.file_line, Some((id, Some(7), 1)));
         assert!(first.panels.get(scope.clone()).maximized);
         assert!(first.settings);
         assert_eq!(first.provider, Some(ProviderKind::Codex));
@@ -1193,7 +1195,7 @@ mod tests {
         assert!(closed.provider.is_none());
         assert_eq!(
             first.file_line,
-            Some((id, Some(7))),
+            Some((id, Some(7), 1)),
             "mounted views retain immutable snapshots"
         );
         runtime.block_on(application.shutdown()).unwrap();
@@ -1548,6 +1550,26 @@ mod tests {
         std::fs::write(directory.path().join("file-explorer-width.json"), b"broken").unwrap();
         let (runtime, broken) = Application::new(directory.path().into(), None).unwrap();
         assert_eq!(broken.snapshot().explorer_width, EXPLORER_DEFAULT_WIDTH);
+        runtime.block_on(broken.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn file_renderings_are_restored_on_the_next_launch_and_a_broken_choice_is_the_default() {
+        use agent_core::presentation::files::{FileRendering, FileRenderingPreferences};
+        let initial = FileRenderingPreferences::default();
+        let chosen = initial.with(FileRendering::Markdown, true);
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, application) = Application::new(directory.path().into(), None).unwrap();
+        assert_eq!(application.snapshot().file_rendering, initial);
+        application.set_file_rendering(chosen);
+        assert_eq!(application.snapshot().file_rendering, chosen);
+        runtime.block_on(application.shutdown()).unwrap();
+        let (runtime, restored) = Application::new(directory.path().into(), None).unwrap();
+        assert_eq!(restored.snapshot().file_rendering, chosen);
+        runtime.block_on(restored.shutdown()).unwrap();
+        std::fs::write(directory.path().join("file-rendering.json"), b"broken").unwrap();
+        let (runtime, broken) = Application::new(directory.path().into(), None).unwrap();
+        assert_eq!(broken.snapshot().file_rendering, initial);
         runtime.block_on(broken.shutdown()).unwrap();
     }
 

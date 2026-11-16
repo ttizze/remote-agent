@@ -258,6 +258,7 @@ pub async fn submit(
         Command::Submit {
             id: input.client_user_message_id.clone(),
             content: InputContent {
+                fresh_context: false,
                 parts: input.input.clone(),
                 model: input.model.clone(),
                 effort: input.effort.clone(),

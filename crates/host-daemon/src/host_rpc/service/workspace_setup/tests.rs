@@ -46,6 +46,8 @@ fn save_launch(
                 model::admit(
                     state,
                     model::Input {
+                        fresh_context: false,
+                        scheduled_task_id: None,
                         message_id: input.into(),
                         created_by: model::Actor::User,
                         creation_source: model::CreationSource::Mobile,
@@ -97,6 +99,7 @@ fn request(cwd: &Path) -> Call {
         initial: Some((
             Uuid::from_u128(42).to_string().into(),
             InputContent {
+                fresh_context: false,
                 parts: vec![op::Input::Text {
                     text: "Build the requested feature".into(),
                 }],
@@ -413,6 +416,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
             command: Command::Submit {
                 id: operation.to_string().into(),
                 content: InputContent {
+                    fresh_context: false,
                     parts: vec![op::Input::Text {
                         text: "continue after rewind".into(),
                     }],
@@ -524,6 +528,7 @@ async fn remote_start_fetches_before_checkout_and_retains_the_completed_card() {
                 command: Command::Submit {
                     id: input.to_string().into(),
                     content: InputContent {
+                        fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "prepare another turn".into(),
                         }],
@@ -1134,6 +1139,7 @@ async fn stopped_checkout(retry_existing: bool) {
             command: Command::Submit {
                 id: input.to_string().into(),
                 content: InputContent {
+                    fresh_context: false,
                     parts: vec![op::Input::Text {
                         text: "new input after Stop".into(),
                     }],
@@ -1339,6 +1345,7 @@ async fn restart_preserves_interrupted_checkouts_and_waits_for_an_explicit_retry
                 command: Command::Submit {
                     id: operation.to_string().into(),
                     content: InputContent {
+                        fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "after restart".into(),
                         }],

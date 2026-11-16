@@ -6,9 +6,17 @@ mod generated;
 mod windows_paths;
 pub use generated::append_generated_image_embeds;
 
+/// GFM with inline and block math, as every client renders it.
+pub fn parse_options() -> ParseOptions {
+    let mut options = ParseOptions::gfm();
+    options.constructs.math_text = true;
+    options.constructs.math_flow = true;
+    options
+}
+
 pub fn parse(source: &str) -> Node {
     // GFM has no syntax errors; only the disabled MDX extensions can fail.
-    let mut root = ::markdown::to_mdast(source, &ParseOptions::gfm()).expect("GFM is infallible");
+    let mut root = ::markdown::to_mdast(source, &parse_options()).expect("GFM is infallible");
     windows_paths::preserve_destinations(&mut root, source);
     root
 }

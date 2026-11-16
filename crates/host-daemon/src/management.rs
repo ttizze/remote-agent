@@ -75,6 +75,29 @@ async fn resume_host(path: &std::path::Path) -> Result<()> {
 }
 
 pub(crate) async fn run(mode: Mode, state_dir: Option<PathBuf>, isolated: bool) -> Result<()> {
+    if let Mode::Triage {
+        output,
+        description,
+    } = &mode
+    {
+        let state = match state_dir {
+            Some(state) => state,
+            None => agent_local_host::LocalHostRegistry::for_user()?
+                .directory()
+                .to_owned(),
+        };
+        let prepared = host_daemon::triage::prepare(
+            output,
+            &state,
+            &agent_protocol::triage::Prepare {
+                source: None,
+                description: description.clone(),
+            },
+            None,
+        )?;
+        println!("{}", serde_json::to_string_pretty(&prepared)?);
+        return Ok(());
+    }
     if let Mode::ResumeHost { launch_file } = &mode {
         return resume_host(launch_file).await;
     }

@@ -19,6 +19,7 @@ async fn launch(service: &HostRpcService, cwd: &str, text: &str) -> SessionRef {
             initial: Some((
                 Uuid::new_v4().to_string().into(),
                 decision::InputContent {
+                    fresh_context: false,
                     parts: vec![op::Input::Text { text: text.into() }],
                     model: None,
                     effort: None,
@@ -258,6 +259,7 @@ async fn weak_native_plan_ids_are_scoped_across_conversations_and_successive_tur
             command: Command::Submit {
                 id: operation.to_string().into(),
                 content: decision::InputContent {
+                    fresh_context: false,
                     parts: vec![op::Input::Text {
                         text: "next turn in A".into(),
                     }],
@@ -366,6 +368,7 @@ fn strong_native_item_ids_keep_the_pinned_global_identity_and_match_text_updates
             native_turn_id: "native-turn".into(),
             native_thread_id: "native-thread".into(),
             provider,
+            prompt_actor: model::Actor::User,
             now: "2026-11-14T00:00:00.000Z".into(),
             completed: false,
         };
@@ -419,6 +422,7 @@ fn native_tool_outputs_preserve_provider_names_and_canonical_content() {
         native_turn_id: "native-turn".into(),
         native_thread_id: "native".into(),
         provider: ProviderKind::Codex,
+        prompt_actor: model::Actor::User,
         now: "2026-11-14T00:00:00.000Z".into(),
         completed: true,
     };

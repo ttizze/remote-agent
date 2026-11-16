@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 struct IndexedItem {
     source_thread_id: String,
     id: String,
+    run_id: Option<String>,
     kind: String,
     input_intent: Option<String>,
     created_by: Option<String>,
@@ -35,7 +36,7 @@ fn local_items(
         .transpose()
         .map_err(ReadError::from)?;
     let mut query=connection.prepare("SELECT i.turn_item_id,i.type,
-        i.input_intent,i.created_by,i.provider_turn_id
+        i.input_intent,i.created_by,i.provider_turn_id,i.run_id
         FROM orchestration_v2_projection_turn_items i
         LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=i.run_id AND r.thread_id=i.thread_id
         WHERE i.thread_id=?1
@@ -65,16 +66,18 @@ fn local_items(
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             },
         )
         .map_err(ReadError::from)?;
     rows.map(|row| {
-        let (id, kind, input_intent, created_by, provider_turn_id) =
+        let (id, kind, input_intent, created_by, provider_turn_id, run_id) =
             row.map_err(ReadError::from)?;
         Ok(IndexedItem {
             source_thread_id: thread_id.into(),
             id,
+            run_id,
             kind,
             input_intent,
             created_by,
@@ -205,6 +208,39 @@ pub(super) fn item_counts(
 
 /// Portable context uses the same visible inherited timeline as the client,
 /// with full source bodies rather than the reduced wire projection.
+/// T3 contextBoundaryOrdinal across a visible timeline, including a fork's
+/// inherited prefix: nothing shown before the latest fresh start reaches a provider.
+fn context_items(
+    connection: &Connection,
+    timeline: Timeline,
+    sources: &mut std::collections::BTreeMap<String, model::State>,
+) -> Result<Vec<IndexedItem>, ReadError> {
+    let thread_id = timeline.state.thread.id.clone();
+    sources.insert(thread_id, timeline.state);
+    let mut start = 0;
+    let mut seen = BTreeSet::new();
+    for (position, index) in timeline.items.iter().enumerate() {
+        let Some(run_id) = &index.run_id else {
+            continue;
+        };
+        if !sources.contains_key(&index.source_thread_id) {
+            sources.insert(
+                index.source_thread_id.clone(),
+                projections::metadata(connection, &index.source_thread_id)?,
+            );
+        }
+        if seen.insert((index.source_thread_id.clone(), run_id.clone()))
+            && sources[&index.source_thread_id]
+                .runs
+                .get(run_id)
+                .is_some_and(model::Run::starts_context)
+        {
+            start = position;
+        }
+    }
+    Ok(timeline.items.into_iter().skip(start).collect())
+}
+
 pub(super) fn handoff_items(
     connection: &Connection,
     thread_id: &str,
@@ -214,10 +250,8 @@ pub(super) fn handoff_items(
 ) -> Result<Vec<(model::TurnItem, Option<model::RunStatus>)>, ReadError> {
     let timeline = read(connection, thread_id, &mut BTreeSet::new())?;
     let mut sources = std::collections::BTreeMap::new();
-    sources.insert(thread_id.to_owned(), timeline.state);
     let mut items = Vec::new();
-    for index in timeline
-        .items
+    for index in context_items(connection, timeline, &mut sources)?
         .into_iter()
         .filter(|index| index.synthetic.is_none())
     {
@@ -262,8 +296,9 @@ pub(super) fn context_history(
     if timeline.state.thread.deleted_at.is_some() {
         return Err("conversation does not exist".into());
     }
-    let indices: Vec<_> = timeline
-        .items
+    // The history reader serves omitted handoff items: the same context window.
+    let items = context_items(connection, timeline, &mut Default::default())?;
+    let indices: Vec<_> = items
         .iter()
         .filter(|index| history::historical_role(&index.kind).is_some())
         .collect();
@@ -360,6 +395,7 @@ fn fork_marker(thread: &model::Thread, source_thread_id: &str) -> IndexedItem {
     IndexedItem {
         source_thread_id: source_thread_id.into(),
         id: marker.id.clone(),
+        run_id: None,
         kind: "fork".into(),
         input_intent: None,
         created_by: None,

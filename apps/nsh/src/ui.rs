@@ -83,7 +83,6 @@ pub(crate) mod colors {
     }
 
     /// `--accent`: a pressed or hovered ghost control, white at 4%.
-    #[cfg(desktop)]
     pub(crate) const T3_ACCENT: Rgba = rgba(0xffffff0a);
     /// `--input`: an outlined control's edge, white at 8%.
     pub(crate) const T3_INPUT: Rgba = rgba(0xffffff14);
@@ -133,15 +132,17 @@ impl Icon {
     pub(crate) const ARROW_LEFT: Self = icon!(ArrowLeft);
     pub(crate) const ARROW_RIGHT: Self = icon!(ArrowRight);
     pub(crate) const ARROW_UP: Self = icon!(ArrowUp);
-    pub(crate) const ARROW_DOWN: Self = icon!(ArrowDown);
-    pub(crate) const GIT_FORK: Self = icon!(GitFork);
     #[cfg(desktop)]
     pub(crate) const GIT_BRANCH: Self = icon!(GitBranch);
     #[cfg(desktop)]
     pub(crate) const PUSH: Self = icon!(CloudUpload);
-    pub(crate) const WRAP: Self = icon!(TextWrap);
+    /// T3 Code's file panel: show a file rendered, or its source again.
+    pub(crate) const EYE: Self = icon!(Eye);
+    pub(crate) const CODE: Self = icon!(CodeXml);
+    pub(crate) const TABLE: Self = icon!(Table2);
     #[cfg(desktop)]
     pub(crate) const MAXIMIZE: Self = icon!(Maximize2);
+    #[cfg(desktop)]
     pub(crate) const MINIMIZE: Self = icon!(Minimize2);
     pub(crate) const WARNING: Self = icon!(TriangleExclamationPoint);
     pub(crate) const CHECK: Self = icon!(Check);
@@ -149,7 +150,6 @@ impl Icon {
     pub(crate) const CHEVRON_RIGHT: Self = icon!(ChevronRight);
     pub(crate) const CHEVRON_UP: Self = icon!(ChevronUp);
     pub(crate) const CLOSE: Self = icon!(X);
-    pub(crate) const CIRCLE_STOP: Self = icon!(CircleStop);
     pub(crate) const COPY: Self = icon!(Copy);
     #[cfg(desktop)]
     pub(crate) const DETAILS: Self = icon!(SquareMenu);
@@ -157,9 +157,7 @@ impl Icon {
     #[cfg(desktop)]
     pub(crate) const DOWNLOAD: Self = icon!(Download);
     pub(crate) const ELLIPSIS: Self = icon!(Ellipsis);
-    pub(crate) const WRENCH: Self = icon!(Wrench);
     pub(crate) const TERMINAL: Self = icon!(SquareTerminal);
-    pub(crate) const BRAIN: Self = icon!(Brain);
     #[cfg(desktop)]
     pub(crate) const FOLDER_OPEN: Self = icon!(FolderOpen);
     pub(crate) const FILE_TEXT: Self = icon!(FileText);
@@ -177,7 +175,6 @@ impl Icon {
     pub(crate) const MONITOR: Self = icon!(Monitor);
     pub(crate) const NEW_CHAT: Self = icon!(SquarePen);
     pub(crate) const PENCIL: Self = icon!(Pencil);
-    pub(crate) const TRASH: Self = icon!(Trash);
     #[cfg(desktop)]
     pub(crate) const PANEL_LEFT_CLOSE: Self = icon!(PanelLeftClose);
     #[cfg(desktop)]
@@ -191,8 +188,6 @@ impl Icon {
     pub(crate) const SHIELD: Self = icon!(Shield);
     pub(crate) const SPARKLES: Self = icon!(Sparkles);
     pub(crate) const QUESTION: Self = icon!(MessageCircleQuestionMark);
-    #[cfg(desktop)]
-    pub(crate) const QUOTE: Self = icon!(Quote);
     pub(crate) const REFRESH: Self = icon!(RotateCw);
     #[cfg(desktop)]
     pub(crate) const SEARCH: Self = icon!(Search);
@@ -212,7 +207,6 @@ impl Icon {
     #[cfg(desktop)]
     pub(crate) const SERVER: Self = icon!(Server);
     pub(crate) const BOT: Self = icon!(Bot);
-    pub(crate) const STEER: Self = icon!(Redo2);
     #[cfg(desktop)]
     pub(crate) const ZOOM_IN: Self = icon!(ZoomIn);
     #[cfg(desktop)]
@@ -231,10 +225,6 @@ impl Icon {
 }
 
 impl Icon {
-    const NOTIFY_BOT: Self = icon!(Bot);
-    const NOTIFY_TERMINAL: Self = icon!(Terminal);
-    const NOTIFY_EYE: Self = icon!(Eye);
-    const NOTIFY_ZAP: Self = icon!(Zap);
     /// Lucide 1 names circle-alert circle-exclamation-point.
     pub(crate) const ALERT: Self = icon!(CircleExclamationPoint);
     /// T3 Code's sidebar statuses: working, waiting on background work, an
@@ -243,33 +233,6 @@ impl Icon {
     pub(crate) const STATUS_WAITING: Self = icon!(CircleDotDashed);
     pub(crate) const STATUS_DONE: Self = icon!(CircleCheck);
     pub(crate) const STATUS_APPROVAL: Self = icon!(ShieldQuestionMark);
-    const HAMMER: Self = icon!(Hammer);
-
-    /// A notification row's icon, as T3 Code's work log draws it.
-    pub(crate) fn notification(
-        icon: agent_core::presentation::background_work::NotificationIcon,
-    ) -> Self {
-        use agent_core::presentation::background_work::NotificationIcon::*;
-        match icon {
-            Bot => Self::NOTIFY_BOT,
-            Terminal => Self::NOTIFY_TERMINAL,
-            Eye => Self::NOTIFY_EYE,
-            Zap => Self::NOTIFY_ZAP,
-            CircleAlert => Self::ALERT,
-        }
-    }
-
-    /// A work item's tool, as T3 Code's work log shows it.
-    pub(crate) fn work(kind: &str) -> Self {
-        match kind {
-            "command" => Self::NOTIFY_TERMINAL,
-            "fileChange" => Self::NEW_CHAT,
-            "mixed" => Self::HAMMER,
-            "reasoning" => Self::BRAIN,
-            "webSearch" => Self::GLOBE,
-            _ => Self::WRENCH,
-        }
-    }
 }
 
 /// An icon in the current text color.
@@ -428,6 +391,16 @@ pub(crate) fn toggle(
     pressed: impl Fn() -> bool + Copy + 'static,
     press: impl Fn() + 'static,
 ) -> nsh_base::ButtonElement {
+    toggle_with(icon(glyph, 16.0), label, pressed, press)
+}
+
+/// T3 Code's ghost toggle around `glyph`, for one whose icon follows its state.
+pub(crate) fn toggle_with(
+    glyph: impl IntoElement,
+    label: impl IntoReactive<SharedString>,
+    pressed: impl Fn() -> bool + Copy + 'static,
+    press: impl Fn() + 'static,
+) -> nsh_base::ButtonElement {
     let label = label.into_reactive();
     bare_button(label.clone(), press)
         .w(px(28.0))
@@ -437,7 +410,7 @@ pub(crate) fn toggle(
         .hover(|s| s.bg(colors::T3_ACCENT))
         .selected(pressed)
         .selected_style(|s| s.bg(colors::T3_ACCENT))
-        .child(view().tooltip(tooltip(label)).child(icon(glyph, 16.0)))
+        .child(view().tooltip(tooltip(label)).child(glyph))
 }
 
 /// nsh-base's button (focus, keys, accessibility) in the desktop client's

@@ -71,6 +71,8 @@ pub(super) struct Context {
     pub native_turn_id: String,
     pub native_thread_id: String,
     pub provider: ProviderKind,
+    /// T3 createdBy of native user messages in this thread.
+    pub prompt_actor: model::Actor,
     pub now: String,
     pub completed: bool,
 }
@@ -208,8 +210,9 @@ impl Context {
             ItemBody::UserMessage { text, content } => (
                 Kind::System,
                 Body::UserMessage {
-                    created_by: model::Actor::User,
+                    created_by: self.prompt_actor,
                     creation_source: model::CreationSource::Provider,
+                    scheduled_task_id: None,
                     message_id: item_identity("message", self.provider, &self.native_turn_id, id),
                     input_intent: "turn_start".into(),
                     text: text.clone().unwrap_or_else(|| {

@@ -152,6 +152,7 @@ fn a_preparing_task_reviews_no_changes_until_its_turn_starts() {
                         project_id: crate::models::ProjectMembership::Assigned("project".into()),
                         preparations: vec![SessionPreparation {
                             submission: agent_protocol::operations::Submission {
+                                fresh_context: false,
                                 thread_id: id.clone(),
                                 client_user_message_id: "input".into(),
                                 input: Vec::new(),
@@ -536,6 +537,7 @@ fn follow_up_delivery_in_an_established_checkout_keeps_the_review_available() {
         thread.cwd = Some("/fixture".into());
         thread.preparations.push(SessionPreparation {
             submission: agent_protocol::operations::Submission {
+                fresh_context: false,
                 thread_id: id.clone(),
                 client_user_message_id: "follow-up".into(),
                 input: Vec::new(),
@@ -570,6 +572,7 @@ fn failed_worktree_preparation_hides_the_source_checkout_until_a_checkout_exists
 ) {
     let preparation = agent_protocol::session::SessionPreparation {
         submission: agent_protocol::operations::Submission {
+            fresh_context: false,
             thread_id: SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap(),
             client_user_message_id: "failed".into(),
             input: Vec::new(),

@@ -71,7 +71,13 @@ pub(crate) fn queued(connection: Connection) -> View {
         .border_1()
         .border_color(colors::border())
         .bg(colors::SURFACE)
-        .label(move || tr_format("キューのメッセージ {0}件", [&count()]))
+        .label(tr("キューのメッセージ"))
+        .accessibility_value(move || {
+            Some(nsh_core::AccessibilityValue {
+                text: Some(count().to_string().into()),
+                ..Default::default()
+            })
+        })
         .child(header)
         .child(when(expanded, move || {
             let drag = signal(None::<Drag>);

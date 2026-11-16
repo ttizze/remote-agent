@@ -451,6 +451,10 @@ fn prepare(
     fresh: bool,
     now: &str,
 ) -> Result<Vec<model::Change>, projections::ReadError> {
+    // T3 freshContext: a fresh start hands nothing to its new provider thread.
+    if run.fresh_context && fork.is_none() && !fresh {
+        return Ok(Vec::new());
+    }
     let fork_source = fork
         .map(|fork| projections::metadata(connection, &fork.source_thread_id))
         .transpose()?;
@@ -465,7 +469,15 @@ fn prepare(
     // T3 prepares imported run-less history until an app run completes, even
     // when the provider has already allocated a native identity. In particular,
     // a baseline rewind allocates an unwritten identity, not a native prefix.
+    // Runs before the latest fresh start never reach a provider again; T3
+    // hands over imported history only when no fresh start has happened.
+    let boundary = if fork.is_none() {
+        source.context_boundary_ordinal()
+    } else {
+        0
+    };
     let imported = state.thread.history_origin == Some(model::ThreadHistoryOrigin::V1Import)
+        && boundary == 0
         && !state
             .runs
             .values()
@@ -484,7 +496,8 @@ fn prepare(
         source
             .last_delivered_run(&thread.id)
             .map_or(0, |run| run.ordinal)
-    };
+    }
+    .max(boundary.saturating_sub(1));
     let items = if fork.is_some() {
         // The target's inherited timeline already owns the exact source cutoff.
         // Its first new input is a local run and must not echo in that context.

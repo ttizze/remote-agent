@@ -723,6 +723,8 @@ impl Claude {
                     }
                 },
                 user: Some(Item {
+                    attempt: None,
+                    author: None,
                     id: id.clone().into(),
                     status: ItemStatus::Unknown,
                     client_input_id: Some(client_id.into()),
@@ -846,6 +848,8 @@ impl Claude {
         };
         let turn_id: agent_protocol::ids::TurnId = params.client_user_message_id.as_str().into();
         let user = Item {
+            attempt: None,
+            author: None,
             id: params.client_user_message_id.as_str().into(),
             status: ItemStatus::Unknown,
             client_input_id: Some(params.client_user_message_id.clone()),
@@ -2129,6 +2133,9 @@ async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
     let mut content = Vec::with_capacity(input.len());
     for part in input {
         match part {
+            op::Input::Context { context } => {
+                content.push(json!({"type":"text","text":context.provider_text()}));
+            }
             op::Input::Text { text, .. } => {
                 let text = input.iter().fold(text.clone(), |text, part| match part {
                     op::Input::Skill { name, path } => {
@@ -2771,6 +2778,30 @@ impl Agent for Claude {
 pub(crate) mod execution_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn structured_context_survives_native_input_without_reading_its_references() {
+        use agent_protocol::{
+            context::{ContextContent, MessageContext},
+            items::MessagePart,
+        };
+        let context = MessageContext {
+            id: "file".into(),
+            label: "Source".into(),
+            content: ContextContent::File {
+                path: "/unread/source.rs".into(),
+            },
+        };
+        let content = input_content(&[op::Input::Context {
+            context: Box::new(context.clone()),
+        }])
+        .await
+        .unwrap();
+        let item = native::input_item("item", &content, false).unwrap();
+        assert!(
+            matches!(item.body(), ItemBody::UserMessage { text: None, content } if content == &[MessagePart::Context {context: Box::new(context)}])
+        );
+    }
+
     include!("claude/native_state_tests.rs");
 
     include!("claude/native_fork_tests.rs");
@@ -2911,6 +2942,7 @@ pub(crate) mod execution_tests {
                 receiver.close();
             }
             let submission = op::Submission {
+                fresh_context: false,
                 thread_id: session.clone(),
                 client_user_message_id: "input".into(),
                 input: vec![op::Input::Text {
@@ -2970,6 +3002,7 @@ pub(crate) mod execution_tests {
             .unwrap();
         let record = claude.record(&session.id).await.unwrap();
         let submission = |model: &str, effort: Option<&str>| op::Submission {
+            fresh_context: false,
             thread_id: session.clone(),
             client_user_message_id: "input".into(),
             input: vec![op::Input::Text {

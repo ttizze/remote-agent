@@ -21,6 +21,8 @@ fn committed_admission_is_atomic_and_repeating_its_command_cannot_reexecute_the_
         model::admit(
             state,
             model::Input {
+                fresh_context: false,
+                scheduled_task_id: None,
                 message_id: "message".into(),
                 created_by: model::Actor::User,
                 creation_source: model::CreationSource::Mobile,
@@ -117,6 +119,8 @@ fn input_decision(
     model::admit(
         state,
         model::Input {
+            fresh_context: false,
+            scheduled_task_id: None,
             message_id: message.into(),
             created_by: model::Actor::User,
             creation_source: model::CreationSource::Mobile,

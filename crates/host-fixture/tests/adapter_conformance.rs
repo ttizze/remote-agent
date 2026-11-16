@@ -37,6 +37,7 @@ async fn finished_with_input(events: &mut Conversation, input: &ClientInputId) -
 
 fn submission(session: &SessionRef, text: &str) -> op::Submission {
     op::Submission {
+        fresh_context: false,
         thread_id: session.clone(),
         client_user_message_id: ClientInputId::from(uuid::Uuid::new_v4().to_string()),
         input: vec![op::Input::Text { text: text.into() }],

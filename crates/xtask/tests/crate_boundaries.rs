@@ -65,10 +65,11 @@ fn host_binaries_and_protocol_stay_independent_of_clients() {
                 "uniffi",
                 "tokio",
                 "iroh",
-                "markdown",
             ][..]
         } else {
-            &["agent-core", "agent-ffi", "uniffi", "markdown"][..]
+            // The pure `markdown` parser is shared: like T3's server, the Host
+            // reads Markdown structure to place generated-image embeds.
+            &["agent-core", "agent-ffi", "uniffi"][..]
         };
         for dependency in forbidden {
             assert!(

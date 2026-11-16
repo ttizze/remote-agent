@@ -58,7 +58,7 @@ pub use execution::{
     observe_item, observe_native_status, observe_plan, observe_subagent, observe_subagent_progress,
     started, uncertain_delivery,
 };
-pub use forks::{fork_native_thread, fork_thread};
+pub use forks::{ForkTarget, fork_native_thread, fork_thread, fork_title};
 mod generated_images;
 mod recovery;
 pub use generated_images::project_generated_images;
@@ -363,6 +363,9 @@ pub struct Thread {
     pub rollback_failure: Option<RollbackFailure>,
     pub last_visited_at: Option<String>,
     pub deleted_at: Option<String>,
+    /// T3 Thread.pullRequests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_requests: Vec<crate::pull_requests::ThreadPullRequestLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +419,10 @@ pub struct Run {
     pub work_started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_preparation: Option<WorkspacePreparation>,
+    /// T3 Run.freshContext: starts a new provider conversation; earlier runs
+    /// stay visible but never reach the provider.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_context: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -749,6 +756,8 @@ pub enum TurnItemBody {
     UserMessage {
         created_by: Actor,
         creation_source: CreationSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scheduled_task_id: Option<String>,
         message_id: String,
         input_intent: String,
         text: String,

@@ -7,7 +7,10 @@ use agent_core::presentation::media::ZoomGesture;
 use nsh_platform_windows::{ComponentContext, Components, NativeComponent, Wheel};
 use std::rc::Rc;
 
+mod conversation;
+
 pub(crate) fn register(components: &Components) {
+    conversation::register(components);
     components.register("bex.wheel", Rc::new(|context| Box::new(WheelArea(context))));
     components.register("bex.zoom", Rc::new(|context| Box::new(ZoomArea(context))));
 }

@@ -10,6 +10,9 @@ pub mod records;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputContent {
+    /// T3 message.dispatch freshContext: a new provider conversation.
+    #[serde(default)]
+    pub fresh_context: bool,
     pub parts: Vec<InputPart>,
     pub model: Option<ModelRef>,
     pub effort: Option<String>,

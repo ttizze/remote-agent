@@ -1,6 +1,18 @@
 {
   "sourceLanguage": "ja",
   "strings": {
+    "Cut off by a steer": {
+      "localizations": {
+        "ja": { "stringUnit": { "state": "translated", "value": "追加の指示で中断" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Cut off by a steer" } }
+      }
+    },
+    "Superseded attempt": {
+      "localizations": {
+        "ja": { "stringUnit": { "state": "translated", "value": "以前の試行" } },
+        "en": { "stringUnit": { "state": "translated", "value": "Superseded attempt" } }
+      }
+    },
     "会話の下書きを開いてから送信してください。": {
       "localizations": {
         "ja": {
@@ -2045,6 +2057,118 @@
           "stringUnit": {
             "state": "translated",
             "value": "Used an MCP tool"
+          }
+        }
+      }
+    },
+    "Markdownのソースを表示": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Markdownのソースを表示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show markdown source"
+          }
+        }
+      }
+    },
+    "Markdownをレンダリング表示": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Markdownをレンダリング表示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show rendered markdown"
+          }
+        }
+      }
+    },
+    "Mermaidのソースを表示": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mermaidのソースを表示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show Mermaid source"
+          }
+        }
+      }
+    },
+    "表を表示": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "表を表示"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show table"
+          }
+        }
+      }
+    },
+    "このファイルは空です。": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "このファイルは空です。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file is empty."
+          }
+        }
+      }
+    },
+    "{0} 行 · {1} 列": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{0} 行 · {1} 列"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{0} rows · {1} columns"
+          }
+        }
+      }
+    },
+    "この図にはリソースのURL、マークアップ、ノードのメタデータ、または独自の設定が含まれています。安全に確認するにはMermaidのソースを表示してください。": {
+      "localizations": {
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "この図にはリソースのURL、マークアップ、ノードのメタデータ、または独自の設定が含まれています。安全に確認するにはMermaidのソースを表示してください。"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This diagram contains resource URLs, markup, node metadata, or custom configuration. Show Mermaid source to inspect it safely."
           }
         }
       }

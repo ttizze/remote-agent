@@ -16,15 +16,19 @@ pub mod connections;
 pub mod diff;
 pub mod editors;
 pub mod error;
+pub mod feedback;
 pub mod files;
+pub mod fresh_context;
 pub mod host_management;
 pub mod media;
 pub mod model_settings;
 pub mod onboarding;
 pub mod permissions;
+pub mod project_clone;
 pub mod project_menu;
 pub mod settings;
 pub mod sidebar;
+pub mod snapshot;
 
 use crate::localization::{UiLanguage, localized_ui_format};
 use crate::models::{

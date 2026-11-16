@@ -291,6 +291,7 @@ async fn native_background_query_accepts_input_only_in_its_current_workspace_and
         .1,
     ));
     let params = op::Submission {
+        fresh_context: false,
         thread_id: session,
         client_user_message_id: Uuid::new_v4().to_string().into(),
         input: vec![op::Input::Text {

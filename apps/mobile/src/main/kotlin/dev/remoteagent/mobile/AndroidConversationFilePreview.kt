@@ -159,7 +159,11 @@ internal fun PreviewText(
         TextButton(onClick = { rendered = !rendered }) {
             Text(if (rendered) language.text("ソースを表示") else language.text("Markdownを表示"))
         }
-    if (rendered) Column { ConversationBody(text, cwd, perform) }
+    if (rendered)
+        Column {
+            val blocks = remember(text) { dev.remoteagent.core.markdownBlocks(text) }
+            ConversationBlocks(blocks, cwd, perform)
+        }
     else
         SelectionContainer {
             Text(

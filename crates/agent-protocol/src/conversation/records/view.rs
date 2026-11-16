@@ -20,6 +20,7 @@ pub fn compact(thread: models::Thread) -> models::Thread {
         cwd: thread.cwd,
         project_id: thread.project_id,
         updated_at: thread.updated_at,
+        last_input_at: thread.last_input_at,
         status: thread.status,
         capabilities: thread.capabilities,
         can_accept_direct_input: thread.can_accept_direct_input,
@@ -97,6 +98,7 @@ mod tests {
     #[test]
     fn list_metadata_keeps_only_a_short_fallback_title_and_no_conversation_payload() {
         let native = models::Thread {
+            last_input_at: Some(1234),
             name: Some("  ".into()),
             preview: Some(format!("\n {}\nprivate body", "界".repeat(140))),
             turns: Some(vec![Arc::new(models::Turn {
@@ -108,6 +110,7 @@ mod tests {
             ..Default::default()
         };
         let metadata = compact(native);
+        assert_eq!(metadata.last_input_at, Some(1234));
         assert_eq!(metadata.name.as_deref(), Some("界".repeat(120).as_str()));
         assert!(metadata.preview.is_none());
         assert!(metadata.turns.is_none());

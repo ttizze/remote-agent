@@ -91,6 +91,8 @@ fn project_membership<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_requests: Vec<crate::pull_requests::PullRequest>,
     pub history_read_state: Option<crate::session::HistoryReadState>,
     pub capabilities: Option<crate::session::Capabilities>,
     /// Effective Host admission, distinct from the provider's static capability.
@@ -129,16 +131,38 @@ pub struct Thread {
     pub project_id: ProjectMembership,
     pub preview: Option<String>,
     pub updated_at: Option<f64>,
+    /// Last human submission, in Unix milliseconds; agent activity never advances it.
+    pub last_input_at: Option<i64>,
     pub history_has_more: Option<bool>,
     pub history_cursor: Option<String>,
     pub history_limit: Option<u64>,
     pub list_stale: Option<bool>,
     pub agent_id: Option<String>,
 }
+/// One T3 RunAttempt of a turn. Clients fold work of a superseded attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionAttempt {
+    pub id: uuid::Uuid,
+    pub state: AttemptState,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttemptState {
+    Running,
+    Completed,
+    Interrupted,
+    Failed,
+    Superseded { by_steer: bool },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<ExecutionAttempt>,
     pub id: crate::ids::TurnId,
+    /// This turn starts the provider context visible to subsequent turns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_context: bool,
     pub provider: Option<crate::session::ProviderKind>,
     pub supports_fork: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -778,6 +802,7 @@ mod tests {
         let mut thread = Thread {
             preparations: vec![SessionPreparation {
                 submission: crate::operations::Submission {
+                    fresh_context: false,
                     thread_id: id,
                     client_user_message_id: "input".into(),
                     input: Vec::new(),

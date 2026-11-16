@@ -1,0 +1,14 @@
+# Stop ends a live turn, then Resume continues in that same conversation.
+expect "検証プロジェクト" 30000
+press このプロジェクトで新しいチャット
+type "AI に依頼する" "[thinking] 停止してから再開します"
+press 送信
+expect "思考中: フィクスチャの確認を計画しています コマンドの順序を決めます。" 20000
+press 停止
+expect "スレッドを再開" 20000
+expect "実行を中断しました"
+press スレッドを再開
+expect "Continue where you left off." 20000
+expect "シミュレータで完了しました。" 30000
+expect_absent "スレッドを再開"
+screenshot resumed

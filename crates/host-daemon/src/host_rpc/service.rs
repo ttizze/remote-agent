@@ -1,7 +1,10 @@
 //! The Host's RPC entry point. Dispatch admits each call, then routes it to the
 //! owner of its resource; workflows that span owners live in the domain files.
 mod activity;
+mod automations;
+mod feedback;
 mod project_import;
+mod pull_requests;
 mod sessions;
 mod titles;
 mod update;
@@ -30,10 +33,13 @@ pub struct HostRpcService {
 }
 
 pub(super) struct ServiceInner {
+    automations: crate::automations::Automations,
+    automation_stop: tokio_util::sync::CancellationToken,
     browser: OnceLock<Arc<crate::browser::Browser>>,
     pub(super) providers: crate::providers::Registry,
     provider_settings: crate::providers::Settings,
     pub(super) projects: ProjectStore,
+    project_clones: crate::project_clone::Clones,
     pub(super) conversation: super::runtime::Runtime,
     pub(super) router: SessionRouter,
     event_pumps: std::sync::Once,
@@ -99,6 +105,10 @@ impl HostRpcService {
         );
         Self {
             inner: Arc::new(ServiceInner {
+                automations: crate::automations::Automations::open(
+                    &projects.path().with_file_name("bex-automations.sqlite"),
+                ),
+                automation_stop: Default::default(),
                 history_scope: OnceLock::new(),
                 conversation,
                 updating: std::sync::atomic::AtomicBool::new(false),
@@ -114,6 +124,7 @@ impl HostRpcService {
                 worktree_cleanup: tokio::sync::Notify::new(),
                 permission_settings_access: Default::default(),
                 terminals: Default::default(),
+                project_clones: crate::project_clone::Clones::new(projects.clone()),
                 projects,
                 router,
                 event_pumps: std::sync::Once::new(),
@@ -192,6 +203,8 @@ impl HostRpcService {
     }
 
     pub(crate) async fn shutdown_owned_processes(&self) {
+        self.inner.automation_stop.cancel();
+        self.inner.project_clones.shutdown().await;
         self.inner.conversation.cancel_preparations();
         if let Some(browser) = self.inner.browser.get() {
             browser.shutdown().await;
@@ -285,6 +298,9 @@ impl HostRpcService {
     }
 
     async fn request(&self, session: SessionId, request: &Call) -> Result<Body, Failure> {
+        if let Some(response) = self.project_request(request).await? {
+            return Ok(response);
+        }
         if let Call::Browser(params) = request {
             let browser = self.inner.browser.get().ok_or_else(|| {
                 Failure::new(
@@ -299,6 +315,32 @@ impl HostRpcService {
                 .map_err(|e| Failure::new("browser_failed", e));
         }
         let response = match request {
+            Call::Automations(params) => self.automations(params).await?.into(),
+            Call::PrepareTriage(params) => {
+                params
+                    .validate()
+                    .map_err(|e| Failure::new("invalid_params", e))?;
+                if let Some(source) = &params.source {
+                    self.require_conversation(source)?;
+                }
+                let state = self
+                    .inner
+                    .projects
+                    .path()
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_owned();
+                let params = params.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::triage::prepare(&state.join("triage"), &state, &params, Some(true))
+                })
+                .await
+                .map_err(|e| Failure::new("triage_failed", e.to_string()))?
+                .map_err(|e| Failure::new("triage_failed", e.to_string()))?
+                .into()
+            }
+            Call::PullRequests(params) => self.pull_requests(params).await?.into(),
+            Call::UploadFeedback(params) => self.upload_feedback(params).await?.into(),
             Call::SearchList(params) => self.search_list(params).await?.into(),
             Call::ReadFileOpenCapabilities(_) => self
                 .inner
@@ -354,15 +396,6 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("diagnostic_write_failed", error.to_string()))?;
                 agent_protocol::models::Empty {}.into()
             }
-            Call::AddProject(params) => (self
-                .inner
-                .projects
-                .register(std::path::Path::new(&params.cwd))
-                .await
-                .map_err(|error| Failure::new("project_add_failed", error))?)
-            .into(),
-            Call::ScanProjects(_) => self.scan_projects().await?.into(),
-            Call::ImportProjects(params) => self.import_projects(&params.paths).await?.into(),
             Call::ReadListDecorations(params) => self.list_decorations(params).await?.into(),
             Call::ListAgents(params) => self.list_agents(params).await?.into(),
             Call::ReadWorktreeSettings(_) => (self
@@ -601,6 +634,19 @@ impl HostRpcService {
         &self.inner.files
     }
 
+    /// The saved conversation a request names.
+    pub(in crate::host_rpc) fn require_conversation(
+        &self,
+        id: &agent_protocol::session::SessionRef,
+    ) -> Result<agent_protocol::orchestration::Thread, Failure> {
+        self.inner
+            .conversation
+            .storage
+            .thread_header(id)
+            .map_err(super::runtime::storage_failure)?
+            .ok_or_else(|| Failure::new("conversation_not_found", "conversation does not exist"))
+    }
+
     pub(in crate::host_rpc) fn require_provider_enabled(
         &self,
         provider: ProviderKind,
@@ -616,6 +662,20 @@ impl HostRpcService {
 
     fn start_event_pumps(&self) {
         self.inner.event_pumps.call_once(|| {
+            self.start_automations();
+            let mut clones = self.inner.project_clones.subscribe();
+            let owner = Arc::downgrade(&self.inner);
+            tokio::spawn(async move {
+                while clones.changed().await.is_ok() {
+                    let state = clones.borrow_and_update().clone();
+                    let Some(inner) = owner.upgrade() else { break };
+                    if let Some(state) = state {
+                        inner.router.broadcast(
+                            agent_protocol::protocol::Notification::ProjectClones { state },
+                        );
+                    }
+                }
+            });
             super::runtime::Runtime::start(self);
             for (_, agent) in self.inner.providers.all() {
                 if let Some(mut events) = agent.event_stream() {

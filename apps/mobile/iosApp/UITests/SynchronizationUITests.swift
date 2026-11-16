@@ -224,6 +224,11 @@ extension LaunchUITests {
         let message = app.textFields["task.message"]
         message.tap(); message.typeText("Show this additional input immediately")
         app.buttons["task.send"].tap()
+        // The default follow-up queues input. Explicitly steer it before
+        // checking that acceptance is visible ahead of the provider's echo.
+        let steer = app.buttons["追加の指示"]
+        XCTAssertTrue(steer.waitUntilExists(timeout: 10))
+        steer.tap()
         let sentMessages = app.textViews.matching(NSPredicate(
             format: "identifier == %@ AND value == %@", "message.user-text", "Show this additional input immediately"
         ))

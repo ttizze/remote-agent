@@ -44,6 +44,28 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    ReadAttempt {
+        thread_id: crate::session::SessionRef,
+        attempt: uuid::Uuid,
+    },
+    Automations(Automations),
+    PrepareTriage(PrepareTriage),
+    PullRequests(PullRequests),
+    Stash {
+        storage_scope: String,
+        thread_id: DraftKey,
+        action: crate::composer::stash::StashAction,
+    },
+    ChangeContext {
+        storage_scope: String,
+        thread_id: DraftKey,
+        action: crate::composer::context::ContextAction,
+    },
+    UseArtifactTemplate {
+        storage_scope: String,
+        thread_id: DraftKey,
+        template: crate::presentation::markdown::ArtifactTemplate,
+    },
     WatchCommandOutput {
         thread_id: crate::session::SessionRef,
         item_id: agent_protocol::ids::ItemId,
@@ -69,6 +91,17 @@ pub enum Intent {
     SetProviderEnabled(SetProviderEnabled),
     SetConnectionEnabled {
         enabled: bool,
+    },
+    UploadFeedback(UploadFeedback),
+    SetFreshContext {
+        storage_scope: String,
+        session: crate::session::SessionRef,
+        enabled: bool,
+    },
+    DismissFeedback {
+        storage_scope: String,
+        session: crate::session::SessionRef,
+        id: String,
     },
     RegisterLiveActivity(RegisterLiveActivity),
     UnregisterLiveActivity(UnregisterLiveActivity),
@@ -126,6 +159,9 @@ pub enum Intent {
     AddProject(AddProject),
     ScanProjects(ScanProjects),
     ImportProjects(ImportProjects),
+    CloneProject(CloneProject),
+    ReadProjectClones(ReadProjectClones),
+    ChangeProjectClone(ChangeProjectClone),
     SelectImportProject {
         path: String,
         selected: bool,
@@ -296,6 +332,9 @@ impl Intent {
     pub(super) fn editing_draft(&mut self) -> Option<&mut DraftKey> {
         match self {
             Self::SetDraft { thread_id, .. }
+            | Self::Stash { thread_id, .. }
+            | Self::ChangeContext { thread_id, .. }
+            | Self::UseArtifactTemplate { thread_id, .. }
             | Self::SelectWorkspace { thread_id, .. }
             | Self::EditComposer { thread_id, .. }
             | Self::AppendTranscript { thread_id, .. }
@@ -317,6 +356,19 @@ impl Intent {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {
+    Automations {
+        session: crate::session::SessionRef,
+    },
+    Triage,
+    PullRequests {
+        session: crate::session::SessionRef,
+    },
+    Feedback {
+        session: crate::session::SessionRef,
+    },
+    ProjectClone {
+        id: Option<String>,
+    },
     InputRecovery {
         input: agent_protocol::ids::ClientInputId,
     },
@@ -608,6 +660,16 @@ mod sessions;
 pub use sessions::*;
 mod project_import;
 pub use project_import::*;
+mod project_clone;
+pub use project_clone::*;
+mod feedback;
+pub use feedback::*;
+mod pull_requests;
+pub use pull_requests::*;
+mod triage;
+pub use triage::*;
+mod automations;
+pub use automations::*;
 mod submission;
 pub use submission::*;
 
@@ -615,11 +677,7 @@ pub(super) fn page_rows(
     mut rows: Vec<crate::models::Thread>,
     limit: u32,
 ) -> (Vec<crate::models::Thread>, bool) {
-    rows.sort_by(|a, b| {
-        b.updated_at
-            .unwrap_or_default()
-            .total_cmp(&a.updated_at.unwrap_or_default())
-    });
+    rows.sort_by_key(|row| std::cmp::Reverse(row.last_input_at));
     page_ranked_rows(rows, limit)
 }
 

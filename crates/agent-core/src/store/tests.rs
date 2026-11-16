@@ -486,6 +486,7 @@ async fn saved_unknown_input_is_resolved_on_the_host_before_restoring_the_compos
                 active_provider: Some(ProviderKind::Codex),
                 preparations: vec![SessionPreparation {
                     submission: agent_protocol::operations::Submission {
+                        fresh_context: false,
                         thread_id: session.clone(),
                         client_user_message_id: input.clone(),
                         input: vec![agent_protocol::operations::Input::Text {
@@ -632,6 +633,7 @@ async fn new_task_admits_the_initial_input_in_one_rpc() {
                 status: crate::models::SessionStatus::Preparing,
                 preparations: vec![agent_protocol::session::SessionPreparation {
                     submission: agent_protocol::operations::Submission {
+                        fresh_context: false,
                         thread_id: operation.thread_id.clone(),
                         client_user_message_id: "00000000-0000-0000-0000-00000000002a".into(),
                         input: serde_json::from_value(params["initial"][1]["parts"].clone())

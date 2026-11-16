@@ -506,6 +506,7 @@ fn picker() -> impl IntoElement {
                             ..
                         } = tool.get_untracked();
                         nsh_base::button()
+                            .accessibility_label(Some(SharedString::from(label.clone())))
                             .flex_row()
                             .items_center()
                             .gap(px(10.0))

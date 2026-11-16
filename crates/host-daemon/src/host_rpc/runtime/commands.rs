@@ -11,7 +11,8 @@ pub(super) struct MessageContent {
     pub(super) context: Option<Value>,
 }
 
-pub(super) fn at() -> String {
+/// The canonical event timestamp.
+pub(in crate::host_rpc) fn at() -> String {
     chrono::DateTime::from_timestamp_millis(now())
         .expect("system time is in chrono's range")
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -154,15 +155,28 @@ impl Runtime {
                     }
                     op::Input::Mention {path,name}=>records.push(json!({"version":1,"contextId":context_id,"kind":"mention","label":name,"path":path})),
                     op::Input::Skill {name,..}=>records.push(json!({"version":1,"contextId":context_id,"kind":"skill","label":name,"name":name})),
+                    op::Input::Context {context}=>{
+                        context.validate()?;
+                        records.push(context.record());
+                    }
                 }
             }
             Ok::<_,String>(MessageContent {text:texts.join("\n"),attachments,context:(!records.is_empty()).then(||json!({"version":1,"records":records}))})
         }).await.map_err(|error|storage_failure(error.to_string()))?.map_err(|error|Failure::new("attachment_failed",error))
     }
 
+    /// A paired client's command.
     pub(in crate::host_rpc) async fn change(
         service: &HostRpcService,
         request: &records::Change,
+    ) -> Result<records::Acknowledged, Failure> {
+        Self::change_from(service, request, Origin::Client).await
+    }
+
+    pub(in crate::host_rpc) async fn change_from(
+        service: &HostRpcService,
+        request: &records::Change,
+        origin: Origin<'_>,
     ) -> Result<records::Acknowledged, Failure> {
         let runtime = &service.inner.conversation;
         if let Some(receipt) = runtime
@@ -265,6 +279,7 @@ impl Runtime {
                     content.as_ref(),
                     context,
                     fork_origin,
+                    origin,
                 )
                 .map(|decision| decision.with_command_outputs(tails.as_ref()))
             })
@@ -309,12 +324,21 @@ fn input_run<'a>(state: &'a model::State, id: &ClientInputId) -> Result<&'a mode
         .ok_or_else(|| "input no longer exists".into())
 }
 
+/// Who submits a message. A Host automation is a T3 scheduled task: it is not
+/// human input, so it never advances the thread's authored recency.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::host_rpc) enum Origin<'a> {
+    Client,
+    Automation(&'a str),
+}
+
 fn decide(
     command: &Command,
     state: &model::State,
     content: Option<&MessageContent>,
     context: model::Context<'_>,
     fork_origin: Option<&model::ProviderThreadFork>,
+    origin: Origin<'_>,
 ) -> Result<model::Decision, String> {
     match command {
         Command::Submit {
@@ -334,8 +358,18 @@ fn decide(
                 state,
                 model::Input {
                     message_id: id.to_string(),
-                    created_by: model::Actor::User,
-                    creation_source: model::CreationSource::Mobile,
+                    created_by: match origin {
+                        Origin::Client => model::Actor::User,
+                        Origin::Automation(_) => model::Actor::System,
+                    },
+                    creation_source: match origin {
+                        Origin::Client => model::CreationSource::Mobile,
+                        Origin::Automation(_) => model::CreationSource::Server,
+                    },
+                    scheduled_task_id: match origin {
+                        Origin::Client => None,
+                        Origin::Automation(id) => Some(id.to_owned()),
+                    },
                     text: content.text.clone(),
                     attachments: content.attachments.clone(),
                     context: content.context.clone(),
@@ -362,6 +396,7 @@ fn decide(
                                 .and_then(model::WorkspacePreparation::for_strategy)
                         }),
                     fork_origin: fork_origin.cloned(),
+                    fresh_context: options.fresh_context,
                 },
                 if options.follow_up == op::FollowUp::Steer {
                     model::Admission::Steer

@@ -1,5 +1,6 @@
 mod account_usage;
 mod apns;
+mod automations;
 pub mod browser;
 mod dictation;
 mod editors;
@@ -8,9 +9,11 @@ mod host_identity;
 mod host_rpc;
 mod host_runtime;
 mod platform;
+mod project_clone;
 mod projects;
 pub mod providers;
 mod terminals;
+pub mod triage;
 mod workspace_files;
 mod workspace_review;
 mod worktrees;

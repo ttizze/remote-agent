@@ -8,6 +8,11 @@ pub(super) fn notification(
 ) -> (Snapshot, Vec<Effect>) {
     use crate::protocol::Notification;
     match message {
+        Notification::ProjectClones { state } => {
+            let mut next = previous.clone();
+            let effects = next.accept_project_clones(state);
+            (next, effects)
+        }
         Notification::ProviderSettings { settings } => {
             let mut next = previous.clone();
             let effects = if next.accept_provider_settings(settings) {

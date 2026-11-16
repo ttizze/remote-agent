@@ -82,6 +82,7 @@ fn listed() -> Snapshot {
             id: Some(SessionRef::new(ProviderKind::Claude, format!("task-{index}")).unwrap()),
             name: Some(format!("Task {index}")),
             updated_at: Some(index as f64),
+            last_input_at: Some(index as i64),
             status: SessionStatus::Running,
             ..Default::default()
         })
@@ -244,6 +245,7 @@ async fn windows_are_saved_after_a_pause_and_restore_latest_ten_turns() {
     let saving = tokio::spawn(run(directory.clone(), receiver, unflushed()));
     let mut running = thread("running", 2, TurnStatus::Running);
     let submission = agent_protocol::operations::Submission {
+        fresh_context: false,
         thread_id: running.id.clone().unwrap(),
         client_user_message_id: "preparing".into(),
         input: Vec::new(),

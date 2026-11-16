@@ -253,7 +253,8 @@ impl Persistence {
             if let Some(next) = next {
                 let changed = !crate::persistence::PersistedState::capture(&next)
                     .same(&crate::persistence::PersistedState::capture(&previous));
-                let immediate = !next.list_source().equivalent(&previous.list_source());
+                let immediate = !next.list_source().equivalent(&previous.list_source())
+                    || !next.input.stashes.same(&previous.input.stashes);
                 previous = next;
                 if !changed {
                     continue;

@@ -17,6 +17,11 @@ pub use mobile::{
     MobileFileAction, MobileFileMenuItem, mobile_file_menu, mobile_file_open_request,
 };
 pub use preview::{file_preview_mime_type, image_extension, is_image_file};
+mod rendered;
+pub use rendered::{
+    FileRendering, FileRenderingPreferences, FileTable, TABLE_ROW_HEADER_WIDTH,
+    file_markdown_blocks, file_rendered, file_rendering, mermaid_file_markdown,
+};
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn mobile_file_icon(path: String) -> String {
@@ -49,6 +54,18 @@ pub use tree::{
 
 /// The desktop client's composer file link, shared by menus and dragging.
 pub fn file_mention(path: &str) -> String {
+    let name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
+    format!("[{name}]({})", link_destination(path))
+}
+
+/// `path` as a Markdown link's destination, which reads back as the same path.
+fn link_destination(path: &str) -> String {
     use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
     const DESTINATION: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
         .remove(b'-')
@@ -67,14 +84,7 @@ pub fn file_mention(path: &str) -> String {
         .remove(b'+')
         .remove(b'$')
         .remove(b',');
-    let name = path
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(path)
-        .replace('\\', "\\\\")
-        .replace('[', "\\[")
-        .replace(']', "\\]");
-    format!("[{name}]({})", utf8_percent_encode(path, DESTINATION))
+    utf8_percent_encode(path, DESTINATION).to_string()
 }
 
 /// The desktop client's explorer follows the workspace, except when displaying a Host folder.

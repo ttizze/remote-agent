@@ -61,14 +61,16 @@ pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
             TurnStatus::Interrupted | TurnStatus::Unknown => model::RunStatus::Interrupted,
             TurnStatus::Completed => model::RunStatus::Completed,
         };
-        projection.runs.push(run(
+        let mut saved = run(
             &id,
             turn.id.as_str(),
             message,
             ordinal as u64 + 1,
             status,
             &selected_model,
-        ));
+        );
+        saved.fresh_context = turn.fresh_context;
+        projection.runs.push(saved);
         for item in turn.items.iter().flatten() {
             let item = item_record(&id, Some(turn.id.as_str()), item, selected, turn.queued);
             push_item(&mut projection, item, true);
@@ -424,10 +426,11 @@ fn body(item: &agent_protocol::items::Item, queued: bool) -> model::TurnItemBody
                     }
                     MessagePart::Attachment {name,path}=>records.push(json!({"version":1,"kind":"mention","label":name,"path":path})),
                     MessagePart::Invocation {name,..}=>records.push(json!({"version":1,"kind":"skill","label":name,"name":name})),
+                    MessagePart::Context {context}=>records.push(context.record()),
                     _=>{}
                 }
             }
-            Body::UserMessage {created_by:model::Actor::User,creation_source:model::CreationSource::Mobile,message_id:item.client_input_id.as_ref().map_or_else(||item.id.to_string(),ToString::to_string),input_intent:if queued {"queued_turn"} else {"turn_start"}.into(),text,attachments,context:(!records.is_empty()).then(||json!({"version":1,"records":records}))}
+            Body::UserMessage {created_by:model::Actor::User,creation_source:model::CreationSource::Mobile,scheduled_task_id:None,message_id:item.client_input_id.as_ref().map_or_else(||item.id.to_string(),ToString::to_string),input_intent:if queued {"queued_turn"} else {"turn_start"}.into(),text,attachments,context:(!records.is_empty()).then(||json!({"version":1,"records":records}))}
         }
         ItemBody::AssistantText {text,phase}=>Body::AssistantMessage {message_id:item.id.to_string(),text:text.clone(),phase:match phase {agent_protocol::items::AssistantPhase::Final=>Some("final_answer".into()),agent_protocol::items::AssistantPhase::Commentary=>Some("commentary".into()),_=>None},attachments:vec![],streaming:item.status==ItemStatus::Running},
         ItemBody::Reasoning {summary,content}=>Body::Reasoning {text:summary.iter().chain(content).cloned().collect::<Vec<_>>().join("\n"),streaming:item.status==ItemStatus::Running},

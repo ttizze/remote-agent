@@ -77,6 +77,7 @@ impl ResolveSavedInput {
         (
             crate::session::ProviderKind,
             &'a agent_protocol::orchestration::TurnItemBody,
+            bool,
         ),
         PeerError,
     > {
@@ -100,16 +101,20 @@ impl ResolveSavedInput {
             .ok_or_else(|| PeerError::InvalidMessage("conversation snapshot is missing".into()))?
             .projection;
         let item=projection.turn_items.iter().find(|item|matches!(&item.body,agent_protocol::orchestration::TurnItemBody::UserMessage {message_id,..} if message_id==self.input.as_str())).ok_or_else(||PeerError::InvalidMessage("unresolved input is missing".into()))?;
-        let instance = item
+        let run = item
             .run_id
             .as_ref()
-            .and_then(|id| projection.runs.iter().find(|run| &run.id == id))
-            .map_or(&projection.thread.provider_instance_id, |run| {
-                &run.provider_instance_id
-            });
+            .and_then(|id| projection.runs.iter().find(|run| &run.id == id));
+        let instance = run.map_or(&projection.thread.provider_instance_id, |run| {
+            &run.provider_instance_id
+        });
         let provider = crate::session::ProviderKind::from_instance_id(instance)
             .map_err(PeerError::InvalidMessage)?;
-        Ok((provider, &item.body))
+        Ok((
+            provider,
+            &item.body,
+            run.is_some_and(|run| run.fresh_context),
+        ))
     }
 }
 
@@ -128,10 +133,10 @@ impl Operation for ResolveSavedInput {
             if let Some(recovery) = snapshot.input.input_recoveries.get(&self.input) {
                 self.operation = recovery.operation;
             } else {
-                let (provider, input) = self
+                let (provider, input, fresh_context) = self
                     .unresolved(snapshot)
                     .map_err(|error| error.to_string())?;
-                let draft = recover_draft(input, provider)?;
+                let draft = recover_draft(input, provider, fresh_context)?;
                 Arc::make_mut(&mut snapshot.input.input_recoveries).insert(
                     self.input.clone(),
                     Arc::new(InputRecovery {
@@ -331,6 +336,7 @@ impl Operation for ResolveLocalInput {
 fn recover_draft(
     body: &agent_protocol::orchestration::TurnItemBody,
     provider: crate::session::ProviderKind,
+    fresh_context: bool,
 ) -> Result<Draft, String> {
     use agent_protocol::{items::MessagePart, orchestration::TurnItemBody};
     let TurnItemBody::UserMessage {
@@ -344,6 +350,7 @@ fn recover_draft(
     };
     let mut draft = Draft {
         text: text.clone(),
+        fresh_context,
         ..Default::default()
     };
     for (attachment, part) in attachments
@@ -368,7 +375,7 @@ fn recover_draft(
             _ => unreachable!("attachments contain image or file references"),
         }
     }
-    for part in crate::orchestration::context_parts(context.as_ref())? {
+    for part in crate::orchestration::context_parts(context.as_ref()) {
         match part {
             MessagePart::Invocation { name, path } => draft.invocations.push(Invocation {
                 provider,
@@ -391,7 +398,8 @@ fn recover_draft(
                 path,
                 is_image: false,
             }),
-            _ => unreachable!("context contains mentions or skills"),
+            MessagePart::Context { context } => draft.contexts.push(*context),
+            _ => unreachable!("context records are mentions, skills or contexts"),
         }
     }
     Ok(draft)
@@ -590,6 +598,7 @@ mod tests {
                 active_provider: Some(ProviderKind::Codex),
                 preparations: vec![SessionPreparation {
                     submission: Submission {
+                        fresh_context: false,
                         thread_id: session.clone(),
                         client_user_message_id: input.clone(),
                         input: vec![

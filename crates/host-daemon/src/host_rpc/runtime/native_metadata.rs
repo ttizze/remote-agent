@@ -124,6 +124,7 @@ pub(in crate::host_rpc) fn records(
         rollback_failure: None,
         last_visited_at: None,
         deleted_at: None,
+        pull_requests: Vec::new(),
     };
     let provider_thread = model::ProviderThread {
         id: provider_thread_id,

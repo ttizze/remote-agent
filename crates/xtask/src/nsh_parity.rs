@@ -1,4 +1,4 @@
-//! `cargo xtask nsh-parity [--compare RUN | --t3 RUN] [STATE-FILTER...]`: brings the Mac NSH
+//! `cargo xtask nsh-parity [--appearance] [--compare RUN | --t3 RUN] [STATE-FILTER...]`: brings the Mac NSH
 //! app and T3 Code to the same states (`apps/nsh/parity/map.toml`), captures
 //! both, pairs their elements and writes `target/nsh-parity/run-<time>/report.md`
 //! with a side-by-side image and the differences of each state.
@@ -17,8 +17,14 @@
 //! `--compare RUN` measures an earlier run's captures again (after editing the
 //! map) without running either client; `--t3 RUN` renders T3's side of it again
 //! first (after editing T3 steps or selectors).
+//! The default compares element presence only. `--appearance` also measures
+//! position, size, colours, typography, corner radii and animation metadata.
+//! `--catalog` lists the complete source-derived T3 component checklist without
+//! building or launching either client.
+mod catalog;
 mod compare;
 mod inventory;
+mod manifest;
 mod map;
 mod pixels;
 mod report;
@@ -28,7 +34,7 @@ use crate::{
     nsh_acceptance::{self, Tools},
     supervision,
 };
-use compare::{Difference, Measure, NshCapture, T3Capture};
+use compare::{Difference, Measure, Mode, NshCapture, T3Capture};
 use map::{Map, Reference, State};
 use pixels::{Image, Rgb};
 use std::{
@@ -45,6 +51,10 @@ const DIFFERS: Rgb = [255, 64, 64];
 const MATCHES: Rgb = [64, 200, 120];
 
 pub async fn run(arguments: &[String]) -> Result<()> {
+    let (mode, arguments) = match arguments {
+        [flag, rest @ ..] if flag == "--appearance" => (Mode::Appearance, rest),
+        _ => (Mode::Presence, arguments),
+    };
     let (flag, existing, filters) = match arguments {
         [flag, run, filters @ ..] if flag == "--compare" || flag == "--t3" => {
             (flag.as_str(), Some(run), filters)
@@ -55,23 +65,27 @@ pub async fn run(arguments: &[String]) -> Result<()> {
     // T3's server runs the Codex relay from its own checkout: paths are absolute.
     let existing = existing.map(|run| cwd.join(run));
     let target = nsh_acceptance::target(&cwd);
+    if matches!(arguments, [flag] if flag == "--catalog") {
+        return catalog::write(&cwd, &target);
+    }
     let map = Map::parse(&fs::read_to_string(cwd.join(MAP))?)
         .map_err(|error| format!("{MAP}: {error}"))?;
     let states = select(&map, filters)?;
     let records = match existing {
         Some(records) => {
             if flag == "--t3" {
-                render_t3(&cwd, &map, &states, &Tools::locate(&target)?, &records).await?;
+                capture_reference(&cwd, &map, &states, &Tools::locate(&target)?, &records).await?;
             }
             records
         }
         None => capture(&cwd, &target, &map, &states).await?,
     };
+    fs::copy(cwd.join(MAP), records.join("comparison-map.toml"))?;
     let outcomes: Vec<report::Outcome> = states
         .iter()
         .map(|state| report::Outcome {
             state,
-            result: compare_state(&map, state, &records.join(&state.name)),
+            result: compare_state(&map, state, &records.join(&state.name), mode),
         })
         .collect();
     let name = records
@@ -79,30 +93,29 @@ pub async fn run(arguments: &[String]) -> Result<()> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let path = records.join("report.md");
-    let report = report::render(&name, &map, &outcomes) + &inventory::render(&records, &states);
+    let inventory = if mode == Mode::Appearance {
+        inventory::render(&records, &states)
+    } else {
+        String::new()
+    };
+    let report = report::render(&name, &map, &outcomes, mode) + &inventory;
     fs::write(&path, report)?;
-    let differences = outcomes
-        .iter()
-        .filter_map(|outcome| outcome.result.as_ref().ok())
-        .flatten()
-        .filter(|difference| {
-            map.approval(
-                &difference.element,
-                difference.metric,
-                difference.follows.as_deref(),
-            )
-            .is_none()
-        })
-        .count();
-    let failed = outcomes
-        .iter()
-        .filter(|outcome| outcome.result.is_err())
-        .count();
+    let summary = report::summary(&map, &outcomes, mode);
+    fs::write(
+        records.join("summary.json"),
+        serde_json::to_vec_pretty(&summary)?,
+    )?;
     println!(
-        "{differences} differences in {} states; {failed} not compared\nreport: {}",
-        outcomes.len() - failed,
+        "{} differences in {} states; {} not compared; {} not measured\nreport: {}",
+        summary.differences,
+        summary.states_compared,
+        summary.states_not_compared,
+        summary.not_measured,
         path.display()
     );
+    if !summary.passed {
+        return Err(format!("parity differs; see {}", path.display()).into());
+    }
     Ok(())
 }
 
@@ -131,6 +144,8 @@ async fn capture(cwd: &Path, target: &Path, map: &Map, states: &[&State]) -> Res
         .duration_since(SystemTime::UNIX_EPOCH)?
         .as_secs();
     let records = target.join("nsh-parity").join(format!("run-{seconds}"));
+    fs::create_dir_all(&records)?;
+    manifest::write(cwd, &records, &tools.app, &tools.codex, &cwd.join(MAP))?;
     let cancel = supervision::cancellation();
     for state in states {
         let directory = records.join(&state.name);
@@ -154,10 +169,36 @@ async fn capture(cwd: &Path, target: &Path, map: &Map, states: &[&State]) -> Res
             return Err("cancelled".into());
         }
     }
-    if states.iter().any(|state| state.reference == Reference::T3) {
-        render_t3(cwd, map, states, &tools, &records).await?;
-    }
+    capture_reference(cwd, map, states, &tools, &records).await?;
     Ok(records)
+}
+
+/// One owned status is replaced on every reference attempt. A failed or
+/// interrupted rerender must never reuse old screenshots as successful ones.
+async fn capture_reference(
+    cwd: &Path,
+    map: &Map,
+    states: &[&State],
+    tools: &Tools,
+    records: &Path,
+) -> Result<()> {
+    if !states.iter().any(|state| state.reference == Reference::T3) {
+        return Ok(());
+    }
+    let status = records.join("reference-status.json");
+    fs::write(
+        &status,
+        serde_json::to_vec(&serde_json::json!({"error": "capture incomplete"}))?,
+    )?;
+    let error = render_t3(cwd, map, states, tools, records)
+        .await
+        .err()
+        .map(|error| error.to_string());
+    fs::write(
+        status,
+        serde_json::to_vec(&serde_json::json!({"error": error}))?,
+    )?;
+    Ok(())
 }
 
 async fn render_t3(
@@ -176,6 +217,7 @@ async fn render_t3(
         .and_then(|bytes| Image::decode(&bytes, map.viewport.width.into()).ok())
         .map_or(2.0, |image| image.scale);
     let app = std::env::var("T3_CODE_APP").unwrap_or_else(|_| T3_APP.into());
+    manifest::reference(records, &app, Path::new(&root), &tools.codex)?;
     let plan = map::t3_plan(
         map,
         states.iter().copied(),
@@ -206,6 +248,7 @@ fn compare_state(
     map: &Map,
     state: &State,
     directory: &Path,
+    mode: Mode,
 ) -> std::result::Result<Vec<Difference>, String> {
     let read =
         |name: &str| fs::read(directory.join(name)).map_err(|error| format!("{name}: {error}"));
@@ -219,18 +262,21 @@ fn compare_state(
     let nsh_image = Image::decode(&read("nsh.png")?, width)?;
     let nsh_capture: NshCapture =
         serde_json::from_slice(&read("nsh.json")?).map_err(|error| error.to_string())?;
-    if (nsh_capture.width - width).abs() > 0.5 {
+    if (nsh_capture.width - width).abs() > 0.5
+        || (nsh_capture.height - f64::from(map.viewport.height)).abs() > 0.5
+    {
         return Err(format!(
-            "the NSH window was {} points wide, not {width}",
-            nsh_capture.width
+            "the NSH window was {}×{} points, expected {width}×{}",
+            nsh_capture.width, nsh_capture.height, map.viewport.height
         ));
     }
     let nsh = compare::nsh_measures(map, state, &nsh_capture, &nsh_image);
     let (reference, reference_image) = match state.reference {
         Reference::T3 => {
-            if let Some(failure) = t3_failure(directory, &state.name) {
-                return Err(failure);
-            }
+            reference_succeeded(
+                directory.parent().ok_or("state has no run directory")?,
+                &state.name,
+            )?;
             let image = Image::decode(&read("t3.png")?, width)?;
             let capture: T3Capture =
                 serde_json::from_slice(&read("t3.json")?).map_err(|error| error.to_string())?;
@@ -244,38 +290,36 @@ fn compare_state(
             nsh_image.clone(),
         ),
     };
-    let differences = compare::differences(map, state, &reference, &nsh);
-    // Approved deviations are outlined as matching.
-    let unapproved: Vec<Difference> = differences
-        .iter()
-        .filter(|difference| {
-            map.approval(
-                &difference.element,
-                difference.metric,
-                difference.follows.as_deref(),
-            )
-            .is_none()
-        })
-        .cloned()
-        .collect();
+    let differences = compare::differences(map, state, &reference, &nsh, mode);
     let composite = composite(
         [reference_image, nsh_image],
         [&reference, &nsh],
-        &unapproved,
+        &differences,
     );
     fs::write(directory.join("composite.png"), composite.encode())
         .map_err(|error| error.to_string())?;
     Ok(differences)
 }
 
-fn t3_failure(records: &Path, state: &str) -> Option<String> {
-    let summary = fs::read(records.parent()?.join("t3-summary.json")).ok()?;
-    let summary: BTreeMap<String, Option<String>> = serde_json::from_slice(&summary).ok()?;
-    summary
-        .get(state)
-        .cloned()
-        .flatten()
-        .map(|reason| format!("T3 did not reach the state: {reason}"))
+fn reference_succeeded(records: &Path, state: &str) -> std::result::Result<(), String> {
+    let read =
+        |file: &str| fs::read(records.join(file)).map_err(|error| format!("{file}: {error}"));
+    let status: BTreeMap<String, Option<String>> =
+        serde_json::from_slice(&read("reference-status.json")?)
+            .map_err(|error| format!("reference status: {error}"))?;
+    match status.get("error") {
+        Some(None) => {}
+        Some(Some(error)) => return Err(format!("reference capture failed: {error}")),
+        None => return Err("reference capture has no status".into()),
+    }
+    let summary: BTreeMap<String, Option<String>> =
+        serde_json::from_slice(&read("t3-summary.json")?)
+            .map_err(|error| format!("reference summary: {error}"))?;
+    match summary.get(state) {
+        Some(None) => Ok(()),
+        Some(Some(error)) => Err(format!("T3 did not reach the state: {error}")),
+        None => Err(format!("T3 did not capture {state}")),
+    }
 }
 
 /// Both screenshots side by side, each compared element outlined: red where it
@@ -295,4 +339,40 @@ fn composite(
         }
     }
     pixels::side_by_side(&left, &right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_explicitly_successful_reference_attempt_and_state_are_usable() {
+        let run = tempfile::tempdir().unwrap();
+        let status = run.path().join("reference-status.json");
+        let summary = run.path().join("t3-summary.json");
+        assert!(reference_succeeded(run.path(), "turn").is_err());
+        fs::write(&status, r#"{"error":null}"#).unwrap();
+        for invalid in [
+            "invalid",
+            "{}",
+            r#"{"other":null}"#,
+            r#"{"turn":"timeout"}"#,
+        ] {
+            fs::write(&summary, invalid).unwrap();
+            assert!(reference_succeeded(run.path(), "turn").is_err());
+        }
+        fs::write(&summary, r#"{"turn":null}"#).unwrap();
+        assert!(reference_succeeded(run.path(), "turn").is_ok());
+        for invalid in [
+            "invalid",
+            "{}",
+            r#"{"error":"capture incomplete"}"#,
+            r#"{"error":"failed"}"#,
+        ] {
+            fs::write(&status, invalid).unwrap();
+            assert!(reference_succeeded(run.path(), "turn").is_err());
+        }
+        fs::write(&status, r#"{"error":null}"#).unwrap();
+        assert!(reference_succeeded(run.path(), "turn").is_ok());
+    }
 }

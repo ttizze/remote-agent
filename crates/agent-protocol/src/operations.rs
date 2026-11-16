@@ -124,10 +124,23 @@ pub struct RegisterRemoteHost {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Input {
-    Text { text: String },
-    Skill { name: String, path: String },
-    LocalImage { path: String },
-    Mention { path: String, name: String },
+    Context {
+        context: Box<crate::context::MessageContext>,
+    },
+    Text {
+        text: String,
+    },
+    Skill {
+        name: String,
+        path: String,
+    },
+    LocalImage {
+        path: String,
+    },
+    Mention {
+        path: String,
+        name: String,
+    },
 }
 /// A compaction command carries no user attachment to discard.
 pub fn is_compaction_message(text: &str, attachment_count: usize) -> bool {
@@ -135,6 +148,29 @@ pub fn is_compaction_message(text: &str, attachment_count: usize) -> bool {
 }
 
 impl Input {
+    pub fn with_context_images(mut input: Vec<Self>) -> Vec<Self> {
+        let paths = Self::contexts(&input)
+            .filter_map(|context| context.content.image_path())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for path in paths {
+            if !input.iter().any(
+                |part| matches!(part, Self::LocalImage { path: existing } if existing == &path),
+            ) {
+                input.push(Self::LocalImage { path });
+            }
+        }
+        input
+    }
+    pub fn contexts(input: &[Self]) -> impl Iterator<Item = &crate::context::MessageContext> {
+        input.iter().filter_map(|part| match part {
+            Self::Context { context } => Some(context.as_ref()),
+            _ => None,
+        })
+    }
+    pub fn validate_contexts(input: &[Self]) -> Result<(), &'static str> {
+        crate::context::validate_contexts(Self::contexts(input))
+    }
     /// T3's isCompactionCommandMessage: a standalone command without attachments.
     pub fn is_compaction(input: &[Self]) -> bool {
         matches!(input, [Self::Text { text }] if is_compaction_message(text, 0))
@@ -145,6 +181,9 @@ impl Input {
         input
             .iter()
             .map(|part| match part {
+                Self::Context { context } => MessagePart::Context {
+                    context: context.clone(),
+                },
                 Self::Text { text } => MessagePart::Text { text: text.clone() },
                 Self::LocalImage { path } => MessagePart::Image {
                     source: path.clone(),
@@ -657,6 +696,10 @@ pub struct ReadAccountUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Submission {
+    /// Start a new native context, preserving the Host's visible transcript.
+    /// Such input waits for its own turn even when `follow_up` asks to steer.
+    #[serde(default)]
+    pub fresh_context: bool,
     pub thread_id: crate::session::SessionRef,
     pub client_user_message_id: crate::ids::ClientInputId,
     pub input: Vec<Input>,

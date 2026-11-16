@@ -11,6 +11,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Box<crate::attribution::Author>>,
     pub id: ItemId,
     #[serde(default)]
     pub status: ItemStatus,
@@ -45,10 +49,23 @@ pub enum ToolKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum MessagePart {
-    Text { text: String },
-    Image { source: String },
-    Attachment { name: String, path: String },
-    Invocation { name: String, path: String },
+    Context {
+        context: Box<crate::context::MessageContext>,
+    },
+    Text {
+        text: String,
+    },
+    Image {
+        source: String,
+    },
+    Attachment {
+        name: String,
+        path: String,
+    },
+    Invocation {
+        name: String,
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,6 +272,8 @@ impl Item {
     }
     pub fn new(id: ItemId, status: ItemStatus, body: ItemBody) -> Self {
         Self {
+            attempt: None,
+            author: None,
             id,
             status,
             client_input_id: None,
@@ -293,8 +312,14 @@ impl Item {
                 }
                 content.retain(|part| !matches!(part, MessagePart::Image { source } if source.starts_with("data:")));
                 for part in content {
-                    if let MessagePart::Text { text } = part {
-                        truncate(text);
+                    match part {
+                        MessagePart::Text { text } => truncate(text),
+                        MessagePart::Context { context } => {
+                            let kind = context.content.kind().to_owned();
+                            context.content = crate::context::ContextContent::Summary { kind };
+                            truncate(&mut context.label);
+                        }
+                        _ => {}
                     }
                 }
             }

@@ -72,6 +72,13 @@ pub(crate) fn start(
     fixture: Option<u16>,
     mtm: MainThreadMarker,
 ) -> Rc<Cell<bool>> {
+    // Request the logical SwiftUI accessibility tree, just as an OS client
+    // does. Backing NSViews alone omit SwiftUI Text and Button elements.
+    unsafe {
+        let _: () = msg_send![&*NSApplication::sharedApplication(mtm),
+            accessibilitySetValue: &*NSNumber::numberWithBool(true),
+            forAttribute: &*NSString::from_str("AXEnhancedUserInterface")];
+    }
     let passed = Rc::new(Cell::new(false));
     let driver = Rc::new(RefCell::new(Driver {
         scenario,
@@ -363,6 +370,23 @@ fn attempt(
         ),
         Step::Drag(from, to) => drag(&Tree::read(mtm, menus), from, to),
         Step::Drop => done(release()),
+        Step::Pointer(x, y) => done((|| {
+            let window = main_window(mtm).ok_or("no window to move the pointer in")?;
+            let content = window.contentView().ok_or("the window has no content")?;
+            let point = content.convertPoint_toView(
+                NSPoint::new(
+                    *x,
+                    if content.isFlipped() {
+                        *y
+                    } else {
+                        content.bounds().size.height - y
+                    },
+                ),
+                None,
+            );
+            hover_point(&window, point)?;
+            Ok(format!("moved the pointer to {x}, {y}"))
+        })()),
         Step::Hover(find) => on_element(&Tree::read(mtm, menus), find, |tree, index| {
             hover(tree, index).map(|()| format!("hovered over {}", tree.nodes[index].describe()))
         }),
@@ -522,6 +546,14 @@ fn reading_order(tree: &Tree, find: &Find) -> Attempt {
             )
         })
         .filter(|&node| tree.frame(node).size.height > 0.0)
+        // A native scrollbar's arrow buttons are window chrome, not rows of
+        // the conversation. Its position is checked by expect_scrolled.
+        .filter(|&node| {
+            !tree
+                .lineage(node)
+                .into_iter()
+                .any(|at| tree.nodes[at].role == "AXScrollBar")
+        })
         .collect();
     if texts.len() < 2 {
         return Attempt::Pending(format!("{} elements to order", texts.len()));
@@ -594,7 +626,7 @@ fn counted(tree: &Tree, find: &Find, count: usize) -> Attempt {
             tree.nodes[index]
                 .texts
                 .iter()
-                .any(|(_, text)| text.contains(find.text.as_str()))
+                .any(|(_, text)| super::script::contains(text, &find.text))
         })
         .count();
     let message = format!("{shown} elements show {:?}", find.text);
@@ -861,18 +893,19 @@ impl Target {
                     NSApplication::sharedApplication(mtm).activate();
                 }
                 window.makeKeyAndOrderFront(None);
-                mouse(window, NSEventType::LeftMouseDown, *from);
-                // In steps, as a hand moves, so a drag's claim sees it start
-                // and its label follows.
+                HELD.with_borrow_mut(|held| *held = Some((window.clone(), *to)));
+                post_mouse(window, NSEventType::LeftMouseDown, *from);
                 for step in 1..=DRAG_STEPS {
                     let along = f64::from(step) / f64::from(DRAG_STEPS);
-                    let at = NSPoint::new(
-                        from.x + (to.x - from.x) * along,
-                        from.y + (to.y - from.y) * along,
+                    post_mouse(
+                        window,
+                        NSEventType::LeftMouseDragged,
+                        NSPoint::new(
+                            from.x + (to.x - from.x) * along,
+                            from.y + (to.y - from.y) * along,
+                        ),
                     );
-                    mouse(window, NSEventType::LeftMouseDragged, at);
                 }
-                HELD.with_borrow_mut(|held| *held = Some((window.clone(), *to)));
             }
             Self::Click {
                 element,
@@ -1045,7 +1078,7 @@ impl Tree {
             self.nodes[index]
                 .texts
                 .iter()
-                .any(|(_, text)| text.contains(needle))
+                .any(|(_, text)| super::script::contains(text, needle))
         })
     }
 
@@ -1332,8 +1365,9 @@ fn flags(held: &Modifiers) -> NSEventModifierFlags {
     flags
 }
 
-/// A mouse wheel over the element's center, handed to its window without moving
-/// the pointer: NSH routes a wheel by where the event says it is.
+/// A mouse wheel over the element's center, dispatched through the window's
+/// hit test. A CGEvent-derived wheel has no window, so NSWindow cannot route it
+/// to hosted AppKit controls itself.
 fn scroll(
     tree: &Tree,
     index: usize,
@@ -1368,7 +1402,18 @@ fn scroll(
         ),
     );
     let event = NSEvent::eventWithCGEvent(&event).ok_or("AppKit took no wheel event")?;
-    window.sendEvent(&event);
+    let point = NSPoint::new(
+        frame.origin.x + frame.size.width / 2.0,
+        frame.origin.y + frame.size.height / 2.0,
+    );
+    let content = window.contentView().ok_or("the window has no content")?;
+    let hit = content
+        .hitTest(content.convertPoint_fromView(point, None))
+        .ok_or("the wheel hit no view")?;
+    // NSWindow dispatches a wheel to the enclosing scroll view, including
+    // when hit testing lands on one of its document's plain NSViews.
+    let scroll: Option<Retained<NSView>> = unsafe { msg_send![&*hit, enclosingScrollView] };
+    scroll.unwrap_or(hit).scrollWheel(&event);
     Ok(())
 }
 
@@ -1384,13 +1429,19 @@ fn hover(tree: &Tree, index: usize) -> Result<(), String> {
         frame.origin.x + frame.size.width / 2.0,
         frame.origin.y + frame.size.height / 2.0,
     );
+    hover_point(window, point)
+}
+
+fn hover_point(window: &NSWindow, point: NSPoint) -> Result<(), String> {
     let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
         NSEventType::MouseMoved, point, NSEventModifierFlags::empty(), 0.0, window.windowNumber(), None, 0, 0, 0.0,
     ).ok_or("AppKit made no pointer event")?;
     let content = window.contentView().ok_or("the window has no content")?;
+    window.setAcceptsMouseMovedEvents(true);
+    window.sendEvent(&event);
     let mut view = content
         .hitTest(content.convertPoint_fromView(point, None))
-        .ok_or_else(|| format!("no view is under {}", node.describe()))?;
+        .ok_or("no view is under the pointer")?;
     // A native view (message text) keeps moves to itself, and only NSH's
     // root view tracks hover: the move goes to the outermost NSH view.
     let nsh = |view: &NSView| view.class().name().to_string_lossy().starts_with("Nsh");
@@ -1469,6 +1520,8 @@ fn capture(mtm: MainThreadMarker, output: &Path, name: &str) -> Result<String, S
         .ok_or("no window to capture")?;
     let mut views = Vec::new();
     describe_views(&content, &content, None, &mut views);
+    let mut seen = std::collections::HashSet::new();
+    describe_accessibility(&content, &content, None, &mut seen, &mut views);
     let size = content.bounds().size;
     let report = json!({
         "width": size.width,
@@ -1517,6 +1570,8 @@ fn describe_views(view: &NSView, content: &NSView, parent: Option<usize>, out: &
         "class": view.class().name().to_string_lossy(),
         "frame": [frame.origin.x, top, frame.size.width, frame.size.height],
         "hidden": view.isHiddenOrHasHiddenAncestor(),
+        "bounds": [view.bounds().origin.x,view.bounds().origin.y,view.bounds().size.width,view.bounds().size.height],
+        "visible": [view.visibleRect().origin.x,view.visibleRect().origin.y,view.visibleRect().size.width,view.visibleRect().size.height],
         "alpha": view.alphaValue(),
         "role": text(object, sel!(accessibilityRole)),
         "texts": texts,
@@ -1524,6 +1579,61 @@ fn describe_views(view: &NSView, content: &NSView, parent: Option<usize>, out: &
     }));
     for child in view.subviews() {
         describe_views(&child, content, Some(index), out);
+    }
+}
+
+/// SwiftUI's Text and Button are logical accessibility nodes, without a
+/// backing NSView. Capture their actual screen frames as well as native views.
+fn describe_accessibility(
+    object: &AnyObject,
+    content: &NSView,
+    parent: Option<usize>,
+    seen: &mut std::collections::HashSet<usize>,
+    out: &mut Vec<Value>,
+) {
+    if out.len() >= MAX_NODES || !seen.insert(object as *const _ as usize) {
+        return;
+    }
+    let index = if object.downcast_ref::<NSView>().is_none()
+        && responds(object, sel!(accessibilityFrame))
+    {
+        let screen: NSRect = unsafe { msg_send![object, accessibilityFrame] };
+        let frame = content
+            .window()
+            .map(|window| content.convertRect_fromView(window.convertRectFromScreen(screen), None))
+            .unwrap_or(screen);
+        let top = if content.isFlipped() {
+            frame.origin.y
+        } else {
+            content.bounds().size.height - frame.origin.y - frame.size.height
+        };
+        let texts: serde_json::Map<String, Value> = [
+            ("label", sel!(accessibilityLabel)),
+            ("title", sel!(accessibilityTitle)),
+            ("value", sel!(accessibilityValue)),
+            ("identifier", sel!(accessibilityIdentifier)),
+        ]
+        .into_iter()
+        .filter_map(|(name, selector)| {
+            text(object, selector)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (name.into(), json!(value)))
+        })
+        .collect();
+        let index = out.len();
+        out.push(json!({"parent":parent,"class":object.class().name().to_string_lossy(),
+            "frame":[frame.origin.x,top,frame.size.width,frame.size.height],"hidden":false,"alpha":1,
+            "role":text(object,sel!(accessibilityRole)),"texts":texts,"layer":null}));
+        Some(index)
+    } else {
+        parent
+    };
+    if responds(object, sel!(accessibilityChildren)) {
+        let children: Option<Retained<NSArray<AnyObject>>> =
+            unsafe { msg_send![object, accessibilityChildren] };
+        for child in children.iter().flat_map(|children| children.iter()) {
+            describe_accessibility(&child, content, index, seen, out);
+        }
     }
 }
 
@@ -1774,19 +1884,25 @@ fn release() -> Result<String, String> {
     let (window, at) = HELD
         .with_borrow_mut(Option::take)
         .ok_or("no drag holds a press")?;
-    mouse(&window, NSEventType::LeftMouseUp, at);
+    post_mouse(&window, NSEventType::LeftMouseUp, at);
     Ok(format!("released at {:.0}, {:.0}", at.x, at.y))
 }
 
 /// A left button's `kind` of event at `at` of `window`, handed to it now, as
 /// the system times its events.
-fn mouse(window: &NSWindow, kind: NSEventType, at: NSPoint) {
+fn mouse_event(window: &NSWindow, kind: NSEventType, at: NSPoint) -> Option<Retained<NSEvent>> {
     let now = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
-    let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-        kind, at, NSEventModifierFlags::empty(), now, window.windowNumber(), None, 0, 1, 1.0,
-    );
-    if let Some(event) = event {
-        window.sendEvent(&event);
+    NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        kind,at,NSEventModifierFlags::empty(),now,window.windowNumber(),None,0,1,1.0,
+    )
+}
+
+// Native controls track mouse-down synchronously. Queue the following events
+// so their tracking loop can consume the drag and release in order.
+fn post_mouse(window: &NSWindow, kind: NSEventType, at: NSPoint) {
+    if let Some(event) = mouse_event(window, kind, at) {
+        let application = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+        application.postEvent_atStart(&event, false);
     }
 }
 
@@ -1812,6 +1928,8 @@ impl Click {
             return;
         };
         let app = NSApplication::sharedApplication(MainThreadMarker::from(&*window));
+        app.activate();
+        window.makeKeyAndOrderFront(None);
         let (press, release, flags) = match self {
             Self::Primary(flags) => (
                 NSEventType::LeftMouseDown,

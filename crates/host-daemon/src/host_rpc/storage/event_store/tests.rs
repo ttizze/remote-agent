@@ -86,6 +86,7 @@ fn a_queued_body_gets_its_position_at_activation_after_ordinal_reassignment() {
     let tx = db.transaction().unwrap();
     let mut queued = item("queued-body", "second");
     queued.body = model::TurnItemBody::UserMessage {
+        scheduled_task_id: None,
         created_by: model::Actor::User,
         creation_source: model::CreationSource::Mobile,
         message_id: "queued-body".into(),

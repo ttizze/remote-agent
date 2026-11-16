@@ -118,7 +118,7 @@ pub(crate) fn target(cwd: &Path) -> PathBuf {
 
 /// The dev app and the fixture programs `just nsh-acceptance` builds.
 pub(crate) struct Tools {
-    app: PathBuf,
+    pub(crate) app: PathBuf,
     fixture: PathBuf,
     pub(crate) codex: PathBuf,
     claude: PathBuf,

@@ -933,8 +933,25 @@ impl crate::providers::Discovery for Codex {
 
 #[async_trait::async_trait]
 impl Agent for Codex {
+    async fn upload_feedback(
+        &self,
+        id: &str,
+        reason: Option<&str>,
+        include_logs: bool,
+    ) -> Result<agent_protocol::feedback::FeedbackReceipt, Failure> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Uploaded {
+            thread_id: String,
+        }
+        let response: Uploaded = self.request("feedback/upload", &serde_json::json!({"classification":"bug", "threadId":id,"reason":reason,"includeLogs":include_logs})).await?;
+        Ok(agent_protocol::feedback::FeedbackReceipt {
+            feedback_id: response.thread_id,
+        })
+    }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
+            feedback: true,
             steer: true,
             fork: true,
             rollback: true,
@@ -1776,6 +1793,7 @@ rl.on('line', line => {
         let agent = Codex::new(Ok(server));
         let mut events = agent.event_stream().unwrap();
         let mut input = op::Submission {
+            fresh_context: false,
             thread_id: SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap(),
             client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
             input: vec![op::Input::Text {

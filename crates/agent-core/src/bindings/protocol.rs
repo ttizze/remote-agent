@@ -1,17 +1,279 @@
 //! ABI converters for wire records; the protocol crate has no UniFFI dependency.
+use agent_protocol::context::*;
+use agent_protocol::ids::{ItemId, TurnId};
 
 use crate::{models::*, session::*};
+use agent_protocol::automations::{
+    Action as AutomationAction, Automation, Definition as AutomationDefinition,
+    Reply as AutomationDetails, Request as Automations, Run as AutomationRun,
+    RunState as AutomationRunState, Schedule as AutomationSchedule,
+};
 use agent_protocol::editors::*;
 use agent_protocol::execution::{BackgroundOutcome, BackgroundReport, BackgroundTaskKind};
+use agent_protocol::feedback::*;
 use agent_protocol::file_metadata::{FileMetadata, FileMetadataKind, FilePathMetadata};
 use agent_protocol::file_tree::EntryKind;
 use agent_protocol::live_activity::*;
 use agent_protocol::permissions::*;
+use agent_protocol::project_clone::*;
 use agent_protocol::project_import::ScanProjects;
 use agent_protocol::providers::*;
+use agent_protocol::snapshot::*;
 use agent_protocol::workspace::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
+#[uniffi::remote(Record)]
+struct Automations {
+    pub session: SessionRef,
+    pub action: AutomationAction,
+}
+#[uniffi::remote(Enum)]
+enum AutomationAction {
+    Retry {
+        id: uuid::Uuid,
+    },
+    List,
+    Save {
+        definition: Box<AutomationDefinition>,
+    },
+    RunNow {
+        id: uuid::Uuid,
+    },
+    Pause {
+        id: uuid::Uuid,
+    },
+    Resume {
+        id: uuid::Uuid,
+    },
+    Remove {
+        id: uuid::Uuid,
+    },
+}
+#[uniffi::remote(Record)]
+struct AutomationDefinition {
+    pub id: uuid::Uuid,
+    pub session: SessionRef,
+    pub title: String,
+    pub prompt: String,
+    pub model: Option<ModelRef>,
+    pub effort: Option<String>,
+    pub service_tier: Option<String>,
+    pub schedule: AutomationSchedule,
+    pub enabled: bool,
+}
+#[uniffi::remote(Enum)]
+enum AutomationSchedule {
+    Once {
+        at_ms: i64,
+    },
+    Interval {
+        every_ms: u64,
+    },
+    FixedTime {
+        minute_of_day: u16,
+        weekdays: Vec<u8>,
+        utc_offset_minutes: i16,
+    },
+}
+#[uniffi::remote(Enum)]
+enum AutomationRunState {
+    Sending,
+    Accepted,
+    Unknown,
+    Failed { message: String },
+}
+#[uniffi::remote(Record)]
+struct AutomationRun {
+    pub id: uuid::Uuid,
+    pub at_ms: i64,
+    pub state: AutomationRunState,
+}
+#[uniffi::remote(Record)]
+struct Automation {
+    pub definition: AutomationDefinition,
+    pub next_at_ms: Option<i64>,
+    pub last_run: Option<AutomationRun>,
+}
+#[uniffi::remote(Record)]
+struct AutomationDetails {
+    pub automations: Vec<Automation>,
+}
+use agent_protocol::triage::{Context as TriageContext, Prepare as PrepareTriage};
+#[uniffi::remote(Record)]
+struct PrepareTriage {
+    pub source: Option<SessionRef>,
+    pub description: String,
+}
+#[uniffi::remote(Record)]
+struct TriageContext {
+    pub machine_name: String,
+    pub cli_command: String,
+    pub id: String,
+    pub directory: String,
+    pub facts_path: String,
+    pub playbook_path: String,
+    pub source: Option<SessionRef>,
+    pub version: String,
+    pub revision: Option<String>,
+}
+use agent_protocol::attribution::Author as MessageAuthor;
+#[uniffi::remote(Enum)]
+enum MessageAuthor {
+    Automation { id: uuid::Uuid },
+    Agent { session: SessionRef },
+    System,
+}
+use agent_protocol::pull_requests::{
+    Action as PullRequestAction, PullRequest, Reply as PullRequestDetails, Request as PullRequests,
+};
+#[uniffi::remote(Record)]
+struct PullRequests {
+    pub session: SessionRef,
+    pub action: PullRequestAction,
+}
+#[uniffi::remote(Enum)]
+enum PullRequestAction {
+    Read { refresh: bool },
+    Link { url: String },
+    Unlink { url: String },
+}
+#[uniffi::remote(Record)]
+struct PullRequest {
+    pub url: String,
+    pub number: u64,
+    pub title: String,
+    pub state: PullRequestState,
+    pub draft: bool,
+    pub head: String,
+    pub base: String,
+    pub updated_at: String,
+    pub error: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct PullRequestDetails {
+    pub linked: Vec<PullRequest>,
+    pub current: Vec<PullRequest>,
+    pub current_error: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct UploadFeedback {
+    pub id: String,
+    pub storage_scope: String,
+    pub thread_id: SessionRef,
+    pub reason: Option<String>,
+    pub include_logs: bool,
+}
+#[uniffi::remote(Record)]
+struct FeedbackReceipt {
+    pub feedback_id: String,
+}
+#[uniffi::remote(Record)]
+struct SnapShotSource {
+    pub captured_at_ms: u64,
+    pub app_name: String,
+    pub window_title: String,
+    pub app_identifier: Option<String>,
+    pub app_icon_data_url: Option<String>,
+    pub accessibility: Option<SnapShotAccessibility>,
+}
+#[uniffi::remote(Enum)]
+enum SnapShotAccessibility {
+    FlatText {
+        text: String,
+        truncated: bool,
+    },
+    ElementTree {
+        image_width: u32,
+        image_height: u32,
+        truncated: bool,
+        root: Box<SnapShotNode>,
+    },
+}
+#[uniffi::remote(Record)]
+struct SnapShotNode {
+    pub role: String,
+    pub name: Option<String>,
+    pub value: Option<String>,
+    pub description: Option<String>,
+    pub bounds: Option<SnapShotBounds>,
+    pub state: Option<SnapShotState>,
+    pub actions: Vec<String>,
+    pub children: Vec<SnapShotNode>,
+}
+#[uniffi::remote(Record)]
+struct SnapShotBounds {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+#[uniffi::remote(Enum)]
+enum SnapShotChecked {
+    On,
+    Off,
+    Mixed,
+}
+#[uniffi::remote(Record)]
+struct SnapShotState {
+    pub active: Option<bool>,
+    pub busy: Option<bool>,
+    pub checked: Option<SnapShotChecked>,
+    pub editable: Option<bool>,
+    pub enabled: Option<bool>,
+    pub expanded: Option<bool>,
+    pub focused: Option<bool>,
+    pub selected: Option<bool>,
+    pub visible: Option<bool>,
+}
+#[uniffi::remote(Record)]
+struct CloneProject {
+    pub id: String,
+    pub repository: String,
+    pub destination: String,
+}
+#[uniffi::remote(Record)]
+struct ReadProjectClones {}
+#[uniffi::remote(Record)]
+struct ChangeProjectClone {
+    pub id: String,
+    pub action: ProjectCloneAction,
+}
+#[uniffi::remote(Enum)]
+enum ProjectCloneAction {
+    Cancel,
+    Retry,
+    Dismiss,
+}
+#[uniffi::remote(Enum)]
+enum ProjectClonePhase {
+    Queued,
+    Fetching,
+    Resolving,
+    Checkout,
+    Registering,
+    Completed,
+    Cancelling,
+    Cancelled,
+    Failed,
+}
+#[uniffi::remote(Record)]
+struct CloneProgress {
+    pub current: u64,
+    pub total: u64,
+}
+#[uniffi::remote(Record)]
+struct ProjectCloneState {
+    pub request: CloneProject,
+    pub phase: ProjectClonePhase,
+    pub progress: Option<CloneProgress>,
+    pub error: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct ProjectClones {
+    pub epoch: String,
+    pub revision: u64,
+    pub clones: Vec<ProjectCloneState>,
+}
 #[uniffi::remote(Record)]
 struct ReadProviderSettings {}
 #[uniffi::remote(Record)]
@@ -886,6 +1148,7 @@ struct SetupScript {
 }
 #[uniffi::remote(Enum)]
 enum Input {
+    Context { context: Box<MessageContext> },
     Text { text: String },
     Skill { name: String, path: String },
     LocalImage { path: String },
@@ -966,4 +1229,159 @@ struct ReadCredentials {}
 struct KeyUpdate {
     pub provider: KeyProvider,
     pub key: Option<String>,
+}
+
+#[uniffi::remote(Record)]
+struct CitationSource {
+    pub host: String,
+    pub storage_scope: String,
+    pub session: SessionRef,
+    pub turn_id: TurnId,
+    pub item_id: ItemId,
+}
+#[uniffi::remote(Record)]
+struct TextRange {
+    pub start: u32,
+    pub end: u32,
+}
+#[uniffi::remote(Record)]
+struct AssistantCitation {
+    pub source: CitationSource,
+    pub range: TextRange,
+    pub text: String,
+    pub prefix: String,
+    pub suffix: String,
+    pub comment: String,
+}
+#[uniffi::remote(Record)]
+struct ContextElementSource {
+    pub function_name: Option<String>,
+    pub file_name: Option<String>,
+    pub line: Option<u64>,
+    pub column: Option<u64>,
+}
+#[uniffi::remote(Record)]
+struct ContextElement {
+    pub page_url: String,
+    pub page_title: Option<String>,
+    pub tag_name: String,
+    pub selector: Option<String>,
+    pub html: String,
+    pub component_name: Option<String>,
+    pub source: Option<ContextElementSource>,
+    pub styles: String,
+}
+#[uniffi::remote(Record)]
+struct ContextStyleChange {
+    pub target_id: String,
+    pub selector: Option<String>,
+    pub property: String,
+    pub previous_value: String,
+    pub value: String,
+}
+#[uniffi::remote(Record)]
+struct PreviewContext {
+    pub annotation_id: String,
+    pub page_url: String,
+    pub page_title: Option<String>,
+    pub comment: String,
+    pub target_summary: String,
+    pub style_changes: Vec<String>,
+    pub elements: Vec<ContextElement>,
+    pub element_ids: Vec<String>,
+    pub region_count: Option<u64>,
+    pub stroke_count: Option<u64>,
+    pub style_change_details: Vec<ContextStyleChange>,
+    pub screenshot_context_id: Option<String>,
+}
+#[uniffi::remote(Enum)]
+enum PullRequestState {
+    Open,
+    Closed,
+    Merged,
+}
+#[uniffi::remote(Record)]
+struct PullRequestContext {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub state: PullRequestState,
+    pub draft: bool,
+}
+#[uniffi::remote(Record)]
+struct ReviewContext {
+    pub section_id: String,
+    pub section_title: String,
+    pub path: String,
+    pub start: u64,
+    pub end: u64,
+    pub range_label: String,
+    pub text: String,
+    pub diff: String,
+    pub language: Option<String>,
+    pub pull_request: Option<PullRequestContext>,
+}
+#[uniffi::remote(Enum)]
+enum ContextContent {
+    Image {
+        path: String,
+    },
+    SnapShot {
+        image_path: String,
+        source: SnapShotSource,
+    },
+    Summary {
+        kind: String,
+    },
+    Citation {
+        citation: AssistantCitation,
+    },
+    File {
+        path: String,
+    },
+    Skill {
+        name: String,
+        path: String,
+        description: String,
+    },
+    Thread {
+        host: String,
+        storage_scope: String,
+        session: SessionRef,
+        title: String,
+    },
+    Environment {
+        host: String,
+    },
+    Model {
+        provider: ProviderKind,
+        model: String,
+    },
+    Terminal {
+        terminal_id: String,
+        terminal_label: String,
+        line_start: u64,
+        line_end: u64,
+        text: String,
+    },
+    Element {
+        element: ContextElement,
+    },
+    Review {
+        review: ReviewContext,
+    },
+    Preview {
+        preview: PreviewContext,
+    },
+    PullRequest {
+        pull_request: PullRequestContext,
+    },
+}
+#[uniffi::remote(Record)]
+struct MessageContext {
+    pub id: String,
+    pub label: String,
+    pub content: ContextContent,
 }

@@ -155,15 +155,56 @@ pub fn activate_queued(
     } else {
         run.ordinal
     };
-    let provider_thread_id = state
-        .thread
-        .active_provider_thread_id
+    let stored = run
+        .provider_thread_id
         .as_ref()
         .and_then(|id| state.provider_threads.get(id))
-        .filter(|thread| thread.provider_instance_id == run.provider_instance_id)
-        .map(|thread| thread.id.clone())
-        .or_else(|| run.provider_thread_id.clone())
         .ok_or("queued run has no provider thread")?;
+    // T3 message.dispatch: a fresh start keeps its reserved, unused thread;
+    // other runs follow the latest conversation since the context boundary.
+    let instance = run.provider_instance_id.as_str();
+    let target = if run.fresh_context {
+        (stored.provider_instance_id == instance
+            && stored.first_run_ordinal.is_none()
+            && stored.native_thread_ref.is_none())
+        .then_some(stored)
+    } else {
+        let boundary = state.context_boundary_ordinal();
+        state
+            .thread
+            .active_provider_thread_id
+            .as_ref()
+            .and_then(|id| state.provider_threads.get(id))
+            .filter(|thread| thread.provider_instance_id == instance && !thread.predates(boundary))
+            .or_else(|| {
+                (stored.provider_instance_id == instance && !stored.predates(boundary))
+                    .then_some(stored)
+            })
+            .or_else(|| state.root_provider_thread(instance, boundary))
+    };
+    let (provider_thread_id, created) = match target {
+        Some(thread) => (thread.id.clone(), None),
+        None => {
+            let thread = ProviderThread {
+                id: super::commands::id(context.command_id, "provider-thread"),
+                provider_instance_id: instance.to_owned(),
+                provider_session_id: None,
+                native_thread_ref: None,
+                native_conversation_head_ref: None,
+                native_metadata: None,
+                status: ProviderThreadStatus::NotLoaded,
+                first_run_ordinal: None,
+                last_run_ordinal: None,
+                handoff_ids: Vec::new(),
+                forked_from: None,
+                pending_background_tasks: Vec::new(),
+                created_at: context.now.into(),
+                updated_at: context.now.into(),
+                ..stored.clone()
+            };
+            (thread.id.clone(), Some(thread))
+        }
+    };
     let attempt = state
         .active_attempt(run.active_attempt_id.as_deref())
         .ok_or("queued run has no attempt")?;
@@ -185,7 +226,8 @@ pub fn activate_queued(
         provider_thread_id: Some(provider_thread_id.clone()),
         ..run.clone()
     };
-    let mut changes = vec![
+    let mut changes: Vec<_> = created.into_iter().map(Change::ProviderThread).collect();
+    changes.extend([
         Change::RunAttempt(RunAttempt {
             provider_thread_id: provider_thread_id.clone(),
             ..attempt.clone()
@@ -201,7 +243,7 @@ pub fn activate_queued(
             provider_thread_id: Some(provider_thread_id.clone()),
             ..root.clone()
         }),
-    ];
+    ]);
     changes.extend(state.pending_fork().map(|transfer| {
         Change::ContextTransfer(transfer.for_run(&run.id, &run.provider_instance_id, context.now))
     }));

@@ -35,6 +35,7 @@ fn old_unknown_input_stays_actionable_outside_the_bounded_visible_page() {
     let tx = db.transaction().unwrap();
     let mut user = item("old-input", "thread", None, 1);
     user.body = model::TurnItemBody::UserMessage {
+        scheduled_task_id: None,
         message_id: "old".into(),
         created_by: model::Actor::User,
         creation_source: model::CreationSource::Mobile,

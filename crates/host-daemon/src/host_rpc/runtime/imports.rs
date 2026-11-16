@@ -194,8 +194,9 @@ impl Runtime {
                     // native attachment files or persisting their old paths.
                     ItemBody::UserMessage { text, content } => model::TurnItemBody::UserMessage {
                         message_id,
-                        created_by: model::Actor::User,
+                        created_by: thread.native_prompt_actor(),
                         creation_source: model::CreationSource::Server,
+                        scheduled_task_id: None,
                         input_intent: "turn_start".into(),
                         text: text.clone().unwrap_or_else(|| {
                             content
@@ -465,6 +466,7 @@ mod tests {
                 command: Command::Submit {
                     id: operation.to_string().into(),
                     content: decision::InputContent {
+                        fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "continue".into(),
                         }],

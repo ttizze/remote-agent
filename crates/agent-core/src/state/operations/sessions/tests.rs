@@ -201,6 +201,7 @@ fn reopening_preserves_only_unsubmitted_local_settings(
             .queue
             .inputs
             .push(agent_protocol::operations::Submission {
+                fresh_context: false,
                 thread_id: id.clone(),
                 client_user_message_id: "input".into(),
                 input: vec![],
@@ -720,7 +721,7 @@ fn a_paged_rewind_restores_only_the_selected_conversations_original_input() {
         .unwrap()
         .original
         .unwrap()
-        .0,
+        .text,
         "owned paged input"
     );
 }
@@ -747,7 +748,12 @@ fn a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences() {
     let capture = RewindCapture {
         scope: state.connection.storage_scope.clone(),
         epoch: state.connection.epoch,
-        original: Some((String::new(), vec![file.clone(), file.clone()])),
+        original: Some(Recalled {
+            text: String::new(),
+            attachments: vec![file.clone(), file.clone()],
+            contexts: Vec::new(),
+            fresh_context: false,
+        }),
     };
     RewindSession::new(session.clone(), "cut".into())
         .complete(&mut state, "", (capture, 1), false)
@@ -826,7 +832,12 @@ fn rewind_never_recalls_an_omitted_or_stale_input_preview() {
     );
     Arc::make_mut(&mut state.sessions.item_details).insert(key, full);
     assert_eq!(
-        operation.capture(&state, "").unwrap().original.unwrap().0,
+        operation
+            .capture(&state, "")
+            .unwrap()
+            .original
+            .unwrap()
+            .text,
         text,
         "rewind must recall the complete original input"
     );

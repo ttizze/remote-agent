@@ -42,6 +42,7 @@ pub(super) fn context(
         native_turn_id: turn.control_ref()?.native_id.clone()?,
         native_thread_id: native.id.clone(),
         provider: native.provider?,
+        prompt_actor: state.thread.native_prompt_actor(),
         now: now.into(),
         completed,
     })

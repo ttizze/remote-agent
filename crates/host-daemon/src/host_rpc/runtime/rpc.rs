@@ -199,10 +199,7 @@ impl Runtime {
         request: &records::Subscribe,
     ) -> Result<HostReply, Failure> {
         let storage = &service.inner.conversation.storage;
-        let thread = storage
-            .thread_header(&request.session)
-            .map_err(storage_failure)?
-            .ok_or_else(|| Failure::new("conversation_not_found", "conversation does not exist"))?;
+        let thread = service.require_conversation(&request.session)?;
         let provider = ProviderKind::from_instance_id(&thread.provider_instance_id)
             .map_err(storage_failure)?;
         // A saved canonical transcript remains readable without a provider process.
@@ -345,6 +342,7 @@ impl Runtime {
             rollback_failure: None,
             last_visited_at: None,
             deleted_at: None,
+            pull_requests: Vec::new(),
         };
         let message = if let Some((id, content)) = &request.initial {
             Some(Self::message_content(service, &thread_id, id.as_str(), &content.parts).await?)
@@ -402,6 +400,7 @@ impl Runtime {
                             message_id: id.to_string(),
                             created_by: model::Actor::User,
                             creation_source: model::CreationSource::Mobile,
+                            scheduled_task_id: None,
                             text: content.text.clone(),
                             attachments: content.attachments.clone(),
                             context: content.context.clone(),
@@ -409,6 +408,7 @@ impl Runtime {
                             driver: request.provider.driver().into(),
                             workspace_preparation: preparation.clone(),
                             fork_origin: None,
+                            fresh_context: options.fresh_context,
                         },
                         model::Admission::Queue,
                         model::Context {

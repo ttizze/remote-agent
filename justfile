@@ -72,27 +72,23 @@ nsh-acceptance *scenarios:
 # Compare the Mac app with the installed T3 Code state by state (apps/nsh/parity/map.toml);
 # T3_CODE_APP names the app (the Nightly by default) and T3_CODE_ROOT a checkout with its
 # dependencies installed, for Playwright and the Codex schema. `--compare RUN` measures a run
-# again. Only on request, as nsh-acceptance. Report: target/nsh-parity/run-*/report.md.
+# again. --catalog lists every source-derived T3 conversation component.
+# Presence only by default; --appearance adds visual metrics.
+# Only on request, as nsh-acceptance. Report: target/nsh-parity/run-*/report.md.
 nsh-parity *args:
-    AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev
-    cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
+    #!/usr/bin/env bash
+    set -euo pipefail
+    agent_parity_action=${1-}
+    if [[ $agent_parity_action == --appearance ]]; then agent_parity_action=${2-}; fi
+    if [[ $agent_parity_action != --compare && $agent_parity_action != --t3 && $agent_parity_action != --catalog ]]; then
+        AGENT_CODE_SIGN_IDENTITY=- bash scripts/build-macos.sh desktop dev
+        cargo build --locked -p host-fixture -p agent-process --bins --target aarch64-apple-darwin
+    fi
     cargo xtask nsh-parity "$@"
 
 # List worktrees whose build outputs went unused for three days; --delete removes those outputs.
 prune-idle-builds *args:
     node scripts/prune-idle-builds.ts "$@"
-
-# Build the NSH preview app for an iPhone simulator.
-nsh-ios-simulator:
-    bash apps/nsh/build-native.sh ios-simulator
-    CC=/usr/bin/clang CXX=/usr/bin/clang++ CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER=/usr/bin/clang cargo build --locked -p agent-nsh --target aarch64-apple-ios-sim
-    bash apps/nsh/package.sh
-
-# NSH message-body preview for a paired iPhone; signing values come from the environment.
-nsh-ios-device:
-    bash apps/nsh/build-native.sh ios-device
-    CC=/usr/bin/clang CXX=/usr/bin/clang++ CARGO_TARGET_AARCH64_APPLE_IOS_LINKER=/usr/bin/clang cargo build --locked -p agent-nsh --target aarch64-apple-ios
-    bash apps/nsh/package.sh ios-device
 
 macos-unit-tests:
     cargo test --locked -p native-focus --test native_focus

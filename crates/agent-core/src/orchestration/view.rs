@@ -243,10 +243,7 @@ pub fn project(
                 .clone()
                 .map(models::ProjectMembership::Assigned)
                 .unwrap_or(models::ProjectMembership::Unassigned {}),
-            can_accept_direct_input: Some(
-                !(projection.thread.lineage.relationship_to_parent.as_deref() == Some("subagent")
-                    && projection.thread.creation_source == model::CreationSource::Provider),
-            ),
+            can_accept_direct_input: Some(!projection.thread.is_provider_subagent()),
             capabilities: Some(capabilities),
             steerable: capabilities.steer && active.is_some(),
             status: agent_protocol::orchestration::shell::task_status(
@@ -254,6 +251,12 @@ pub fn project(
                 native_status,
             ),
             updated_at: millis(Some(&projection.updated_at)).map(|at| at as f64 / 1000.0),
+            pull_requests: projection
+                .thread
+                .pull_requests
+                .iter()
+                .map(agent_protocol::pull_requests::ThreadPullRequestLink::pull_request)
+                .collect(),
             turns: Some(turns),
             background,
             queue,
@@ -660,6 +663,8 @@ fn timeline(
                         })
                 })
                 .unwrap_or(display::TurnStatus::Completed),
+            attempts: run.map_or_else(Vec::new, |run| run_attempts(projection, &run.id)),
+            fresh_context: run.is_some_and(|run| run.fresh_context),
             items: Some(Vec::new()),
             started_at: millis(started_at).map(|at| at as f64 / 1000.0),
             started_at_ms: millis(started_at),
@@ -690,25 +695,135 @@ fn timeline(
             let detail = details
                 .get(&(row.source_thread_id.clone(), row.source_item_id.clone()))
                 .filter(|detail| same_detail_revision(&row.item, detail));
-            turn.items.as_mut().unwrap().extend(item_view(
-                detail.map_or(row.item.as_ref(), |detail| detail.as_ref()),
-                provider,
-                detail.is_some(),
-                match &row.item.body {
-                    model::TurnItemBody::Subagent { subagent_id, .. } => projection
-                        .subagents
-                        .iter()
-                        .find(|task| &task.id == subagent_id)
-                        .and_then(|task| task.model.as_deref()),
-                    _ => None,
-                },
-            )?);
+            let attempt =
+                item_attempt(projection, &row.item).map(|attempt| attempt_id(&attempt.id));
+            let author = author(projection, &row.item);
+            turn.items.as_mut().unwrap().extend(
+                item_view(
+                    detail.map_or(row.item.as_ref(), |detail| detail.as_ref()),
+                    provider,
+                    detail.is_some(),
+                    match &row.item.body {
+                        model::TurnItemBody::Subagent { subagent_id, .. } => projection
+                            .subagents
+                            .iter()
+                            .find(|task| &task.id == subagent_id)
+                            .and_then(|task| task.model.as_deref()),
+                        _ => None,
+                    },
+                )?
+                .into_iter()
+                .map(|mut item| {
+                    let saved = Arc::make_mut(&mut item);
+                    saved.attempt = attempt;
+                    saved.author = author.clone();
+                    item
+                }),
+            );
         }
     }
     turns.retain(|turn| {
         turn.items.as_ref().is_some_and(|items| !items.is_empty()) || turn.error.is_some()
     });
     Ok(turns)
+}
+
+/// A user message's sender other than the local user, from T3 createdBy and
+/// scheduledTaskId. A provider subagent's prompt comes from its parent's agent.
+fn author(
+    projection: &ThreadProjection,
+    item: &model::TurnItem,
+) -> Option<Box<agent_protocol::attribution::Author>> {
+    use agent_protocol::attribution::Author;
+    let model::TurnItemBody::UserMessage {
+        created_by,
+        scheduled_task_id,
+        ..
+    } = &item.body
+    else {
+        return None;
+    };
+    if let Some(id) = scheduled_task_id
+        .as_deref()
+        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+    {
+        return Some(Box::new(Author::Automation { id }));
+    }
+    match created_by {
+        model::Actor::User => None,
+        model::Actor::System => Some(Box::new(Author::System)),
+        model::Actor::Agent => projection
+            .thread
+            .lineage
+            .parent_thread_id
+            .as_deref()
+            .and_then(|parent| model::shell::public_session_ref(parent).ok())
+            .map(|session| Box::new(Author::Agent { session })),
+    }
+}
+
+/// Client identity of a T3 RunAttempt id.
+fn attempt_id(id: &str) -> uuid::Uuid {
+    uuid::Uuid::parse_str(id)
+        .unwrap_or_else(|_| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, id.as_bytes()))
+}
+
+/// T3 resolveAttempt: an item belongs to the attempt rooted on its node chain.
+fn item_attempt<'a>(
+    projection: &'a ThreadProjection,
+    item: &model::TurnItem,
+) -> Option<&'a model::RunAttempt> {
+    let run = item.run_id.as_deref()?;
+    let rooted = |node: &str| {
+        projection
+            .attempts
+            .iter()
+            .find(|attempt| attempt.root_node_id == node && attempt.run_id == run)
+    };
+    let mut visited = BTreeSet::new();
+    let mut node = item.node_id.as_deref();
+    while let Some(id) = node.filter(|id| visited.insert(*id)) {
+        if let Some(attempt) = rooted(id) {
+            return Some(attempt);
+        }
+        let current = projection.nodes.iter().find(|node| node.id == id)?;
+        if let Some(attempt) = rooted(&current.root_node_id) {
+            return Some(attempt);
+        }
+        node = current.parent_node_id.as_deref();
+    }
+    None
+}
+
+/// A run's T3 attempts in order. A steering restart cuts off its predecessor.
+fn run_attempts(projection: &ThreadProjection, run: &str) -> Vec<models::ExecutionAttempt> {
+    let mut attempts: Vec<_> = projection
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.run_id == run)
+        .collect();
+    attempts.sort_by_key(|attempt| attempt.attempt_ordinal);
+    attempts
+        .iter()
+        .enumerate()
+        .map(|(index, attempt)| {
+            use model::RunAttemptStatus as Status;
+            models::ExecutionAttempt {
+                id: attempt_id(&attempt.id),
+                state: match attempt.status {
+                    Status::Pending | Status::Running => models::AttemptState::Running,
+                    Status::Completed => models::AttemptState::Completed,
+                    Status::Interrupted | Status::Cancelled => models::AttemptState::Interrupted,
+                    Status::Failed => models::AttemptState::Failed,
+                    Status::Superseded => models::AttemptState::Superseded {
+                        by_steer: attempts.get(index + 1).is_some_and(|next| {
+                            next.reason == model::AttemptReason::SteeringRestart
+                        }),
+                    },
+                },
+            }
+        })
+        .collect()
 }
 
 fn run_status(status: model::RunStatus) -> display::TurnStatus {
@@ -801,37 +916,21 @@ pub(crate) fn attachment_parts(
         .collect())
 }
 
-pub(crate) fn context_parts(
-    context: Option<&serde_json::Value>,
-) -> Result<Vec<items::MessagePart>, String> {
-    let Some(context) = context else {
-        return Ok(vec![]);
-    };
-    context
-        .get("records")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("message context records are missing")?
-        .iter()
-        .map(|record| {
-            let text = |field| {
-                record
-                    .get(field)
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or("message context field is missing".to_owned())
-            };
-            match record.get("kind").and_then(serde_json::Value::as_str) {
-                Some("mention") => Ok(items::MessagePart::Attachment {
-                    name: text("label")?,
-                    path: text("path")?,
-                }),
-                // T3 stores skills by name. The native executor resolves their current catalog path.
-                Some("skill") => Ok(items::MessagePart::Invocation {
-                    name: text("name")?,
-                    path: String::new(),
-                }),
-                _ => Err("unknown message context kind".into()),
+/// Stored T3 context records as message parts; undecodable records are dropped.
+pub(crate) fn context_parts(context: Option<&serde_json::Value>) -> Vec<items::MessagePart> {
+    use agent_protocol::context::StoredContext;
+    agent_protocol::context::stored_contexts(context)
+        .into_iter()
+        .map(|record| match record {
+            StoredContext::Mention { path, label } => {
+                items::MessagePart::Attachment { name: label, path }
             }
+            // T3 stores skills by name. The native executor resolves their current catalog path.
+            StoredContext::Skill { name } => items::MessagePart::Invocation {
+                name,
+                path: String::new(),
+            },
+            StoredContext::Context(context) => items::MessagePart::Context { context },
         })
         .collect()
 }
@@ -880,14 +979,16 @@ fn submission(
             _ => unreachable!(),
         });
     }
-    for part in context_parts(context.as_ref())? {
+    for part in context_parts(context.as_ref()) {
         input.push(match part {
             items::MessagePart::Attachment { name, path } => op::Input::Mention { name, path },
             items::MessagePart::Invocation { name, path } => op::Input::Skill { name, path },
-            _ => unreachable!("context contains mentions or skills"),
+            items::MessagePart::Context { context } => op::Input::Context { context },
+            _ => unreachable!("context records are mentions, skills or contexts"),
         });
     }
     Ok(op::Submission {
+        fresh_context: run.fresh_context,
         thread_id: id.clone(),
         client_user_message_id: message_id.clone().into(),
         input,
@@ -960,7 +1061,7 @@ fn item_view(
             ..
         } => {
             let mut content = attachment_parts(attachments)?;
-            content.extend(context_parts(context.as_ref())?);
+            content.extend(context_parts(context.as_ref()));
             items::ItemBody::UserMessage {
                 text: Some(text.clone()),
                 content,

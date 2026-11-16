@@ -6,6 +6,7 @@ use agent_protocol::{conversation::Command, protocol::Call};
 
 fn content(text: &str) -> agent_protocol::conversation::InputContent {
     agent_protocol::conversation::InputContent {
+        fresh_context: false,
         parts: vec![op::Input::Text { text: text.into() }],
         model: Some(agent_protocol::models::ModelRef {
             provider: ProviderKind::Codex,

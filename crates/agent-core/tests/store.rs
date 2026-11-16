@@ -724,6 +724,229 @@ async fn a_browser_session_orders_actions_reads_while_shown_and_slows_after_fail
     store.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn project_clone_notifications_survive_stale_reads_and_actions_use_the_same_job() {
+    use agent_protocol::project_clone::*;
+    let (store, mut reader, writer) = setup(authenticated_snapshot()).await;
+    reader.script_project_clones();
+    let request = CloneProject {
+        id: "00000000-0000-0000-0000-000000000001".into(),
+        repository: "https://host/repo".into(),
+        destination: "/repo".into(),
+    };
+    let catalog = |revision, phase| ProjectClones {
+        epoch: "clone-host".into(),
+        revision,
+        clones: vec![ProjectCloneState {
+            request: request.clone(),
+            phase,
+            progress: None,
+            error: None,
+        }],
+    };
+    let operation = store.dispatch(Intent::CloneProject(request.clone()));
+    let call = read(&mut reader).await;
+    assert_eq!(call["method"], "host/project/clone");
+    assert_eq!(call["params"], json!(request));
+    writer
+        .reply(
+            &call,
+            json!({"result":catalog(1, ProjectClonePhase::Queued)}),
+        )
+        .await
+        .unwrap();
+    operation.await.unwrap();
+    let reading = store.dispatch(Intent::ReadProjectClones(ReadProjectClones {}));
+    let delayed = read(&mut reader).await;
+    assert_eq!(delayed["method"], "host/project/clones");
+    writer.notify(json!({"method":"host/project/clonesChanged","params":{"state":catalog(3, ProjectClonePhase::Failed)}})).await.unwrap();
+    wait_for(&store, |state| {
+        state
+            .project_clone_views()
+            .first()
+            .is_some_and(|view| view.can_retry)
+    })
+    .await;
+    writer
+        .reply(
+            &delayed,
+            json!({"result":catalog(2, ProjectClonePhase::Fetching)}),
+        )
+        .await
+        .unwrap();
+    reading.await.unwrap();
+    assert_eq!(
+        store.snapshot().project_clone_views()[0].state.phase,
+        ProjectClonePhase::Failed
+    );
+    for (action, revision, phase) in [
+        (ProjectCloneAction::Retry, 4, ProjectClonePhase::Fetching),
+        (ProjectCloneAction::Cancel, 5, ProjectClonePhase::Cancelled),
+    ] {
+        let changing = store.dispatch(Intent::ChangeProjectClone(ChangeProjectClone {
+            id: request.id.clone(),
+            action,
+        }));
+        let call = read(&mut reader).await;
+        assert_eq!(call["method"], "host/project/clone/change");
+        assert_eq!(call["params"]["id"], request.id);
+        let view = &store.snapshot().project_clone_views()[0];
+        assert!(
+            !view.can_cancel && !view.can_retry && !view.can_dismiss,
+            "a pending action cannot be submitted twice"
+        );
+        writer
+            .reply(&call, json!({"result":catalog(revision, phase)}))
+            .await
+            .unwrap();
+        changing.await.unwrap();
+        assert_eq!(store.snapshot().project_clone_views()[0].state.phase, phase);
+    }
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn fresh_context_policy_reaches_the_host_and_a_rejected_send_restores_it() {
+    let mut initial = snapshot();
+    initial.connection.storage_scope = "fixture-storage".into();
+    let session = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
+    Arc::make_mut(initial.panes.primary_mut()).navigation =
+        Arc::new(agent_core::state::Navigation {
+            thread_id: Some(session.clone()),
+            cwd: "/fixture".into(),
+            draft_key: session.clone().into(),
+        });
+    let key = DraftKey::from(&session);
+    let (store, mut reader, mut writer) = setup(initial).await;
+    store
+        .dispatch(Intent::SetFreshContext {
+            storage_scope: "fixture-storage".into(),
+            session: session.clone(),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: key.clone(),
+            text: "fresh prompt".into(),
+        })
+        .await
+        .unwrap();
+    assert!(store.snapshot().input.drafts[&key].fresh_context);
+    let sending = store.dispatch(Intent::Submit {
+        thread_id: Some(session),
+        client_user_message_id: "00000000-0000-0000-0000-000000000014".into(),
+        alternate: false,
+    });
+    let request = read_after_reviews(&mut reader, &mut writer).await;
+    assert_eq!(request["method"], "host/conversation/change");
+    assert_eq!(
+        request["params"]["command"]["Submit"]["content"]["fresh_context"],
+        true
+    );
+    assert_eq!(
+        request["params"]["command"]["Submit"]["content"]["follow_up"],
+        "queue"
+    );
+    assert!(!store.snapshot().input.drafts[&key].fresh_context);
+    writer
+        .reply(
+            &request,
+            json!({"error":{"code":"refused","message":"Not sent","delivery":"notSent"}}),
+        )
+        .await
+        .unwrap();
+    assert!(sending.await.is_err());
+    assert!(store.snapshot().input.drafts[&key].fresh_context);
+    assert_eq!(store.snapshot().input.drafts[&key].text, "fresh prompt");
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn feedback_upload_survives_navigation_without_duplicate_sends_and_reports_failures() {
+    use agent_core::presentation::feedback::FeedbackPhase;
+    use agent_protocol::feedback::UploadFeedback;
+    let mut initial = authenticated_snapshot();
+    initial.connection.storage_scope = "fixture-storage".into();
+    let (store, mut reader, writer) = setup(initial).await;
+    let session = SessionRef::new(ProviderKind::Codex, "session".into()).unwrap();
+    let scope = store.snapshot().connection.storage_scope.clone();
+    let request = UploadFeedback {
+        id: "00000000-0000-0000-0000-000000000001".into(),
+        storage_scope: scope.clone(),
+        thread_id: session.clone(),
+        reason: Some("A bug".into()),
+        include_logs: false,
+    };
+    let uploading = store.dispatch(Intent::UploadFeedback(request.clone()));
+    let call = read(&mut reader).await;
+    assert_eq!(call["method"], "host/feedback/upload");
+    assert_eq!(call["params"]["includeLogs"], false);
+    assert_eq!(call["params"]["storageScope"], scope);
+    let notice = store.snapshot().feedback_notice(session.clone()).unwrap();
+    assert_eq!(notice.phase, FeedbackPhase::Uploading);
+    assert!(!notice.can_dismiss);
+    let mut duplicate = request.clone();
+    duplicate.id = "00000000-0000-0000-0000-000000000002".into();
+    store
+        .dispatch(Intent::UploadFeedback(duplicate.clone()))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), reader.read_request())
+            .await
+            .is_err()
+    );
+    store
+        .dispatch(Intent::NewChat { cwd: String::new() })
+        .await
+        .unwrap();
+    writer
+        .reply(&call, json!({"result":{"feedbackId":"uploaded-report"}}))
+        .await
+        .unwrap();
+    uploading.await.unwrap();
+    let notice = store.snapshot().feedback_notice(session.clone()).unwrap();
+    assert_eq!(notice.phase, FeedbackPhase::Sent);
+    assert_eq!(notice.feedback_id.as_deref(), Some("uploaded-report"));
+    assert!(notice.can_dismiss);
+    store
+        .dispatch(Intent::DismissFeedback {
+            storage_scope: "another-host".into(),
+            session: session.clone(),
+            id: notice.id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(store.snapshot().feedback_notice(session.clone()).is_some());
+    store
+        .dispatch(Intent::DismissFeedback {
+            storage_scope: scope,
+            session: session.clone(),
+            id: notice.id,
+        })
+        .await
+        .unwrap();
+    assert!(store.snapshot().feedback_notice(session.clone()).is_none());
+    let failing = store.dispatch(Intent::UploadFeedback(duplicate));
+    let call = read(&mut reader).await;
+    writer
+        .reply(
+            &call,
+            json!({"error":{"code":"failed","message":"Upload rejected","delivery":"notSent"}}),
+        )
+        .await
+        .unwrap();
+    assert!(failing.await.is_err());
+    let notice = store.snapshot().feedback_notice(session).unwrap();
+    assert_eq!(notice.phase, FeedbackPhase::Failed);
+    assert!(notice.feedback_id.is_none());
+    assert!(notice.can_dismiss);
+    assert!(store.snapshot().panes.primary().error.is_none());
+    store.close().await.unwrap();
+}
+
 fn authenticated_snapshot() -> Snapshot {
     Snapshot {
         catalog: agent_core::state::Catalog {
@@ -774,7 +997,10 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
             current.lists.threads.is_some()
                 && current.lists.task_activity.is_some()
                 && current.catalog.account.accounts.is_some()
-                && current.operations.is_empty()
+                && current.operations.iter().all(|(key, state)| {
+                    matches!(key, op::OperationKey::Item { .. })
+                        && matches!(state.phase, op::OperationPhase::Failed { .. })
+                })
                 && (cwd.is_empty() || current.panes.primary().workspace.review.is_some())
         };
         if ready {
@@ -808,6 +1034,10 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
             "host/workspace/review" => {
                 assert_eq!(request["params"]["cwd"], cwd);
                 review()
+            }
+            "host/conversation/hydrate" => {
+                writer.reply(&request, json!({"error":{"code":"fixture_deferred","message":"body is not preloaded"}})).await.unwrap();
+                continue;
             }
             method => panic!("unexpected connection request: {method}"),
         };
@@ -3430,6 +3660,7 @@ async fn rewind_frame(
 #[tokio::test]
 async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer(
     #[values(false, true)] navigate: bool,
+    #[values(false, true)] fresh_context: bool,
     #[values(
         "/fixture/shot.png",
         r"C:\fixture\shot.png",
@@ -3444,14 +3675,26 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
     let mut initial = snapshot();
     let user = |id: &str, content: serde_json::Value| json!({"id":id,"status":"completed","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":content}}}}});
     let kept = json!({"id":"kept","status":"completed","items":[user("a",json!([{"text":{"text":"earlier"}}]))]});
+    let context = agent_protocol::context::MessageContext {
+        id: "terminal".into(),
+        label: "Build output".into(),
+        content: agent_protocol::context::ContextContent::Terminal {
+            terminal_id: "build".into(),
+            terminal_label: "Build".into(),
+            line_start: 1,
+            line_end: 2,
+            text: "original output".into(),
+        },
+    };
     let thread: Thread = serde_json::from_value(json!({
         "id":{"provider":"codex","id":"thread"},"cwd":"/fixture","status":"idle",
         "turns":[kept.clone(),
-            {"id":"edit","status":"completed","items":[user("b",json!([
+            {"id":"edit","status":"completed","freshContext":fresh_context,"items":[user("b",json!([
                 {"text":{"text":"send this again"}},
                 {"image":{"source":image}},
                 {"image":{"source":"data:image/png;base64,AAAA"}},
-                {"attachment":{"name":"notes.md","path":"/fixture/notes.md"}}
+                {"attachment":{"name":"notes.md","path":"/fixture/notes.md"}},
+                {"context":{"context":context.clone()}}
             ]))]},
             {"id":"later","status":"completed","items":[user("c",json!([{"text":{"text":"removed"}}]))]}]
     })).unwrap();
@@ -3596,6 +3839,8 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
     // Pinned T3 chatViewSend.ts appends the recalled message to the latest
     // composer prompt after native confirmation, preserving existing input.
     assert_eq!(draft.text, "replaced\n\nsend this again");
+    assert_eq!(draft.contexts, [context]);
+    assert_eq!(draft.fresh_context, fresh_context);
     assert_eq!(
         draft
             .attachments

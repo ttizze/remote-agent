@@ -153,7 +153,10 @@ impl Storage {
             }
             let state=projections::metadata(&transaction,&source_id)?;
             let transfer_id=model::derived_id("context-transfer",&[&target_id,"fork"]);
-            let (thread,transfer)=plan(&transaction,&state,through,&target_id,&transfer_id,now)?;
+            let titles=transaction.prepare("SELECT title FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL").map_err(failure)?
+                .query_map([],|row|row.get::<_,String>(0)).map_err(failure)?.collect::<Result<_,_>>().map_err(failure)?;
+            let fork=model::ForkTarget {id:&target_id,transfer_id:&transfer_id,title:model::fork_title(&state.thread.title,&titles)};
+            let (thread,transfer)=plan(&transaction,&state,through,fork,now)?;
             let target_state=model::State::new(thread.clone());
             commands::append_decision(&transaction,&target_state,model::Decision {
                 changes:vec![model::Change::ThreadCreated(thread),model::Change::ContextTransfer(transfer)],effects:vec![],
@@ -169,8 +172,7 @@ fn plan(
     connection: &Connection,
     state: &model::State,
     through: &agent_protocol::conversation::records::ForkPoint,
-    target_id: &str,
-    transfer_id: &str,
+    fork: model::ForkTarget<'_>,
     now: &str,
 ) -> Result<(model::Thread, model::ContextTransfer), String> {
     use agent_protocol::conversation::records::ForkPoint;
@@ -180,8 +182,7 @@ fn plan(
             &state.thread,
             run,
             state.context_source_point(run),
-            target_id,
-            transfer_id,
+            fork,
             now,
         );
     }
@@ -219,15 +220,7 @@ fn plan(
         provider_thread_ref: reference,
         provider_turn_ref: turn.and_then(|turn| turn.native_turn_ref.clone()),
     };
-    model::fork_native_thread(
-        &state.thread,
-        provider,
-        turn,
-        point,
-        target_id,
-        transfer_id,
-        now,
-    )
+    model::fork_native_thread(&state.thread, provider, turn, point, fork, now)
 }
 
 pub(super) fn native_origin(

@@ -181,6 +181,7 @@ pub(in crate::host_rpc) struct NativeAgent {
     /// Item IDs whose native bodies cannot be read.
     pub(in crate::host_rpc) unreadable: Mutex<std::collections::HashSet<String>>,
     pub(in crate::host_rpc) inputs: Arc<Mutex<Vec<op::Submission>>>,
+    pub(in crate::host_rpc) feedback_reports: Mutex<Vec<(String, Option<String>, bool)>>,
     pub(in crate::host_rpc) interrupts: Mutex<Vec<(String, TurnId)>>,
     pub(in crate::host_rpc) injected: Arc<Mutex<Vec<HistoryInjection>>>,
     pub(in crate::host_rpc) released: Arc<Mutex<Vec<String>>>,
@@ -225,6 +226,7 @@ impl NativeAgent {
             needs_reload: false,
             unreadable: Default::default(),
             inputs: Default::default(),
+            feedback_reports: Default::default(),
             interrupts: Default::default(),
             injected: Default::default(),
             released: Default::default(),
@@ -264,6 +266,7 @@ impl NativeAgent {
             needs_reload: self.needs_reload,
             unreadable: Default::default(),
             inputs: self.inputs.clone(),
+            feedback_reports: Mutex::new(self.feedback_reports.lock().unwrap().clone()),
             interrupts: Default::default(),
             injected: self.injected.clone(),
             released: self.released.clone(),
@@ -463,8 +466,24 @@ impl crate::providers::Discovery for NativeAgent {
 
 #[async_trait::async_trait]
 impl Agent for NativeAgent {
+    async fn upload_feedback(
+        &self,
+        id: &str,
+        reason: Option<&str>,
+        include_logs: bool,
+    ) -> Result<agent_protocol::feedback::FeedbackReceipt, Failure> {
+        self.feedback_reports.lock().unwrap().push((
+            id.into(),
+            reason.map(str::to_owned),
+            include_logs,
+        ));
+        Ok(agent_protocol::feedback::FeedbackReceipt {
+            feedback_id: format!("feedback:{id}"),
+        })
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities {
+            feedback: self.provider == ProviderKind::Codex,
             steer: true,
             model_change: true,
             rename: true,

@@ -7,6 +7,6 @@ press 送信
 expect "シミュレータで完了しました。" 30000
 expect "[immediate] 分岐元の会話です" after 新しいチャット
 press ここから会話を分岐
-expect "Simulator conversation" 20000
-expect "分岐元の会話です" after "Simulator conversation"
+expect "Simulator conversation (1)" 20000
+expect "分岐元の会話です" after "Simulator conversation (1)"
 screenshot forked

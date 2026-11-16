@@ -320,6 +320,7 @@ fn route(
                         command: Command::Submit {
                             id: operation.to_string().into(),
                             content: InputContent {
+                                fresh_context: false,
                                 parts: vec![agent_protocol::operations::Input::Text {
                                     text: "[success] Reply from another Bex client".into(),
                                 }],

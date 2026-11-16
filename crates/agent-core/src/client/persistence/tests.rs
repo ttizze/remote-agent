@@ -484,6 +484,59 @@ async fn failed_device_writes_remain_dirty_when_another_session_saves() {
 }
 
 #[tokio::test]
+async fn a_failed_stash_save_keeps_a_recoverable_prompt_and_a_retry_saves_the_whole_move() {
+    use crate::{
+        composer::stash::StashAction,
+        state::{DraftKey, Event, reduce},
+    };
+    let storage = Arc::new(Storage::default());
+    let persistence = persistence(storage.clone());
+    let mut snapshot = persistence.restore(false, None).await.unwrap();
+    draft(&mut snapshot, "recover this 日本語 prompt");
+    let snapshots = watch::channel(Arc::new(snapshot.clone())).1;
+    let saving = tokio::spawn(persistence.start(snapshots).unwrap());
+    persistence
+        .enqueue(Arc::new(snapshot.clone()))
+        .unwrap()
+        .await
+        .unwrap();
+    let (stashed, _) = reduce(
+        &snapshot,
+        "",
+        Event::Intent(Intent::Stash {
+            storage_scope: snapshot.connection.storage_scope.clone(),
+            thread_id: DraftKey::from("draft"),
+            action: StashAction::Save {
+                id: "entry".into(),
+                created_at_ms: 100,
+            },
+        }),
+    );
+    let stashed = Arc::new(stashed);
+    storage.fail_local.store(true, Ordering::SeqCst);
+    assert!(persistence.enqueue(stashed.clone()).unwrap().await.is_err());
+    assert!(persistence.failure().is_some());
+    let unchanged = crate::persistence::decode(&storage.local.lock().unwrap()).unwrap();
+    assert_eq!(
+        unchanged.input.drafts[&DraftKey::from("draft")].text,
+        "recover this 日本語 prompt"
+    );
+    assert!(unchanged.input.stashes.is_empty());
+    assert_eq!(stashed.input.stashes[0].text, "recover this 日本語 prompt");
+    storage.fail_local.store(false, Ordering::SeqCst);
+    persistence.finish(stashed.clone()).unwrap().await.unwrap();
+    saving.await.unwrap();
+    let restored = crate::persistence::decode(&storage.local.lock().unwrap()).unwrap();
+    assert_eq!(restored.input.stashes, stashed.input.stashes);
+    assert!(
+        restored.input.drafts[&DraftKey::from("draft")]
+            .text
+            .is_empty()
+    );
+    assert!(persistence.failure().is_none());
+}
+
+#[tokio::test]
 async fn final_save_seals_the_queue_even_if_earlier_waiters_are_cancelled() {
     let storage = Arc::new(Storage::default());
     let persistence = persistence(storage.clone());

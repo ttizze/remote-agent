@@ -395,6 +395,17 @@ pub(crate) trait Discovery: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Agent: Send + Sync {
+    async fn upload_feedback(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: bool,
+    ) -> Result<agent_protocol::feedback::FeedbackReceipt, Failure> {
+        Err(Failure::new(
+            "unsupported",
+            "このエージェントはフィードバック送信に対応していません。",
+        ))
+    }
     fn capabilities(&self) -> Capabilities;
     fn availability(&self) -> Result<(), Failure>;
     /// Reject creation before the Host creates a workspace. Some adapters can

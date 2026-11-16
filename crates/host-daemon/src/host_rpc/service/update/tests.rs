@@ -28,6 +28,7 @@ async fn an_uncertain_update_continuation_is_reported_without_resending() {
                 native_session: SessionRef::new(ProviderKind::Codex, "native".into()).unwrap(),
                 cwd: None,
                 submission: op::Submission {
+                    fresh_context: false,
                     thread_id: target.clone(),
                     client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
                     input: vec![],

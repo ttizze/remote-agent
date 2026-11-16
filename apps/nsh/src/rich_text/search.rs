@@ -110,59 +110,6 @@ pub(super) fn decorate(
     blocks
 }
 
-/// Only the paragraph carrying the selected start needs a new drawn anchor.
-pub(super) fn reveals(block: &Value) -> bool {
-    std::iter::once(&block["markerHighlights"])
-        .chain(
-            block["runs"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|run| &run["highlights"]),
-        )
-        .flat_map(|highlights| highlights.as_array().into_iter().flatten())
-        .any(|highlight| highlight["reveal"] == true)
-}
-
-/// Styled fragments of one run, in UTF-8 bytes; native views convert to UTF-16.
-#[derive(Default)]
-pub(super) struct Fragment {
-    pub text: String,
-    pub highlighted: bool,
-    pub active: bool,
-    pub reveal: bool,
-}
-
-pub(super) fn fragments(run: &Value) -> Vec<Fragment> {
-    let text = run["text"].as_str().unwrap_or_default();
-    let mut result = Vec::new();
-    let mut start = 0;
-    for found in run["highlights"].as_array().into_iter().flatten() {
-        let from = found["start"].as_u64().unwrap_or_default() as usize;
-        let end = found["end"].as_u64().unwrap_or_default() as usize;
-        if start < from {
-            result.push(Fragment {
-                text: text[start..from].into(),
-                ..Default::default()
-            });
-        }
-        result.push(Fragment {
-            text: text[from..end].into(),
-            highlighted: true,
-            active: found["active"] == true,
-            reveal: found["reveal"] == true,
-        });
-        start = end;
-    }
-    if start < text.len() {
-        result.push(Fragment {
-            text: text[start..].into(),
-            ..Default::default()
-        });
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

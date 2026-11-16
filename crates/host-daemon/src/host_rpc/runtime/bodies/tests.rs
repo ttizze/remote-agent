@@ -176,6 +176,7 @@ async fn saved_tool_details_do_not_depend_on_native_history_or_a_rebound_source(
             command: Command::Submit {
                 id: input.to_string().into(),
                 content: decision::InputContent {
+                    fresh_context: false,
                     parts: vec![op::Input::Text {
                         text: "explicit new input".into(),
                     }],
@@ -462,6 +463,7 @@ async fn unreadable_native_messages_block_handoff_and_switch_until_atomic_import
                 command: Command::Submit {
                     id: input.to_string().into(),
                     content: InputContent {
+                        fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "continue on Claude".into(),
                         }],
@@ -499,6 +501,7 @@ async fn unreadable_native_messages_block_handoff_and_switch_until_atomic_import
                 command: Command::Submit {
                     id: input.to_string().into(),
                     content: InputContent {
+                        fresh_context: false,
                         parts: vec![op::Input::Text {
                             text: "continue on Claude".into(),
                         }],

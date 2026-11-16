@@ -1,0 +1,1984 @@
+# T3 Code conversation UI: one named part per presence check.
+# Visual metrics are outside this catalog. Sources are relative to source_root.
+
+[reference]
+repository = "https://github.com/pingdotgg/t3code"
+revision = "4c361199f47f6ea32a2c14835df392640d0f7c63"
+source_root = "apps/web/src"
+entry = "components/ChatView.tsx"
+
+[[component]]
+id = "canvas"
+area = "画面・履歴"
+source = "components/ChatView.tsx"
+symbol = "ChatView"
+line = 413
+related_sources = ["components/chat/backgroundThread.ts", "components/chat/ChatBannerLane.tsx", "components/chat/ChatCanvas.tsx", "components/chat/ChatCanvasContext.ts", "components/chat/ThreadTimeline.tsx", "components/chat/ThreadVisitWatermark.tsx", "components/chat/timelineRowContext.ts"]
+parts = [
+  "会話キャンバス",
+  "ヘッダー",
+  "会話タイムライン",
+  "入力欄",
+  "上部バナー領域",
+  "下部の状態表示領域",
+]
+
+[[component]]
+id = "draft"
+area = "画面・履歴"
+source = "components/chat/DraftHeroHeadline.tsx"
+symbol = "DraftHeroHeadline"
+line = 72
+related_sources = ["components/chat/DraftHeroProjectHeading.tsx", "components/chat/DraftProjectName.tsx"]
+parts = [
+  "新規会話の見出し",
+  "プロジェクト名",
+  "プロジェクト選択",
+  "プロジェクト追加",
+  "プロジェクトなしで開始",
+]
+
+[[component]]
+id = "empty"
+area = "画面・履歴"
+source = "components/NoActiveThreadState.tsx"
+symbol = "NoActiveThreadState"
+line = 6
+parts = [
+  "会話未選択の表示",
+  "プロジェクトがないときの表示",
+]
+
+[[component]]
+id = "history"
+area = "画面・履歴"
+source = "components/chat/MessagesTimeline.tsx"
+symbol = "TimelineHistoryControl"
+line = 1356
+parts = [
+  "過去ターンの追加読み込み",
+  "追加読み込み中の表示",
+  "読み込み失敗の表示",
+]
+
+[[component]]
+id = "turn-fold"
+area = "画面・履歴"
+source = "components/chat/MessagesTimeline.tsx"
+symbol = "TurnFoldTimelineRow"
+line = 1620
+parts = [
+  "完了した作業の折りたたみ見出し",
+  "開閉アイコン",
+  "時刻",
+  "遅延読み込みのスケルトン",
+  "作業の読み込みエラー",
+]
+
+[[component]]
+id = "attempt-fold"
+area = "画面・履歴"
+source = "components/chat/MessagesTimeline.tsx"
+symbol = "AttemptFoldTimelineRow"
+line = 1654
+parts = [
+  "割り込み前の試行の折りたたみ",
+  "Cut off by a steer の表示",
+  "開閉アイコン",
+  "遅延読み込み中の表示",
+  "試行の読み込みエラー",
+]
+
+[[component]]
+id = "minimap"
+area = "画面・履歴"
+source = "components/chat/TimelineMinimap.tsx"
+symbol = "TimelineMinimap"
+line = 37
+parts = [
+  "発言位置のストリップ",
+  "現在位置",
+  "ホバー時のプレビュー",
+  "前の発言へ移動",
+  "次の発言へ移動",
+  "狭い画面での表示",
+]
+
+[[component]]
+id = "find"
+area = "画面・履歴"
+source = "components/chat/ThreadFindBar.tsx"
+symbol = "ThreadFindBar"
+line = 26
+related_sources = ["components/chat/markdownFindContext.ts", "components/chat/ThreadFindProvider.tsx"]
+parts = [
+  "検索入力",
+  "一致件数と現在の一致",
+  "前の一致",
+  "次の一致",
+  "検索を閉じる",
+  "検索中の表示",
+  "検索失敗と再試行",
+]
+
+[[component]]
+id = "overlays"
+area = "画面・履歴"
+source = "components/chat/TimelineOverlays.tsx"
+symbol = "ScrollToEndButton"
+line = 26
+parts = [
+  "最新位置へ戻るボタン",
+  "未読などの件数表示",
+  "ファイルのドロップ先表示",
+]
+
+[[component]]
+id = "announcement"
+area = "画面・履歴"
+source = "components/chat/ThreadActivityAnnouncer.tsx"
+symbol = "ThreadActivityAnnouncer"
+line = 12
+parts = [
+  "会話の状態変化の読み上げ通知",
+]
+
+[[component]]
+id = "triage-draft"
+area = "画面・履歴"
+source = "components/chat/TriageDraftHero.tsx"
+symbol = "TriageDraftHero"
+line = 11
+parts = [
+  "不具合調査用の新規会話見出し",
+  "対象マシンとサーバーバージョン",
+  "調査用CLIコマンドのコピー",
+]
+
+[[component]]
+id = "user-message"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "UserTimelineRow"
+line = 424
+parts = [
+  "発言の本文",
+  "送信者見出し",
+  "本文のある吹き出し",
+  "画像のみの発言",
+  "動画のみの発言",
+  "添付と本文の組み合わせ",
+  "モデル変更の区切り",
+  "新しいコンテキストの区切り",
+  "送信状態の表示",
+]
+
+[[component]]
+id = "user-actions"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "RevertUserMessageButton"
+line = 1076
+related_sources = ["components/chat/MessageCopyButton.tsx", "components/chat/TimelineRowParts.tsx"]
+parts = [
+  "発言の時刻",
+  "ここから編集のアイコン",
+  "発言コピーのアイコン",
+  "プロンプトリンクのコピー",
+  "コピー完了の表示",
+  "マウスが乗ったときの操作表示",
+  "タッチ環境での操作表示",
+]
+
+[[component]]
+id = "long-message"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "CollapsibleUserMessageBody"
+line = 1111
+parts = [
+  "長文の折りたたみ",
+  "末尾のフェード",
+  "全文を表示",
+  "折りたたむ",
+  "検索時の本文の表示",
+]
+
+[[component]]
+id = "user-intent"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "UserMessageIntentMarker"
+line = 1049
+parts = [
+  "実行中の追加指示のマーカー",
+  "キューから追加指示へ変更したマーカー",
+  "追加指示アイコンと説明",
+]
+
+[[component]]
+id = "attributed-message"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "AutomationMessageRow"
+line = 280
+related_sources = ["components/chat/GuestMessageAttachments.tsx", "components/chat/guestMessageStyle.tsx"]
+parts = [
+  "自動実行の発言見出し",
+  "自動実行の本文の開閉",
+  "自動実行設定を開く",
+  "別エージェントの発言見出し",
+  "別エージェントの本文の開閉",
+  "送信元エージェントを開く",
+  "T3 Codeからの発言表示",
+  "ゲスト名とゲストの発言",
+]
+
+[[component]]
+id = "user-images"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "UserTimelineRow"
+line = 424
+parts = [
+  "送信画像のプレビュー",
+  "画像1枚の表示",
+  "画像2枚の表示",
+  "画像3枚以上のコラージュ",
+  "画像を拡大する操作",
+  "送信画像が利用できない表示",
+]
+
+[[component]]
+id = "user-files"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "UserFileCard"
+line = 101
+parts = [
+  "添付ファイルカード",
+  "ファイルのアイコンと名前",
+  "拡張子と容量",
+  "アップロード中の表示",
+  "ファイルのプレビュー",
+  "ファイルのダウンロード",
+  "貼り付けた長文ファイルの表示",
+  "不明な添付の表示",
+]
+
+[[component]]
+id = "user-video"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "UserVideoAttachment"
+line = 177
+parts = [
+  "送信動画のプレイヤー",
+  "送信動画の拡大",
+  "動画の再読み込み",
+  "送信中など動画ソースがない表示",
+]
+
+[[component]]
+id = "user-audio"
+area = "ユーザー発言"
+source = "components/chat/TimelineUserMessageRow.tsx"
+symbol = "UserTimelineRow"
+line = 424
+parts = [
+  "送信した音声のプレイヤー",
+]
+
+[[component]]
+id = "snapshot"
+area = "ユーザー発言"
+source = "components/chat/SnapShotAttachmentDetails.tsx"
+symbol = "SnapShotAttachmentDetails"
+line = 136
+parts = [
+  "Snap Shot添付の枠",
+  "取得元アプリなどの詳細",
+  "アクセシビリティの内容",
+  "添付内容を開く",
+]
+
+[[component]]
+id = "context-chips"
+area = "チップ・コンテキスト"
+source = "components/chat/UserMessageContextChips.tsx"
+symbol = "UserMessageContextReferenceChip"
+line = 511
+related_sources = ["components/chat/FileTagChip.tsx", "components/chat/WorkspaceEntryIcon.tsx", "components/chat/PierreEntryIcon.tsx"]
+parts = [
+  "ファイルやフォルダへのメンションチップ",
+  "スキルチップ",
+  "会話チップ",
+  "環境チップ",
+  "画像チップ",
+  "ファイルチップ",
+  "動画ファイルチップ",
+  "ターミナルチップ",
+  "ブラウザ要素チップ",
+  "レビューコメントチップ",
+  "Pull Requestチップ",
+  "プレビュー注釈チップ",
+  "参照不能なチップ",
+]
+
+[[component]]
+id = "context-details"
+area = "チップ・コンテキスト"
+source = "components/chat/UserMessageContextChips.tsx"
+symbol = "UserMessageElementDetails"
+line = 227
+parts = [
+  "要素のHTMLプレビュー",
+  "要素のCSSプレビュー",
+  "レビューコメント本文",
+  "レビューコメントの差分",
+  "プレビュー注釈の画像と説明",
+]
+
+[[component]]
+id = "terminal-context"
+area = "チップ・コンテキスト"
+source = "components/chat/TerminalContextInlineChip.tsx"
+symbol = "TerminalContextInlineChip"
+line = 16
+parts = [
+  "ターミナル名",
+  "行範囲",
+  "選択したターミナル出力の詳細",
+]
+
+[[component]]
+id = "skill-context"
+area = "チップ・コンテキスト"
+source = "components/chat/SkillInlineText.tsx"
+symbol = "SkillChipPopover"
+line = 120
+parts = [
+  "スキルのアイコンと名前",
+  "スキルの詳細ポップオーバー",
+]
+
+[[component]]
+id = "model-context"
+area = "チップ・コンテキスト"
+source = "components/chat/ModelMentionChip.tsx"
+symbol = "ModelMentionChip"
+line = 87
+parts = [
+  "モデルへのメンション",
+  "モデルとプロバイダーの表示",
+]
+
+[[component]]
+id = "context-drag"
+area = "チップ・コンテキスト"
+source = "components/chat/ThreadContextDragGhost.tsx"
+symbol = "ThreadContextDragGhost"
+line = 6
+parts = [
+  "会話チップをドラッグ中のアイコンとタイトル",
+  "複数会話の追加件数",
+]
+
+[[component]]
+id = "assistant-message"
+area = "回答"
+source = "components/chat/TimelineAssistantRows.tsx"
+symbol = "AssistantTimelineRow"
+line = 27
+parts = [
+  "回答者見出し",
+  "回答本文",
+  "ストリーミング中の本文",
+  "空の回答の表示",
+  "回答内検索の対象",
+]
+
+[[component]]
+id = "assistant-actions"
+area = "回答"
+source = "components/chat/TimelineAssistantRows.tsx"
+symbol = "AssistantMessageMeta"
+line = 151
+parts = [
+  "回答のコピーアイコン",
+  "コピー完了の表示",
+  "この回答から分岐するアイコン",
+  "分岐処理中の表示",
+  "回答の時刻",
+  "回答のステータス",
+  "本文と別の行に置く回答操作",
+  "マウスが乗ったときの操作表示",
+  "タッチ環境での操作表示",
+]
+
+[[component]]
+id = "changed-files"
+area = "回答"
+source = "components/chat/ChangedFilesTree.tsx"
+symbol = "ChangedFilesCard"
+line = 28
+related_sources = ["components/chat/DiffStatLabel.tsx"]
+parts = [
+  "変更ファイルのカード",
+  "変更ファイル数",
+  "追加行数と削除行数",
+  "ディレクトリの開閉",
+  "変更ファイルの一覧",
+  "ファイルの差分を開く",
+  "変更ファイルのコンテキストメニュー",
+]
+
+[[component]]
+id = "selection"
+area = "回答"
+source = "components/chat/AssistantSelectionToolbar.tsx"
+symbol = "AssistantSelectionToolbar"
+line = 23
+parts = [
+  "選択した回答を入力欄に引用する操作",
+  "選択が長すぎるときの表示",
+  "スクロール後の選択操作の再表示",
+  "キーボードからの操作",
+]
+
+[[component]]
+id = "citation"
+area = "回答"
+source = "components/chat/AssistantCitationChip.tsx"
+symbol = "AssistantCitationChip"
+line = 36
+parts = [
+  "引用チップ",
+  "引用元の本文",
+  "引用元へ移動",
+  "引用のコメント",
+  "引用のコンテキストメニュー",
+]
+
+[[component]]
+id = "citation-comment"
+area = "回答"
+source = "components/chat/AssistantCitationCommentEditor.tsx"
+symbol = "AssistantCitationCommentEditor"
+line = 10
+parts = [
+  "引用へのコメントの入力と確定",
+]
+
+[[component]]
+id = "citation-source"
+area = "回答"
+source = "components/chat/AssistantCitationSource.tsx"
+symbol = "AssistantCitationSource"
+line = 335
+parts = [
+  "引用元の位置の強調",
+  "コメント対象の位置の強調",
+]
+
+[[component]]
+id = "markdown-text"
+area = "Markdown"
+source = "components/ChatMarkdown.tsx"
+symbol = "CHAT_MARKDOWN_COMPONENTS"
+line = 963
+related_sources = ["components/chat/MarkdownDetails.tsx"]
+parts = [
+  "段落",
+  "見出しH1",
+  "見出しH2",
+  "見出しH3",
+  "見出しH4",
+  "見出しH5",
+  "見出しH6",
+  "太字",
+  "斜体",
+  "取り消し線",
+  "インラインコード",
+  "引用",
+  "箇条書き",
+  "番号付きリスト",
+  "チェック済みタスク",
+  "未完了タスク",
+  "区切り線",
+  "改行",
+  "HTMLのdetails/summary",
+  "Noteの注記",
+  "Tipの注記",
+  "Importantの注記",
+  "Warningの注記",
+  "Cautionの注記",
+]
+
+[[component]]
+id = "markdown-links"
+area = "Markdown"
+source = "components/ChatMarkdown.tsx"
+symbol = "MarkdownAnchor"
+line = 1061
+related_sources = ["components/chat/MarkdownExternalLink.tsx", "components/chat/MarkdownFileLink.tsx", "components/chat/MarkdownThreadLink.tsx"]
+parts = [
+  "外部リンク",
+  "外部リンクのファビコン",
+  "ワークスペースのファイルリンク",
+  "ファイルリンクのアイコンとチップ",
+  "行番号付きファイルリンク",
+  "フォルダリンク",
+  "会話へのリンク",
+  "Pull Requestのリンクとプレビュー",
+  "引用リンク",
+]
+
+[[component]]
+id = "markdown-code"
+area = "Markdown"
+source = "components/chat/MarkdownCodeBlock.tsx"
+symbol = "MarkdownCodeBlock"
+line = 131
+related_sources = ["components/chat/HighlightedCodeLines.tsx", "components/chat/HighlightedTokens.tsx"]
+parts = [
+  "コード本文",
+  "言語の表示",
+  "ファイル名付きフェンスの見出し",
+  "コードのシンタックスハイライト",
+  "コードのコピーアイコン",
+  "コピー完了の表示",
+  "折り返しの切り替え",
+  "ターミナルで実行する操作",
+  "コードの読み込み中の表示",
+  "コード描画失敗時のフォールバック",
+]
+
+[[component]]
+id = "markdown-table"
+area = "Markdown"
+source = "components/chat/MarkdownTable.tsx"
+symbol = "MarkdownTable"
+line = 16
+parts = [
+  "表のヘッダーと本文",
+  "横スクロール",
+  "表のコピー操作",
+  "Markdownとしてコピー",
+  "CSVとしてコピー",
+  "コピー完了の表示",
+]
+
+[[component]]
+id = "mermaid"
+area = "Markdown"
+source = "components/chat/MarkdownMermaidCodeBlock.tsx"
+symbol = "MarkdownMermaidCodeBlock"
+line = 11
+related_sources = ["components/chat/MermaidDiagram.tsx"]
+parts = [
+  "Mermaidの図",
+  "ソースコード表示",
+  "図とソースの切り替え",
+  "Mermaidソースのコピー",
+  "図を拡大する操作",
+  "図の読み込み中の表示",
+  "図の描画失敗の表示",
+]
+
+[[component]]
+id = "math"
+area = "Markdown"
+source = "components/chat/MarkdownMath.tsx"
+symbol = "MarkdownMath"
+line = 14
+related_sources = ["components/chat/MathTypeset.tsx"]
+parts = [
+  "インラインの数式",
+  "独立ブロックの数式",
+]
+
+[[component]]
+id = "artifact-template"
+area = "Markdown"
+source = "components/ChatMarkdown.tsx"
+symbol = "CodexArtifactTemplateCard"
+line = 279
+parts = [
+  "成果物テンプレートのカード",
+  "テンプレートの種類アイコン",
+  "テンプレートを使う操作",
+]
+
+[[component]]
+id = "markdown-media"
+area = "画像・メディア"
+source = "components/chat/ChatMarkdownMedia.tsx"
+symbol = "ChatMarkdownImage"
+line = 157
+related_sources = ["components/media/AttachmentImage.tsx"]
+parts = [
+  "Markdown画像",
+  "ワークスペースの画像",
+  "画像のキャプション",
+  "画像の読み込み失敗",
+  "利用できない画像やメディアの表示",
+  "画像の拡大操作",
+  "Markdown動画",
+]
+
+[[component]]
+id = "audio"
+area = "画像・メディア"
+source = "components/files/AudioPreview.tsx"
+symbol = "AudioPreview"
+line = 24
+related_sources = ["components/files/InlineAudioPreview.tsx"]
+parts = [
+  "音声の再生と一時停止",
+  "音声のファイル名",
+  "音声の再生時間と全長",
+  "音声の読み込み中の表示",
+  "音声が利用できない表示",
+  "音声のプレビューを開く/再試行",
+  "標準プレイヤーで表示する場合のシーク",
+]
+
+[[component]]
+id = "expanded-media"
+area = "画像・メディア"
+source = "components/chat/ExpandedImageDialog.tsx"
+symbol = "ExpandedImageDialog"
+line = 82
+related_sources = ["components/chat/ExpandedImagePreview.tsx"]
+parts = [
+  "拡大した画像",
+  "拡大した動画",
+  "拡大表示を閉じる",
+  "メディアの失敗表示",
+  "メディアの再読み込み",
+  "メディアに対する操作メニュー",
+]
+
+[[component]]
+id = "html-render"
+area = "画像・メディア"
+source = "components/chat/HtmlRenderFrame.tsx"
+symbol = "HtmlRenderFrame"
+line = 23
+related_sources = ["components/chat/HtmlRenderDialog.tsx"]
+parts = [
+  "HTML成果物の埋め込み表示",
+  "HTML成果物の全画面表示",
+  "HTML成果物の全画面ダイアログ",
+  "HTML成果物の読み込み失敗",
+]
+
+[[component]]
+id = "mcp-app"
+area = "画像・メディア"
+source = "components/chat/McpAppFrame.tsx"
+symbol = "McpAppFrame"
+line = 79
+parts = [
+  "MCPアプリの埋め込み表示",
+  "MCPアプリの全画面表示",
+  "MCPアプリの全画面終了",
+  "閉じたMCPアプリを再表示",
+  "アプリの読み込み失敗",
+  "アプリが別ページへ移動した際の停止表示",
+]
+
+[[component]]
+id = "zoom-image"
+area = "画像・メディア"
+source = "components/chat/ZoomableImage.tsx"
+symbol = "ZoomableImage"
+line = 41
+parts = [
+  "画像の拡大と全体表示",
+  "ズーム率の表示または読み上げ",
+  "拡大画像のパン",
+  "画像ズームのキーボード操作",
+]
+
+[[component]]
+id = "media-actions"
+area = "画像・メディア"
+source = "components/media/MediaActions.tsx"
+symbol = "MediaActions"
+line = 113
+parts = [
+  "メディアのコンテキストメニュー",
+  "フルパスをコピー",
+  "相対パスをコピー",
+  "URLをコピー",
+  "ファイルビューアで開く",
+  "メディアを保存",
+  "画像をコピー",
+  "保存やコピーの処理中の通知",
+  "保存やコピーの完了と失敗の通知",
+]
+
+[[component]]
+id = "video-player"
+area = "画像・メディア"
+source = "components/media/MediaVideoPlayer.tsx"
+symbol = "MediaVideoPlayer"
+line = 31
+related_sources = ["components/media/OpenMediaLink.tsx"]
+parts = [
+  "動画プレビュー",
+  "動画の再生を開くアイコン",
+  "動画の標準再生コントロール",
+  "動画読み込み中の表示",
+  "動画を利用できない表示",
+  "動画の再試行",
+  "元のメディアを開く",
+]
+
+[[component]]
+id = "working"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkGroupRows.tsx"
+symbol = "WorkingTimelineRow"
+line = 278
+parts = [
+  "作業中の見出し",
+  "作業時間",
+  "ワークツリー準備中の見出し",
+  "コンテキスト圧縮中の見出し",
+  "バックグラウンド準備のチップ",
+  "準備の進捗ポップオーバー",
+  "進捗のシマー要素",
+]
+
+[[component]]
+id = "thinking"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkGroupRows.tsx"
+symbol = "ThinkingTimelineRow"
+line = 361
+parts = [
+  "思考中のアイコン",
+  "思考中のラベルまたは回答プレビュー",
+  "思考中のシマー要素",
+  "思考グループを開閉する操作",
+]
+
+[[component]]
+id = "live-work"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkGroupRows.tsx"
+symbol = "LiveWorkEntryTimelineRow"
+line = 493
+parts = [
+  "実行中ツールのアイコン",
+  "実行中ツールのラベル",
+  "実行中ツールのシマー要素",
+  "実行失敗のマーク",
+  "実行中グループを開閉する操作",
+]
+
+[[component]]
+id = "work-group"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkGroupRows.tsx"
+symbol = "WorkGroupToggleTimelineRow"
+line = 588
+related_sources = ["components/chat/WorkLog.tsx"]
+parts = [
+  "ツールグループのアイコン",
+  "ツール件数の見出し",
+  "グループの開閉",
+  "グループ内部の一覧",
+  "グループ内のスクロール",
+]
+
+[[component]]
+id = "work-entry"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkEntryRow.tsx"
+symbol = "WorkEntryLogRow"
+line = 174
+parts = [
+  "作業の種類アイコン",
+  "作業の見出し",
+  "作業の時刻",
+  "作業詳細の開閉",
+  "警告のアイコン",
+  "ツール失敗のマーク",
+  "作成した会話を開く",
+  "通知されたサブエージェントを開く",
+]
+
+[[component]]
+id = "reasoning"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkEntryRow.tsx"
+symbol = "ReasoningTraceContent"
+line = 119
+parts = [
+  "思考の要約",
+  "思考の展開したMarkdown本文",
+  "実行中の思考の追記",
+]
+
+[[component]]
+id = "tool-inspector"
+area = "作業・ツール"
+source = "components/chat/V2ItemInspector.tsx"
+symbol = "V2ItemInspector"
+line = 226
+related_sources = ["components/chat/CommandOutputPanel.tsx", "components/chat/ShellCommandBlock.tsx"]
+parts = [
+  "コマンド本文",
+  "ストリーミングするコマンド出力",
+  "終了コード",
+  "ファイル変更のファイル名",
+  "ファイル追加行数と削除行数",
+  "変更操作と旧パス/新パス",
+  "差分を開く操作",
+  "ファイル検索のパターン",
+  "ファイル検索結果と行/列/プレビュー",
+  "Web検索のパターン",
+  "Web検索結果のリンクと説明",
+  "動的ツールの名前",
+  "動的ツールの入力引数",
+  "ツールのテキスト出力",
+  "ツールの画像出力",
+  "承認リクエストの詳細",
+  "質問リクエストの詳細",
+  "通知の詳細",
+  "システム通知の詳細",
+  "エラーの詳細",
+  "Todoの各ステップと状態",
+  "ツールの出力が空の場合の表示",
+]
+
+[[component]]
+id = "work-media"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkEntryRow.tsx"
+symbol = "WorkEntryLogRow"
+line = 174
+parts = [
+  "ツールが閲覧した画像",
+  "遅延取得したツール出力",
+  "ツール詳細の読み込み中の表示",
+  "ツール詳細の取得失敗の表示",
+]
+
+[[component]]
+id = "answer-history"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkEntryRow.tsx"
+symbol = "QuestionAnswerHistory"
+line = 570
+parts = [
+  "過去の質問文",
+  "過去の回答文",
+  "過去の回答に付けた添付",
+]
+
+[[component]]
+id = "turn-error"
+area = "作業・ツール"
+source = "components/chat/TimelineWorkEntryRow.tsx"
+symbol = "WorkEntryLogRow"
+line = 174
+parts = [
+  "エラーのアイコン",
+  "エラーの見出し",
+  "エラーメッセージ",
+  "エラーの時刻",
+  "使用制限の表示",
+  "使用制限の解除時刻",
+  "ワークスペース準備の再試行",
+]
+
+[[component]]
+id = "compaction"
+area = "作業・ツール"
+source = "components/chat/MessagesTimeline.tsx"
+symbol = "ContextCompactionTimelineRow"
+line = 1513
+parts = [
+  "圧縮の区切り",
+  "圧縮のアイコン",
+  "圧縮前のトークン数",
+  "圧縮後のトークン数",
+  "圧縮中の表示",
+  "圧縮失敗の表示",
+]
+
+[[component]]
+id = "tool-icons"
+area = "作業・ツール"
+source = "components/chat/TimelineToolActivityIcon.tsx"
+symbol = "ToolActivityIconView"
+line = 79
+parts = [
+  "作業種別に対応したアイコン",
+  "プロバイダーやツール固有の画像アイコン",
+  "ネイティブアプリのアイコン",
+  "アイコン取得不能時のフォールバック",
+]
+
+[[component]]
+id = "plan"
+area = "計画"
+source = "components/chat/ProposedPlanCard.tsx"
+symbol = "ProposedPlanCard"
+line = 41
+parts = [
+  "Planのバッジ",
+  "計画のタイトル",
+  "計画のMarkdown本文",
+  "長い計画の折りたたみプレビュー",
+  "計画を展開",
+  "計画を折りたたむ",
+  "計画の操作メニュー",
+  "計画をコピー",
+  "計画のコピー完了",
+  "計画をMarkdownでダウンロード",
+  "計画をワークスペースに保存",
+]
+
+[[component]]
+id = "plan-save"
+area = "計画"
+source = "components/chat/ProposedPlanCard.tsx"
+symbol = "SavePlanToWorkspaceForm"
+line = 258
+parts = [
+  "保存先パスの入力",
+  "計画の保存を確定",
+  "計画の保存をキャンセル",
+  "保存処理中の表示",
+]
+
+[[component]]
+id = "worktree-setup"
+area = "ワークツリー"
+source = "components/chat/WorktreeSetupCard.tsx"
+symbol = "WorktreeSetupCard"
+line = 314
+parts = [
+  "準備カードの見出し",
+  "準備中の表示",
+  "準備完了の表示",
+  "準備失敗の表示",
+  "準備キャンセルの表示",
+  "完了した準備の折りたたみ要約",
+  "経過時間",
+  "各段階の一覧",
+  "段階ごとのpending/running/done/failed/warning/skippedアイコン",
+  "段階の詳細文",
+  "段階ごとの所要時間",
+  "セットアップ出力の末尾",
+  "準備の詳細を開閉",
+  "ブランチ名",
+  "ベースの参照名",
+  "ワークツリーのパス",
+  "ターミナルを開く",
+  "ローカルで作業する",
+  "準備をキャンセル",
+]
+
+[[component]]
+id = "lifecycle"
+area = "ライフサイクル"
+source = "components/chat/V2LifecycleRow.tsx"
+symbol = "V2LifecycleRow"
+line = 70
+related_sources = ["components/chat/TimelineSystemDivider.tsx"]
+parts = [
+  "中断した実行の区切り",
+  "中断のアイコンと理由",
+  "環境間の引き継ぎ",
+  "引き継ぎ失敗の表示",
+  "分岐元の会話へのリンク",
+  "作成した分岐へのリンク",
+  "新しく作成した会話の表示とリンク",
+  "新しいセッションの区切り",
+  "モデル切り替えの区切り",
+]
+
+[[component]]
+id = "subagent"
+area = "サブエージェント"
+source = "components/chat/V2LifecycleRow.tsx"
+symbol = "SubagentTimelineLink"
+line = 397
+related_sources = ["components/chat/AgentElapsed.tsx", "components/chat/SubagentTooltipContent.tsx"]
+parts = [
+  "エージェントのアバター",
+  "プロバイダーや環境のアイコン",
+  "エージェントの名前",
+  "状態のドット",
+  "queued/running/waiting/idle/completed/failed/stoppedの表示",
+  "進捗または結果の要約",
+  "経過時間",
+  "子会話を開く操作",
+  "リモートの子エージェント表示",
+  "エージェントの詳細ツールチップ",
+]
+
+[[component]]
+id = "subagent-group"
+area = "サブエージェント"
+source = "components/chat/TimelineV2EventRow.tsx"
+symbol = "V2SubagentGroup"
+line = 54
+parts = [
+  "複数エージェントのまとめ行",
+  "重なったアバター",
+  "省略された人数",
+  "人数の見出し",
+  "状態の集計",
+  "グループの経過時間",
+  "エージェント一覧の開閉",
+  "展開した子エージェント各行",
+]
+
+[[component]]
+id = "subagent-bar"
+area = "サブエージェント"
+source = "components/chat/ProviderSubagentBar.tsx"
+symbol = "ProviderSubagentBar"
+line = 14
+parts = [
+  "子会話のプロバイダー表示",
+  "子会話のモデル表示",
+  "推論設定の表示",
+  "実行状態と経過時間",
+  "親会話に戻る操作",
+  "自律実行である旨の表示",
+]
+
+[[component]]
+id = "native-child"
+area = "サブエージェント"
+source = "components/chat/NativeChildWorkDialog.tsx"
+symbol = "NativeChildWorkDialog"
+line = 30
+parts = [
+  "プロバイダー内部の子作業を開く操作",
+  "子作業の読み取り専用ダイアログ",
+  "子作業の役割",
+  "子作業の依頼文",
+  "子作業の各ステップ",
+  "子作業のツール入力と本文",
+  "前半省略の表示",
+  "記録がない場合の表示",
+  "子作業の読み込み中と失敗",
+  "子作業を再読み込み",
+]
+
+[[component]]
+id = "workflow-opening"
+area = "サブエージェント"
+source = "components/chat/WorkflowOpeningBlock.tsx"
+symbol = "WorkflowOpeningBlock"
+line = 38
+parts = [
+  "委任や連携から始まった会話の開始表示",
+  "関連する会話を開く操作",
+]
+
+[[component]]
+id = "child-approval"
+area = "サブエージェント"
+source = "components/chat/ChildThreadApprovals.tsx"
+symbol = "ChildThreadApprovals"
+line = 78
+parts = [
+  "子会話の承認依頼",
+  "子会話の名前",
+  "コマンドなどの詳細",
+  "MCPアプリ名",
+  "承認を求める理由",
+  "応答不能なプロセスの表示",
+  "子会話の承認/拒否/追加選択肢",
+  "子会話の承認エラー",
+]
+
+[[component]]
+id = "approval"
+area = "対話リクエスト"
+source = "components/chat/TimelinePendingApprovalRow.tsx"
+symbol = "TimelinePendingApprovalRow"
+line = 34
+parts = [
+  "承認待ちの見出し",
+  "承認待ちのアイコン",
+  "承認対象のコマンドまたは説明",
+  "承認理由",
+  "全アクセスの例外に関する説明",
+  "承認操作",
+]
+
+[[component]]
+id = "approval-actions"
+area = "対話リクエスト"
+source = "components/chat/ComposerPendingApprovalActions.tsx"
+symbol = "ComposerPendingApprovalActions"
+line = 33
+parts = [
+  "承認する",
+  "拒否する",
+  "追加の承認選択肢",
+  "今回のセッションを常に許可",
+  "承認をキャンセル",
+  "選択肢の警告",
+  "応答処理中や応答不可の表示",
+]
+
+[[component]]
+id = "question"
+area = "対話リクエスト"
+source = "components/chat/ComposerPendingUserInputPanel.tsx"
+symbol = "ComposerPendingUserInputPanel"
+line = 30
+parts = [
+  "質問カードの見出し",
+  "質問のMarkdown本文",
+  "質問の選択肢",
+  "選択肢の説明",
+  "単一選択のラジオ",
+  "複数選択のチェック",
+  "選択肢のキー表示",
+  "複数質問の現在位置/総数",
+  "質問を開閉",
+  "回答せずに質問を閉じる",
+]
+
+[[component]]
+id = "question-actions"
+area = "対話リクエスト"
+source = "components/chat/ComposerPrimaryActions.tsx"
+symbol = "ComposerPrimaryActions"
+line = 81
+parts = [
+  "前の質問へ戻る",
+  "次の質問へ進む",
+  "最後の質問を送信",
+  "回答中の状態",
+  "質問待ちの実行を停止",
+  "入力欄から自由な回答を送る",
+]
+
+[[component]]
+id = "secret"
+area = "対話リクエスト"
+source = "components/chat/SecretRequestCard.tsx"
+symbol = "SecretRequestCard"
+line = 36
+parts = [
+  "秘密情報の要求ラベル",
+  "要求理由",
+  "取得元への外部リンク",
+  "保存先ソース選択",
+  "マスクされた秘密情報入力",
+  "参照形式の入力",
+  "安全に保存する操作",
+  "要求を拒否する操作",
+  "保存エラー",
+  "秘密情報の取り扱い説明",
+  "回答済みまたは拒否済みの表示",
+]
+
+[[component]]
+id = "link-request"
+area = "対話リクエスト"
+source = "components/chat/LinkRequestCard.tsx"
+symbol = "LinkRequestCard"
+line = 55
+parts = [
+  "接続要求の概要と理由",
+  "要求を拒否",
+  "接続を確認またはマシンを選択",
+  "権限がないときの表示",
+  "接続確認ダイアログ",
+  "マシン一覧",
+  "別アドレスの入力",
+  "ペアリングコードの入力",
+  "アクセス権限の選択",
+  "既存の接続を使う表示",
+  "戻る/キャンセル/続ける/接続",
+  "接続中と接続失敗の表示",
+]
+
+[[component]]
+id = "composer"
+area = "入力欄"
+source = "components/chat/ChatComposer.tsx"
+symbol = "ChatComposer"
+line = 485
+related_sources = ["components/chat/ComposerControl.tsx", "components/chat/ComposerControlsBar.tsx", "components/chat/ComposerPromptLengthValidation.tsx"]
+parts = [
+  "本文の入力エディタ",
+  "プレースホルダー",
+  "折りたたまれた入力欄",
+  "入力欄を展開",
+  "既存の下書き",
+  "入力中のコンテキストチップ",
+  "入力中のモデルメンション",
+  "入力中のコードブロック",
+  "入力履歴の候補",
+  "送信待ちの添付行",
+  "プロンプト長の警告",
+  "ライブ文字起こし",
+]
+
+[[component]]
+id = "composer-code"
+area = "入力欄"
+source = "components/chat/ComposerCodeBlockNodeView.tsx"
+symbol = "ComposerCodeBlockNodeView"
+line = 9
+related_sources = ["components/chat/ComposerCodeBlockLanguagePicker.tsx"]
+parts = [
+  "入力中コードブロックの本文",
+  "入力中コードブロックの言語選択",
+]
+
+[[component]]
+id = "send-actions"
+area = "入力欄"
+source = "components/chat/ComposerPrimaryActions.tsx"
+symbol = "ComposerPrimaryActions"
+line = 81
+parts = [
+  "送信するアイコン",
+  "停止するアイコン",
+  "停止後に再開するアイコン",
+  "追加指示を送るアイコン",
+  "キューに追加するアイコン",
+  "キューの編集を確定するアイコン",
+  "コンテキストを圧縮して送る操作",
+  "次回送信で履歴を残す/圧縮する切り替え",
+  "送信処理中の表示",
+  "送信できない理由の表示",
+]
+
+[[component]]
+id = "composer-attachments"
+area = "入力欄"
+source = "components/chat/ComposerAttachmentStrip.tsx"
+symbol = "ComposerAttachmentMediaRow"
+line = 111
+related_sources = ["components/chat/ComposerImageThumbnail.tsx"]
+parts = [
+  "添付操作を開く",
+  "画像のサムネイル",
+  "動画のサムネイル",
+  "Snap Shotの添付",
+  "ファイル名と容量",
+  "添付を削除",
+  "添付のプレビュー",
+  "添付のプレビューダイアログ",
+  "画像だけの未展開プレビュー",
+  "アップロード中の表示",
+  "アップロード失敗と再試行",
+  "下書きの添付を保存できない警告",
+  "ファイルの再添付が必要な表示",
+  "未展開の画像の追加件数",
+  "キューの添付の削除",
+]
+
+[[component]]
+id = "composer-menu"
+area = "入力欄"
+source = "components/chat/ComposerCommandMenu.tsx"
+symbol = "ComposerCommandMenu"
+line = 107
+related_sources = ["components/chat/ComposerCommandMenuLayer.tsx"]
+parts = [
+  "スラッシュコマンド候補",
+  "スキル候補",
+  "ファイルやフォルダ候補",
+  "会話候補",
+  "環境候補",
+  "モデル候補",
+  "Pull Request候補",
+  "候補のアイコン",
+  "候補の説明",
+  "スキルの提供元バッジ",
+  "選択中の候補",
+  "候補を検索中の表示",
+  "候補がない場合の表示",
+]
+
+[[component]]
+id = "stash"
+area = "入力欄"
+source = "components/chat/ComposerStashMenu.tsx"
+symbol = "ComposerStashMenu"
+line = 32
+parts = [
+  "退避した下書きの一覧",
+  "下書きの抜粋",
+  "退避した下書きの復元",
+  "退避した下書きを削除",
+  "退避一覧を閉じる",
+  "退避した時刻",
+  "退避した画像とファイル数",
+  "画像保存中または画像欠落の表示",
+  "退避した下書きがない表示",
+]
+
+[[component]]
+id = "stash-badge"
+area = "入力欄"
+source = "components/chat/ComposerStashBadge.tsx"
+symbol = "ComposerStashBadge"
+line = 7
+parts = [
+  "退避した下書きの件数バッジ",
+]
+
+[[component]]
+id = "queue"
+area = "入力欄"
+source = "components/chat/QueuedRunsControl.tsx"
+symbol = "QueuedRunsControl"
+line = 76
+parts = [
+  "キューの件数",
+  "送信待ちの発言本文",
+  "キュー内の順序",
+  "添付のサムネイル",
+  "コンテキストのチップ",
+  "送信元や自動実行の発言の折りたたみ",
+  "発言の時刻",
+  "実行中の追加指示へ昇格",
+  "キューの発言を編集",
+  "キューの編集をキャンセル",
+  "キューから削除",
+  "キューの表示を展開/折りたたむ",
+  "編集不可や保留状態の表示",
+]
+
+[[component]]
+id = "pending-terminal"
+area = "入力欄"
+source = "components/chat/ComposerPendingTerminalContexts.tsx"
+symbol = "ComposerPendingTerminalContextChip"
+line = 14
+parts = [
+  "送信前のターミナルチップ",
+  "ターミナル選択範囲の詳細",
+  "送信前のターミナルコンテキストの削除",
+]
+
+[[component]]
+id = "model-picker"
+area = "モデル・権限"
+source = "components/chat/ProviderModelPicker.tsx"
+symbol = "ProviderModelPicker"
+line = 88
+related_sources = ["components/chat/ModelListRow.tsx", "components/chat/ModelPickerContent.tsx", "components/chat/ModelPickerSidebar.tsx", "components/chat/ProviderInstanceIcon.tsx", "components/chat/ProviderPackageIcon.tsx"]
+parts = [
+  "現在のプロバイダーアイコン",
+  "現在のモデル名",
+  "現在の推論設定",
+  "モデル選択を開く",
+  "モデル検索",
+  "プロバイダーの一覧",
+  "モデルの一覧",
+  "利用不可モデルの表示",
+  "複数モデルの選択",
+  "プロバイダーの警告",
+  "プロバイダー設定への操作",
+]
+
+[[component]]
+id = "model-options"
+area = "モデル・権限"
+source = "components/chat/ComposerModelEffort.tsx"
+symbol = "ComposerPickerFooter"
+line = 660
+related_sources = ["components/chat/EffortGlyph.tsx", "components/chat/TraitsSpeed.tsx", "components/chat/composerProviderState.tsx"]
+parts = [
+  "推論レベルの選択",
+  "推論なしの選択",
+  "速度の選択",
+  "高速/Ultracodeの操作",
+  "権限モードの選択",
+  "現在の選択を示すアイコン",
+  "モデル選択下部の操作",
+]
+
+[[component]]
+id = "composer-mode"
+area = "モデル・権限"
+source = "components/chat/ComposerFooterControls.tsx"
+symbol = "ComposerFooterModeControls"
+line = 24
+related_sources = ["components/chat/CompactComposerControlsMenu.tsx"]
+parts = [
+  "実行モードの表示",
+  "実行モードの切り替え",
+  "権限設定の表示と切り替え",
+  "狭い入力欄の追加操作メニュー",
+]
+
+[[component]]
+id = "chatgpt-plan"
+area = "モデル・権限"
+source = "components/chat/ChatGptSharingControl.tsx"
+symbol = "ChatGptSharingControl"
+line = 11
+parts = [
+  "ChatGPTプラン利用の表示",
+  "プラン利用の説明",
+  "使用量を開く操作",
+]
+
+[[component]]
+id = "provider-traits"
+area = "モデル・権限"
+source = "components/chat/TraitsPicker.tsx"
+symbol = "TraitsMenuContent"
+line = 379
+parts = [
+  "プロバイダー固有の推論設定",
+  "選択式のモデルオプション",
+  "モデルオプションの説明",
+  "モデルオプションの既定値バッジ",
+  "オン/オフ式のモデルオプション",
+  "本文にUltrathink指定がある場合の表示",
+  "子会話など設定変更不可のときの現在値",
+]
+
+[[component]]
+id = "dictation"
+area = "音声入力"
+source = "components/chat/ComposerSpeechButton.tsx"
+symbol = "ComposerSpeechButton"
+line = 177
+related_sources = ["components/chat/VoiceInputErrorPill.tsx", "components/chat/VoiceInputPill.tsx"]
+parts = [
+  "音声入力を開始",
+  "録音中の表示",
+  "音量の波形",
+  "録音時間と上限",
+  "録音をキャンセル",
+  "録音を確定",
+  "音声処理中の表示",
+  "後処理をスキップ",
+  "音声入力のエラー",
+  "エラーからの操作",
+]
+
+[[component]]
+id = "voice-setup"
+area = "音声入力"
+source = "components/chat/VoiceInputSetup.tsx"
+symbol = "VoiceInputSetup"
+line = 22
+parts = [
+  "音声入力の初期設定ダイアログ",
+  "音声モデルの表示",
+  "音声モデルの容量",
+  "モデルのダウンロード",
+  "ダウンロード進捗",
+  "ダウンロード検証中の表示",
+  "ダウンロードをキャンセル",
+  "モデルの読み込みや取得の再試行",
+  "マイク選択",
+  "マイク一覧の更新",
+  "使用不能なマイクの表示",
+  "音声設定への操作",
+  "音声入力を開始する操作",
+]
+
+[[component]]
+id = "provider-banner"
+area = "通知・状態"
+source = "components/chat/ProviderStatusBanner.tsx"
+symbol = "ProviderStatusBanner"
+line = 96
+parts = [
+  "プロバイダー未設定/非互換/失敗の通知",
+  "通知のアイコンと見出し",
+  "通知の説明",
+  "プロバイダー設定を開く",
+  "プロバイダー状態を更新",
+  "通知を閉じる",
+]
+
+[[component]]
+id = "thread-error-banner"
+area = "通知・状態"
+source = "components/chat/ThreadErrorBanner.tsx"
+symbol = "ThreadErrorBanner"
+line = 72
+parts = [
+  "会話のエラー通知",
+  "長いエラー文の展開",
+  "ChatGPT使用制限の表示",
+  "管理者への依頼をコピー",
+  "ChatGPT使用量を開く",
+  "エラー通知を閉じる",
+]
+
+[[component]]
+id = "banner-stack"
+area = "通知・状態"
+source = "components/chat/ComposerBannerStack.tsx"
+symbol = "ComposerBannerStack"
+line = 38
+related_sources = ["components/chat/ComposerBanner.tsx"]
+parts = [
+  "入力欄上の通知カード",
+  "通知のアイコン",
+  "通知の見出しと説明",
+  "通知の操作",
+  "通知の開閉と件数",
+  "通知の詳細表示",
+  "通知を閉じる",
+]
+
+[[component]]
+id = "system-banners"
+area = "通知・状態"
+source = "components/chat/useSystemComposerBanners.tsx"
+symbol = "useSystemComposerBanners"
+line = 58
+related_sources = ["components/chat/ComposerServerUpdateStatus.tsx", "components/chat/useAutoBalanceUpdateBanner.tsx"]
+parts = [
+  "環境のオフライン通知",
+  "環境の再接続中通知",
+  "環境を再接続",
+  "サーバーを切断",
+  "サーバーの更新通知",
+  "サーバーの更新進捗",
+  "サーバーの更新失敗",
+  "バージョン不一致の通知",
+  "自動割当て先の更新通知",
+]
+
+[[component]]
+id = "project-clone"
+area = "通知・状態"
+source = "components/chat/useProjectCloneBanner.tsx"
+symbol = "useProjectCloneBanner"
+line = 25
+parts = [
+  "プロジェクトの取得/クローン状態の通知",
+  "クローン失敗の通知と操作",
+]
+
+[[component]]
+id = "usage-limit"
+area = "通知・状態"
+source = "components/chat/UsageLimitRecoveryBanner.tsx"
+symbol = "usageLimitRecoveryBannerItem"
+line = 37
+parts = [
+  "使用制限に達した通知",
+  "自動再開や待機時間の表示",
+  "使用制限からの再開設定",
+  "スヌーズの操作",
+]
+
+[[component]]
+id = "model-fallback"
+area = "通知・状態"
+source = "components/chat/ComposerUsageLimits.tsx"
+symbol = "modelFallbackBannerItem"
+line = 72
+parts = [
+  "代替モデル使用の通知",
+  "使用量の通知",
+]
+
+[[component]]
+id = "feedback"
+area = "通知・状態"
+source = "components/chat/ComposerFeedback.tsx"
+symbol = "feedbackBannerItem"
+line = 12
+parts = [
+  "フィードバックの状態通知",
+  "フィードバックに関する操作",
+]
+
+[[component]]
+id = "fresh-session-banner"
+area = "通知・状態"
+source = "components/chat/ComposerFreshSession.tsx"
+symbol = "freshSessionBannerItem"
+line = 6
+parts = [
+  "次の発言で新しいセッションを開始する通知",
+  "新しいセッション開始の取り消し",
+]
+
+[[component]]
+id = "thread-now"
+area = "通知・状態"
+source = "components/chat/ThreadNow.tsx"
+symbol = "ThreadNow"
+line = 83
+parts = [
+  "注意が必要な状態の行",
+  "バックグラウンド作業の行",
+  "履歴や状態の同期中表示",
+  "目標の状態の行",
+]
+
+[[component]]
+id = "activity-notices"
+area = "通知・状態"
+source = "components/chat/ThreadActivityBanners.tsx"
+symbol = "runStopNowItem"
+line = 131
+parts = [
+  "停止処理中の表示",
+  "停止要求からの経過時間",
+  "停止に応答しない表示",
+  "強制停止の操作",
+  "バックグラウンドコマンドやエージェントの表示",
+  "バックグラウンド作業の詳細",
+  "バックグラウンド作業を停止",
+  "待機中の子会話を開く",
+  "目標の内容と使用量",
+  "目標を再開",
+  "目標をクリア",
+  "ブランチ不一致の通知",
+  "ブランチを復元する操作",
+  "プロバイダー拡張機能の状態",
+]
+
+[[component]]
+id = "background-details"
+area = "通知・状態"
+source = "components/chat/BackgroundWorkDetails.tsx"
+symbol = "BackgroundWorkDetails"
+line = 21
+parts = [
+  "バックグラウンド作業の詳細ダイアログ",
+  "各作業の名前と状態",
+  "実行コマンド",
+  "実行中のコマンド出力",
+  "子会話を開く",
+]
+
+[[component]]
+id = "thread-life-status"
+area = "通知・状態"
+source = "components/chat/ThreadStatusLine.tsx"
+symbol = "ThreadStatusLine"
+line = 5
+related_sources = ["components/chat/useThreadLifecycle.tsx"]
+parts = [
+  "スヌーズ中の表示と残り時間",
+  "今すぐ起こす操作",
+  "完了扱いの状態と経過時間",
+  "完了扱いを解除する操作",
+  "スヌーズから復帰した通知と閉じる操作",
+]
+
+[[component]]
+id = "header"
+area = "ヘッダー・周辺操作"
+source = "components/chat/ChatHeader.tsx"
+symbol = "ChatHeader"
+line = 71
+parts = [
+  "プロジェクトのアイコンと名前",
+  "同じプロジェクトで新規会話を作成",
+  "親会話のパンくずとリンク",
+  "会話のタイトル",
+  "会話名の変更入力",
+  "会話の操作メニュー",
+  "リンク先環境から開始したバッジ",
+  "ゲスト共有の表示",
+]
+
+[[component]]
+id = "panel-controls"
+area = "ヘッダー・周辺操作"
+source = "components/chat/PanelLayoutControls.tsx"
+symbol = "PanelLayoutControls"
+line = 33
+parts = [
+  "会話詳細の表示切り替え",
+  "ターミナルの表示切り替え",
+  "右パネルの表示切り替え",
+  "右パネルの最大化",
+  "最大化の解除",
+]
+
+[[component]]
+id = "context-strip"
+area = "ヘッダー・周辺操作"
+source = "components/chat/ComposerSurface.tsx"
+symbol = "ContextStrip"
+line = 72
+parts = [
+  "入力欄の環境/ブランチ操作領域",
+]
+
+[[component]]
+id = "branch-toolbar"
+area = "ヘッダー・周辺操作"
+source = "components/BranchToolbar.tsx"
+symbol = "BranchToolbar"
+line = 595
+parts = [
+  "環境の選択",
+  "ブランチの選択",
+  "ローカル/ワークツリーの選択",
+  "新しいワークツリーの指定",
+  "利用権限の表示",
+]
+
+[[component]]
+id = "thread-menu"
+area = "ヘッダー・周辺操作"
+source = "components/threadActionMenu.logic.ts"
+symbol = "buildThreadActionMenuItems"
+line = 116
+parts = [
+  "会話内検索を開く",
+  "同じブランチで新規会話",
+  "ピン留め/解除",
+  "会話を完了扱い/解除",
+  "スヌーズ/解除",
+  "スヌーズ時刻の指定",
+  "会話名を変更",
+  "会話名を再生成",
+  "未読にする",
+  "ゲスト共有",
+  "プロジェクトによる絞り込み/解除",
+  "会話をプロジェクトへ変換",
+  "自動完了の設定",
+  "パスをコピー",
+  "ブランチをコピー",
+  "会話の参照をコピー",
+  "会話IDをコピー",
+  "プロジェクト設定を開く",
+  "会話をアーカイブ",
+  "会話を削除",
+  "読み取り専用時の操作不可表示",
+]
+
+[[component]]
+id = "thread-details"
+area = "会話から開くパネル"
+source = "components/chat/ThreadDetailsPanel.tsx"
+symbol = "ThreadDetailsPanel"
+line = 89
+related_sources = ["components/chat/ThreadDetailsCard.tsx", "components/chat/ThreadDetailsControl.tsx", "components/chat/ThreadDetailsSection.tsx"]
+parts = [
+  "インラインの会話詳細カード",
+  "ポップオーバーの会話詳細カード",
+  "環境情報",
+  "エディタで開く",
+  "プロジェクトのスクリプト",
+  "ブランチ情報",
+  "Gitの操作",
+  "変更ファイル",
+  "Pull Request一覧",
+  "会話の親子/委任関係",
+  "サイドチャット一覧",
+  "サーバー一覧",
+  "自動実行一覧",
+  "使用量とコンテキスト情報",
+  "詳細項目の表示設定メニュー",
+]
+
+[[component]]
+id = "relationships"
+area = "会話から開くパネル"
+source = "components/chat/ThreadRelationshipsControl.tsx"
+symbol = "ThreadRelationshipsPanel"
+line = 394
+related_sources = ["components/chat/ThreadLineageWorkflowRow.tsx", "components/chat/ThreadRelationshipIcon.tsx"]
+parts = [
+  "親や分岐の会話一覧",
+  "サブエージェントの会話一覧",
+  "委任元の表示",
+  "リモートの子会話表示",
+  "関係する会話の追加読み込み",
+  "関係する会話を開く",
+]
+
+[[component]]
+id = "terminal-drawers"
+area = "会話から開くパネル"
+source = "components/chat/ChatTerminalDrawers.tsx"
+symbol = "ChatTerminalDrawers"
+line = 41
+parts = [
+  "会話に属するターミナルのドロワー",
+]
+
+[[component]]
+id = "right-panel"
+area = "会話から開くパネル"
+source = "components/chat/RightPanelSurfaceContent.tsx"
+symbol = "RightPanelSurfaceContent"
+line = 62
+related_sources = ["components/chat/ChatRightPanel.tsx"]
+parts = [
+  "差分/レビューのパネル",
+  "ファイルプレビューのパネル",
+  "ブラウザプレビューのパネル",
+  "デバイスのパネル",
+  "Pull Requestのパネル",
+  "サイドチャットのパネル",
+]
+
+[[component]]
+id = "side-chat"
+area = "会話から開くパネル"
+source = "components/chat/SideChatPane.tsx"
+symbol = "SideChatPane"
+line = 36
+parts = [
+  "サイドチャットのヘッダー",
+  "サイドチャットの会話本文",
+  "サイドチャットの入力欄",
+  "サイドチャットを閉じる操作",
+]
+
+[[component]]
+id = "mini-player"
+area = "会話から開くパネル"
+source = "components/preview/ThreadPreviewMiniPlayer.tsx"
+symbol = "ThreadPreviewMiniPlayer"
+line = 194
+parts = [
+  "ブラウザプレビューのミニプレイヤー",
+]
+
+[[component]]
+id = "open-editor"
+area = "会話から開くパネル"
+source = "components/chat/OpenInPicker.tsx"
+symbol = "OpenInPicker"
+line = 206
+parts = [
+  "既定のエディタで開く",
+  "エディタ選択メニュー",
+  "各エディタのアイコン",
+  "SSH経由のエディタで開く",
+  "SSHルートがない場合の表示",
+  "エディタがない場合の表示",
+]
+
+[[component]]
+id = "detail-usage"
+area = "会話から開くパネル"
+source = "components/chat/ThreadDetailsUsage.tsx"
+symbol = "ThreadDetailsUsage"
+line = 43
+parts = [
+  "使用制限の各ウィンドウ",
+  "残り使用量のバーと値",
+  "使用制限リセット時刻",
+  "使用量ペースの説明",
+  "使用量が取得不能な表示",
+  "コンテキスト使用量",
+  "コンテキスト上限",
+  "圧縮しきい値のマーカー",
+]
+
+[[component]]
+id = "detail-servers"
+area = "会話から開くパネル"
+source = "components/chat/ThreadServersPanel.tsx"
+symbol = "ThreadServersPanel"
+line = 43
+parts = [
+  "会話が起動したサーバー一覧",
+  "ポート番号",
+  "起動元とプロセス名",
+  "ブラウザでサーバーを開く",
+  "サーバーを停止",
+  "サーバー停止中の表示",
+  "サーバーをさらに表示/折りたたむ",
+]
+
+[[component]]
+id = "detail-automations"
+area = "会話から開くパネル"
+source = "components/chat/ThreadAutomationsPanel.tsx"
+symbol = "ThreadAutomationsPanel"
+line = 60
+parts = [
+  "自動実行の一覧",
+  "自動実行の状態ドット",
+  "自動実行のタイトル",
+  "予定と次の実行時刻",
+  "自動実行を編集",
+  "今すぐ実行",
+  "自動実行を一時停止/再開",
+  "自動実行設定を開く",
+  "自動実行の読み込み失敗",
+]
+
+[[component]]
+id = "detail-prs"
+area = "会話から開くパネル"
+source = "components/chat/ThreadDetailsPrRows.tsx"
+symbol = "ThreadDetailsPrRows"
+line = 66
+related_sources = ["components/chat/ThreadDetailsPrRow.tsx"]
+parts = [
+  "現在のPull Request",
+  "Pull Requestの状態",
+  "Pull Request名と番号",
+  "Pull Requestを開く",
+  "追加Pull Requestを表示/折りたたむ",
+]
+
+[[component]]
+id = "detail-items"
+area = "会話から開くパネル"
+source = "components/chat/ThreadDetailsItemsMenu.tsx"
+symbol = "ThreadDetailsItemsMenuItems"
+line = 16
+parts = [
+  "会話詳細の各項目を表示/非表示",
+  "会話詳細の表示設定を既定に戻す",
+]
+
+[[component]]
+id = "overlay-dialogs"
+area = "会話から開くダイアログ"
+source = "components/chat/ChatOverlayHosts.tsx"
+symbol = "RevertConfirmHost"
+line = 193
+parts = [
+  "編集による巻き戻しの確認",
+  "ブランチ復元の確認",
+  "デバイス設定のダイアログ",
+  "Pull Requestから会話を作る確認",
+]
+
+[[component]]
+id = "guest-sharing"
+area = "会話から開くダイアログ"
+source = "components/chat/GuestShareControls.tsx"
+symbol = "GuestShareDialogHost"
+line = 48
+parts = [
+  "ゲスト共有のダイアログ",
+  "ゲスト共有の状態",
+  "ゲストからの送信待ちメッセージ",
+  "共有リンクを作成",
+  "共有リンクをコピー",
+  "リンク作成中と失敗の表示",
+  "共有を停止",
+  "共有リンクの期限切れ",
+  "ゲストの送信待ちメッセージを送信",
+  "ゲストの送信待ちメッセージを破棄",
+]
+

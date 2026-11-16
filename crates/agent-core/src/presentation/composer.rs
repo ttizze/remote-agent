@@ -40,6 +40,9 @@ fn resumable(thread: &crate::models::Thread) -> bool {
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerControls {
+    pub fresh_context_available: bool,
+    pub feedback_available: bool,
+    pub feedback: Option<super::feedback::FeedbackNotice>,
     pub workspace: Option<WorkspaceSelection>,
     pub navigation: Navigation,
     pub connected: bool,
@@ -93,20 +96,26 @@ pub struct FollowUpControls {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct QueuedMessage {
     pub id: ClientInputId,
+    pub fresh_context: bool,
     pub text: String,
     /// Images and files sent with it.
     pub attachments: u32,
     /// Sent, and not yet in the Host's queue.
     pub pending: bool,
+    pub contexts: Vec<agent_protocol::context::MessageContext>,
 }
 
 fn follow_up_controls(
     snapshot: &Snapshot,
     thread: Option<&crate::models::Thread>,
+    fresh_context: bool,
 ) -> FollowUpControls {
     let preferences = snapshot.input.composer_preferences;
     let action = |alternate| {
-        let requested = follow_up::requested(preferences.follow_up, alternate);
+        let requested = follow_up::for_context(
+            follow_up::requested(preferences.follow_up, alternate),
+            fresh_context,
+        );
         if thread.is_some_and(|thread| follow_up::waits(thread, requested)) {
             FollowUp::Queue
         } else {
@@ -130,13 +139,23 @@ fn follow_up_controls(
     let session = thread.id.as_ref();
     let waiting = thread.queue.inputs.iter().map(|input| QueuedMessage {
         id: input.client_user_message_id.clone(),
+        fresh_context: input.fresh_context,
         text: follow_up::queued_text(input),
         attachments: input
             .input
             .iter()
-            .filter(|part| !matches!(part, agent_protocol::operations::Input::Text { .. }))
+            .filter(|part| {
+                !matches!(
+                    part,
+                    agent_protocol::operations::Input::Text { .. }
+                        | agent_protocol::operations::Input::Context { .. }
+                )
+            })
             .count() as u32,
         pending: false,
+        contexts: agent_protocol::operations::Input::contexts(&input.input)
+            .cloned()
+            .collect(),
     });
     let key = session.map(crate::state::DraftKey::from);
     let mut sending: Vec<_> = snapshot
@@ -164,9 +183,11 @@ fn follow_up_controls(
         queue: waiting
             .chain(sending.into_iter().map(|(id, pending)| QueuedMessage {
                 id: id.clone(),
+                fresh_context: pending.draft.fresh_context,
                 text: pending.draft.text.clone(),
                 attachments: pending.draft.attachments.len() as u32,
                 pending: true,
+                contexts: pending.draft.contexts.clone(),
             }))
             .collect(),
         held: thread.queue.held,
@@ -194,6 +215,7 @@ pub struct ComposerPresentation {
     pub controls: ComposerControls,
     models: Arc<Vec<Model>>,
     catalog: Option<Arc<agent_protocol::composer::ComposerCatalog>>,
+    stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
 }
 
 impl ComposerPresentation {
@@ -203,6 +225,7 @@ impl ComposerPresentation {
             && self.controls == other.controls
             && self.models.same(&other.models)
             && self.catalog.same(&other.catalog)
+            && self.stashes.same(&other.stashes)
     }
     pub(crate) fn project(
         snapshot: &Snapshot,
@@ -223,6 +246,10 @@ impl ComposerPresentation {
         let provider = snapshot.model_provider_for_draft(key.clone());
         let question = session.and_then(|id| snapshot.question_prompt(id.clone()));
         let controls = ComposerControls {
+            fresh_context_available: session
+                .is_some_and(|id| snapshot.fresh_context_available(id.clone())),
+            feedback_available: session.is_some_and(|id| snapshot.feedback_available(id.clone())),
+            feedback: session.and_then(|id| snapshot.feedback_notice(id.clone())),
             workspace: workspace::project(snapshot, pane, &draft),
             navigation: pane.navigation.as_ref().clone(),
             connected: snapshot.connection.connected,
@@ -253,14 +280,15 @@ impl ComposerPresentation {
             background: thread
                 .and_then(|thread| super::background_work::BackgroundWork::new(&thread.background)),
             unavailable: session
-                .and_then(|id| snapshot.input_unavailable_reason(id.clone(), provider)),
+                .and_then(|id| snapshot.input_unavailable_reason(id.clone(), provider))
+                .or_else(|| snapshot.project_clone_block_reason(&pane.navigation.cwd)),
             question_phase: question.as_ref().and_then(|question| {
                 snapshot.operation_phase(OperationKey::Request {
                     id: question.request_id.clone(),
                 })
             }),
             question,
-            follow_up: follow_up_controls(snapshot, thread.map(AsRef::as_ref)),
+            follow_up: follow_up_controls(snapshot, thread.map(AsRef::as_ref), draft.fresh_context),
         };
         let catalog = snapshot
             .catalog
@@ -273,6 +301,7 @@ impl ComposerPresentation {
             controls,
             models: snapshot.catalog.models.clone(),
             catalog,
+            stashes: snapshot.input.stashes.clone(),
         };
         if let Some(previous) = previous
             && next.equivalent(previous)
@@ -353,6 +382,12 @@ impl Snapshot {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl ComposerPresentation {
+    pub fn stashed_prompts(&self) -> Vec<crate::composer::stash::StashedPrompt> {
+        self.stashes.as_ref().clone()
+    }
+    pub fn stash_count(&self) -> u32 {
+        self.stashes.len() as u32
+    }
     pub fn draft(&self) -> Draft {
         self.draft.as_ref().clone()
     }
@@ -397,7 +432,7 @@ impl ComposerPresentation {
     /// Whether core state lets the composer send `has_content`. Clients add
     /// their own media transfer, recording, and permission state.
     pub fn can_send(&self, has_content: bool) -> bool {
-        has_content
+        (has_content || !self.draft.contexts.is_empty())
             && self.accepts_input()
             && self.controls.provider.is_some()
             && self.controls.unavailable.is_none()
@@ -408,6 +443,51 @@ impl ComposerPresentation {
     }
     pub fn can_attach(&self) -> bool {
         self.accepts_input()
+    }
+
+    pub fn can_resume(&self) -> bool {
+        let follow_up = &self.controls.follow_up;
+        self.can_send(true)
+            && self.controls.navigation.thread_id.is_some()
+            && self.controls.running_turn.is_none()
+            && self.controls.question.is_none()
+            && self.draft.text.trim().is_empty()
+            && self.draft.attachments.is_empty()
+            && self.draft.contexts.is_empty()
+            && follow_up.editing.is_none()
+            && !follow_up.busy
+            && (follow_up.resumable || follow_up.held && !follow_up.queue.is_empty())
+    }
+
+    /// The owner dispatches these in order. Held input resumes in its original
+    /// conversation; an interrupted run without queued input gets one continuation.
+    pub fn resume_intents(
+        &self,
+        client_user_message_id: ClientInputId,
+    ) -> Vec<crate::state::Intent> {
+        use crate::state::{Intent, follow_up::QueueAction};
+        if !self.can_resume() {
+            return Vec::new();
+        }
+        let thread_id = self.controls.navigation.thread_id.clone().unwrap();
+        if self.controls.follow_up.held && !self.controls.follow_up.queue.is_empty() {
+            return vec![Intent::Queue {
+                thread_id,
+                action: QueueAction::Resume,
+            }];
+        }
+        vec![
+            Intent::EditComposer {
+                thread_id: self.controls.navigation.draft_key.clone(),
+                text: RESUME_PROMPT.into(),
+                cursor: RESUME_PROMPT.len() as u32,
+            },
+            Intent::Submit {
+                thread_id: Some(thread_id),
+                client_user_message_id,
+                alternate: false,
+            },
+        ]
     }
 }
 

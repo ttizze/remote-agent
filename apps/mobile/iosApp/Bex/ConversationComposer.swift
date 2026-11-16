@@ -81,13 +81,11 @@ struct ConversationComposer: View {
                 .buttonBorderShape(.capsule)
                 .accessibilityIdentifier("task.diff")
             }
-            #if BEX_NSH_CONVERSATION
-                ConversationQueue(
-                    followUp: controls.followUp,
-                    threadId: model.navigation.threadId,
-                    perform: { model.perform($0) }
-                )
-            #endif
+            ConversationQueue(
+                followUp: controls.followUp,
+                threadId: model.navigation.threadId,
+                perform: { model.perform($0) }
+            )
             if let error = model.transferError {
                 AppNotice(text: error)
             }
@@ -199,6 +197,15 @@ struct ConversationComposer: View {
                model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasAttachments {
                 ComposerStopButton(turnId: runningTurnId, interrupting: model.interruptingTurnId == runningTurnId,
                                    stop: model.interrupt)
+            } else if model.composer.canResume(), !dictation.isRecording, !dictation.requestingPermission {
+                Button { model.resume() } label: {
+                    Image(systemName: "play.fill").font(.system(size: 16, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.circle)
+                .accessibilityLabel("スレッドを再開")
+                .accessibilityIdentifier("task.resume")
+                .disabled(model.transferring || preparingMedia)
             } else {
                 sendButton(hasAttachments: hasAttachments)
             }

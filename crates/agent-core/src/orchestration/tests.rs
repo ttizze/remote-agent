@@ -350,6 +350,7 @@ fn a_queued_input_is_displayed_once_in_the_queue_until_it_starts() {
     user.body = TurnItemBody::UserMessage {
         created_by: Actor::User,
         creation_source: CreationSource::Mobile,
+        scheduled_task_id: None,
         message_id: "input".into(),
         input_intent: "queued_turn".into(),
         text: "next".into(),
@@ -417,6 +418,7 @@ fn an_uncertain_steer_is_answerable_as_its_own_input_without_replacing_the_runni
         message_id: "steer-input".into(),
         created_by: Actor::User,
         creation_source: CreationSource::Mobile,
+        scheduled_task_id: None,
         input_intent: "steer".into(),
         text: "extra".into(),
         attachments: vec![],
@@ -502,6 +504,7 @@ fn imported_messages_group_at_user_inputs_without_inventing_application_runs() {
                 message_id: format!("user-{index}"),
                 created_by: Actor::User,
                 creation_source: CreationSource::Server,
+                scheduled_task_id: None,
                 input_intent: "turn_start".into(),
                 text: format!("question {index}"),
                 attachments: vec![],
@@ -580,6 +583,7 @@ fn queued_input_is_hidden_until_activation_regardless_of_event_order_and_stays_h
     queued.body = TurnItemBody::UserMessage {
         created_by: Actor::User,
         creation_source: CreationSource::Mobile,
+        scheduled_task_id: None,
         message_id: "input".into(),
         input_intent: "queued_turn".into(),
         text: "hello".into(),
@@ -879,6 +883,7 @@ fn canonical_rewind_actions_require_a_real_local_run_and_restorable_boundary(
     input.body = TurnItemBody::UserMessage {
         created_by: Actor::User,
         creation_source: CreationSource::Mobile,
+        scheduled_task_id: None,
         message_id: "input".into(),
         input_intent: "submit".into(),
         text: "original".into(),
@@ -994,4 +999,113 @@ fn authored_body_previews_only_accept_their_own_hydration_revision() {
         same_detail_revision(&live, &detail),
         "preserve the existing independent live command-output contract"
     );
+}
+
+#[test]
+fn attempts_senders_and_fresh_starts_reach_the_turn_view_from_t3_records() {
+    use agent_protocol::{
+        attribution::Author,
+        models::{AttemptState, ExecutionAttempt},
+        session,
+    };
+    let identity = session::SessionRef::new(None, "thread".into()).unwrap();
+    let mut projection = projection();
+    let mut started = run("completed");
+    started.fresh_context = true;
+    started.active_attempt_id = Some("attempt-2".into());
+    projection.runs.push(started);
+    let attempt = |id: &str, ordinal: u64, root: &str, reason: &str, status: &str| -> RunAttempt {
+        serde_json::from_value(json!({
+            "id":id,"runId":"run","attemptOrdinal":ordinal,"rootNodeId":root,
+            "providerInstanceId":"codex","providerThreadId":"provider-thread","providerTurnId":null,
+            "reason":reason,"status":status,"startedAt":NOW,"completedAt":NOW
+        }))
+        .unwrap()
+    };
+    let first = uuid::Uuid::from_u128(1);
+    let second = uuid::Uuid::from_u128(2);
+    projection.attempts = vec![
+        attempt(&first.to_string(), 1, "root-1", "initial", "superseded"),
+        attempt(
+            &second.to_string(),
+            2,
+            "root-2",
+            "steering_restart",
+            "completed",
+        ),
+    ];
+    // A tool item under a child node resolves through its parent to attempt 1.
+    projection.nodes.push(
+        serde_json::from_value(json!({
+            "id":"tool-node","threadId":"thread","runId":"run","parentNodeId":"root-1",
+            "rootNodeId":"root-1","kind":"tool_call","status":"completed","countsForRun":true,
+            "providerThreadId":null,"providerTurnId":null,"nativeItemRef":null,
+            "runtimeRequestId":null,"checkpointScopeId":null,"startedAt":NOW,"completedAt":NOW
+        }))
+        .unwrap(),
+    );
+    let automation = uuid::Uuid::from_u128(9);
+    let mut prompt = item("prompt", 1);
+    prompt.node_id = Some("root-1".into());
+    prompt.body = TurnItemBody::UserMessage {
+        message_id: "input".into(),
+        created_by: Actor::System,
+        creation_source: CreationSource::Server,
+        scheduled_task_id: Some(automation.to_string()),
+        input_intent: "turn_start".into(),
+        text: "Daily review".into(),
+        attachments: vec![],
+        context: None,
+    };
+    let mut cut = item("cut", 2);
+    cut.node_id = Some("tool-node".into());
+    let mut answer = item("answer", 3);
+    answer.node_id = Some("root-2".into());
+    for (position, item) in [prompt, cut, answer].into_iter().enumerate() {
+        projection
+            .visible_turn_items
+            .push(row(item.clone(), Visibility::Local, position as u64));
+        projection.turn_items.push(Arc::new(item));
+    }
+    let snapshot = ThreadSnapshot {
+        snapshot_sequence: 1,
+        projection,
+        history_cursor: None,
+        has_more_history: false,
+        latest_local_turn_ordinal: None,
+    };
+    let view = project(
+        &snapshot,
+        &identity,
+        session::ProviderKind::Codex,
+        session::Capabilities::default(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let turn = &view.thread.turns.unwrap()[0];
+    assert!(turn.fresh_context);
+    assert_eq!(
+        turn.attempts,
+        [
+            ExecutionAttempt {
+                id: first,
+                state: AttemptState::Superseded { by_steer: true }
+            },
+            ExecutionAttempt {
+                id: second,
+                state: AttemptState::Completed
+            },
+        ]
+    );
+    let items = turn.items.as_ref().unwrap();
+    assert_eq!(
+        items.iter().map(|item| item.attempt).collect::<Vec<_>>(),
+        [Some(first), Some(first), Some(second)]
+    );
+    assert_eq!(
+        items[0].author.as_deref(),
+        Some(&Author::Automation { id: automation })
+    );
+    assert_eq!(items[2].author, None);
 }

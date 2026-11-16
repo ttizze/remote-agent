@@ -1,0 +1,41 @@
+{
+  "blocks": [
+    {
+      "header": 2,
+      "marker": null,
+      "code": false,
+      "quoted": false,
+      "depth": 0,
+      "alignment": "left",
+      "runs": [
+        {
+          "text": "日本語 👋",
+          "strong": true,
+          "emphasis": false,
+          "strikethrough": false,
+          "code": false,
+          "link": null,
+          "darkColor": null,
+          "lightColor": null
+        },
+        {
+          "text": " ファイル",
+          "strong": false,
+          "emphasis": false,
+          "strikethrough": false,
+          "code": false,
+          "link": "file:///fixture/%E6%97%A5%E6%9C%AC%E8%AA%9E.txt",
+          "darkColor": null,
+          "lightColor": null
+        }
+      ]
+    }
+  ],
+  "secondary": false,
+  "role": "user",
+  "target": "opaque-native-menu-target",
+  "sideChat": true,
+  "cell": null,
+  "maxWidth": 400,
+  "menu": {"quote": "チャットに追加", "sideChat": "サイドチャットで質問"}
+}

@@ -7,8 +7,7 @@ pub fn summary(
 ) -> Result<crate::models::Thread, String> {
     use crate::{models, session};
     let provider = session::ProviderKind::from_instance_id(&shell.thread.provider_instance_id)?;
-    let subagent = shell.thread.creation_source == crate::orchestration::CreationSource::Provider
-        && shell.thread.lineage.relationship_to_parent.as_deref() == Some("subagent");
+    let subagent = shell.thread.is_provider_subagent();
     Ok(models::Thread {
         id: Some(public_session_ref(&shell.thread.id)?),
         active_provider: Some(provider),
@@ -48,10 +47,16 @@ pub fn summary(
             steer: false,
             model_change: false,
             rollback: false,
+            feedback: false,
         }),
         updated_at: chrono::DateTime::parse_from_rfc3339(&shell.thread.updated_at)
             .ok()
             .map(|at| at.timestamp_millis() as f64 / 1_000.0),
+        // T3 threadSort: the latest human input, else the thread's creation.
+        last_input_at: crate::search::authored_activity_ms(
+            shell.latest_user_authored_message_at.as_deref(),
+            &shell.thread.created_at,
+        ),
         history_read_state: Some(session::HistoryReadState::new(
             session::HistoryReadKind::Complete,
             Vec::new(),

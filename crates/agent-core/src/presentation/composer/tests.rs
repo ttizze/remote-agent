@@ -332,6 +332,7 @@ fn the_review_summary_needs_a_conversation_with_changes() {
 #[test]
 fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
     let queued = |id: &str| agent_protocol::operations::Submission {
+        fresh_context: false,
         thread_id: session(),
         client_user_message_id: id.into(),
         input: vec![agent_protocol::operations::Input::Text {

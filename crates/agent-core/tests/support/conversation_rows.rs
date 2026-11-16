@@ -97,7 +97,10 @@ pub fn shell_thread(
         pending_runtime_request: None,
         latest_visible_message: None,
         latest_user_message_at: None,
-        latest_user_authored_message_at: None,
+        latest_user_authored_message_at: thread
+            .last_input_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|at| at.to_rfc3339()),
         has_actionable_proposed_plan: false,
         pending_background_tasks: projection
             .provider_threads
