@@ -21,6 +21,9 @@
       "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_2",
       "providers::claude::execution_tests::native_background_query_accepts_input_only_in_its_current_workspace_and_unpinned_head::case_3",
       "providers::claude::execution_tests::native_fork_without_a_cursor_reaches_full_copy_authentication"
+    ],
+    "agent-core": [
+      "state::operations::sessions::tests::a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences"
     ]
   },
   "guards": {
@@ -2685,7 +2688,8 @@
       "claude_no_assistant_boundaries_preserve_retained_user_prompts::case_3_plain_retained_prompt",
       "claude_no_assistant_boundaries_preserve_retained_user_prompts::case_4_missing_previous_cursor",
       "imported_claude_history_reaches_a_fresh_native_baseline_without_reimport::case_1_same_host",
-      "imported_claude_history_reaches_a_fresh_native_baseline_without_reimport::case_2_restart_before_first_query"
+      "imported_claude_history_reaches_a_fresh_native_baseline_without_reimport::case_2_restart_before_first_query",
+      "claude_native_rewind_retires_settled_background_work_before_resuming_the_kept_head"
     ]
   }
 }

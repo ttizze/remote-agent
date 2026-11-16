@@ -719,3 +719,48 @@ fn a_paged_rewind_restores_only_the_selected_conversations_original_input() {
         "owned paged input"
     );
 }
+
+#[test]
+fn a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences() {
+    // T3 rewindToMessage adds files with allowDuplicates, including copies
+    // already in the latest draft. Native success is covered by store tests;
+    // this boundary checks the actual operation's draft update and removal.
+    let session = SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();
+    let file = Attachment {
+        path: "/fixture/shared.png".into(),
+        name: "shared.png".into(),
+        is_image: true,
+    };
+    let mut state = Snapshot::default();
+    Arc::make_mut(&mut state.input.drafts).insert(
+        session.clone().into(),
+        Arc::new(crate::state::Draft {
+            attachments: vec![file.clone()],
+            ..Default::default()
+        }),
+    );
+    let capture = RewindCapture {
+        scope: state.connection.storage_scope.clone(),
+        epoch: state.connection.epoch,
+        original: Some((String::new(), vec![file.clone(), file.clone()])),
+    };
+    RewindSession::new(session.clone(), "cut".into())
+        .complete(&mut state, "", (capture, 1), false)
+        .unwrap();
+    assert_eq!(
+        state.input.drafts[&session.clone().into()].attachments,
+        vec![file.clone(), file.clone(), file.clone()]
+    );
+    let (after, _) = crate::state::reduce(
+        &state,
+        "",
+        crate::state::Event::Intent(crate::state::Intent::RemoveAttachment {
+            draft_key: session.clone().into(),
+            index: 1,
+        }),
+    );
+    assert_eq!(
+        after.input.drafts[&session.into()].attachments,
+        vec![file.clone(), file]
+    );
+}

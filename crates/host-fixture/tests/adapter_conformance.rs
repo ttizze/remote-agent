@@ -2332,3 +2332,107 @@ async fn verify_imported_reset_input(
         1
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_native_rewind_retires_settled_background_work_before_resuming_the_kept_head() {
+    // Pinned ClaudeAdapterV2.rollbackThread rejects an active answer, then
+    // closes the live query before rewinding. Settled background work alone
+    // must not permanently lock a completed conversation out of rewind.
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    std::fs::write(root.join("background-shell-paused"), []).unwrap();
+    let host = start(&root, Arc::new(Memory::default())).await;
+    let local = host.local().await.unwrap();
+    let session = create(&local.peer, ProviderKind::Claude, &root).await;
+    let (_, mut events) = open(&local.peer, &session).await;
+    let input = submission(&session, "retained-answer");
+    submit(&local.peer, &input).await.unwrap();
+    let kept = events.input_turn(&input.client_user_message_id, true).await;
+    assert_eq!(kept.status, TurnStatus::Completed);
+    let input = submission(&session, "background-shell");
+    submit(&local.peer, &input).await.unwrap();
+    let discarded = events.input_turn(&input.client_user_message_id, true).await;
+    assert_eq!(discarded.status, TurnStatus::Completed);
+    assert!(
+        events
+            .projection
+            .snapshot
+            .projection
+            .provider_threads
+            .iter()
+            .any(|thread| !thread.pending_background_tasks.is_empty())
+    );
+    let native = conversations::native_source(&root, &session, ProviderKind::Claude);
+    conversations::command(
+        &local.peer,
+        &session,
+        uuid::Uuid::new_v4(),
+        Command::Rewind(discarded.id.clone()),
+    )
+    .await
+    .unwrap();
+    while events
+        .view()
+        .thread
+        .turns
+        .iter()
+        .flatten()
+        .any(|turn| turn.id == discarded.id)
+    {
+        assert!(
+            events
+                .projection
+                .snapshot
+                .projection
+                .thread
+                .rollback_failure
+                .is_none(),
+            "{:?}",
+            events
+                .projection
+                .snapshot
+                .projection
+                .thread
+                .rollback_failure
+        );
+        events.next().await;
+    }
+    let retained = events
+        .view()
+        .thread
+        .turns
+        .unwrap()
+        .into_iter()
+        .find(|turn| turn.id == kept.id)
+        .unwrap();
+    assert_eq!(retained.status, TurnStatus::Completed);
+    assert_eq!(claude_answer(&retained), claude_answer(&kept));
+    let input = submission(&session, "after-background-rewind");
+    submit(&local.peer, &input).await.unwrap();
+    let answer = events.input_turn(&input.client_user_message_id, true).await;
+    assert_eq!(answer.status, TurnStatus::Completed, "{answer:?}");
+    assert_eq!(claude_answer(&answer), "reply 2: after-background-rewind");
+    assert_eq!(
+        conversations::native_source(&root, &session, ProviderKind::Claude),
+        native
+    );
+    assert!(
+        events
+            .projection
+            .snapshot
+            .projection
+            .provider_threads
+            .iter()
+            .all(|thread| thread.pending_background_tasks.is_empty())
+    );
+    assert!(
+        claude_native_rows(&root, &native)
+            .iter()
+            .any(|row| row["fixtureInput"]["content"]
+                .to_string()
+                .contains("background-shell")),
+        "native rollback retains the discarded audit tail"
+    );
+    local.close().await;
+    host.close().await.unwrap();
+}
