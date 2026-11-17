@@ -15,7 +15,12 @@ async function until(predicate) {
   }
 }
 
-function fixture(t, env = process.env) {
+function fixtureEnvironment(inheritedEnv = process.env) {
+  return Object.fromEntries(Object.entries(inheritedEnv).filter(([name]) => !name.startsWith('GIT_')));
+}
+
+function fixture(t, inheritedEnv = process.env) {
+  const env = fixtureEnvironment(inheritedEnv);
   const git = execFileSync('bash', ['-c', 'type -P git'], { env, encoding: 'utf8' }).trim();
   assert.ok(isAbsolute(git), 'fixture Git must resolve to an absolute executable path');
   const root = mkdtempSync(join(tmpdir(), 'remote-run-'));
@@ -24,9 +29,10 @@ function fixture(t, env = process.env) {
   const log = join(root, 'events');
   mkdirSync(work);
   mkdirSync(bin);
-  execFileSync(git, ['init', '--quiet'], { cwd: work });
+  const runGit = args => execFileSync(git, args, { cwd: work, env, encoding: 'utf8' });
+  runGit(['init', '--quiet']);
   writeFileSync(join(work, '.gitignore'), 'target/\n');
-  execFileSync(git, ['add', '.gitignore'], { cwd: work });
+  runGit(['add', '.gitignore']);
   mkdirSync(join(work, 'scripts'));
   copyFileSync('scripts/remote-run.sh', join(work, 'scripts/remote-run.sh'));
   writeFileSync(log, '');
@@ -95,6 +101,7 @@ main().catch(error => { console.error(error); process.exitCode = 1; });
   });
   return {
     work,
+    git: runGit,
     events: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean),
     command: task => readFileSync(join(root, task + '.command'), 'utf8'),
     release: (task, stage) => writeFileSync(join(root, `${task}.${stage}`), ''),
@@ -113,6 +120,32 @@ main().catch(error => { console.error(error); process.exitCode = 1; });
     },
   };
 }
+
+test('fixtures isolate repository selection and staging from the caller', async t => {
+  const parent = fixture(t);
+  parent.git(['config', 'bex.remoteBuilder', 'parent-builder']);
+  const config = join(parent.work, '.git/config');
+  const index = join(parent.work, '.git/index');
+  const savedConfig = readFileSync(config);
+  const savedIndex = readFileSync(index);
+  const build = fixture(t, {
+    ...process.env,
+    GIT_DIR: join(parent.work, '.git'),
+    GIT_COMMON_DIR: join(parent.work, '.git'),
+    GIT_WORK_TREE: parent.work,
+    GIT_INDEX_FILE: index,
+    GIT_CONFIG: config,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'bex.remoteBuilder',
+    GIT_CONFIG_VALUE_0: 'inherited-builder',
+  });
+  assert.ok(existsSync(join(build.work, '.git/config')));
+  const task = build.start('isolated');
+  assert.equal(await task.done, 0, task.stderr());
+  assert.ok(existsSync(join(build.work, 'target/isolated')));
+  assert.deepEqual(readFileSync(config), savedConfig);
+  assert.deepEqual(readFileSync(index), savedIndex);
+});
 
 test('exported Git functions cannot redirect fixture commands back into the mock', async t => {
   const env = { ...process.env, 'BASH_FUNC_git%%': '() { command git "$@";\n}' };
@@ -157,7 +190,7 @@ async function builderRun(t, tools, edit = script => script, stdin = 'pipe') {
   const locker = join(home, 'locker');
   const client = spawn('bash', ['-c', edit(build.command('remote'))], {
     cwd: home,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_LOCKER: locker },
+    env: { ...fixtureEnvironment(), PATH: `${bin}:${process.env.PATH}`, FIXTURE_LOCKER: locker },
     stdio: [stdin, 'pipe', 'pipe'],
   });
   client.stdout.resume();
@@ -202,7 +235,7 @@ for (const [name, edit] of [
 
 test('snapshots include same-size edits with racy index timestamps without modifying staging', async t => {
   const build = fixture(t);
-  const git = args => execFileSync('git', args, { cwd: build.work, encoding: 'utf8' });
+  const git = build.git;
   git(['config', 'core.trustctime', 'false']);
   const path = join(build.work, 'tracked.txt');
   const index = join(build.work, '.git/index');

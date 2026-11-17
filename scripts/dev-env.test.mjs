@@ -12,12 +12,14 @@ function put(root, path, content) {
   return destination;
 }
 
-function fixture(t, builder = '') {
+function fixture(t, builder = '', inheritedEnv = process.env) {
+  const env = Object.fromEntries(Object.entries(inheritedEnv).filter(([name]) => !name.startsWith('GIT_')));
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'dev-env-')));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...args) => {
-    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    const result = spawnSync('git', args, { cwd: root, env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
   };
   git('init', '--quiet');
   if (builder) git('config', 'bex.remoteBuilder', builder);
@@ -43,18 +45,46 @@ printf 'export NIX_BUILD_TOP=$(mktemp -d)\\n'
   const archive = 'registry/cache/index.crates.io-fixture/archived-1.0.0.crate';
   put(root, `seed/${archive}`, 'archive');
   return {
-    root, archive, nixLog, sharedHome: join(root, 'seed'),
+    root, archive, nixLog, git, sharedHome: join(root, 'seed'),
     home: join(root, 'target/cargo-home'),
     run(args = ['true'], overrides = {}) {
       const result = spawnSync('bash', ['scripts/dev-env.sh', ...args], {
         cwd: root, encoding: 'utf8',
-        env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, CARGO_HOME: join(root, 'seed'), DEV_ENV_NIX_LOG: nixLog, ...overrides },
+        env: { ...env, PATH: `${join(root, 'bin')}:${env.PATH}`, CARGO_HOME: join(root, 'seed'), DEV_ENV_NIX_LOG: nixLog, ...overrides },
       });
       assert.ifError(result.error);
       return result;
     },
   };
 }
+
+test('fixtures cannot inherit the caller repository or configuration', t => {
+  const parent = fixture(t);
+  parent.git('config', 'bex.remoteBuilder', 'parent-builder');
+  parent.git('add', 'justfile');
+  const config = join(parent.root, '.git/config');
+  const index = join(parent.root, '.git/index');
+  const savedConfig = readFileSync(config);
+  const savedIndex = readFileSync(index);
+  const build = fixture(t, 'test-builder', {
+    ...process.env,
+    GIT_DIR: join(parent.root, '.git'),
+    GIT_COMMON_DIR: join(parent.root, '.git'),
+    GIT_WORK_TREE: parent.root,
+    GIT_INDEX_FILE: index,
+    GIT_CONFIG: config,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'bex.remoteBuilder',
+    GIT_CONFIG_VALUE_0: 'inherited-builder',
+  });
+  assert.equal(build.git('rev-parse', '--show-toplevel').trim(), build.root);
+  assert.equal(build.git('config', '--get', 'bex.remoteBuilder').trim(), 'test-builder');
+  const result = build.run(['cargo', 'check']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split('\n'), ['--native', 'test-builder', 'cargo', 'check']);
+  assert.deepEqual(readFileSync(config), savedConfig);
+  assert.deepEqual(readFileSync(index), savedIndex);
+});
 
 test('local commands reuse Cargo-owned dependency storage without copying it into the worktree', (t) => {
   const build = fixture(t);
@@ -69,7 +99,7 @@ test('the build volume owns shared Cargo storage unless CARGO_HOME is explicit',
   const build = fixture(t);
   const volume = join(build.root, 'build volume');
   mkdirSync(volume);
-  spawnSync('git', ['config', 'bex.buildRoot', volume], { cwd: build.root });
+  build.git('config', 'bex.buildRoot', volume);
   const command = ['bash', '-c', 'printf "%s" "$CARGO_HOME"'];
   const result = build.run(command, { CARGO_HOME: '' });
   assert.equal(result.status, 0, result.stderr);
@@ -79,7 +109,7 @@ test('the build volume owns shared Cargo storage unless CARGO_HOME is explicit',
 
 test('an unavailable build volume fails before selecting tools or creating outputs', t => {
   const build = fixture(t);
-  spawnSync('git', ['config', 'bex.buildRoot', join(build.root, 'unavailable')], { cwd: build.root });
+  build.git('config', 'bex.buildRoot', join(build.root, 'unavailable'));
   const result = build.run();
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Build storage is unavailable/);
