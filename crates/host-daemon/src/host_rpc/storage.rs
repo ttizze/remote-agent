@@ -18,6 +18,8 @@ pub mod fixture;
 mod forks;
 mod handoffs;
 pub(in crate::host_rpc) use handoffs::NativeAllocation;
+#[cfg(test)]
+mod delivery_conformance;
 mod lifecycle;
 mod message_search;
 mod native_bindings;

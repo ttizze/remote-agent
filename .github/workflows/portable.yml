@@ -81,6 +81,8 @@ jobs:
         run: nix develop .#native --command cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p agent-process -p agent-protocol -p agent-transport -p agent-local-host -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
       - name: Pairing specification proofs and Rust conformance
         run: nix develop .#native --command just lean-pairing
+      - name: Delivery specification proofs and SQLite conformance
+        run: nix develop .#native --command just lean-delivery
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         env:

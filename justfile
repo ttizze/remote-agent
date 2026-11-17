@@ -217,3 +217,14 @@ lean-pairing:
     "$agent_lean/bin/lean" -R crates/agent-transport/proofs -o target/lean-pairing/Pairing.olean crates/agent-transport/proofs/Pairing.lean
     LEAN_PATH="$PWD/target/lean-pairing" "$agent_lean/bin/lean" --run crates/agent-transport/proofs/PairingCases.lean > target/lean-pairing/cases.jsonl
     cargo run --locked --package agent-transport --example pairing-conformance -- target/lean-pairing/cases.jsonl
+
+# Verify durable admission/recovery, then replay model traces against real SQLite.
+[group('portable')]
+lean-delivery:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/lean-delivery
+    agent_lean=$(nix build --no-update-lock-file --out-link target/.lean-package --print-out-paths .#lean4)
+    "$agent_lean/bin/lean" -R crates/host-daemon/proofs -o target/lean-delivery/Delivery.olean crates/host-daemon/proofs/Delivery.lean
+    LEAN_PATH="$PWD/target/lean-delivery" "$agent_lean/bin/lean" --run crates/host-daemon/proofs/DeliveryCases.lean > target/lean-delivery/cases.jsonl
+    AGENT_DELIVERY_TRACES="$PWD/target/lean-delivery/cases.jsonl" cargo nextest run --locked --package host-daemon --lib --features agent-core/bindings --run-ignored ignored-only --success-output immediate delivery_conformance
