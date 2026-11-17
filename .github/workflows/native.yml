@@ -509,10 +509,10 @@ jobs:
             target/nsh-acceptance/run-*/thread-details/*.json
             target/nsh-acceptance/run-*/thread-details/*.txt
             target/nsh-acceptance/run-*/thread-details/*.png
-            target/nsh-acceptance/run-*/composer/*.log
-            target/nsh-acceptance/run-*/composer/*.json
-            target/nsh-acceptance/run-*/composer/*.txt
-            target/nsh-acceptance/run-*/composer/*.png
+            target/nsh-acceptance/run-*/composer*/*.log
+            target/nsh-acceptance/run-*/composer*/*.json
+            target/nsh-acceptance/run-*/composer*/*.txt
+            target/nsh-acceptance/run-*/composer*/*.png
           retention-days: 7
   iphone-tests:
     # A cold shared build can outlast the artifact receiver's deadline.

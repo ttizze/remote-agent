@@ -177,7 +177,15 @@ pub(crate) fn sheet(
     compose: impl Fn() + 'static,
     dismiss: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {
-    on_key("escape", move |_| dismiss());
+    // The composer can retain keyboard focus behind this modal sheet.
+    on_key_with(
+        "escape",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..Default::default()
+        },
+        move |_| dismiss(),
+    );
     let width = move || px((window().width.0 - SHEET_INSET).max(0.0));
     view()
         .absolute()
