@@ -1032,7 +1032,7 @@ async fn failed_chat_creation_keeps_draft_and_retry_survives_reconnect() {
         )
         .await
         .unwrap();
-        let blocked = root.join("scratch");
+        let blocked = root.join("bex-chat");
         std::fs::write(&blocked, "not a directory").unwrap();
         store
             .dispatch(Intent::NewChat { cwd: String::new() })
@@ -1223,7 +1223,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
             }
             else {
                 assert!(store.snapshot().selected_directory(store.snapshot().panes.primary()).is_empty(), "an unselected chat must remain unselected: {cwd}");
-                assert_eq!(Path::new(&cwd).parent(), Some(root.join("scratch").as_path()));
+                assert_eq!(Path::new(&cwd).parent(), Some(root.join("bex-chat").as_path()));
                 let snapshot = store.snapshot();
                 assert_eq!(snapshot.sessions.conversations[&id].project_id, models::ProjectMembership::Assigned(models::SCRATCH_PROJECT_ID.into()));
                 assert_eq!(snapshot.sessions.conversations[&id].cwd.as_deref(), Some(cwd.as_str()));
@@ -2192,7 +2192,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
             let thread = completed_chat(&local.peer, request).await;
             assert_eq!(
                 Path::new(thread.cwd.as_ref().unwrap()).parent(),
-                Some(root.join("scratch").as_path())
+                Some(root.join("bex-chat").as_path())
             );
             assert_eq!(
                 thread.project_id.as_deref(),
@@ -2227,7 +2227,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
                 .thread;
             assert_eq!(
                 Path::new(thread.cwd.as_ref().unwrap()).parent(),
-                Some(root.join("scratch").as_path())
+                Some(root.join("bex-chat").as_path())
             );
             assert_eq!(
                 thread.project_id.as_deref(),

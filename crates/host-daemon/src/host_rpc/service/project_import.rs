@@ -283,7 +283,7 @@ mod tests {
             ThreadResponse {
                 thread: Thread {
                     id: Some(native.clone()),
-                    cwd: Some(root.join("scratch/private-chat").to_str().unwrap().into()),
+                    cwd: Some(root.join("bex-chat/private-chat").to_str().unwrap().into()),
                     turns: Some(vec![Arc::new(Turn {
                         id: "turn".into(),
                         status: TurnStatus::Completed,
@@ -357,7 +357,7 @@ mod tests {
         let transcripts = root.join("native/projects/shared");
         std::fs::create_dir_all(&transcripts).unwrap();
         let sources = [uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
-        let folders = [root.join("scratch/first"), root.join("scratch/second")];
+        let folders = [root.join("bex-chat/first"), root.join("bex-chat/second")];
         for (id, cwd) in sources.iter().zip(&folders) {
             let user = serde_json::json!({"type":"user","uuid":"question","parentUuid":null,"sessionId":id,"cwd":cwd,"entrypoint":"sdk-ts","promptSource":"sdk","message":{"content":"saved question"}});
             let answer = serde_json::json!({"type":"assistant","uuid":"answer","parentUuid":"question","sessionId":id,"cwd":cwd,"message":{"id":"reply","role":"assistant","content":[{"type":"text","text":"saved answer"}]}});
@@ -467,7 +467,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repository = root.path().join("repository");
         let linked = root.path().join("linked");
-        let chats = root.path().join("scratch");
+        let chats = root.path().join("bex-chat");
         for path in [
             &repository.join(".git"),
             &repository.join("src"),

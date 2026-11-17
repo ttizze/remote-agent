@@ -1,7 +1,7 @@
 use super::*;
 use agent_protocol::models::{ProjectRoot, SCRATCH_PROJECT_ID};
 
-const DIRECTORY: &str = "scratch";
+const DIRECTORY: &str = "bex-chat";
 
 impl ProjectStore {
     pub(crate) fn scratch_directory(&self) -> PathBuf {

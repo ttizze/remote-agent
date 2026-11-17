@@ -327,14 +327,14 @@ mod tests {
         store.register(&scratch).await.unwrap();
         let snapshot = ProjectStore::fixture(store.path()).load().await.unwrap();
         assert_eq!(snapshot.projects.len(), 2);
-        for path in [&scratch, &child, &root.join("scratch/other")] {
+        for path in [&scratch, &child, &root.join("bex-chat/other")] {
             assert_eq!(
                 snapshot.project_membership(path.to_str()),
                 ProjectMembership::Assigned(SCRATCH_PROJECT_ID.into())
             );
         }
         assert_ne!(
-            snapshot.project_for_workspace(root.join("scratch-other").to_str().unwrap()),
+            snapshot.project_for_workspace(root.join("bex-chat-other").to_str().unwrap()),
             Some(SCRATCH_PROJECT_ID)
         );
     }

@@ -619,7 +619,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
             if selected {
                 assert_project_directory(Path::new(&cwd), &workspace, automatic.then_some(root.join("worktrees").as_path()));
             } else {
-                assert_eq!(Path::new(&cwd).parent(), Some(root.join("scratch").as_path()));
+                assert_eq!(Path::new(&cwd).parent(), Some(root.join("bex-chat").as_path()));
             }
             let turn = &snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[number];
             let items = turn.items.as_ref().unwrap();
@@ -1246,7 +1246,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
             if selected {
                 assert_project_directory(Path::new(&current), &workspace, automatic.then_some(root.join("worktrees").as_path()));
             } else {
-                assert_eq!(Path::new(&current).parent(), Some(root.join("scratch").as_path()));
+                assert_eq!(Path::new(&current).parent(), Some(root.join("bex-chat").as_path()));
             }
             let turns = snapshot.sessions.conversations[&id].turns.as_ref().unwrap();
             assert!(turns[index].items.as_ref().unwrap().iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| text.starts_with(&format!("reply {}: independent {index}", index + 1)))));
@@ -1474,7 +1474,7 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
  {
     tokio::time::timeout(Duration::from_secs(45), async {
         let root = tempfile::tempdir().unwrap();
-        let cwd = root.path().join("scratch");
+        let cwd = root.path().join("bex-chat");
         std::fs::create_dir(&cwd).unwrap();
         let config = cwd.join("claude-fixture.json");
         std::fs::write(&config, json!({"unauthenticated":true}).to_string()).unwrap();

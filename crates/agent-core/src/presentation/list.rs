@@ -1028,7 +1028,7 @@ mod tests {
             id: models::SCRATCH_PROJECT_ID.into(),
             name: "renamed".into(),
             roots: vec![models::ProjectRoot {
-                path: "/data/scratch".into(),
+                path: "/data/bex-chat".into(),
             }],
             ..Default::default()
         };
