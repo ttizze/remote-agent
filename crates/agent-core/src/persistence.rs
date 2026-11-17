@@ -21,10 +21,64 @@ pub struct EditorPreferences {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::state::ModelPreferences;
     use agent_protocol::editors::EditorId;
+
+    pub(crate) fn lean_cases<T: serde::de::DeserializeOwned>(kind: &str, count: usize) -> Vec<T> {
+        let dir = std::env::var_os("AGENT_CORE_CASES").expect("set AGENT_CORE_CASES");
+        let path = std::path::PathBuf::from(dir).join("persistence.jsonl");
+        let input = std::fs::read_to_string(path).expect("read Lean persistence fixtures");
+        let cases: Vec<_> = input
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["kind"] == kind)
+            .map(|row| serde_json::from_value(row).unwrap())
+            .collect();
+        assert_eq!(cases.len(), count, "incomplete {kind} corpus");
+        cases
+    }
+
+    #[test]
+    #[ignore = "requires Lean-generated persistence.jsonl"]
+    fn lean_core_persistence_conformance() {
+        use crate::state::DraftKey;
+        use serde_json::{Value, json};
+
+        #[derive(Debug, Deserialize)]
+        struct Case {
+            keys: Vec<String>,
+            accepted: bool,
+        }
+
+        for case in lean_cases::<Case>("drafts", 6) {
+            let bytes = encode(&Snapshot::default()).unwrap();
+            let mut saved: Value = serde_json::from_slice(&bytes).unwrap();
+            saved["drafts"] = Value::Array(
+                case.keys
+                    .iter()
+                    .enumerate()
+                    .map(|(index, key)| {
+                        let draft = Draft {
+                            text: index.to_string(),
+                            ..Default::default()
+                        };
+                        json!([DraftKey::from(key.as_str()), draft])
+                    })
+                    .collect(),
+            );
+            let restored = decode(&serde_json::to_vec(&saved).unwrap());
+            assert_eq!(restored.is_ok(), case.accepted, "{case:?}");
+            if let Ok(restored) = restored {
+                assert_eq!(restored.input.drafts.len(), case.keys.len());
+                for (index, key) in case.keys.iter().enumerate() {
+                    let draft = &restored.input.drafts[&DraftKey::from(key.as_str())];
+                    assert_eq!(draft.text, index.to_string());
+                }
+            }
+        }
+    }
 
     #[test]
     fn welcome_and_folderless_new_chat_restore_independent_user_work() {

@@ -21,6 +21,8 @@ pub mod feedback;
 pub mod files;
 pub mod fresh_context;
 pub mod host_management;
+#[cfg(test)]
+pub(crate) mod lean_cases;
 pub mod media;
 pub mod message_attachment;
 pub mod message_context;

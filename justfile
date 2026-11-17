@@ -233,3 +233,17 @@ lean-delivery:
     "$agent_lean/bin/lean" -R crates/host-daemon/proofs -o target/lean-delivery/Delivery.olean crates/host-daemon/proofs/Delivery.lean
     LEAN_PATH="$PWD/target/lean-delivery" "$agent_lean/bin/lean" --run crates/host-daemon/proofs/DeliveryCases.lean > target/lean-delivery/cases.jsonl
     AGENT_DELIVERY_TRACES="$PWD/target/lean-delivery/cases.jsonl" cargo nextest run --locked --package host-daemon --lib --features agent-core/bindings --run-ignored ignored-only --success-output immediate delivery_conformance
+
+[group('portable')]
+lean-core:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/lean-core
+    lean=${LEAN_BIN:-$(nix build --no-update-lock-file --no-link --print-out-paths .#lean4)/bin/lean}
+    for source in crates/agent-core/proofs/*.lean; do
+        model=$(basename "$source" .lean)
+        cases="target/lean-core/${model,,}.jsonl"
+        "$lean" --run "$source" > "$cases" || { cat "$cases" >&2; exit 1; }
+        test -s "$cases"
+    done
+    AGENT_CORE_CASES="$PWD/target/lean-core" cargo nextest run --locked --package agent-core --lib --features bindings --run-ignored ignored-only lean_core_

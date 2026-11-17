@@ -144,6 +144,37 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
+    #[test]
+    #[ignore = "requires Lean-generated persistence.jsonl"]
+    fn lean_core_updates_conformance() {
+        #[derive(Debug, Deserialize)]
+        struct Case {
+            extra: u64,
+            current: u64,
+            draft: bool,
+            matching: bool,
+            uploaded: bool,
+            expected: Option<u64>,
+        }
+
+        let file = "bex-macOS-arm64.zip";
+        for case in crate::persistence::tests::lean_cases::<Case>("updates", 48) {
+            let mut extra = release(case.extra, file);
+            extra["draft"] = case.draft.into();
+            extra["prerelease"] = (!case.matching).into();
+            if !case.uploaded {
+                extra["assets"][0]["state"] = "pending".into();
+            }
+            let base = release(5, file);
+            let orders = [vec![base.clone(), extra.clone()], vec![extra, base]];
+            for releases in orders {
+                let result = select(releases, case.current, "macos", "aarch64").unwrap();
+                let selected = result.map(|download| download.build);
+                assert_eq!(selected, case.expected, "{case:?}");
+            }
+        }
+    }
+
     fn release(build: u64, name: &str) -> Value {
         json!({"tag_name":format!("prd-{build}"), "draft":false, "prerelease":false,
             "assets":[{"name":name,"state":"uploaded","size":42,

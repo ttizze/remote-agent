@@ -294,6 +294,43 @@ impl Snapshot {
 
 #[cfg(test)]
 mod tests {
+    #[derive(Debug, serde::Deserialize)]
+    struct AdvanceCase {
+        answers: Vec<bool>,
+        saved: usize,
+        index: usize,
+        sent: bool,
+    }
+
+    #[test]
+    #[ignore = "requires Lean-generated presentation.jsonl"]
+    fn lean_core_question_advance_conformance() {
+        for row in crate::presentation::lean_cases::cases::<AdvanceCase>("advance", 40) {
+            let mut draft = QuestionDraft {
+                index: row.saved,
+                ..Default::default()
+            };
+            let mut questions = Vec::new();
+            let mut expected = BTreeMap::new();
+            for (index, answered) in row.answers.iter().copied().enumerate() {
+                let question = question(&index.to_string(), false, true);
+                if answered {
+                    let text = format!("answer {index}");
+                    draft.edit(&question, text.clone());
+                    expected.insert(question.id.clone(), QuestionAnswer::FreeText { text });
+                }
+                questions.push(question);
+            }
+            let answer = draft.advance(&questions);
+            assert_eq!(draft.index(&questions), row.index, "{row:?}");
+            assert_eq!(
+                answer,
+                row.sent.then_some(Answer::Questions { answers: expected }),
+                "{row:?}"
+            );
+        }
+    }
+
     use super::*;
     use agent_protocol::{
         requests::{QuestionChoice, Request, RequestTarget},

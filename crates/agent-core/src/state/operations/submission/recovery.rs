@@ -333,6 +333,9 @@ impl Operation for ResolveLocalInput {
 }
 
 #[cfg(test)]
+mod conformance;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use agent_protocol::{

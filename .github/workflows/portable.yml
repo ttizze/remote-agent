@@ -85,6 +85,8 @@ jobs:
         run: nix develop .#native --command just lean-pairing
       - name: Delivery specification proofs and SQLite conformance
         run: nix develop .#native --command just lean-delivery
+      - name: Client core proofs and Rust conformance
+        run: nix develop .#native --command just lean-core
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         env:

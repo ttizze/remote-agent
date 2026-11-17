@@ -1,5 +1,41 @@
 use super::*;
 
+#[test]
+#[ignore = "requires Lean-generated persistence.jsonl"]
+fn lean_core_conversation_cache_conformance() {
+    #[derive(Debug, Deserialize)]
+    struct Decision {
+        loaded: bool,
+        retained: bool,
+    }
+    #[derive(Debug, Deserialize)]
+    struct Case {
+        current: bool,
+        same_scope: bool,
+        same_thread: bool,
+        expected: Decision,
+    }
+
+    let source = snapshot([thread("cached", 1, TurnStatus::Completed)]);
+    let (id, replica) = source.sessions.projections.iter().next().unwrap();
+    for case in crate::persistence::tests::lean_cases::<Case>("cache", 8) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = file(directory.path(), id);
+        let mut entry = copy("home", id, replica);
+        if !case.current {
+            entry.format = FORMAT - 1;
+        }
+        if !case.same_thread {
+            entry.session = SessionRef::new(ProviderKind::Claude, "other".into()).unwrap();
+        }
+        write_value(&path, entry).unwrap();
+        let scope = if case.same_scope { "home" } else { "away" };
+        let loaded = read(&path, scope).is_some();
+        assert_eq!(loaded, case.expected.loaded, "{case:?}");
+        assert_eq!(path.exists(), case.expected.retained, "{case:?}");
+    }
+}
+
 /// Flushes no one asks for.
 fn unflushed() -> tokio::sync::mpsc::UnboundedReceiver<Flush> {
     tokio::sync::mpsc::unbounded_channel().1

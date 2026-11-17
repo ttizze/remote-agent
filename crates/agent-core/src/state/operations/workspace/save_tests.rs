@@ -1,6 +1,8 @@
 use super::*;
 use crate::session::ProviderKind;
 
+mod conformance;
+
 const PATH: &str = "/project/notes.txt";
 
 fn select(snapshot: &mut Snapshot, pane_id: &str, name: &str) {

@@ -2,6 +2,8 @@ use super::*;
 use model::*;
 use serde_json::json;
 
+mod history_conformance;
+
 const NOW: &str = "2026-11-14T00:00:00.000Z";
 
 fn projection() -> ThreadProjection {

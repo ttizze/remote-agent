@@ -459,6 +459,8 @@ impl Drop for ClientSession {
 
 #[cfg(test)]
 mod tests {
+    mod client_conformance;
+
     use super::*;
     use crate::client::persistence::{DevicePreferences, PreferenceKey, PreferenceStorage};
     use std::sync::{

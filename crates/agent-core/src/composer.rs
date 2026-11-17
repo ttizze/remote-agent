@@ -4,6 +4,8 @@ pub mod code;
 pub mod completions;
 pub mod context;
 pub(crate) mod input;
+#[cfg(test)]
+mod lean_conformance;
 pub mod snapshot;
 pub mod stash;
 pub(crate) mod template;

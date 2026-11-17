@@ -328,6 +328,63 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, serde::Deserialize)]
+    struct ToolCase {
+        connected: bool,
+        directory: bool,
+        enabled: Vec<String>,
+    }
+
+    #[test]
+    #[ignore = "requires Lean-generated presentation.jsonl"]
+    fn lean_core_panel_tools_conformance() {
+        for row in crate::presentation::lean_cases::cases::<ToolCase>("tools", 4) {
+            let enabled: Vec<_> = panel_tools(row.connected, row.directory)
+                .into_iter()
+                .filter(|tool| tool.enabled)
+                .map(|tool| tool.key)
+                .collect();
+            assert_eq!(enabled, row.enabled, "{row:?}");
+        }
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct CloseCase {
+        count: usize,
+        active: usize,
+        closed: usize,
+        selected: Option<usize>,
+    }
+
+    #[test]
+    #[ignore = "requires Lean-generated presentation.jsonl"]
+    fn lean_core_panel_close_conformance() {
+        for row in crate::presentation::lean_cases::cases::<CloseCase>("close", 40) {
+            let scope = PanelScope::default();
+            let mut panels = Panels::new();
+            let mut ids = Vec::new();
+            for _ in 0..row.count {
+                let opened = panels.open(scope.clone(), PanelKind::Terminal, None);
+                ids.push(opened.id);
+                panels = opened.panels;
+            }
+            let panels = panels.activate(scope.clone(), ids[row.active]).panels;
+            let closed = ids.get(row.closed).copied().unwrap_or(u64::MAX);
+            let state = panels.close(scope.clone(), closed).get(scope);
+            assert_eq!(
+                state.active,
+                row.selected.map(|index| ids[index]),
+                "{row:?}"
+            );
+            ids.retain(|id| *id != closed);
+            assert!(
+                state.surfaces.iter().map(|surface| surface.id).eq(ids),
+                "{row:?}"
+            );
+        }
+    }
+
     fn open(
         panels: &mut Arc<Panels>,
         key: PanelScope,

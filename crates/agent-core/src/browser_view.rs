@@ -190,6 +190,35 @@ mod tests {
     use super::*;
     use agent_protocol::browser::{BrowserFrame, BrowserTab};
 
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ResizeCase {
+        width: u32,
+        height: u32,
+        current_width: u32,
+        current_height: u32,
+        next_width: Option<u32>,
+        next_height: Option<u32>,
+    }
+
+    #[test]
+    #[ignore = "requires Lean-generated presentation.jsonl"]
+    fn lean_core_browser_resize_conformance() {
+        for row in crate::presentation::lean_cases::cases::<ResizeCase>("resize", 324) {
+            let actual = super::fit_action(
+                f64::from(row.width) / 2.,
+                f64::from(row.height) / 2.,
+                row.current_width,
+                row.current_height,
+            );
+            let actual = actual.map(|action| match action {
+                agent_protocol::browser::BrowserAction::Resize { width, height } => (width, height),
+                _ => panic!("unexpected action: {row:?}"),
+            });
+            assert_eq!(actual, row.next_width.zip(row.next_height), "{row:?}");
+        }
+    }
+
     fn tab(id: &str, title: &str, url: &str) -> BrowserTab {
         BrowserTab {
             id: id.into(),
