@@ -292,7 +292,7 @@ fn answers_cannot_be_advanced_twice_while_the_response_is_in_flight() {
 }
 
 #[test]
-fn stopping_retries_failure_and_does_not_depend_on_message_input_availability() {
+fn stopping_with_a_draft_retries_failure_and_does_not_depend_on_message_input_availability() {
     let mut snapshot = snapshot();
     assert!(!presentation(&snapshot).can_interrupt(Some("turn".into())));
     let thread = Arc::make_mut(
@@ -306,6 +306,13 @@ fn stopping_retries_failure_and_does_not_depend_on_message_input_availability() 
         status: TurnStatus::Running,
         ..Default::default()
     })]);
+    Arc::make_mut(&mut snapshot.input.drafts).insert(
+        session().into(),
+        Arc::new(Draft {
+            text: "keep this draft".into(),
+            ..Default::default()
+        }),
+    );
     assert!(presentation(&snapshot).can_interrupt(Some("turn".into())));
     assert_eq!(
         presentation(&snapshot).primary_stop_turn(),

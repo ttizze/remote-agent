@@ -21,6 +21,7 @@ import dev.remoteagent.core.Snapshot
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -33,7 +34,6 @@ class ComposerStopTest {
         val key = JSONObject().put("Session", JSONObject().put("session", identity))
         val state =
             JSONObject(Snapshot.empty().serialize().decodeToString())
-                .put("connected", true)
                 .put("navigation", JSONObject().put("thread_id", identity).put("draft_key", key).put("cwd", "/fixture"))
                 .put(
                     "drafts",
@@ -96,11 +96,16 @@ class ComposerStopTest {
     }
 
     @Test
-    fun runningTurnKeepsStopAvailableWhileADraftIsBeingEdited() {
+    fun restoredRunningTurnKeepsStopVisibleAndDisabledWhileAnOfflineDraftIsEdited() {
         fixture("running", "keep this draft").use { snapshot ->
-            compose.setContent { MaterialTheme { ComposerFixture(snapshot, { _, _ -> }, {}) {} } }
-            compose.onNodeWithTag("composer.stop").assertIsDisplayed().assertIsEnabled()
+            val intents = mutableListOf<Intent>()
+            compose.setContent {
+                MaterialTheme { ComposerFixture(snapshot, { intent, _ -> intents.add(intent) }, {}) {} }
+            }
+            compose.onNodeWithTag("composer.stop").assertIsDisplayed().assertIsNotEnabled().performClick()
             compose.runOnIdle {
+                assertFalse(snapshot.connected())
+                assertTrue(intents.isEmpty())
                 assertEquals(
                     "keep this draft",
                     snapshot
