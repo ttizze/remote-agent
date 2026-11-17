@@ -14,8 +14,8 @@ use windows::{
         System::LibraryLoader::*,
         UI::{
             Controls::{
-                DRAWITEMSTRUCT, EM_CHARFROMPOS, EM_SCROLLCARET, ODS_DISABLED, ODS_FOCUS,
-                ODS_SELECTED, RichEdit::*,
+                DRAWITEMSTRUCT, EM_CHARFROMPOS, EM_SCROLLCARET, EM_SETREADONLY, ODS_DISABLED,
+                ODS_FOCUS, ODS_SELECTED, RichEdit::*,
             },
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{EnableWindow, GetKeyState, VK_C, VK_CONTROL},

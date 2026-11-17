@@ -60,6 +60,11 @@ fn system_rich_edit_keeps_document_positions_for_chips_unicode_and_tables() {
         (damaged, Some("  統合前レビュー\r\u{fffc} 統合前レビュー")),
     ] {
         load_document(window, &document).unwrap();
+        assert_ne!(
+            unsafe { GetWindowLongPtrW(window, GWL_STYLE) } & ES_READONLY as isize,
+            0,
+            "image updates, including decoding failures, preserve the edit lock"
+        );
         let mut buffer = vec![0u16; 4096];
         let mut request = GETTEXTEX {
             cb: (buffer.len() * 2) as u32,
