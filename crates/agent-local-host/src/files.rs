@@ -1,4 +1,4 @@
-//! Owner-only state files written atomically.
+//! Atomic file replacement and owner-only state files.
 use anyhow::{Context, Result};
 use std::{
     fs::{self, File},
@@ -86,25 +86,27 @@ fn save_private(path: &Path, write: impl Fn(&mut File) -> io::Result<()>) -> Res
         file.lock()?;
         file
     };
-    save_private_inner(path, write)
+    write_atomic(path, write)
+        .map_err(anyhow::Error::from)
         .with_context(|| format!("could not save state {}", path.display()))
 }
 
-fn save_private_inner(path: &Path, write: impl Fn(&mut File) -> io::Result<()>) -> Result<()> {
+/// Flush and atomically replace a file, tolerating transient Windows reader locks.
+/// The callback may run again after a failed OS operation; its own errors are final.
+/// New files start owner-only. A caller replacing a workspace file must preserve
+/// its original permissions in the callback.
+pub fn write_atomic<E>(
+    path: &Path,
+    write: impl Fn(&mut File) -> std::result::Result<(), E>,
+) -> std::result::Result<(), atomicwrites::Error<E>> {
     let mut retries = 0;
     loop {
         let result = atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
-            .write_with_options(
-                |file| {
-                    write(file)?;
-                    file.sync_all()
-                },
-                private_file_options(),
-            );
-        // A reader outside this writer lock can temporarily hold the Windows
+            .write_with_options(&write, private_file_options());
+        // A reader outside the caller's writer lock can temporarily hold the Windows
         // destination without delete sharing. Retry only OS failures, never
         // serialization errors. Every attempt atomically replaces the complete,
-        // flushed JSON document.
+        // flushed document.
         if cfg!(windows)
             && let Err(atomicwrites::Error::Internal(error)) = &result
             && matches!(error.raw_os_error(), Some(5 | 32 | 33))
@@ -114,13 +116,69 @@ fn save_private_inner(path: &Path, write: impl Fn(&mut File) -> io::Result<()>) 
             std::thread::sleep(std::time::Duration::from_millis(10 * retries));
             continue;
         }
-        return result.map_err(Into::into);
+        return result;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn failed_write_preserves_the_original_and_can_be_retried_by_its_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.bin");
+        fs::write(&path, "original").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let result = write_atomic(&path, |file| {
+            calls.set(calls.get() + 1);
+            file.write_all(b"partial")?;
+            Err::<(), _>(io::Error::from_raw_os_error(5))
+        });
+        assert!(matches!(result, Err(atomicwrites::Error::User(_))));
+        assert_eq!(calls.get(), 1, "callback errors must never be retried");
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        write_atomic(&path, |file| file.write_all(b"complete")).unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"complete");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_recovers_when_a_windows_reader_releases_its_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.bin");
+        fs::write(&path, "original").unwrap();
+        // A reader may allow other reads and writes while denying replacement.
+        let reader = File::options()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let (attempted, attempts) = std::sync::mpsc::channel();
+        let worker = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                write_atomic(&path, |file| {
+                    attempted.send(()).unwrap();
+                    file.write_all(b"replacement")
+                })
+            })
+        };
+        attempts
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        // Keep the reader through the first failed replacement. Always release
+        // it before joining, including when an implementation gives up early.
+        let retried = attempts.recv_timeout(std::time::Duration::from_secs(2));
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        drop(reader);
+        let saved = worker.join().unwrap();
+        assert!(retried.is_ok(), "the temporary reader lock was not retried");
+        saved.unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"replacement");
+    }
 
     #[test]
     fn source_development_has_its_own_state_beneath_the_shared_release_directory() {

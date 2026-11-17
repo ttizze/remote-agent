@@ -516,15 +516,11 @@ fn read(path: &Path) -> Result<State> {
 fn save(path: &Path, state: &State) -> Result<()> {
     let parent = path.parent().context("settings have no parent directory")?;
     fs::create_dir_all(parent)?;
-    atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
-        .write_with_options(
-            |file| {
-                serde_json::to_writer(&mut *file, state).map_err(std::io::Error::other)?;
-                file.write_all(b"\n")
-            },
-            agent_local_host::private_file_options(),
-        )
-        .map_err(Into::into)
+    agent_local_host::write_atomic(path, |file| {
+        serde_json::to_writer(&mut *file, state).map_err(std::io::Error::other)?;
+        file.write_all(b"\n")
+    })
+    .map_err(Into::into)
 }
 
 /// Fresh and recreated worktrees share checkout, copy and rollback rules.

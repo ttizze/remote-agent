@@ -209,17 +209,9 @@ impl HostLease {
             },
         )?;
         // No credentials are written here: tickets contain only endpoint addresses.
-        atomicwrites::AtomicFile::new(
-            self.directory.join("host.ticket"),
-            atomicwrites::AllowOverwrite,
-        )
-        .write_with_options(
-            |file| {
-                file.write_all(ticket.to_string().as_bytes())?;
-                file.sync_all()
-            },
-            crate::private_file_options(),
-        )?;
+        crate::write_atomic(&self.directory.join("host.ticket"), |file| {
+            file.write_all(ticket.to_string().as_bytes())
+        })?;
         self.registry.save(&Registration {
             directory: self.directory.clone(),
             ready: true,

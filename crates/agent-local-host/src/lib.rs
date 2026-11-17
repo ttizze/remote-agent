@@ -38,7 +38,7 @@ impl Drop for LocalClientAccess {
 
 pub use files::{
     create_state_directory, private_file_options, save_private_bytes, save_private_json,
-    state_directory,
+    state_directory, write_atomic,
 };
 pub use registry::{HostLease, LocalHost, LocalHostRegistry, LocalHostState};
 

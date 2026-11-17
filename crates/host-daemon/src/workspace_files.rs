@@ -166,11 +166,7 @@ impl WorkspaceFiles {
             let bytes = read_bounded(&path, EDIT_LIMIT)?;
             std::str::from_utf8(&bytes).context("visualize HTML is not UTF-8")?;
             fs::create_dir_all(&directory)?;
-            atomicwrites::AtomicFile::new(&archive, atomicwrites::AllowOverwrite)
-                .write_with_options(
-                    |file| file.write_all(&bytes),
-                    agent_local_host::private_file_options(),
-                )?;
+            agent_local_host::write_atomic(&archive, |file| file.write_all(&bytes))?;
             bytes
         } else {
             read_bounded(&archive, EDIT_LIMIT)
@@ -270,38 +266,32 @@ impl WorkspaceFiles {
                 if text.len() as u64 + if bom { 3 } else { 0 } > EDIT_LIMIT {
                     return Err(anyhow!("ファイルが大きすぎるため編集できません。"));
                 }
-                atomicwrites::AtomicFile::new(&path, atomicwrites::AllowOverwrite)
-                    .write_with_options(
-                        |output| -> Result<()> {
-                            output
-                                .set_permissions(
-                                    fs::metadata(&path)
-                                        .context("read file permissions before saving")?
-                                        .permissions(),
-                                )
-                                .context("apply permissions to replacement file")?;
-                            if bom {
-                                output.write_all(&[0xef, 0xbb, 0xbf])?;
-                            }
-                            output
-                                .write_all(text.as_bytes())
-                                .context("write replacement file")?;
-                            // Other editors don't share our mutex; recheck before replacement.
-                            if hash(&read_bounded(&path, EDIT_LIMIT)?) != params.revision {
-                                return Err(anyhow!(
-                                    "revision_conflict: file changed while saving"
-                                ));
-                            }
-                            Ok(())
-                        },
-                        agent_local_host::private_file_options(),
-                    )
-                    .map_err(|error| match error {
-                        atomicwrites::Error::Internal(error) => {
-                            anyhow::Error::new(error).context("prepare or commit file replacement")
-                        }
-                        atomicwrites::Error::User(error) => error,
-                    })?;
+                agent_local_host::write_atomic(&path, |output| -> Result<()> {
+                    output
+                        .set_permissions(
+                            fs::metadata(&path)
+                                .context("read file permissions before saving")?
+                                .permissions(),
+                        )
+                        .context("apply permissions to replacement file")?;
+                    if bom {
+                        output.write_all(&[0xef, 0xbb, 0xbf])?;
+                    }
+                    output
+                        .write_all(text.as_bytes())
+                        .context("write replacement file")?;
+                    // Other editors don't share our mutex; recheck before replacement.
+                    if hash(&read_bounded(&path, EDIT_LIMIT)?) != params.revision {
+                        return Err(anyhow!("revision_conflict: file changed while saving"));
+                    }
+                    Ok(())
+                })
+                .map_err(|error| match error {
+                    atomicwrites::Error::Internal(error) => {
+                        anyhow::Error::new(error).context("prepare or commit file replacement")
+                    }
+                    atomicwrites::Error::User(error) => error,
+                })?;
                 read_file(&path, &requested).map(Body::from)
             }
             Call::Upload(params) => {

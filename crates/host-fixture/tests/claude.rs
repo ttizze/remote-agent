@@ -330,7 +330,13 @@ async fn command_output_until(
         }
     })
     .await;
-    assert!(found.is_ok(), "{expected:?} not in {outputs:?}");
+    let snapshot = store.snapshot();
+    assert!(
+        found.is_ok(),
+        "{expected:?} not in {outputs:?}; turns={:?}; error={:?}",
+        snapshot.sessions.conversations[id].turns,
+        snapshot.panes.primary().error,
+    );
 }
 
 async fn completed(
