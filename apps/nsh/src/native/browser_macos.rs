@@ -24,7 +24,7 @@ pub(crate) struct Service {
 }
 
 impl Service {
-    pub fn new(
+    pub(crate) fn new(
         application: Arc<Application>,
         runtime: tokio::runtime::Handle,
         directory: Option<PathBuf>,
@@ -81,7 +81,7 @@ impl Service {
         container
     }
 
-    pub fn shutdown(&self) -> TaskTracker {
+    pub(crate) fn shutdown(&self) -> TaskTracker {
         self.startup.take();
         if let Some(browser) = self.browser.take() {
             browser.shutdown();
@@ -221,7 +221,7 @@ impl NativeComponent for Host {
     fn set_prop(&mut self, _: &str, _: Option<&JsonValue>) {}
 }
 
-pub fn register(components: &Components, service: Rc<Service>) {
+pub(crate) fn register(components: &Components, service: Rc<Service>) {
     let host = service.clone();
     components.register(
         "bex.browser.host",

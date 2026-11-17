@@ -47,7 +47,7 @@ mod appkit {
         }
     }
 
-    pub fn run() {
+    pub(super) fn run() {
         let mtm = MainThreadMarker::new().expect("AppKit test runs on the main thread");
         let _app = NSApplication::sharedApplication(mtm);
         // SAFETY: all arguments are valid AppKit values; the window stays hidden.

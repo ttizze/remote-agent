@@ -8,7 +8,7 @@ pub(super) const COMPLETED: &str = "onboarding.completed";
 
 impl Application {
     /// Opens the import on the selected Host and scans its history there.
-    pub fn open_import(&self) {
+    pub(crate) fn open_import(&self) {
         let state = self.snapshot();
         let host = state.host.clone();
         if self.stop.is_cancelled()
@@ -27,7 +27,7 @@ impl Application {
             .dispatch(&host, None, Intent::ScanProjects(op::ScanProjects {}));
     }
 
-    pub fn close_import(&self) {
+    pub(crate) fn close_import(&self) {
         self.state.send_modify(|state| {
             let state = Arc::make_mut(state);
             state.onboarding = state.onboarding.back();
@@ -35,7 +35,7 @@ impl Application {
     }
 
     /// Imports the selected projects; one that brings all of them ends the setup.
-    pub fn import_projects(self: &Arc<Self>) {
+    pub(crate) fn import_projects(self: &Arc<Self>) {
         let host = self.snapshot().host.clone();
         let response =
             self.client
@@ -63,7 +63,7 @@ impl Application {
     }
 
     /// Skipping or finishing the import: a first run saves its completion.
-    pub fn finish_onboarding(self: &Arc<Self>) {
+    pub(crate) fn finish_onboarding(self: &Arc<Self>) {
         let next = match self.snapshot().onboarding.finish() {
             Finish::Closed(next) => next,
             Finish::Save => return self.save_onboarding(),

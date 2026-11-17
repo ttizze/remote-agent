@@ -1,20 +1,16 @@
 use super::*;
-use windows::{
-    Win32::System::{
-        Com::{
-            IDataObject, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE,
-            StructuredStorage::{
-                CreateILockBytesOnHGlobal, IStorage, StgCreateDocfileOnILockBytes,
-            },
-        },
-        Ole::{
-            DROPEFFECT, DROPEFFECT_NONE, IOleInPlaceFrame, IOleInPlaceUIWindow, IOleObject,
-            OLEINPLACEFRAMEINFO,
-        },
-        SystemServices::{MODIFIERKEYS_FLAGS, RECO_FLAGS},
+use windows::Win32::System::{
+    Com::{
+        IDataObject, STGM_CREATE, STGM_READWRITE, STGM_SHARE_EXCLUSIVE,
+        StructuredStorage::{CreateILockBytesOnHGlobal, IStorage, StgCreateDocfileOnILockBytes},
     },
-    core::{BOOL, GUID, Interface, OutRef, Ref, Result, implement},
+    Ole::{
+        DROPEFFECT, DROPEFFECT_NONE, IOleInPlaceFrame, IOleInPlaceUIWindow, IOleObject,
+        OLEINPLACEFRAMEINFO,
+    },
+    SystemServices::{MODIFIERKEYS_FLAGS, RECO_FLAGS},
 };
+use windows_core::{BOOL, GUID, Interface, OutRef, Ref, Result, implement};
 
 /// Rich Edit needs client-owned OLE storage when it reads inline RTF pictures.
 /// Without it the system parser substitutes a space for each picture.

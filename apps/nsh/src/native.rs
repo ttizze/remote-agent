@@ -74,9 +74,9 @@ mod conversation_macos;
 #[cfg(target_os = "ios")]
 mod document_picker;
 #[cfg(target_os = "ios")]
-pub mod ios;
+pub(crate) mod ios;
 #[cfg(target_os = "macos")]
-pub mod macos;
+pub(crate) mod macos;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple;

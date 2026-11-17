@@ -587,7 +587,7 @@ impl NativeComponent for Toolbar {
     }
 }
 
-pub fn register(components: &Components) {
+pub(crate) fn register(components: &Components) {
     super::conversation_macos::register(components);
     super::hosted::register(components, "bex.browser.canvas", "bex_nsh_browser");
     super::terminal::register(components);

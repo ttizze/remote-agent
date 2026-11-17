@@ -42,7 +42,7 @@ pub(crate) struct Dictation {
 }
 
 impl Dictation {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let connection = use_context::<Connection>().unwrap();
         let this = Self {
             owner: Owner::current(),
@@ -96,14 +96,14 @@ impl Dictation {
         this
     }
 
-    pub fn cancel(self) {
+    pub(crate) fn cancel(self) {
         self.generation.update(|value| *value += 1);
         self.recording.replace(None);
         self.active.set(false);
         self.requesting.set(false);
     }
 
-    pub fn finish(self, client: Arc<crate::client::Client>, send: bool) {
+    pub(crate) fn finish(self, client: Arc<crate::client::Client>, send: bool) {
         if let Some(recording) = self.recording.replace(None) {
             self.active.set(false);
             self.send_recorded_text.set(send);
@@ -121,7 +121,7 @@ impl Dictation {
         }
     }
 
-    pub fn body(self) -> View {
+    pub(crate) fn body(self) -> View {
         let width = signal(0.0_f32);
         view()
             .h(px(48.0))
@@ -187,7 +187,7 @@ impl Dictation {
             ))
     }
 
-    pub fn cancel_button(self) -> impl Element {
+    pub(crate) fn cancel_button(self) -> impl Element {
         let connection = use_context::<Connection>().unwrap();
         ui::icon_button_sized(
             Icon::CLOSE,
@@ -200,7 +200,7 @@ impl Dictation {
     }
 
     #[cfg(desktop)]
-    pub fn bar(
+    pub(crate) fn bar(
         self,
         send: impl Fn() + 'static,
         enabled: impl Fn() -> bool + Copy + 'static,
@@ -237,7 +237,7 @@ impl Dictation {
             )
     }
 
-    pub fn button(self) -> impl Element {
+    pub(crate) fn button(self) -> impl Element {
         let connection = use_context::<Connection>().unwrap();
         ui::ghost(
             move || -> SharedString {

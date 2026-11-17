@@ -27,7 +27,7 @@ pub(super) struct Actions {
     submission: Submission,
 }
 impl Actions {
-    pub fn new(connection: Connection, summary: Memo<WorkspaceSummary>) -> Self {
+    pub(super) fn new(connection: Connection, summary: Memo<WorkspaceSummary>) -> Self {
         Self {
             connection,
             summary,
@@ -56,10 +56,10 @@ impl Actions {
             self.form.set(Some((target, form)));
         }
     }
-    pub fn add_script(self) {
+    pub(super) fn add_script(self) {
         self.open(self.target(), Form::Script(None));
     }
-    pub fn branch(self) {
+    pub(super) fn branch(self) {
         let target = self.target();
         let branches = self
             .summary
@@ -86,7 +86,7 @@ impl Actions {
             }
         });
     }
-    pub fn push(self) {
+    pub(super) fn push(self) {
         let target = self.target();
         let remotes = self
             .summary
@@ -108,7 +108,7 @@ impl Actions {
             }
         });
     }
-    pub fn script_menu(self, script: ProjectScript) {
+    pub(super) fn script_menu(self, script: ProjectScript) {
         let target = self.target();
         ui::popup(
             &json!([{"id":"edit","title":tr("編集")},{"id":"remove","title":tr("削除")}]),
@@ -159,7 +159,7 @@ impl Actions {
             crate::native::message(tr("ワークスペース"), localized(reason));
         }
     }
-    pub fn view(self) -> impl IntoElement {
+    pub(super) fn view(self) -> impl IntoElement {
         when(
             move || self.form.with(Option::is_some),
             move || self.editor(),

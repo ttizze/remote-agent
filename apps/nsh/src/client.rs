@@ -622,7 +622,7 @@ impl Client {
 
     /// A server's invitation over the user's SSH, for this device to confirm.
     #[cfg(desktop)]
-    pub fn ssh_invitation(
+    pub(crate) fn ssh_invitation(
         &self,
         destination: String,
     ) -> async_channel::Receiver<Result<agent_protocol::models::Invitation, String>> {
@@ -652,7 +652,7 @@ impl Client {
     }
 
     #[cfg(dictation)]
-    pub fn prepare_dictation(
+    pub(crate) fn prepare_dictation(
         &self,
         host: &str,
         pane: Option<u64>,
@@ -668,7 +668,7 @@ impl Client {
     }
 
     #[cfg(dictation)]
-    pub fn dictate(
+    pub(crate) fn dictate(
         self: &Arc<Self>,
         host: String,
         pane: Option<u64>,

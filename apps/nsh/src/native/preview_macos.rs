@@ -161,7 +161,7 @@ impl PreviewView {
 
 pub(super) struct Preview(Retained<PreviewView>);
 impl Preview {
-    pub fn new(context: ComponentContext) -> Self {
+    pub(super) fn new(context: ComponentContext) -> Self {
         let this = PreviewView::alloc(MainThreadMarker::new().unwrap()).set_ivars(State {
             context,
             path: RefCell::default(),

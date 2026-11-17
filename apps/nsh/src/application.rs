@@ -272,7 +272,7 @@ pub(crate) struct Application {
 
 impl Application {
     #[cfg(target_os = "macos")]
-    pub fn set_browser_renderer(&self, id: String) {
+    pub(crate) fn set_browser_renderer(&self, id: String) {
         self.state
             .send_modify(|state| Arc::make_mut(state).browser_renderer = id);
     }
@@ -456,7 +456,7 @@ impl Application {
     }
 
     #[cfg(desktop)]
-    pub fn select_update_channel(&self, channel: agent_core::updates::Channel) {
+    pub(crate) fn select_update_channel(&self, channel: agent_core::updates::Channel) {
         if let Some(updater) = &self.updater {
             updater.select_channel(channel);
         }
@@ -465,7 +465,7 @@ impl Application {
     /// Checks, downloads or restarts into a release, as the update's phase allows.
     /// The restart quits once the worker that replaces this app is waiting.
     #[cfg(desktop)]
-    pub fn advance_update(self: &Arc<Self>) {
+    pub(crate) fn advance_update(self: &Arc<Self>) {
         use agent_core::updates::UpdatePhase;
         let Some(updater) = self.updater.clone() else {
             return;
@@ -583,7 +583,7 @@ impl Application {
 
     /// Saves the interface contrast, then publishes it so the root is made again.
     #[cfg(desktop)]
-    pub fn select_contrast(&self, contrast: u32) {
+    pub(crate) fn select_contrast(&self, contrast: u32) {
         if let Err(reason) = self.client.device.select_contrast(contrast) {
             self.fail(reason.to_string());
             return;
@@ -775,7 +775,7 @@ impl Application {
     }
 
     #[cfg(desktop)]
-    pub fn open_script(&self, scope: PanelScope, cwd: String, command: String) {
+    pub(crate) fn open_script(&self, scope: PanelScope, cwd: String, command: String) {
         self.state.send_modify(|state| {
             let next = state.panels.clone().open_script(scope, cwd, command);
             Arc::make_mut(state).panels = next.panels;

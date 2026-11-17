@@ -177,6 +177,7 @@ fn panel(list: List, selected: Memo<Vec<ProjectKey>>, open: Signal<bool>) -> imp
                                     key,
                                     highlighted.get_untracked(),
                                     projects.with_untracked(Vec::len) + 1,
+                                    agent_core::composer::CompletionBoundary::Stop,
                                 )
                             {
                                 highlighted.set(index);
