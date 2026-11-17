@@ -23,6 +23,7 @@
       packages = forEachSystem (pkgs: {
         agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
         kani = pkgs.callPackage ./tools/kani/package.nix { };
+        lean4 = pkgs.lean4;
         cargo = pkgs.callPackage ./tools/cargo/package.nix { };
         maestro = pkgs.callPackage ./tools/maestro/package.nix { };
         relax = pkgs.callPackage ./tools/relax/package.nix { };

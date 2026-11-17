@@ -205,3 +205,15 @@ mutants-diff *args:
 kani-diff *args:
     mkdir -p target/kani-diff
     cargo kani --package agent-core --lib --harness presentation::diff::proofs --output-format terse -Z unstable-options --harness-timeout 120 --export-json target/kani-diff/results.json "$@"
+
+# Prove pairing's abstract contract, then compare generated traces with real Rust.
+# This is model verification plus finite conformance, not a proof of compiled Rust.
+[group('portable')]
+lean-pairing:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/lean-pairing
+    agent_lean=$(nix build --no-update-lock-file --no-link --print-out-paths .#lean4)
+    "$agent_lean/bin/lean" -R crates/agent-transport/proofs -o target/lean-pairing/Pairing.olean crates/agent-transport/proofs/Pairing.lean
+    LEAN_PATH="$PWD/target/lean-pairing" "$agent_lean/bin/lean" --run crates/agent-transport/proofs/PairingCases.lean > target/lean-pairing/cases.jsonl
+    cargo run --locked --package agent-transport --example pairing-conformance -- target/lean-pairing/cases.jsonl
