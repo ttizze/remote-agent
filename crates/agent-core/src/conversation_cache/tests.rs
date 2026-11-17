@@ -59,6 +59,49 @@ fn save_thread(directory: &Path, thread: Thread) {
     write(directory, "", &id, &replica).unwrap();
 }
 
+#[test]
+fn concurrent_cache_owners_publish_complete_conversations_without_sharing_temporary_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = SessionRef::new(ProviderKind::Claude, "shared-cache".into()).unwrap();
+    let replicas: Vec<_> = (1..=8)
+        .map(|turns| {
+            crate::test_conversations::projection(
+                crate::models::ThreadResponse {
+                    thread: thread("shared-cache", turns, TurnStatus::Completed),
+                    ..Default::default()
+                },
+                1,
+            )
+        })
+        .collect();
+    let start = std::sync::Barrier::new(replicas.len());
+    let results = std::thread::scope(|scope| {
+        let writers: Vec<_> = replicas
+            .iter()
+            .map(|replica| {
+                scope.spawn(|| {
+                    (0..24)
+                        .map(|_| {
+                            start.wait();
+                            write(directory.path(), "", &id, replica)?;
+                            let bytes = std::fs::read(file(directory.path(), &id))?;
+                            agent_protocol::protocol::decode::<Copy>(&bytes).map(|_| ())
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        writers
+            .into_iter()
+            .flat_map(|writer| writer.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    for result in results {
+        result.expect("independent cache owners must publish whole files without consuming each other's temporary file");
+    }
+    assert!(read(&file(directory.path(), &id), "").is_some());
+}
+
 fn restored(directory: &Path) -> BTreeMap<SessionRef, Arc<Thread>> {
     let mut snapshot = Snapshot::default();
     restore(directory, &mut snapshot);

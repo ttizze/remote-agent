@@ -63,7 +63,12 @@ impl HostRpcService {
             {
                 self.inner
                     .automations
-                    .finish(&value, receipt_state(receipt))
+                    .finish(
+                        &value.definition.session,
+                        value.definition.id,
+                        run.id,
+                        receipt_state(receipt),
+                    )
                     .map_err(|e| Failure::new("automation_failed", e))?;
             }
         }
@@ -107,7 +112,11 @@ impl HostRpcService {
             }
             Err(_) => RunState::Unknown,
         };
-        if let Err(error) = self.inner.automations.finish(&value, state) {
+        if let Err(error) =
+            self.inner
+                .automations
+                .finish(&definition.session, definition.id, run.id, state)
+        {
             tracing::error!(operation="automation.finish", message=%error);
         }
     }

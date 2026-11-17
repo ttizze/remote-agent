@@ -227,17 +227,22 @@ impl Automations {
         })
     }
     /// Record what the conversation owner certified about this dispatch.
-    pub(crate) fn finish(&self, value: &Automation, state: RunState) -> Result<(), String> {
+    pub(crate) fn finish(
+        &self,
+        session: &SessionRef,
+        automation: Uuid,
+        dispatch: Uuid,
+        state: RunState,
+    ) -> Result<(), String> {
         self.with(|connection| {
-            let Some(run) = &value.last_run else {
+            let Some(mut current) = find(connection, session, automation)? else {
                 return Ok(());
             };
-            let Some(mut current) =
-                find(connection, &value.definition.session, value.definition.id)?
-            else {
-                return Ok(());
-            };
-            let Some(saved) = current.last_run.as_mut().filter(|saved| saved.id == run.id) else {
+            // Reconciliation can certify a receipt before the original dispatch
+            // finishes. Late completions cannot revoke that definitive result.
+            let Some(saved) = current.last_run.as_mut().filter(|saved| {
+                saved.id == dispatch && matches!(saved.state, RunState::Sending | RunState::Unknown)
+            }) else {
                 return Ok(());
             };
             saved.state = match state {
@@ -271,6 +276,77 @@ mod tests {
         Request {
             session: definition.session.clone(),
             action,
+        }
+    }
+    #[test]
+    fn confirmed_dispatch_results_survive_late_completions_and_restart() {
+        for confirmed in [
+            RunState::Accepted,
+            RunState::Failed {
+                message: "rejected before submission".into(),
+            },
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("automations.sqlite");
+            let owner = Automations::open(&path);
+            let definition = definition(SessionRef::new(None, Uuid::new_v4().to_string()).unwrap());
+            owner
+                .change(
+                    &request(
+                        &definition,
+                        Action::Save {
+                            definition: definition.clone().into(),
+                        },
+                    ),
+                    0,
+                )
+                .unwrap();
+            let dispatch = owner.due(60_000).unwrap().pop().unwrap();
+            let dispatch_id = dispatch.last_run.as_ref().unwrap().id;
+            owner
+                .finish(
+                    &definition.session,
+                    definition.id,
+                    dispatch_id,
+                    confirmed.clone(),
+                )
+                .unwrap();
+            for late in [
+                RunState::Failed {
+                    message: "late completion failure".into(),
+                },
+                RunState::Unknown,
+            ] {
+                owner
+                    .finish(&definition.session, definition.id, dispatch_id, late)
+                    .unwrap();
+                assert_eq!(
+                    owner.list(None).unwrap().automations[0]
+                        .last_run
+                        .as_ref()
+                        .unwrap()
+                        .state,
+                    confirmed,
+                    "a delayed completion cannot revoke a confirmed dispatch result"
+                );
+            }
+            drop(owner);
+            let owner = Automations::open(&path);
+            assert!(owner.uncertain(None).unwrap().is_empty());
+            let next = owner.due(120_000).unwrap().pop().unwrap();
+            owner
+                .finish(
+                    &definition.session,
+                    definition.id,
+                    dispatch_id,
+                    RunState::Accepted,
+                )
+                .unwrap();
+            assert_eq!(
+                owner.list(None).unwrap().automations[0].last_run,
+                next.last_run,
+                "an earlier dispatch cannot finish the next scheduled dispatch"
+            );
         }
     }
     #[test]
@@ -309,7 +385,14 @@ mod tests {
         assert!(owner.due(179_999).unwrap().is_empty());
         let first = owner.due(180_000).unwrap().pop().unwrap();
         assert!(owner.due(180_001).unwrap().is_empty());
-        owner.finish(&first, RunState::Accepted).unwrap();
+        owner
+            .finish(
+                &definition.session,
+                definition.id,
+                first.last_run.as_ref().unwrap().id,
+                RunState::Accepted,
+            )
+            .unwrap();
         let second = owner.due(240_000).unwrap().pop().unwrap();
         assert_ne!(first.last_run.unwrap().id, second.last_run.unwrap().id);
     }
@@ -361,7 +444,14 @@ mod tests {
             retry.last_run.as_ref().unwrap().id,
             sent.last_run.as_ref().unwrap().id
         );
-        owner.finish(&retry, RunState::Accepted).unwrap();
+        owner
+            .finish(
+                &definition.session,
+                definition.id,
+                retry.last_run.as_ref().unwrap().id,
+                RunState::Accepted,
+            )
+            .unwrap();
         let mut foreign = definition.clone();
         foreign.session = SessionRef::new(None, Uuid::new_v4().to_string()).unwrap();
         assert!(

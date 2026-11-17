@@ -1,7 +1,7 @@
 use agent_protocol::models::{Project, ProjectMembership};
 use std::{
     collections::{BTreeSet, HashMap},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 #[derive(Debug, Default)]
@@ -22,10 +22,7 @@ enum WorkspaceMatch<'a> {
 /// Membership, discovery and SDK provenance recovery share this boundary.
 pub(crate) fn scratch_root<'a>(roots: &'a BTreeSet<PathBuf>, path: &Path) -> Option<&'a Path> {
     let physical = dunce::canonicalize(path).ok();
-    let path = if path
-        .components()
-        .any(|part| part == std::path::Component::ParentDir)
-    {
+    let path = if path.components().any(|part| part == Component::ParentDir) {
         physical.as_deref()?
     } else {
         path
@@ -76,6 +73,14 @@ impl Snapshot {
     }
 
     fn match_workspace(&self, workspace: &Path) -> WorkspaceMatch<'_> {
+        // A lexical prefix cannot prove containment across parent traversal.
+        // Let the caller resolve it physically, including any symlink targets.
+        if workspace
+            .components()
+            .any(|part| part == Component::ParentDir)
+        {
+            return WorkspaceMatch::Missing;
+        }
         let mapped = worktree_mapping(&self.worktree_roots, workspace)
             .map(|(root, source)| Path::new(source).join(workspace.strip_prefix(root).unwrap()));
         let workspace = mapped.as_deref().unwrap_or(workspace);
@@ -222,5 +227,41 @@ mod tests {
             snapshot.project_for_workspace(&fixture_path("/host/cwd")),
             None
         );
+    }
+
+    #[test]
+    fn parent_components_use_physical_workspace_membership() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        for name in ["a", "b", "outside", "b/nested"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let mut snapshot = snapshot();
+        snapshot.projects = serde_json::from_value(json!([
+            {"id":"a","name":"A","roots":[{"path":root.join("a")}]},
+            {"id":"b","name":"B","roots":[{"path":root.join("b")}]}
+        ]))
+        .unwrap();
+        for (relative, expected) in [
+            ("a/../b", Some("b")),
+            ("a/../outside", None),
+            ("a/../a", Some("a")),
+            ("a/missing/../../b", None),
+        ] {
+            assert_eq!(
+                snapshot.project_for_workspace(root.join(relative).to_str().unwrap()),
+                expected,
+                "membership must follow the workspace reached by {relative}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("b/nested"), root.join("a/alias")).unwrap();
+            assert_eq!(
+                snapshot.project_for_workspace(root.join("a/alias/..").to_str().unwrap()),
+                Some("b"),
+                "parent traversal follows the symlink target, not lexical component removal"
+            );
+        }
     }
 }
