@@ -497,20 +497,7 @@ fn decide(
             Some(run) => model::interrupt(state, &run.id, context),
             None => Ok(model::hold_queue(state, true)),
         },
-        Command::Rename(title) => {
-            let title = title.trim();
-            if title.is_empty() {
-                return Err("title is empty".into());
-            }
-            Ok(model::Decision {
-                changes: vec![model::Change::Thread(model::Thread {
-                    title: title.into(),
-                    updated_at: context.now.into(),
-                    ..state.thread.clone()
-                })],
-                ..Default::default()
-            })
-        }
+        Command::Rename(title) => model::titles::rename(state, title, context.now),
         Command::Rewind(run) => model::rewind(state, run.as_str(), context),
         Command::Answer { id, answer } => model::respond(
             state,

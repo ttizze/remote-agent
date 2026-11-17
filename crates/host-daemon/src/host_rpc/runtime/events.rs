@@ -275,21 +275,12 @@ impl Runtime {
                         &[],
                         &now,
                         |state| {
-                            if native::external::provider(state, &session).is_none()
-                                || state.thread.title == name
-                            {
+                            if native::external::provider(state, &session).is_none() {
                                 return Ok(agent_protocol::orchestration::Decision::default());
                             }
-                            Ok(agent_protocol::orchestration::Decision {
-                                changes: vec![agent_protocol::orchestration::Change::Thread(
-                                    agent_protocol::orchestration::Thread {
-                                        title: name,
-                                        updated_at: now.clone(),
-                                        ..state.thread.clone()
-                                    },
-                                )],
-                                ..Default::default()
-                            })
+                            Ok(agent_protocol::orchestration::titles::observe_native(
+                                state, &name, &now,
+                            ))
                         },
                     )?;
                 }

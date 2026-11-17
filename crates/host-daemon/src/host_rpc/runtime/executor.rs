@@ -380,6 +380,9 @@ impl Runtime {
     ) -> Result<(), String> {
         use model::EffectRequest as Request;
         match &effect.request {
+            Request::ThreadTitleGenerate { message_id, .. } => {
+                Self::generate_title(service, effect, worker, message_id).await?
+            }
             Request::ProviderRuntimeContinue { source_run_id } => {
                 service.inner.conversation.storage.continue_runtime(
                     &effect.id,

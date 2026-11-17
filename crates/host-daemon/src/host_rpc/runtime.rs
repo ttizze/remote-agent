@@ -42,6 +42,7 @@ pub(in crate::host_rpc) mod t3_contract;
 #[cfg(test)]
 mod tests;
 mod text;
+mod titles;
 mod workspaces;
 
 pub(super) struct Runtime {

@@ -4,6 +4,16 @@
 use super::*;
 use agent_protocol::orchestration as model;
 
+// Title inference has no native side effects and must never hold up a steer,
+// interrupt, answer or queued turn. Each lane retains its own FIFO ordering.
+const READY_EFFECT: &str = "candidate.status='pending'
+    AND NOT EXISTS (
+        SELECT 1 FROM orchestration_v2_effect_outbox AS active
+        WHERE active.thread_id=candidate.thread_id
+          AND (active.effect_type='thread.title.generate')=(candidate.effect_type='thread.title.generate')
+          AND (active.status='running' OR (active.status='pending' AND active.rowid<candidate.rowid))
+    )";
+
 pub(super) fn claim(
     connection: &Connection,
     worker_id: &str,
@@ -14,12 +24,7 @@ pub(super) fn claim(
          SET status='running',attempt_count=attempt_count+1,lease_owner=?1,updated_at=?2,last_error=NULL
          WHERE effect_id=(
            SELECT candidate.effect_id FROM orchestration_v2_effect_outbox AS candidate
-           WHERE candidate.status='pending' AND candidate.available_at<=?2
-             AND NOT EXISTS (
-               SELECT 1 FROM orchestration_v2_effect_outbox AS active
-               WHERE active.thread_id=candidate.thread_id
-                 AND (active.status='running' OR (active.status='pending' AND active.rowid<candidate.rowid))
-             )
+           WHERE {READY_EFFECT} AND candidate.available_at<=?2
            ORDER BY candidate.available_at,candidate.created_at,candidate.effect_id LIMIT 1
          ) RETURNING {}", event_store::EFFECT_COLUMNS)).map_err(failure)?;
     let mut rows = query.query(params![worker_id, now]).map_err(failure)?;
@@ -40,7 +45,7 @@ pub(in crate::host_rpc) enum Settlement<'a> {
 
 impl Storage {
     pub(in crate::host_rpc) fn next_effect_at(&self) -> Result<Option<String>, String> {
-        self.with(|connection|connection.query_row("SELECT min(candidate.available_at) FROM orchestration_v2_effect_outbox candidate WHERE candidate.status='pending' AND NOT EXISTS (SELECT 1 FROM orchestration_v2_effect_outbox active WHERE active.thread_id=candidate.thread_id AND (active.status='running' OR (active.status='pending' AND active.rowid<candidate.rowid)))",[],|row|row.get(0)).map_err(failure))
+        self.with(|connection|connection.query_row(&format!("SELECT min(candidate.available_at) FROM orchestration_v2_effect_outbox candidate WHERE {READY_EFFECT}"),[],|row|row.get(0)).map_err(failure))
     }
     pub(in crate::host_rpc) fn recover_effects(&self, now: &str) -> Result<(), String> {
         self.with(|connection| reconcile_after_process_loss(connection, now))
@@ -88,7 +93,13 @@ impl Storage {
         worker: &str,
     ) -> Result<Option<model::State>, String> {
         self.with(|connection| {
-            let state = projections::load(connection, &effect.thread_id, &[])?;
+            let items = match &effect.request {
+                model::EffectRequest::ThreadTitleGenerate { message_id, .. } => {
+                    vec![model::user_item_id(&effect.thread_id, message_id)]
+                }
+                _ => Vec::new(),
+            };
+            let state = projections::load(connection, &effect.thread_id, &items)?;
             Ok(state
                 .effects
                 .get(&effect.id)
@@ -201,7 +212,7 @@ pub(super) fn reconcile_after_process_loss(
         WHERE (status='pending' OR (status='running' AND lease_owner IS NOT NULL))
           AND effect_type IN ('provider-session.apply-model-selection','provider-turn.start','provider-turn.interrupt','provider-turn.steer','provider-turn.restart','runtime-request.respond')",[now]).map_err(failure)?;
     tx.execute("UPDATE orchestration_v2_effect_outbox SET status='pending',lease_owner=NULL,available_at=?1,updated_at=?1,last_error='Requeued after the previous server process ended.'
-        WHERE status='running' AND effect_type IN ('provider-runtime.continue','provider-session.detach','provider-thread.rollback','checkpoint.capture')",[now]).map_err(failure)?;
+        WHERE status='running' AND effect_type IN ('thread.title.generate','provider-runtime.continue','provider-session.detach','provider-thread.rollback','checkpoint.capture')",[now]).map_err(failure)?;
     tx.commit().map_err(failure)
 }
 
@@ -282,6 +293,62 @@ mod tests {
         assert_eq!(retry.last_error, None);
         assert!(finish(&db, "first", Some("worker"), LATER, Settlement::Succeeded).unwrap());
         assert_eq!(claim(&db, "worker", LATER).unwrap().unwrap().id, "second");
+    }
+
+    #[test]
+    fn title_inference_has_a_separate_lane_and_restarts_without_replaying_native_input() {
+        let mut db = database();
+        enqueue(&mut db, "title", "thread");
+        let mut title = event_store::effects(&db, "thread").unwrap()["title"].clone();
+        title.request = model::EffectRequest::ThreadTitleGenerate {
+            message_id: "user-message".into(),
+            expected_title: "placeholder".into(),
+        };
+        let tx = db.transaction().unwrap();
+        // The fixture starts the title before enqueueing execution to prove
+        // that title latency cannot block an unrelated native write.
+        tx.execute(
+            "DELETE FROM orchestration_v2_effect_outbox WHERE effect_id='title'",
+            [],
+        )
+        .unwrap();
+        event_store::save_effect(&tx, &title).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            claim(&db, "title-worker", NOW).unwrap().unwrap().id,
+            "title"
+        );
+        enqueue(&mut db, "native", "thread");
+        assert_eq!(
+            claim(&db, "native-worker", NOW).unwrap().unwrap().id,
+            "native"
+        );
+        assert!(claim(&db, "another", NOW).unwrap().is_none());
+        assert!(
+            finish(
+                &db,
+                "native",
+                Some("native-worker"),
+                NOW,
+                Settlement::Succeeded
+            )
+            .unwrap()
+        );
+        reconcile_after_process_loss(&mut db, LATER).unwrap();
+        let recovered = claim(&db, "restarted", LATER).unwrap().unwrap();
+        assert_eq!(recovered.id, "title");
+        assert_eq!(recovered.attempt_count, 2);
+        assert!(
+            !finish(
+                &db,
+                "title",
+                Some("title-worker"),
+                LATER,
+                Settlement::Succeeded
+            )
+            .unwrap()
+        );
+        assert!(claim(&db, "another", LATER).unwrap().is_none());
     }
 
     #[test]
