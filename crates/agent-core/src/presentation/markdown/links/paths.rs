@@ -70,6 +70,10 @@ pub(super) fn relative(path: &str, cwd: &str) -> Option<String> {
     if comparable.trim_end_matches('/') == root {
         return Some(".".into());
     }
+    // A local filesystem root cannot contain a different network authority.
+    if is_network_host_path(path) != is_network_host_path(cwd) {
+        return None;
+    }
     if !comparable.starts_with(&format!("{root}/")) {
         return None;
     }

@@ -86,6 +86,49 @@ fn all_extensionless_names_and_unknown_extensions_are_links() {
     }
 }
 
+#[rstest::rstest]
+#[case("/")]
+#[case("//")]
+fn a_filesystem_root_never_contains_an_unrelated_network_share(#[case] root: &str) {
+    assert_eq!(file_workspace_relative_path(root, root), Some(".".into()));
+    for source in [
+        "file://server/share/a.rs",
+        "file://localhost/%2Fserver/share/a.rs",
+        r"\\server\share\a.rs",
+    ] {
+        let target = markdown_file_target(source.into(), root.into(), MarkdownFileSurface::Desktop);
+        assert!(
+            target.is_none(),
+            "the local filesystem root does not authorize a network share: {source}: {target:?}"
+        );
+        assert!(
+            chips::Workspace::new(root, None)
+                .file(source, Syntax::Link)
+                .is_none()
+        );
+    }
+    assert_eq!(
+        file_workspace_relative_path(r"\\server\share\a.rs", root),
+        None
+    );
+    assert_eq!(
+        file_workspace_relative_path("/src/a.rs", root),
+        Some("src/a.rs".into())
+    );
+    assert_eq!(
+        file_workspace_relative_path(r"\\server\share\a.rs", r"\\server\share\"),
+        Some("a.rs".into())
+    );
+    assert!(
+        markdown_file_target(
+            "file://server/share/a.rs".into(),
+            r"\\server\share\".into(),
+            MarkdownFileSurface::Desktop,
+        )
+        .is_some()
+    );
+}
+
 #[test]
 fn labels_require_the_path_and_explicit_position_to_match() {
     let file = file_reference("/repo/src/example.ts:12:3", Syntax::Link).unwrap();
