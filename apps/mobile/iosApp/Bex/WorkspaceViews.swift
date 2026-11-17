@@ -195,11 +195,11 @@ private struct WorkspaceDirectoryScreen: View {
                                    selectedLine = line
                                    selected = FileEntry(name: URL(fileURLWithPath: path).lastPathComponent,
                                                         path: path, directory: false, size: 0)
-                               }) { path in
-                aiEdit(path)
-                selected = nil
-                close()
-            }
+                               }, aiEdit: { path in
+                                   aiEdit(path)
+                                   selected = nil
+                                   close()
+                               })
         }
     }
 

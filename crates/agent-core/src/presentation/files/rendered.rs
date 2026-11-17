@@ -618,17 +618,27 @@ mod tests {
 
     /// The boxes a rendering of `source` shows, in reading order.
     fn boxes(source: &str) -> Vec<bool> {
-        file_markdown_blocks(source, "/repo/a.md", "/repo".into(), None)
-            .into_iter()
-            .filter_map(|block| match block {
-                MarkdownBlock::Paragraph { style, .. } => match style.marker.as_deref() {
-                    Some("☑") => Some(true),
-                    Some("☐") => Some(false),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect()
+        fn visit(blocks: Vec<MarkdownBlock>) -> Vec<bool> {
+            blocks
+                .into_iter()
+                .flat_map(|block| match block {
+                    MarkdownBlock::Paragraph { style, .. } => match style.marker.as_deref() {
+                        Some("☑") => vec![true],
+                        Some("☐") => vec![false],
+                        _ => Vec::new(),
+                    },
+                    MarkdownBlock::Disclosure { blocks, .. }
+                    | MarkdownBlock::Callout { blocks, .. } => visit(blocks),
+                    _ => Vec::new(),
+                })
+                .collect()
+        }
+        visit(file_markdown_blocks(
+            source,
+            "/repo/a.md",
+            "/repo".into(),
+            None,
+        ))
     }
 
     #[test]
@@ -669,6 +679,25 @@ mod tests {
         assert_eq!(
             file_markdown_task_checked(source, 1, true).unwrap(),
             source.replacen("- [ ] after", "- [x] after", 1)
+        );
+        // A caption is inline content, so its source list has no rendered box.
+        let source = "<details>\n<summary>\n\n- [ ] caption\n\n</summary>\n\n- [ ] body\n\n</details>\n\n- [ ] after\n";
+        assert_eq!(boxes(source), [false, false]);
+        assert_eq!(file_markdown_task_checked(source, 0, true), None);
+        assert_eq!(file_markdown_task_checked(source, 1, true), None);
+    }
+
+    #[test]
+    fn checking_a_task_preserves_unicode_frontmatter_and_crlf() {
+        let source =
+            "\u{feff}---\r\ntitle: 日本語 [ ]\r\n---\r\n🦀 本文\r\n\r\n- [ ] 最初\r\n- [X] 次\r\n";
+        assert_eq!(
+            file_markdown_task_checked(source, 1, false),
+            Some(source.replace("- [X] 次", "- [ ] 次"))
+        );
+        assert_eq!(
+            file_markdown_task_checked(source, 0, true),
+            Some(source.replace("- [ ] 最初", "- [x] 最初"))
         );
     }
 

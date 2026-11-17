@@ -3,6 +3,7 @@ use super::*;
 use serde_json::{Value, json};
 
 mod document;
+pub(crate) use document::TaskPresses;
 pub(crate) use document::view as document;
 #[cfg(any(target_os = "macos", test))]
 use std::collections::BTreeMap;

@@ -304,14 +304,33 @@ pub fn markdown_task_checked(source: &str, index: u32, checked: bool) -> Option<
         visit(&parse(source), &mut tasks);
         tasks
     }
+    fn visible_tasks(blocks: &[MarkdownBlock]) -> usize {
+        blocks
+            .iter()
+            .map(|block| {
+                let (style, children) = match block {
+                    MarkdownBlock::Paragraph { style, .. }
+                    | MarkdownBlock::Table { style, .. }
+                    | MarkdownBlock::Visualization { style, .. } => (style, &[][..]),
+                    MarkdownBlock::Disclosure { style, blocks, .. }
+                    | MarkdownBlock::Callout { style, blocks, .. } => (style, blocks.as_slice()),
+                };
+                usize::from(matches!(style.marker.as_deref(), Some("☐" | "☑")))
+                    + visible_tasks(children)
+            })
+            .sum()
+    }
     let written = tasks(source);
     // The rendering reads the source without its disclosure tags, which can
     // turn text between them into a list: then a box's place names no item here.
     let shown = tasks(&without_disclosure_tags(source));
-    if !written
-        .iter()
-        .map(|task| task.1)
-        .eq(shown.iter().map(|task| task.1))
+    // Disclosure captions render inline: a list in a caption has no box.
+    // Reject a numbering mismatch before using a visible box's index in source.
+    if written.len() != visible_tasks(&document(source, None))
+        || !written
+            .iter()
+            .map(|task| task.1)
+            .eq(shown.iter().map(|task| task.1))
     {
         return None;
     }

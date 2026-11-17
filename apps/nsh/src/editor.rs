@@ -7,8 +7,8 @@ use crate::{
 };
 use agent_core::{
     presentation::files::{
-        FileRendering, file_edit_prompt, file_line_start_utf16, file_rendered, file_rendering,
-        mermaid_file_markdown,
+        FileRendering, file_edit_prompt, file_line_start_utf16, file_markdown_task_checked,
+        file_rendered, file_rendering, mermaid_file_markdown,
     },
     state::{Intent, operations as op},
 };
@@ -92,6 +92,31 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
         )
     });
     let contents = computed(move || controls.with(|controls| controls.text.clone()));
+    let tasks: crate::conversation::native::TaskPresses = (
+        computed(move || controls.with(|controls| controls.can_edit) && !busy()),
+        std::rc::Rc::new(move |index, checked| {
+            let Some(text) =
+                contents.with_untracked(|text| file_markdown_task_checked(text, index, checked))
+            else {
+                return;
+            };
+            connection.client.with(|client| {
+                client.dispatch(
+                    &host.get(),
+                    None,
+                    Intent::SetFileDraft {
+                        path: path.get(),
+                        text,
+                    },
+                );
+                client.dispatch(
+                    &host.get(),
+                    None,
+                    Intent::SaveFile(op::SaveFile { path: path.get() }),
+                );
+            });
+        }),
+    );
     let position = computed(move || {
         (
             target.with(|target| (target.line, target.line_request)),
@@ -224,6 +249,7 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                 move || Some(contents.get()),
                 move |source, cwd, home| agent_core::presentation::files::file_markdown_blocks(&source, &path.get(), cwd, home),
                 896.0,
+                Some(tasks.clone()),
             ),
         ))
         .child(when(
@@ -237,7 +263,7 @@ pub(crate) fn screen(target: ReadSignal<TextFile>) -> impl Element {
                     }))
                     .child(crate::conversation::native::document(
                         surroundings, path.get(), move || diagram.get(),
-                        agent_core::presentation::markdown::workspace_markdown_blocks, 10_000.0,
+                        agent_core::presentation::markdown::workspace_markdown_blocks, 10_000.0, None,
                     ))
             },
         ))
