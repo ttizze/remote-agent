@@ -27,6 +27,13 @@ use std::sync::{Arc, OnceLock};
 
 const SESSION_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+#[cfg(feature = "test-support")]
+type FixtureReadHook = Box<
+    dyn Fn(bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 pub struct HostRpcService {
     pub(super) inner: Arc<ServiceInner>,
@@ -54,6 +61,8 @@ pub(super) struct ServiceInner {
     dictation: crate::dictation::Dictation,
     history_scope: OnceLock<(std::path::PathBuf, bool)>,
     updating: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "test-support")]
+    fixture_read: OnceLock<FixtureReadHook>,
 }
 
 impl HostRpcService {
@@ -75,6 +84,35 @@ impl HostRpcService {
     #[cfg(feature = "test-support")]
     pub fn fixture_projects(&self) -> ProjectStore {
         self.inner.projects.clone()
+    }
+
+    /// Fixture transport faults apply to canonical reads, independently of providers.
+    #[cfg(feature = "test-support")]
+    pub fn set_fixture_read_hook<F, Fut>(&self, hook: F)
+    where
+        F: Fn(bool) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        assert!(
+            self.inner
+                .fixture_read
+                .set(Box::new(move |earlier| Box::pin(hook(earlier))))
+                .is_ok(),
+            "fixture read hook already configured"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(in crate::host_rpc) async fn before_fixture_read(
+        &self,
+        earlier: bool,
+    ) -> Result<(), Failure> {
+        if let Some(hook) = self.inner.fixture_read.get() {
+            hook(earlier)
+                .await
+                .map_err(|message| Failure::new("history_unavailable", message))?;
+        }
+        Ok(())
     }
 
     pub fn new(
@@ -110,6 +148,8 @@ impl HostRpcService {
                 ),
                 automation_stop: Default::default(),
                 history_scope: OnceLock::new(),
+                #[cfg(feature = "test-support")]
+                fixture_read: OnceLock::new(),
                 conversation,
                 updating: std::sync::atomic::AtomicBool::new(false),
                 browser: OnceLock::new(),

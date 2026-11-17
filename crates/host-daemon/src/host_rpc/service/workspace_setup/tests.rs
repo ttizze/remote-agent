@@ -862,7 +862,12 @@ async fn an_empty_launch_keeps_its_async_script_live_until_the_real_process_exit
 
 #[tokio::test]
 async fn asynchronous_failure_does_not_block_or_resend_the_initial_input() {
-    let fixture = Fixture::new(script("printf 'waiting\\n'; while [ ! -f .release ]; do sleep 0.02; done; printf 'async failure\\n'; exit 9", true)).await;
+    let command = if cfg!(windows) {
+        "Write-Output waiting; while (-not (Test-Path .release)) { Start-Sleep -Milliseconds 20 }; Write-Output 'async failure'; exit 9"
+    } else {
+        "printf 'waiting\\n'; while [ ! -f .release ]; do sleep 0.02; done; printf 'async failure\\n'; exit 9"
+    };
+    let fixture = Fixture::new(script(command, true)).await;
     let client = fixture.host.open_session();
     let (_, mut updates) = admit(&fixture.host, client.id(), &fixture.request("main", false)).await;
     let active = setup_until(&mut updates, |setup| {
@@ -1256,7 +1261,14 @@ async fn restart_preserves_interrupted_checkouts_and_waits_for_an_explicit_retry
         let mut setup = WorkspaceSetup::new(Some("main".into()), now().max(0) as u64);
         setup.worktree_path = Some(checkout.to_str().unwrap().into());
         setup.branch = Some(branch);
-        setup.script = script("printf 'after\\n' >> .script-history", async_ready);
+        setup.script = script(
+            if cfg!(windows) {
+                "[IO.File]::AppendAllText('.script-history', \"after`n\")"
+            } else {
+                "printf 'after\\n' >> .script-history"
+            },
+            async_ready,
+        );
         setup.stage(SetupStageId::Fetch, SetupStageStatus::Skipped, 0);
         setup.stage(SetupStageId::Checkout, SetupStageStatus::Done, 0);
         setup.stage(SetupStageId::SetupScript, SetupStageStatus::Running, 0);

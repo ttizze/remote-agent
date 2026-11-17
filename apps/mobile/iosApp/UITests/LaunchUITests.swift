@@ -67,7 +67,7 @@ final class LaunchUITests: XCTestCase {
     }
 
     func expandSimulatorProject(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
-        let project = app.buttons["tasks.project.simulator-project"]
+        let project = app.descendants(matching: .any)["tasks.project.simulator-project"]
         guard project.waitUntilExists(timeout: 10) else {
             XCTFail("The fixture project did not appear.\n\(app.debugDescription)", file: file, line: line)
             return
@@ -183,7 +183,7 @@ final class LaunchUITests: XCTestCase {
         confirm.tap()
     }
 
-    func simulatorTaskRowIdentifier(_ path: String) throws -> String {
+    func simulatorTaskIdentifier(_ path: String, prefix: String = "tasks.row.") throws -> String {
         struct Session: Decodable {
             let provider: String?
             let id: String
@@ -195,7 +195,11 @@ final class LaunchUITests: XCTestCase {
 
         let response = try simulatorFixture(path, expectedStatus: 200, timeout: 15)
         let session = try JSONDecoder().decode(TaskIdentity.self, from: response).threadId
-        return "tasks.row.\(session.provider ?? "bex"):\(session.id)"
+        return "\(prefix)\(session.provider ?? "bex"):\(session.id)"
+    }
+
+    func simulatorTaskRow(_ app: XCUIApplication, native: String) throws -> XCUIElement {
+        try app.descendants(matching: .any)[simulatorTaskIdentifier("session-identity/\(native)")]
     }
 
     func startSimulatorConversation(_ app: XCUIApplication, promptText: String) {
@@ -241,6 +245,13 @@ final class LaunchUITests: XCTestCase {
         app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", prefix))
             .firstMatch
+    }
+
+    /// Match a fixture's provenance marker inside its public item address.
+    func fixtureItems(_ app: XCUIApplication, containing marker: String) -> XCUIElementQuery {
+        app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND identifier CONTAINS %@", "item.", marker
+        ))
     }
 
     func prefixedButton(_ app: XCUIApplication, prefix: String) -> XCUIElement {

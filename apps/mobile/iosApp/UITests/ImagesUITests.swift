@@ -23,7 +23,7 @@ extension LaunchUITests {
     func testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[generated-images] Show generated images and links")
-        let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
+        let finalAnswer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(finalAnswer.waitUntilExists(timeout: 25))
         let finalID = finalAnswer.identifier
         func showGeneratedImage(_ name: String) {
@@ -56,8 +56,7 @@ extension LaunchUITests {
         app.terminate(); _ = try connectedSimulatorApp()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitUntilExists(timeout: 30))
         let number = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
-        let row = try app
-            .descendants(matching: .any)[simulatorTaskRowIdentifier("session-identity/fixture-thread-\(number)")]
+        let row = try simulatorTaskRow(app, native: "fixture-thread-\(number)")
         XCTAssertTrue(row.waitUntilExists(timeout: 20)); row.tap()
         showGeneratedImage("inline")
         showGeneratedImage("saved")
@@ -68,7 +67,7 @@ extension LaunchUITests {
         _ app: XCUIApplication, index: Int, filename: String, expected: WorkspacePreview = .quickLook
     ) {
         // File chips replace the authored link captions. The fixture lists the image, text file, then website.
-        let link = prefixedElement(app, prefix: "item.fixture-final-").links.element(boundBy: index)
+        let link = fixtureItems(app, containing: "fixture-final-").firstMatch.links.element(boundBy: index)
         showConversationElement(link, in: app, upward: true)
         link.tap()
         if case .video = expected {
@@ -182,7 +181,7 @@ extension LaunchUITests {
     func testSimulatorOpensOnlyTheTappedImageAndSavesIt() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[generated-images] [gallery] Open only the tapped image")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 25))
         let image = app.images.matching(NSPredicate(
             format: "identifier BEGINSWITH %@",
             "message.image.fixture-generated-inline-"
@@ -216,7 +215,7 @@ extension LaunchUITests {
     func testSimulatorDisplaysImagesInMessagesAndMarkdownAfterReopening() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[images] Display the attached images")
-        let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
+        let finalAnswer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(finalAnswer.waitUntilExists(timeout: 25))
         let finalID = finalAnswer.identifier
         let messageImage = app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.image."))
@@ -238,8 +237,7 @@ extension LaunchUITests {
         app.terminate(); _ = try connectedSimulatorApp()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitUntilExists(timeout: 30))
         let threadNumber = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
-        let row = try app
-            .descendants(matching: .any)[simulatorTaskRowIdentifier("session-identity/fixture-thread-\(threadNumber)")]
+        let row = try simulatorTaskRow(app, native: "fixture-thread-\(threadNumber)")
         XCTAssertTrue(row.waitUntilExists(timeout: 20)); row.tap()
         showConversationElement(inlineImage, in: app, upward: true)
         showConversationElement(hostImage, in: app, upward: false)

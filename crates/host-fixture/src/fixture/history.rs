@@ -120,6 +120,14 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
         drop(last);
     }
     if long_history || reading {
+        // Codex item keys are globally strong, including across fixture archives.
+        for turn in &turns {
+            let mut turn = turn.borrow_mut();
+            turn["id"] = format!("{id}:{}", turn["id"].as_str().unwrap()).into();
+            for item in turn["items"].as_array_mut().unwrap() {
+                item["id"] = format!("{id}:{}", item["id"].as_str().unwrap()).into();
+            }
+        }
         // Keep turns started through the fixture when the client reopens history.
         // Only the list's placeholder turn is replaced by the synthetic archive.
         turns.extend(
@@ -240,6 +248,36 @@ mod tests {
         let text = answer["text"].as_str().unwrap();
         assert!(text.contains("```rust") && text.contains("| Attempt |"));
         assert!(text.ends_with(&format!("Answer {} ends here.", READING_TURNS - 1)));
+    }
+
+    #[test]
+    fn synthetic_item_ids_are_stable_and_distinct_between_conversations() {
+        let ids = |id: &str| {
+            let thread = Thread {
+                metadata: serde_json::from_value(
+                    json!({"id":id,"cwd":"/fixture","fixtureHistory":"reading"}),
+                )
+                .unwrap(),
+                turns: vec![],
+            };
+            persisted(&thread)
+                .unwrap()
+                .turns
+                .iter()
+                .flat_map(|turn| {
+                    turn.borrow()["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|item| item["id"].as_str().unwrap().to_owned())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let first = ids("first");
+        assert!(!first.is_empty());
+        assert_eq!(first, ids("first"));
+        assert!(first.is_disjoint(&ids("second")));
     }
 
     #[test]

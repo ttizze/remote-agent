@@ -5,7 +5,7 @@ use agent_transport::{
 };
 use anyhow::{Context, Result};
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{CredentialStore, HostCredentials, HostRpcService, HostRuntime, ProjectStore};
+use host_daemon::{CredentialStore, HostCredentials, HostRpcService, HostRuntime};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -13,6 +13,11 @@ use std::{
 };
 use tokio_util::sync::{CancellationToken, DropGuard};
 use zeroize::Zeroizing;
+
+pub(crate) const READ_FAIL_FILE: &str = "fail-next-conversation-read";
+pub(crate) const PAGE_FAIL_FILE: &str = "fail-next-conversation-page";
+pub(crate) const READ_HOLD_FILE: &str = "hold-conversation-reads";
+pub(crate) const READ_HELD_FILE: &str = "conversation-read-held";
 
 /// Automatic checkouts live at `<worktrees>/<id>/<project name>`.
 #[track_caller]
@@ -56,7 +61,7 @@ pub struct HostFixture {
     pub credentials: Arc<HostCredentials>,
     pub memory: Arc<Memory>,
     pub ticket: Ticket,
-    pub projects: ProjectStore,
+    pub service: HostRpcService,
     pub stop: CancellationToken,
     pub running: tokio::task::JoinHandle<Result<()>>,
     _stop_on_drop: DropGuard,
@@ -139,7 +144,37 @@ impl HostFixture {
         }
         eprintln!("Host fixture: providers ready; starting RPC");
         let service = HostRpcService::new(backends, directory.join("bex-worktrees.json"));
-        let projects = service.fixture_projects();
+        let stop = CancellationToken::new();
+        let read_directory = directory.to_owned();
+        let read_stop = stop.clone();
+        service.set_fixture_read_hook(move |earlier| {
+            let directory = read_directory.clone();
+            let stop = read_stop.clone();
+            async move {
+                let failure = directory.join(if earlier {
+                    PAGE_FAIL_FILE
+                } else {
+                    READ_FAIL_FILE
+                });
+                match std::fs::remove_file(failure) {
+                    Ok(()) => return Err("fixture conversation read failed".into()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+                let hold = directory.join(READ_HOLD_FILE);
+                if hold.exists() {
+                    std::fs::write(directory.join(READ_HELD_FILE), [])
+                        .map_err(|error| error.to_string())?;
+                    while hold.exists() {
+                        tokio::select! {
+                            _ = stop.cancelled() => return Err("fixture Host stopped".into()),
+                            _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                        }
+                    }
+                }
+                Ok(())
+            }
+        });
         #[cfg(unix)]
         service
             .enable_browser(directory.join("browser"))
@@ -148,7 +183,7 @@ impl HostFixture {
         service.start().unwrap();
         let runtime = Arc::new(
             HostRuntime::new(
-                service,
+                service.clone(),
                 endpoint,
                 credentials.clone(),
                 name.into(),
@@ -156,12 +191,11 @@ impl HostFixture {
             )
             .await,
         );
-        let stop = CancellationToken::new();
         // Exercise the real periodic cleanup with real Git, PTYs and agents,
         // without spending a production minute between each test phase.
         let running = tokio::spawn(runtime.run(stop.clone(), Duration::from_millis(100)));
         Ok(Self {
-            projects,
+            service,
             server: server.ok(),
             credentials,
             memory,

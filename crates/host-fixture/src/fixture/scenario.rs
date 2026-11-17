@@ -447,8 +447,17 @@ impl ScenarioTurn {
         if scenario == "interrupted" {
             return context.finish(thread, turn, "interrupted", None);
         }
-        let response_text = self.prepare_response(&thread_id, &prompt, scenario, image.as_ref())?;
-        let final_id = format!("fixture-final-{suffix}");
+        let external = prompt.contains("[external-reply]");
+        let response_text = if external {
+            "Latest reply from another client".into()
+        } else {
+            self.prepare_response(&thread_id, &prompt, scenario, image.as_ref())?
+        };
+        let final_id = if external {
+            format!("fixture-external-final-{suffix}")
+        } else {
+            format!("fixture-final-{suffix}")
+        };
         let index = turn.borrow()["items"].as_array().unwrap().len();
         context.stream_item(
             &thread_id,

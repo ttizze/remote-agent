@@ -917,6 +917,8 @@ impl Threads {
             context.error(id, -32601, "list_turns is not supported yet")?;
             return Ok(());
         }
+        // Native-history mutation is separate from a real second client's input:
+        // import isolation tests must be able to change only the provider file.
         let external = context.home.join("background-reply");
         if external.exists()
             && let Some(latest) = self
@@ -924,8 +926,11 @@ impl Threads {
                 .values()
                 .max_by_key(|thread| thread.borrow().metadata["createdAt"].as_i64().unwrap_or(0))
         {
-            latest.borrow_mut().turns.push(Rc::new(RefCell::new(json!({"id":"fixture-external-turn","status":"completed","items":[
-                                {"id":"fixture-external-final","type":"agentMessage","phase":"final_answer","text":fs::read_to_string(&external)?}]}))));
+            let native = latest.borrow().metadata["id"].as_str().unwrap().to_owned();
+            latest.borrow_mut().turns.push(Rc::new(RefCell::new(json!({
+                "id":format!("{native}:fixture-external-turn"),"status":"completed","items":[
+                {"id":format!("{native}:fixture-external-final"),"type":"agentMessage","phase":"final_answer","text":fs::read_to_string(&external)?}]
+            }))));
             fs::remove_file(external)?;
         }
         let Some(thread) = self.require_thread(context, id, thread_id(params))? else {

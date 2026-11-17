@@ -1,5 +1,4 @@
 use super::*;
-use agent_protocol::execution::TurnStatus;
 
 pub(in crate::host_rpc::runtime) fn provider<'a>(
     state: &'a model::State,
@@ -16,7 +15,7 @@ pub(in crate::host_rpc::runtime) fn provider<'a>(
     })
 }
 
-pub(super) fn context(
+pub(in crate::host_rpc::runtime) fn context(
     state: &model::State,
     native: &SessionRef,
     turn: &agent_protocol::ids::TurnId,
@@ -109,11 +108,7 @@ impl Runtime {
                         .await?;
                 }
                 if completed {
-                    let status = match turn.status {
-                        TurnStatus::Failed => model::ProviderTurnStatus::Failed,
-                        TurnStatus::Interrupted => model::ProviderTurnStatus::Interrupted,
-                        _ => model::ProviderTurnStatus::Completed,
-                    };
+                    let status = completed_turn_status(turn.status);
                     let item_ids = storage
                         .unfinished_turn_item_ids(&source.target, &context.provider_turn_id)?;
                     let tails = service

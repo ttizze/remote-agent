@@ -852,7 +852,7 @@ pub(in crate::host_rpc) async fn own(
     host.inner
         .conversation
         .storage
-        .seed_native_header(&thread, &native)
+        .seed_native_records(&thread, &native, Default::default())
         .unwrap();
 }
 

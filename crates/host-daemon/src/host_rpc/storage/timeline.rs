@@ -463,6 +463,87 @@ fn is_turn_start(item: &IndexedItem) -> bool {
         )
 }
 
+// Nodes needed for an item also retain its attempt/root ancestry.
+fn load_nodes(
+    connection: &Connection,
+    mut ids: BTreeSet<String>,
+) -> Result<Vec<model::ExecutionNode>, String> {
+    let mut nodes = BTreeMap::new();
+    while let Some(id) = ids.pop_first() {
+        if nodes.contains_key(&id) {
+            continue;
+        }
+        let Some(node) = projections::read::<model::ExecutionNode>(connection, &id)? else {
+            continue;
+        };
+        ids.extend(node.parent_node_id.iter().cloned());
+        if node.root_node_id != id {
+            ids.insert(node.root_node_id.clone());
+        }
+        nodes.insert(id, node);
+    }
+    Ok(nodes.into_values().collect())
+}
+
+fn control_nodes(
+    connection: &Connection,
+    projection: &ThreadProjection,
+) -> Result<Vec<model::ExecutionNode>, String> {
+    let mut ids: BTreeSet<_> = projection
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.kind == model::NodeKind::RootTurn
+                || !matches!(
+                    node.status,
+                    model::NodeStatus::Completed
+                        | model::NodeStatus::Failed
+                        | model::NodeStatus::Cancelled
+                        | model::NodeStatus::Interrupted
+                )
+        })
+        .map(|node| node.id.clone())
+        .collect();
+    ids.extend(
+        projection
+            .attempts
+            .iter()
+            .map(|attempt| attempt.root_node_id.clone()),
+    );
+    ids.extend(
+        projection
+            .provider_threads
+            .iter()
+            .filter_map(|thread| thread.owner_node_id.clone()),
+    );
+    ids.extend(
+        projection
+            .provider_turns
+            .iter()
+            .map(|turn| turn.node_id.clone()),
+    );
+    ids.extend(
+        projection
+            .runtime_requests
+            .iter()
+            .map(|request| request.node_id.clone()),
+    );
+    ids.extend(projection.plans.iter().map(|plan| plan.node_id.clone()));
+    ids.extend(
+        projection
+            .subagents
+            .iter()
+            .map(|agent| agent.parent_node_id.clone()),
+    );
+    ids.extend(
+        projection
+            .checkpoint_scopes
+            .iter()
+            .map(|scope| scope.node_id.clone()),
+    );
+    load_nodes(connection, ids)
+}
+
 fn select_page(
     connection: &Connection,
     items: &[IndexedItem],
@@ -476,6 +557,7 @@ fn select_page(
     let has_user = candidates.iter().any(is_user_turn);
     let item_limit = if has_user { 500 } else { 75 };
     let mut selected = Vec::new();
+    let mut nodes = BTreeMap::new();
     let mut bytes = 0;
     let mut user_turns = 0;
     let mut raw_turns = 0;
@@ -486,7 +568,12 @@ fn select_page(
             break;
         }
         let row = materialize(connection, index)?;
+        let related = load_nodes(connection, row.item.node_id.iter().cloned().collect())?
+            .into_iter()
+            .filter(|node| !nodes.contains_key(&node.id))
+            .collect::<Vec<_>>();
         let mut cost = serde_json::to_vec(&row).map_err(failure)?.len();
+        cost += serde_json::to_vec(&related).map_err(failure)?.len();
         if snapshot_thread.is_some_and(|thread| {
             row.visibility == Visibility::Local || row.source_thread_id == thread
         }) {
@@ -499,9 +586,20 @@ fn select_page(
         user_turns += usize::from(is_user_turn(index));
         raw_turns += usize::from(is_turn_start(index));
         selected.push(row);
+        nodes.extend(related.into_iter().map(|node| (node.id.clone(), node)));
     }
     if user_turns == 0 {
         selected.truncate(75);
+        nodes = load_nodes(
+            connection,
+            selected
+                .iter()
+                .filter_map(|row| row.item.node_id.clone())
+                .collect(),
+        )?
+        .into_iter()
+        .map(|node| (node.id.clone(), node))
+        .collect();
     }
     selected.reverse();
     let has_more_history = selected.first().is_some_and(|row| row.position > 0);
@@ -526,6 +624,7 @@ fn select_page(
     Ok(ThreadHistoryPage {
         snapshot_sequence: sequence,
         items: selected,
+        nodes: nodes.into_values().collect(),
         next_cursor,
         has_more_history,
     })
@@ -696,6 +795,23 @@ pub(super) fn snapshot(connection: &Connection, thread_id: &str) -> Result<Threa
         .map(|item| Arc::new(model::wire::item(&item)))
         .collect();
     inherited_turns(connection, &items, &mut projection)?;
+    projection.nodes = control_nodes(connection, &projection)?;
+    let mut node_ids: BTreeSet<_> = projection
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect();
+    projection.nodes.extend(
+        load_nodes(
+            connection,
+            dependencies
+                .iter()
+                .filter_map(|item| item.node_id.clone())
+                .collect(),
+        )?
+        .into_iter()
+        .filter(|node| node_ids.insert(node.id.clone())),
+    );
     model::wire::projection(&mut projection);
     let reserved = serde_json::to_vec(&dependencies).map_err(failure)?.len();
     let control = serde_json::to_vec(&projection).map_err(failure)?.len();
@@ -720,11 +836,16 @@ pub(super) fn snapshot(connection: &Connection, thread_id: &str) -> Result<Threa
             row.item.clone()
         })
         .collect();
-    for item in dependencies {
+    for item in &dependencies {
         if seen.insert(item.id.clone()) {
-            projection.turn_items.push(item);
+            projection.turn_items.push(item.clone());
         }
     }
+    projection.nodes.extend(
+        page.nodes
+            .into_iter()
+            .filter(|node| node_ids.insert(node.id.clone())),
+    );
     projection.visible_turn_items = page.items;
     let visible_plans: BTreeSet<_> = projection
         .turn_items

@@ -8,9 +8,9 @@ extension LaunchUITests {
         let conversationId = try useSimulatorConversationFixture("long-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:\(conversationId)"]
+        let row = try simulatorTaskRow(app, native: conversationId)
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["item.long-14-0"].waitUntilExists(timeout: 20))
+        XCTAssertTrue(fixtureItems(app, containing: "long-14-0").firstMatch.waitUntilExists(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]
         let latestButton = app.buttons["task.latest"]
         let approval = app.buttons["request.accept"]
@@ -55,8 +55,7 @@ extension LaunchUITests {
 
     private func latestFixtureAnswer(_ app: XCUIApplication) throws -> XCUIElement {
         // Keyboard resizing can recycle older answers, changing the native text view's ordinal.
-        let rows = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "item.fixture-final-"))
+        let rows = fixtureItems(app, containing: "fixture-final-")
         let id = try XCTUnwrap(rows.allElementsBoundByIndex.last?.identifier)
         return app.descendants(matching: .any)[id].textViews["message.assistant-text"]
     }
@@ -77,14 +76,14 @@ extension LaunchUITests {
         XCTAssertEqual(input.value as? String, "$fixture-review @Fixture Plugin ")
         input.typeText("[success] Use the selected tools")
         app.buttons["task.send"].tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 30))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 30))
         XCTAssertFalse((input.value as? String ?? "").contains("fixture-review"))
     }
 
     func testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[success] [selection] Verify assistant selection")
-        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        let answer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(answer.waitUntilExists(timeout: 30))
         let text = answer.textViews["message.assistant-text"]
         XCTAssertTrue(text.waitUntilExists(timeout: 5))
@@ -120,7 +119,7 @@ extension LaunchUITests {
     func testSimulatorOpensSideChatWithoutLosingOriginalDraft() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[success] [selection] Original conversation")
-        let original = prefixedElement(app, prefix: "item.fixture-final-")
+        let original = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(original.waitUntilExists(timeout: 30))
         let originalID = original.identifier
         let message = app.textFields["task.message"]
@@ -145,8 +144,7 @@ extension LaunchUITests {
             sideMessage.value as? String, "> Needle\n\n[success] Explain this selection", app.debugDescription
         )
         app.buttons["task.send"].tap()
-        let final = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "item.fixture-final-")).firstMatch
+        let final = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(final.waitUntilExists(timeout: 30))
         let sideID = final.identifier
         XCTAssertNotEqual(sideID, originalID)
@@ -183,7 +181,7 @@ extension LaunchUITests {
         let app = try connectedSimulatorApp()
         let text = "Needle Alpha Bravo [success]"
         startSimulatorConversation(app, promptText: text)
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 30))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 30))
         let sent = app.textViews.matching(NSPredicate(
             format: "identifier == %@ AND value == %@", "message.user-text", text
         )).firstMatch
@@ -224,12 +222,12 @@ extension LaunchUITests {
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("[success] Keep this chat unassigned")
         app.buttons["task.send"].tap()
-        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        let answer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(answer.waitUntilExists(timeout: 30))
         let answerID = answer.identifier
         let completed = expectation(
             for: NSPredicate(format: "label CONTAINS %@", "作業しました"),
-            evaluatedWith: prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+            evaluatedWith: prefixedElement(app, prefix: "turn.activity.")
         )
         wait(for: [completed], timeout: 10)
         XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
@@ -240,12 +238,11 @@ extension LaunchUITests {
         XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: プロジェクトなし")
         app.terminate()
         _ = try connectedSimulatorApp(expandProject: false)
-        let scratch = app.buttons["tasks.project.bex:scratch"]
+        let scratch = app.descendants(matching: .any)["tasks.project.bex:scratch"]
         XCTAssertTrue(scratch.waitUntilExists(timeout: 20))
         scratch.tap()
         let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
-        let row = try app
-            .descendants(matching: .any)[simulatorTaskRowIdentifier("session-identity/fixture-thread-\(number)")]
+        let row = try simulatorTaskRow(app, native: "fixture-thread-\(number)")
         XCTAssertTrue(row.waitUntilExists(timeout: 20), "The chat must be in the No project group")
         row.tap()
         XCTAssertTrue(app.descendants(matching: .any)[answerID].waitUntilExists(timeout: 20))
@@ -261,7 +258,7 @@ extension LaunchUITests {
         let accept = app.buttons["request.accept"]
         XCTAssertTrue(accept.waitUntilExists(timeout: 15))
         accept.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 15))
 
         let message = app.descendants(matching: .any)["task.message"]
         message.tap(); message.typeText("Keep this draft")

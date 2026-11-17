@@ -1124,11 +1124,10 @@ impl Worker {
 
     /// Claude woke for background work after its answer: as T3 Code, the
     /// report is a new turn that the work's notification starts.
-    async fn wake(&mut self, message: &Value) -> Result<(), String> {
-        let frame = (message["type"] == "user" && message["origin"]["kind"] == "task-notification")
-            .then(|| message["uuid"].as_str())
-            .flatten()
-            .map(str::to_owned);
+    async fn wake(&mut self, frame: Option<String>) -> Result<(), String> {
+        if !self.settled() {
+            self.settle().await?;
+        }
         // The transcript names the turn by the answer it follows, too.
         let turn_id: agent_protocol::ids::TurnId = format!("{}-wake", self.turn_id).into();
         let reports: Vec<_> = std::mem::take(&mut self.reports)
@@ -1326,6 +1325,9 @@ impl Worker {
                 let message = match event {
                     SdkEvent::Message { message } => message,
                     SdkEvent::Request { request_id, request } => {
+                        if response.request_started() {
+                            self.wake(None).await?;
+                        }
                         if let Err(error) = self.permission(&request_id, &request).await {
                             tracing::warn!(target: "agent", operation = "host.claude.request_rejected", message = %error);
                             process.write(&SdkInput::Answer { request_id, response: None, error: Some(error) }).await?;
@@ -1358,10 +1360,9 @@ impl Worker {
                     self.consume_input(id, *opens_turn).await?;
                 }
                 if observation.woke {
-                    if !self.settled() {
-                        self.settle().await?;
-                    }
-                    self.wake(&message).await?;
+                    let frame = (message["type"] == "user" && message["origin"]["kind"] == "task-notification")
+                        .then(|| message["uuid"].as_str()).flatten().map(str::to_owned);
+                    self.wake(frame).await?;
                 }
                 match observation.disposition {
                     MessageDisposition::Forward => self.message(message).await?,

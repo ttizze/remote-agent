@@ -2945,12 +2945,14 @@ async fn gallery_restarts_paging_after_a_history_reset() {
             .await
             .unwrap();
         writer.reply(&extend, json!({"result":ThreadHistoryPage {
+        nodes: vec![],
             snapshot_sequence: before_reset, items: vec![], next_cursor: Some("stale-older".into()), has_more_history: true
         }})).await.unwrap();
         let extend = read(&mut reader).await;
         assert_eq!(extend["method"], "host/conversation/extend");
         assert_eq!(extend["params"]["cursor"], "reset-older");
         writer.reply(&extend, json!({"result":ThreadHistoryPage {
+        nodes: vec![],
             snapshot_sequence: before_reset + 1, items: vec![], next_cursor: None, has_more_history: false
         }})).await.unwrap();
         (reader, writer)

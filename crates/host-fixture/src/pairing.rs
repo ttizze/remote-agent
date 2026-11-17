@@ -1,13 +1,12 @@
 //! Loopback-only UI test controls. No saved application profiles are used.
 
+use crate::test_support::{PAGE_FAIL_FILE, READ_FAIL_FILE, READ_HELD_FILE, READ_HOLD_FILE};
 use crate::{Result, test_support::Connection};
 use agent_protocol::operations::{CreateInvitation, IdentifyDevice, Pair};
 use agent_transport::transport::{Identity, Ticket};
 use serde_json::json;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::{
-    fs::OpenOptions,
-    io::Write,
     net::Ipv4Addr,
     path::{Path, PathBuf},
     sync::{
@@ -37,7 +36,7 @@ pub struct PairingServer {
 impl PairingServer {
     pub fn start(
         root: &Path,
-        projects: host_daemon::ProjectStore,
+        service: host_daemon::HostRpcService,
         ticket: Ticket,
         identity: Identity,
     ) -> Result<Self> {
@@ -64,14 +63,17 @@ impl PairingServer {
                 } else {
                     route(
                         &root,
-                        &projects,
+                        &service,
                         &runtime,
                         &ticket,
                         &identity,
                         request.method(),
                         request.url(),
                     )
-                    .unwrap_or_else(|_| (503, b"Isolated Host is unavailable".to_vec()))
+                    .unwrap_or_else(|error| {
+                        eprintln!("UI fixture control failed: {error}");
+                        (503, b"Isolated Host is unavailable".to_vec())
+                    })
                 };
                 let kind = if page {
                     "text/html; charset=utf-8"
@@ -152,9 +154,81 @@ fn history_conversation(root: &Path, path: &str) -> Result<bool> {
     Ok(true)
 }
 
+fn publish_catalog(
+    root: &Path,
+    service: &host_daemon::HostRpcService,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<()> {
+    let bytes = match fs::read(root.join("list-fixture.json")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes)?;
+    runtime.block_on(async {
+        for row in rows {
+            let native = row["id"]
+                .as_str()
+                .ok_or("fixture conversation ID is missing")?;
+            let session = agent_protocol::session::SessionRef::new(
+                agent_protocol::session::ProviderKind::Codex,
+                native.into(),
+            )
+            .map_err(str::to_owned)?;
+            service
+                .publish_fixture_history(&session)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    })
+}
+
+fn submit_reply(
+    runtime: &tokio::runtime::Runtime,
+    ticket: &Ticket,
+    identity: &Identity,
+    target: agent_protocol::session::SessionRef,
+    prompt: &str,
+) -> Result<()> {
+    use agent_protocol::conversation::{Command, InputContent, records};
+    runtime.block_on(async {
+        let connection =
+            Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
+        let operation = uuid::Uuid::new_v4();
+        let result: Result<()> = async {
+            let acknowledged = connection
+                .peer
+                .call(&records::Change {
+                    session: target,
+                    operation,
+                    command: Command::Submit {
+                        id: operation.to_string().into(),
+                        content: InputContent {
+                            fresh_context: false,
+                            parts: vec![agent_protocol::operations::Input::Text {
+                                text: prompt.into(),
+                            }],
+                            model: None,
+                            effort: None,
+                            service_tier: None,
+                            follow_up: agent_protocol::operations::FollowUp::Queue,
+                        },
+                    },
+                })
+                .await?;
+            acknowledged.accepted().map_err(|error| error.message)?;
+            Ok(())
+        }
+        .await;
+        connection.close().await;
+        result
+    })
+}
+
 fn route(
     root: &Path,
-    projects: &host_daemon::ProjectStore,
+    service: &host_daemon::HostRpcService,
     runtime: &tokio::runtime::Runtime,
     ticket: &Ticket,
     identity: &Identity,
@@ -176,10 +250,26 @@ fn route(
             serde_json::to_vec(&json!({"threadId":session_identity(root, native)?}))?,
         ));
     }
+    if let Some(key) = path.strip_prefix("/background-reply/") {
+        let (provider, id) = key
+            .split_once(':')
+            .ok_or("fixture conversation key is invalid")?;
+        let provider = (provider != "bex").then_some(provider);
+        let target = serde_json::from_value(json!({"provider":provider, "id":id}))?;
+        submit_reply(
+            runtime,
+            ticket,
+            identity,
+            target,
+            "[success] [immediate] [external-reply] Latest reply from another client",
+        )?;
+        return Ok((204, Vec::new()));
+    }
     // Each test names its own worktree conversation so attachments and
     // checkout state from one test never reach another on a shared Host.
     if let Some(name) = path.strip_prefix("/worktree-conversation/") {
         worktree_conversation(root, name)?;
+        publish_catalog(root, service, runtime)?;
         return Ok((204, Vec::new()));
     }
     if let Some((name, state)) = path
@@ -196,6 +286,7 @@ fn route(
         return Ok((204, Vec::new()));
     }
     if history_conversation(root, path)? {
+        publish_catalog(root, service, runtime)?;
         return Ok((204, Vec::new()));
     }
     match path {
@@ -212,7 +303,10 @@ fn route(
         | "/merge-worktree/merged"
         | "/merge-worktree/new-work"
         | "/merge-worktree/dirty"
-        | "/merge-worktree/clean" => merge_worktree(root, path)?,
+        | "/merge-worktree/clean" => {
+            merge_worktree(root, path)?;
+            publish_catalog(root, service, runtime)?;
+        }
         // A changed file Git has no text diff for, which the diff names binary.
         "/binary-file" => fs::write(root.join("project").join("pixel.bin"), [0, 1, 2, 255, 0])?,
         // The Codex fixture's background command and subagent finish.
@@ -236,9 +330,11 @@ fn route(
                 "name":"External conversation","createdAt":10000,"updatedAt":10000,"status":{"type":"notLoaded"},
                 "historyMode":"paginated","path":rollout}]),
             )?;
+            publish_catalog(root, service, runtime)?;
         }
         "/list-fixture" | "/title-fixture" | "/list-fixture/reset" => {
-            list_fixture(root, projects, path)?
+            list_fixture(root, &service.fixture_projects(), path)?;
+            publish_catalog(root, service, runtime)?;
         }
         "/paired-device" => pair_device(runtime, ticket, identity)?,
         "/import-candidates" => import_candidates(root)?,
@@ -258,101 +354,43 @@ fn route(
             };
             rows.push(json!({
                 "id":native,"cwd":root.join("project"),"name":"Simulator conversation",
-                "createdAt":10000,"updatedAt":10000,"status":{"type":"notLoaded"},"turns":[]
+                "createdAt":10000,"updatedAt":10000,"status":{"type":"idle"}
             }));
             write_json(path, &rows)?;
-            runtime.block_on(async {
-                let connection =
-                    Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
-                let _ = connection
-                    .peer
-                    .call(&agent_protocol::conversation::records::SubscribeList {
-                        subscription: uuid::Uuid::new_v4(),
-                        after_sequence: None,
-                        refresh: true,
-                    })
-                    .await?;
-                connection.close().await;
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-            })?;
+            publish_catalog(root, service, runtime)?;
             return Ok((
                 200,
-                serde_json::to_vec(&json!({"threadId":{"provider":"codex","id":native}}))?,
+                serde_json::to_vec(&json!({"threadId":session_identity(root, &native)?}))?,
             ));
         }
-        "/background-reply" => {
-            fs::write(
-                root.join("background-reply"),
-                "Latest reply from another client",
+        "/client-reply" => {
+            let target = agent_protocol::session::SessionRef::new(
+                agent_protocol::session::ProviderKind::Codex,
+                "fixture-external-thread".into(),
+            )
+            .unwrap();
+            submit_reply(
+                runtime,
+                ticket,
+                identity,
+                target,
+                "[success] Reply from another Bex client",
             )?;
-            let rollout = root.join("external-rollout.jsonl");
-            if rollout.exists() {
-                OpenOptions::new()
-                    .append(true)
-                    .open(rollout)?
-                    .write_all(b"external reply persisted\n")?;
-            }
         }
-        "/client-reply" => runtime.block_on(async {
-            let connection =
-                Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
-            let result: Result<()> = async {
-                use agent_protocol::{
-                    conversation::{Command, InputContent, records},
-                    session::{ProviderKind, SessionRef},
-                };
-                let target =
-                    SessionRef::new(ProviderKind::Codex, "fixture-external-thread".into()).unwrap();
-                connection
-                    .peer
-                    .call(&records::Subscribe {
-                        session: target.clone(),
-                        subscription: uuid::Uuid::new_v4(),
-                        after_sequence: None,
-                    })
-                    .await?;
-                let operation = uuid::Uuid::new_v4();
-                let acknowledged = connection
-                    .peer
-                    .call(&records::Change {
-                        session: target,
-                        operation,
-                        command: Command::Submit {
-                            id: operation.to_string().into(),
-                            content: InputContent {
-                                fresh_context: false,
-                                parts: vec![agent_protocol::operations::Input::Text {
-                                    text: "[success] Reply from another Bex client".into(),
-                                }],
-                                model: None,
-                                effort: None,
-                                service_tier: None,
-                                follow_up: agent_protocol::operations::FollowUp::Queue,
-                            },
-                        },
-                    })
-                    .await?;
-                acknowledged.accepted().map_err(|error| error.message)?;
-                Ok(())
-            }
-            .await;
-            connection.close().await;
-            result
-        })?,
         "/fail-next-history-read" => {
-            fs::write(root.join("fail-next-history-read"), "")?;
+            fs::write(root.join(READ_FAIL_FILE), "")?;
         }
         "/fail-next-history-page" => {
-            fs::write(root.join("fail-next-history-page"), "")?;
+            fs::write(root.join(PAGE_FAIL_FILE), "")?;
         }
         "/fail-next-fork" => {
             fs::write(root.join("fail-next-fork"), "")?;
         }
         "/hold-history-reads" => {
-            fs::write(root.join("hold-history-reads"), [])?;
+            fs::write(root.join(READ_HOLD_FILE), [])?;
         }
         "/release-history-reads" => {
-            for name in ["hold-history-reads", "history-read-held"] {
+            for name in [READ_HOLD_FILE, READ_HELD_FILE] {
                 match fs::remove_file(root.join(name)) {
                     Ok(()) => (),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -446,7 +484,7 @@ fn merge_worktree(root: &Path, path: &str) -> Result<()> {
     write_json(
         root.join("list-fixture.json"),
         &json!([
-            {"id":"merge-active","cwd":checkout,"name":"Merged running task","updatedAt":20000,"status":{"type":"active"}},
+            {"id":"merge-active","cwd":checkout,"name":"Merged running task","updatedAt":20000,"status":{"type":"active"},"turns":[{"id":"merge-running-turn","status":"inProgress","items":[]}]},
             {"id":"merge-idle","cwd":checkout,"name":"Merged idle task","updatedAt":19999,"status":{"type":"idle"}}
         ]),
     )
@@ -546,6 +584,18 @@ fn list_fixture(root: &Path, store: &host_daemon::ProjectStore, path: &str) -> R
     let backup = root.join("projects-before-list-fixture.json");
     let fixture = root.join("list-fixture.json");
     if path.ends_with("/reset") {
+        for name in [
+            READ_FAIL_FILE,
+            PAGE_FAIL_FILE,
+            READ_HOLD_FILE,
+            READ_HELD_FILE,
+        ] {
+            match fs::remove_file(root.join(name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         if backup.exists() {
             let projects: Vec<agent_protocol::models::Project> =
                 serde_json::from_slice(&fs::read(&backup)?)?;
@@ -693,7 +743,6 @@ mod tests {
 
     #[test]
     fn history_scenarios_are_seeded_with_their_own_identity() {
-        let (runtime, ticket, identity) = isolated_control_peer();
         let root = tempfile::tempdir().unwrap();
         for (path, id, kind) in [
             ("/long-conversation/scenario-a", "scenario-a", "long"),
@@ -705,21 +754,7 @@ mod tests {
             ),
             ("/reading-conversation/scenario-d", "scenario-d", "reading"),
         ] {
-            assert_eq!(
-                route(
-                    root.path(),
-                    &host_daemon::HostRpcService::new([], root.path().join("bex-worktrees.json"))
-                        .fixture_projects(),
-                    &runtime,
-                    &ticket,
-                    &identity,
-                    &Method::Post,
-                    path
-                )
-                .unwrap()
-                .0,
-                204
-            );
+            assert!(history_conversation(root.path(), path).unwrap());
             let rows: serde_json::Value =
                 serde_json::from_slice(&fs::read(root.path().join("list-fixture.json")).unwrap())
                     .unwrap();
@@ -750,8 +785,7 @@ mod tests {
                         &host_daemon::HostRpcService::new(
                             [],
                             root.path().join("bex-worktrees.json")
-                        )
-                        .fixture_projects(),
+                        ),
                         &runtime,
                         &ticket,
                         &identity,

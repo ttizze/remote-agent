@@ -83,6 +83,17 @@ pub(super) struct Artifact {
     pub plan: Option<model::Plan>,
 }
 
+pub(super) fn completed_turn_status(
+    status: agent_protocol::execution::TurnStatus,
+) -> model::ProviderTurnStatus {
+    use agent_protocol::execution::TurnStatus;
+    match status {
+        TurnStatus::Failed => model::ProviderTurnStatus::Failed,
+        TurnStatus::Interrupted => model::ProviderTurnStatus::Interrupted,
+        _ => model::ProviderTurnStatus::Completed,
+    }
+}
+
 pub(super) fn item_status(status: ItemStatus, completed: bool) -> model::TurnItemStatus {
     use model::TurnItemStatus as Status;
     match status {
@@ -497,7 +508,7 @@ impl Context {
 #[cfg(test)]
 mod tests;
 
-fn control_reference(provider: ProviderKind, turn: &str) -> model::ProviderRef {
+pub(super) fn control_reference(provider: ProviderKind, turn: &str) -> model::ProviderRef {
     model::ProviderRef {
         driver: provider.driver().into(),
         native_id: Some(turn.into()),

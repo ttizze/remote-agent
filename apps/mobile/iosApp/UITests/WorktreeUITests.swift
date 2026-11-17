@@ -5,11 +5,17 @@ extension LaunchUITests {
         let app = try connectedSimulatorApp()
         try useSimulatorListFixture("merge-worktree/fresh")
         refreshSimulatorTaskList(app)
-        let project = app.buttons["tasks.project.simulator-project"]
+        let project = app.descendants(matching: .any)["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitUntilExists(timeout: 10))
-        let running = app.descendants(matching: .any)["tasks.running.codex:merge-active"]
+        let running = try app.descendants(matching: .any)[simulatorTaskIdentifier(
+            "session-identity/merge-active",
+            prefix: "tasks.running."
+        )]
         XCTAssertTrue(running.waitUntilExists(timeout: 10))
-        let changes = app.descendants(matching: .any)["tasks.changes.codex:merge-active"]
+        let changes = try app.descendants(matching: .any)[simulatorTaskIdentifier(
+            "session-identity/merge-active",
+            prefix: "tasks.changes."
+        )]
         XCTAssertFalse(changes.exists)
         try simulatorFixture("merge-worktree/dirty")
         refreshSimulatorTaskList(app)
@@ -31,7 +37,10 @@ extension LaunchUITests {
         try simulatorFixture("merge-worktree/new-work")
         refreshSimulatorTaskList(app)
         XCTAssertTrue(changes.waitUntilExists(timeout: 10))
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.changes.codex:merge-idle"].exists)
+        XCTAssertTrue(try app.descendants(matching: .any)[simulatorTaskIdentifier(
+            "session-identity/merge-idle",
+            prefix: "tasks.changes."
+        )].exists)
         XCTAssertTrue(running.exists)
     }
 
@@ -191,7 +200,7 @@ extension LaunchUITests {
         try useSimulatorListFixture("worktree-conversation/review")
         refreshSimulatorTaskList(app)
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-review-thread"]
+        let row = try simulatorTaskRow(app, native: "fixture-review-thread")
         XCTAssertTrue(row.waitUntilExists(timeout: 15)); row.tap()
         let changes = app.buttons["task.diff"]
         XCTAssertTrue(changes.waitUntilExists(timeout: 15))
@@ -226,7 +235,7 @@ extension LaunchUITests {
         XCTAssertTrue(running.exists, "Counts must update before the turn finishes")
         captureScreen(app, named: "Live worktree counts before turn completion")
         try simulatorFixture("release-inputs")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 10))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 10))
     }
 
     private func assertWorkspaceDiffTabs(_ app: XCUIApplication) {

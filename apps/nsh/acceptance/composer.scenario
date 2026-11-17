@@ -5,7 +5,7 @@ expect "検証プロジェクト" 30000
 press このプロジェクトで新しいチャット
 type "AI に依頼する" "/re"
 expect "Review fixture changes" 10000
-press fixture-review
+press "fixture-review:*"
 expect_absent "Review fixture changes"
 dump inserted
 # One line takes the field's least height.

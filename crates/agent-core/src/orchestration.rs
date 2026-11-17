@@ -118,8 +118,15 @@ pub fn receive_history(
     if current.history_cursor.as_deref() != Some(requested_cursor) {
         return None;
     }
+    let mut projection = merge_older_history(&current.projection, &page.items);
+    // A page cannot replace a newer live node observed by this subscription.
+    for node in page.nodes {
+        if !projection.nodes.iter().any(|saved| saved.id == node.id) {
+            projection.nodes.push(node);
+        }
+    }
     Some(ThreadSnapshot {
-        projection: merge_older_history(&current.projection, &page.items),
+        projection,
         history_cursor: page.next_cursor,
         has_more_history: page.has_more_history,
         ..current.clone()

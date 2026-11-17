@@ -145,6 +145,17 @@ impl ResponseState {
         self.steered = true;
     }
 
+    /// The SDK can ask permission before forwarding the assistant tool block.
+    pub(super) fn request_started(&mut self) -> bool {
+        if !self.answered_input() {
+            return false;
+        }
+        self.background.response_started(None);
+        self.result_received = false;
+        self.idle = false;
+        true
+    }
+
     pub(super) fn observe<'a>(&mut self, message: &'a Value) -> Result<Observation<'a>, String> {
         self.roster.observe(message);
         let background_level = self.observe_background(message)?;
@@ -325,6 +336,47 @@ mod tests {
             ),
             MessageDisposition::Applied
         );
+    }
+
+    #[test]
+    fn a_permission_before_its_assistant_block_opens_one_background_report() {
+        let mut response = ResponseState::default();
+        observe(
+            &mut response,
+            json!({"type":"system","subtype":"task_started","task_id":"shell","task_type":"local_bash"}),
+        );
+        observe(
+            &mut response,
+            json!({"type":"system","subtype":"task_notification","task_id":"shell"}),
+        );
+        settle(&mut response);
+        assert!(!response.finished());
+        assert!(response.request_started());
+        assert!(!response.request_started());
+        assert!(!response.answered());
+        let assistant = response
+            .observe(&json!({"type":"assistant","message":{"content":[]}}))
+            .unwrap()
+            .woke;
+        assert!(
+            !assistant,
+            "the assistant block must not open the same report again"
+        );
+        settle(&mut response);
+        assert!(response.finished());
+    }
+
+    #[test]
+    fn requests_do_not_steal_an_unconsumed_input_or_restart_a_stopped_response() {
+        let mut response = ResponseState::default();
+        settle(&mut response);
+        response.accept("next".into());
+        assert!(!response.request_started());
+        let echo = json!({"type":"user","uuid":"next"});
+        assert_eq!(response.observe(&echo).unwrap().echoes, [("next", true)]);
+        settle(&mut response);
+        response.interrupt("stop");
+        assert!(!response.request_started());
     }
 
     #[test]

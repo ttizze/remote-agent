@@ -49,6 +49,36 @@ pub(super) fn message(hwnd: HWND, id: u32, w: usize, l: isize) -> LRESULT {
     unsafe { SendMessageW(hwnd, id, Some(WPARAM(w)), Some(LPARAM(l))) }
 }
 
+fn mark_links(window: HWND, links: &[rich_document::Link]) {
+    // Friendly-name RTF fields insert hidden URL instructions into native
+    // character positions. The application already owns destinations; mark
+    // the displayed ranges as links without adding hidden document text.
+    let format = CHARFORMATW {
+        cbSize: std::mem::size_of::<CHARFORMATW>() as u32,
+        dwMask: CFM_LINK,
+        dwEffects: CFE_LINK,
+        ..Default::default()
+    };
+    for link in links {
+        let range = CHARRANGE {
+            cpMin: link.start as i32,
+            cpMax: link.end as i32,
+        };
+        message(
+            window,
+            EM_EXSETSEL,
+            0,
+            (&range as *const CHARRANGE) as isize,
+        );
+        message(
+            window,
+            EM_SETCHARFORMAT,
+            SCF_SELECTION as usize,
+            (&format as *const CHARFORMATW) as isize,
+        );
+    }
+}
+
 pub(super) enum Descriptor {
     Text(Document, bool),
     Icon(String),
@@ -1062,6 +1092,7 @@ impl Edit {
             SF_RTF as usize,
             (&mut stream as *mut EDITSTREAM) as isize,
         );
+        mark_links(self.window, &next.links);
         *self.context.document.borrow_mut() = next.clone();
         let mut restored = if retained {
             range

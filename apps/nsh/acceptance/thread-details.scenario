@@ -2,27 +2,27 @@
 # and while the tool panel is open. A popup never changes inline visibility.
 expect "検証プロジェクト" 30000
 window 1360 800
-expect ソース
+expect thread-details-card
 press スレッド詳細を切り替え
-expect_absent ソース
+expect_absent thread-details-card
 window 900 800
 press スレッド詳細を切り替え
-expect ソース
+expect thread-details-card
 screenshot popover
 key escape
-expect_absent ソース
+expect_absent thread-details-card
 press スレッド詳細を切り替え
-expect ソース
+expect thread-details-card
 window 1360 800
-expect_absent ソース
+expect_absent thread-details-card
 press スレッド詳細を切り替え
-expect ソース
+expect thread-details-card
 screenshot inline
 press 右パネルを切り替え
-expect_absent ソース
+expect_absent thread-details-card
 press スレッド詳細を切り替え
-expect ソース
+expect thread-details-card
 key escape
-expect_absent ソース
+expect_absent thread-details-card
 press ツールを閉じる
-expect ソース
+expect thread-details-card

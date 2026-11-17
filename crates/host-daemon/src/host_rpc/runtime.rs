@@ -20,6 +20,8 @@ mod commands;
 pub(in crate::host_rpc) use commands::{Origin, at};
 mod events;
 mod executor;
+#[cfg(feature = "test-support")]
+mod fixture;
 mod imports;
 #[cfg(all(test, unix))]
 mod ingress_tests;

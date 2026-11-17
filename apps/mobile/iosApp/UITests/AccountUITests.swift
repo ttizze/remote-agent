@@ -16,7 +16,7 @@ extension LaunchUITests {
         let composer = app.textFields["task.message"]
         composer.tap(); composer.typeText("[success] Inherit this question")
         app.buttons["task.send"].tap()
-        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        let answer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(answer.waitUntilExists(timeout: 25))
         let originalAnswerID = answer.identifier
         let firstFork = app.buttons["response.fork." + String(originalAnswerID.dropFirst("item.".count))]
@@ -41,8 +41,8 @@ extension LaunchUITests {
         XCTAssertTrue(app.descendants(matching: .any)[originalAnswerID].waitUntilExists(timeout: 20))
         composer.tap(); composer.typeText("[success] Continue the fork")
         app.buttons["task.send"].tap()
-        let forkAnswer = app.descendants(matching: .any).matching(NSPredicate(
-            format: "identifier BEGINSWITH 'item.fixture-final-' AND identifier != %@",
+        let forkAnswer = fixtureItems(app, containing: "fixture-final-").matching(NSPredicate(
+            format: "identifier != %@",
             originalAnswerID
         )).firstMatch
         XCTAssertTrue(forkAnswer.waitUntilExists(timeout: 25))
@@ -50,8 +50,7 @@ extension LaunchUITests {
         captureScreen(app, named: "Fork inherits the selected answer and accepts a new turn")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let number = try XCTUnwrap(originalAnswerID.split(separator: "-").dropLast().last)
-        let original = try app
-            .descendants(matching: .any)[simulatorTaskRowIdentifier("session-identity/fixture-thread-\(number)")]
+        let original = try simulatorTaskRow(app, native: "fixture-thread-\(number)")
         XCTAssertTrue(original.waitUntilExists(timeout: 15)); original.tap()
         XCTAssertTrue(app.descendants(matching: .any)[nextID].waitUntilExists(timeout: 20))
     }
@@ -238,7 +237,7 @@ extension LaunchUITests {
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("[success] Keep the conversation agent")
         app.buttons["task.send"].tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 25))
         expandComposer(app)
         app.buttons["model.settings"].tap()
         XCTAssertTrue(app.segmentedControls["model.provider"].buttons["Codex"].isSelected)
@@ -252,9 +251,9 @@ extension LaunchUITests {
         try useSimulatorListFixture("external-conversation")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = app.buttons["tasks.row.codex:fixture-external-thread"]
+        let row = try simulatorTaskRow(app, native: "fixture-external-thread")
         XCTAssertTrue(row.waitUntilExists(timeout: 15)); row.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["item.answer-fixture-external-thread"]
+        XCTAssertTrue(fixtureItems(app, containing: "answer-fixture-external-thread").firstMatch
             .waitUntilExists(timeout: 15))
         expandComposer(app)
         captureScreen(app, named: "Model controls on an externally created conversation")
@@ -276,7 +275,7 @@ extension LaunchUITests {
         XCTAssertTrue(selected.isSelected)
         dismissModelSettings(app)
         try simulatorFixture("release-inputs")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 25))
     }
 
     func testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone() throws {

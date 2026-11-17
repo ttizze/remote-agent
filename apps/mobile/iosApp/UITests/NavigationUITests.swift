@@ -39,7 +39,7 @@ extension LaunchUITests {
         XCTAssertTrue(app.buttons["pairing.scan"].exists)
         XCTAssertEqual(app.buttons["pairing.scan"].label, "QRコードを読み取る")
         assertUnavailableScannerCanBeCancelled(app)
-        XCTAssertFalse(app.buttons["tasks.project.simulator-project"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.simulator-project"].exists)
         app.terminate(); app.launch()
         XCTAssertTrue(app.buttons["tasks.connect"].waitUntilExists(timeout: 10))
         app.buttons["tasks.connect"].tap()
@@ -48,7 +48,7 @@ extension LaunchUITests {
         XCTAssertTrue(app.navigationBars["プライバシーポリシー"].waitUntilExists(timeout: 5))
         app.buttons["閉じる"].tap()
         XCTAssertTrue(app.buttons["pairing.scan"].waitUntilExists(timeout: 10))
-        XCTAssertFalse(app.buttons["tasks.project.simulator-project"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.simulator-project"].exists)
         captureScreen(app, named: "Removed Host stays unpaired after relaunch")
         app.terminate()
         let reconnected = try connectedSimulatorApp()
@@ -67,7 +67,7 @@ extension LaunchUITests {
         let prompt = app.descendants(matching: .any)["task.message"]
         prompt.tap(); prompt.typeText("[model] Verify chosen settings")
         app.buttons["task.send"].tap()
-        let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
+        let finalAnswer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(finalAnswer.waitUntilExists(timeout: 25), "Chosen settings were rejected by the fixture")
         let finalID = finalAnswer.identifier
         let detail = app.descendants(matching: .any)["task.detail"]
@@ -76,13 +76,12 @@ extension LaunchUITests {
         let taskList = app.descendants(matching: .any)["tasks.list"]
         XCTAssertTrue(taskList.waitUntilExists(timeout: 30))
         XCTAssertFalse(detail.exists)
-        let project = app.buttons["tasks.project.simulator-project"]
+        let project = app.descendants(matching: .any)["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitUntilExists(timeout: 10))
         XCTAssertEqual(project.value as? String, "閉じています")
         project.tap()
         let threadNumber = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
-        let row = try app
-            .descendants(matching: .any)[simulatorTaskRowIdentifier("session-identity/fixture-thread-\(threadNumber)")]
+        let row = try simulatorTaskRow(app, native: "fixture-thread-\(threadNumber)")
         XCTAssertTrue(row.waitUntilExists(timeout: 20)); row.tap()
         XCTAssertTrue(app.descendants(matching: .any)[finalID].waitUntilExists(timeout: 30))
         let settings = app.buttons["model.settings"]
@@ -177,7 +176,7 @@ extension LaunchUITests {
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitUntilExists(timeout: 10))
         XCTAssertGreaterThan(search.frame.midY, app.frame.height * 0.8)
-        let project = app.buttons["tasks.project.simulator-project"]
+        let project = app.descendants(matching: .any)["tasks.project.simulator-project"]
         XCTAssertTrue(project.exists)
         // Expansion persists across launches; this scenario begins with a closed project.
         if project.value as? String == "開いています" {
@@ -194,7 +193,7 @@ extension LaunchUITests {
         XCTAssertTrue(search.waitUntilExists(timeout: 10))
         XCTAssertEqual(project.value as? String, "閉じています")
         search.tap(); search.typeText("no-matching-conversation-unique\n")
-        XCTAssertFalse(app.buttons["tasks.project.simulator-project"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.project.simulator-project"].exists)
         search.buttons.firstMatch.tap()
         closeSearch(app)
         app.buttons["tasks.menu"].tap()
@@ -329,12 +328,11 @@ extension LaunchUITests {
         XCTAssertTrue(draft.waitUntilExists(timeout: 10))
         XCTAssertEqual(draft.value as? String, "[success] Retain this project draft")
         app.buttons["task.send"].tap()
-        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        let answer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(answer.waitUntilExists(timeout: 25))
         let answerID = answer.identifier
         let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
-        let row = try app
-            .descendants(matching: .any)[simulatorTaskRowIdentifier("session-identity/fixture-thread-\(number)")]
+        let row = try simulatorTaskRow(app, native: "fixture-thread-\(number)")
         let message = app.textFields["task.message"]
 
         message.tap(); message.typeText("Keep this conversation draft")

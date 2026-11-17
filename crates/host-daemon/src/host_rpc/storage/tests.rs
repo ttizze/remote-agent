@@ -259,3 +259,84 @@ async fn search_finds_an_old_saved_message_beyond_twenty_thousand_streaming_rows
         );
     }
 }
+
+#[test]
+fn large_tool_histories_page_settled_nodes_and_retain_live_ancestry() {
+    use model::projection::ThreadStreamItem;
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Storage::open(&directory.path().join("state.sqlite"));
+    let node_id = |index| format!("tool-{index}:{}", "native-reference".repeat(20));
+    storage
+        .with(|db| {
+            let tx = db.transaction().map_err(failure)?;
+            projections::save(&tx, Some("thread"), &thread("thread"))?;
+            let root: model::ExecutionNode = serde_json::from_value(serde_json::json!({
+                "id":"root","threadId":"thread","rootNodeId":"root","kind":"root_turn",
+                "status":"running","countsForRun":false
+            }))
+            .map_err(failure)?;
+            projections::save(&tx, Some("thread"), &root)?;
+            for index in 0..4000 {
+                let node = model::ExecutionNode {
+                    id: node_id(index),
+                    parent_node_id: Some("root".into()),
+                    kind: model::NodeKind::ToolCall,
+                    status: if index == 0 {
+                        model::NodeStatus::Running
+                    } else {
+                        model::NodeStatus::Completed
+                    },
+                    ..root.clone()
+                };
+                projections::save(&tx, Some("thread"), &node)?;
+                let item: model::TurnItem = serde_json::from_value(serde_json::json!({
+                "id":format!("item-{index}"),"threadId":"thread","ordinal":index,"nodeId":node.id,
+                "status":"completed","updatedAt":NOW,"type":"command_execution",
+                "input":"inspect","output":"done","streaming":false
+            })).map_err(failure)?;
+                projections::save(&tx, Some("thread"), &item)?;
+            }
+            let mut live = projections::read::<model::ExecutionNode>(&tx, &node_id(0))?.unwrap();
+            live.parent_node_id = Some(node_id(1));
+            projections::save(&tx, Some("thread"), &live)?;
+            tx.commit().map_err(failure)
+        })
+        .unwrap();
+    let target = SessionRef::new(None, "thread".into()).unwrap();
+    let snapshot = storage
+        .thread_stream(&target, None)
+        .unwrap()
+        .into_iter()
+        .find_map(|item| {
+            if let ThreadStreamItem::Snapshot(snapshot) = item {
+                Some(snapshot)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert!(
+        serde_json::to_vec(&snapshot).unwrap().len() < 1_048_576,
+        "the initial window keeps the existing one-MiB budget"
+    );
+    for id in ["root".to_owned(), node_id(0), node_id(1)] {
+        assert!(snapshot.projection.nodes.iter().any(|node| node.id == id));
+    }
+    assert!(
+        !snapshot
+            .projection
+            .nodes
+            .iter()
+            .any(|node| node.id == node_id(2))
+    );
+    assert!(storage.thread_item(&target, "item-2").unwrap().is_some());
+    let page = storage
+        .thread_history(&target, snapshot.history_cursor.as_ref().unwrap())
+        .unwrap();
+    assert!(!page.items.is_empty());
+    for row in &page.items {
+        let id = row.item.node_id.as_ref().unwrap();
+        assert!(page.nodes.iter().any(|node| &node.id == id));
+    }
+    assert!(page.nodes.iter().any(|node| node.id == "root"));
+}

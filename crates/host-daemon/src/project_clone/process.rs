@@ -155,10 +155,18 @@ pub(super) fn publish(source: &Path, destination: &Path) -> std::io::Result<()> 
             Err(std::io::Error::last_os_error())
         }
     }
-    // Windows directory moves fail when the target exists, including an empty folder.
     #[cfg(windows)]
     {
-        std::fs::rename(source, destination)
+        for path in [source, destination] {
+            if path.as_os_str().as_encoded_bytes().contains(&0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "path contains NUL",
+                ));
+            }
+        }
+        // MoveFileEx without REPLACE_EXISTING also protects empty directories.
+        atomicwrites::move_atomic(source, destination)
     }
 }
 
@@ -258,6 +266,27 @@ mod tests {
             assert_eq!(parse_progress(line.as_bytes()), None);
         }
     }
+    #[test]
+    fn publication_rejects_nul_without_moving_a_path_prefix() {
+        for (source_name, destination_name) in [
+            ("source\0ignored", "destination"),
+            ("source", "destination\0ignored"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source");
+            std::fs::create_dir(&source).unwrap();
+            std::fs::write(source.join("file"), "original").unwrap();
+            let error = publish(
+                &root.path().join(source_name),
+                &root.path().join(destination_name),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(source.join("file").exists());
+            assert!(!root.path().join("destination").exists());
+        }
+    }
+
     #[test]
     fn publication_never_replaces_an_existing_empty_directory() {
         let root = tempfile::tempdir().unwrap();

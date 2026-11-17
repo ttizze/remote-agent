@@ -45,6 +45,7 @@ fn history_projection_failure_keeps_the_page_retryable(
         context: None,
     };
     let mut page = ThreadHistoryPage {
+        nodes: vec![],
         snapshot_sequence: 10,
         items: vec![row],
         next_cursor: next_cursor.map(str::to_owned),

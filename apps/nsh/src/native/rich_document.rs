@@ -266,8 +266,12 @@ impl Writer {
             u8::from(run["emphasis"] == true),
             u8::from(run["strikethrough"] == true)
         );
-        if let Some(destination) = link {
-            self.start_link(destination, !file.is_object() && !caption);
+        if link.is_some() {
+            self.body.push_str(if !file.is_object() && !caption {
+                "\\ul "
+            } else {
+                "\\ul0 "
+            });
         }
         let start = self.units;
         if file.is_object() && after_caption {
@@ -276,7 +280,6 @@ impl Writer {
         self.file_glyph(file, size);
         self.highlighted(text, run);
         if let Some(destination) = link {
-            self.body.push_str("}}");
             self.links.push(Link {
                 start,
                 end: self.units,
@@ -391,7 +394,7 @@ impl Writer {
         error: Option<&str>,
         labels: &Value,
     ) {
-        self.start_link(source, false);
+        self.body.push_str("{\\ul0 ");
         let start = self.units;
         if !data.is_some_and(|data| self.png(data, width.saturating_sub(24).max(1))) {
             let label =
@@ -400,20 +403,10 @@ impl Writer {
         } else {
             self.decorations.push((start, self.units));
         }
-        self.body.push_str("}}");
+        self.body.push('}');
         self.links.push(Link {start,end:self.units,destination:source.into(),tooltip:source.into(),
             action:if error.is_some(){"retryImage"}else{"image"},
             menu:serde_json::json!([{"id":"saveImage","title":labels["saveImage"],"enabled":data.is_some()}])});
-    }
-
-    fn start_link(&mut self, destination: &str, underline: bool) {
-        self.body.push_str("{\\field{\\*\\fldinst HYPERLINK \"");
-        escape(destination, &mut self.body);
-        self.body.push_str(if underline {
-            "\"}{\\fldrslt\\ul "
-        } else {
-            "\"}{\\fldrslt\\ul0 "
-        });
     }
 
     fn highlighted(&mut self, text: &str, run: &Value) {
@@ -526,7 +519,7 @@ mod tests {
         let rtf = String::from_utf8(doc.rtf).unwrap();
         assert!(rtf.contains("\\pict\\pngblip"));
         assert!(rtf.contains("\\red255\\green0\\blue0;") && rtf.contains("\\f3\\fs28"));
-        assert!(rtf.contains("\\fldrslt\\ul0"));
+        assert!(rtf.contains("\\ul0"));
         let doc = paragraphs(&[
             json!({"runs":[{"text":"Read","link":"/repo"},{"text":"repo","link":"/repo","file":{"folder":true,"tooltip":"/repo"}}]}),
         ]);

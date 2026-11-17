@@ -8,9 +8,9 @@ extension LaunchUITests {
         let conversationId = try useSimulatorConversationFixture("long-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:\(conversationId)"]
+        let row = try simulatorTaskRow(app, native: conversationId)
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
-        let latest = app.descendants(matching: .any)["item.long-14-0"]
+        let latest = fixtureItems(app, containing: "long-14-0").firstMatch
         XCTAssertTrue(latest.waitUntilExists(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]
         message.tap(); message.typeText("[approval] Reopen while this turn is running")
@@ -36,11 +36,11 @@ extension LaunchUITests {
         app.terminate(); app.launch()
         expandSimulatorProject(app)
 
-        let row = app.descendants(matching: .any)["tasks.row.codex:\(conversationId)"]
+        let row = try simulatorTaskRow(app, native: conversationId)
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitUntilExists(timeout: 30))
-        XCTAssertTrue(app.descendants(matching: .any)["item.long-14-0"].waitUntilExists(timeout: 20))
+        XCTAssertTrue(fixtureItems(app, containing: "long-14-0").firstMatch.waitUntilExists(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]
         XCTAssertTrue(message.waitUntilExists(timeout: 10))
         message.tap(); message.typeText("[delayed-input] Keep the reading position")
@@ -61,7 +61,7 @@ extension LaunchUITests {
         }
         let atBottom = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: latestButton)
         wait(for: [atBottom], timeout: 5)
-        let anchor = app.descendants(matching: .any)["item.long-14-0"]
+        let anchor = fixtureItems(app, containing: "long-14-0").firstMatch
         let beforeDrag = anchor.frame.minY
         // Start in the horizontal padding so the press cannot begin text selection.
         let start = detail.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.55))
@@ -84,7 +84,7 @@ extension LaunchUITests {
         if latestButton.exists {
             latestButton.tap()
         }
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 20))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 20))
     }
 
     func testSimulatorRendersVisualizationAndReopensIt() throws {
@@ -119,7 +119,7 @@ extension LaunchUITests {
     func testSimulatorRendersMarkdownTableAndReopensIt() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[success] [markdown-table] Render the table")
-        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        let answer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(answer.waitUntilExists(timeout: 30))
         let message = app.descendants(matching: .any)["task.message"]
         let emptyValue = try XCTUnwrap(message.placeholderValue)
@@ -140,7 +140,7 @@ extension LaunchUITests {
     }
 
     private func verifyMarkdownTable(_ app: XCUIApplication) {
-        let table = prefixedElement(app, prefix: "item.fixture-final-")
+        let table = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(table.waitUntilExists(timeout: 15))
         let header = app.textViews["markdown.cell.0.0.0"]
         let first = app.textViews["markdown.cell.0.1.0"]
@@ -174,7 +174,7 @@ extension LaunchUITests {
         #endif
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[long-markdown] Render the complete stream")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 20))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]
         let completed = app.textViews.matching(NSPredicate(format: "value CONTAINS %@", "MARKDOWN_STREAM_COMPLETE"))
             .firstMatch
@@ -246,8 +246,8 @@ extension LaunchUITests {
         #endif
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[history] Reopen history")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
-        XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").waitUntilExists(timeout: 10))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 15))
+        XCTAssertTrue(prefixedElement(app, prefix: "turn.activity.").waitUntilExists(timeout: 10))
 
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitUntilExists(timeout: 10))
@@ -256,14 +256,14 @@ extension LaunchUITests {
         newestTask.tap()
 
         XCTAssertTrue(app.descendants(matching: .any)["task.detail"].waitUntilExists(timeout: 15))
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").exists)
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
-        XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists)
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.exists)
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-command-").firstMatch.exists)
+        XCTAssertTrue(prefixedElement(app, prefix: "turn.activity.").exists)
         XCTAssertTrue(app.buttons["task.diff"].waitUntilExists(timeout: 10))
         captureScreen(app, named: "Reference conversation layout")
-        let activity = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        let activity = prefixedElement(app, prefix: "turn.activity.")
         activity.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").waitUntilExists(timeout: 5))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-command-").firstMatch.waitUntilExists(timeout: 5))
         captureScreen(app, named: "Expanded work rows")
         let command = app.buttons.matching(NSPredicate(format: "label == %@", "./gradlew test")).firstMatch
         command.tap()

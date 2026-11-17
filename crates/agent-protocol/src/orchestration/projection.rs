@@ -73,6 +73,7 @@ pub enum ThreadStreamItem {
 pub struct ThreadHistoryPage {
     pub snapshot_sequence: u64,
     pub items: Vec<ProjectedTurnItem>,
+    pub nodes: Vec<ExecutionNode>,
     pub next_cursor: Option<String>,
     pub has_more_history: bool,
 }

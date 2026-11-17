@@ -109,7 +109,7 @@ async fn main() {
     )
     .await
     .unwrap();
-    host.projects.replace_fixture_projects(&serde_json::from_value::<Vec<agent_protocol::models::Project>>(serde_json::json!([
+    host.service.fixture_projects().replace_fixture_projects(&serde_json::from_value::<Vec<agent_protocol::models::Project>>(serde_json::json!([
         {"id":"simulator-project","name":"検証プロジェクト","roots":[{"path":workspace}],"createdAt":1,"updatedAt":1}
     ])).unwrap()).unwrap();
     if let Some(lease) = &lease {
@@ -175,7 +175,7 @@ async fn main() {
     }
     let pairing = PairingServer::start(
         &directory,
-        host.projects.clone(),
+        host.service.clone(),
         host.ticket.clone(),
         host.credentials.local_identity().await,
     )

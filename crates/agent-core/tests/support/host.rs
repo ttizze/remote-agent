@@ -835,6 +835,7 @@ impl State {
         let snapshot = self.capture(response)?;
         value["result"] = json!(
             agent_protocol::orchestration::projection::ThreadHistoryPage {
+                nodes: snapshot.projection.nodes,
                 snapshot_sequence: snapshot.snapshot_sequence,
                 items: snapshot
                     .projection

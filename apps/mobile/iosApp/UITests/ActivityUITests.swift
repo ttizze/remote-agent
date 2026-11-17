@@ -8,9 +8,9 @@ extension LaunchUITests {
         let id = try useSimulatorConversationFixture("long-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:\(id)"]
+        let row = try simulatorTaskRow(app, native: id)
         XCTAssertTrue(row.waitUntilExists(timeout: 20)); row.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["item.long-14-0"].waitUntilExists(timeout: 20))
+        XCTAssertTrue(fixtureItems(app, containing: "long-14-0").firstMatch.waitUntilExists(timeout: 20))
         let input = app.descendants(matching: .any)["task.message"]
         for cycle in 0 ..< 4 {
             if cycle.isMultiple(of: 2) {
@@ -36,7 +36,7 @@ extension LaunchUITests {
     func testSimulatorComposerGrowsToFitWrappedDraft() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[success] [immediate] Verify composer wrapping")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 15))
         let input = app.descendants(matching: .any)["task.message"]
         input.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitUntilExists(timeout: 5))
@@ -80,7 +80,7 @@ extension LaunchUITests {
         captureScreen(app, named: "New conversation centers the prompt project and environment above composer")
         submitSimulatorConversation(app, promptText: "[success] [immediate] Start the simulator conversation")
 
-        let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
+        let finalAnswer = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(finalAnswer.waitUntilExists(timeout: 15), "Final answer did not stream into the conversation")
         XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
         XCTAssertTrue(app.buttons["task.send"].exists)
@@ -98,41 +98,45 @@ extension LaunchUITests {
     func testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[groups] Inspect grouped live activity")
-        let first = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        let first = prefixedElement(app, prefix: "turn.activity.")
         XCTAssertTrue(first.waitUntilExists(timeout: 10))
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-command-").firstMatch.exists)
         XCTAssertFalse(app.buttons["回答をコピー"].exists, "Commentary must not show final-answer actions")
-        let progress = prefixedElement(app, prefix: "item.fixture-progress-")
+        let progress = fixtureItems(app, containing: "fixture-progress-").firstMatch
         XCTAssertTrue(progress.waitUntilExists(timeout: 20))
-        let second = app.buttons.matching(NSPredicate(
+        let second = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND identifier CONTAINS %@",
             "turn.activity.",
-            ":fixture-next-command-"
+            "fixture-next-command-"
         )).firstMatch
         XCTAssertTrue(second.waitUntilExists(timeout: 5))
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-next-command-").firstMatch.exists)
         XCTAssertLessThan(first.frame.minY, progress.frame.minY)
         XCTAssertLessThan(progress.frame.minY, second.frame.minY)
         captureScreen(app, named: "Commands grouped between visible commentary")
         second.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-next-command-").waitUntilExists(timeout: 5))
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists,
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-next-command-").firstMatch.waitUntilExists(timeout: 5))
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-command-").firstMatch.exists,
                        "Expanding one group must leave the earlier group collapsed")
         app.buttons.matching(NSPredicate(format: "label == %@", "pwd")).firstMatch.tap()
         XCTAssertTrue(app.textViews.matching(NSPredicate(format: "value == %@", "GROUP_DETAIL_OUTPUT")).firstMatch
             .waitUntilExists(timeout: 5))
         captureScreen(app, named: "Selected command group and command details expanded")
         try simulatorFixture("release-inputs")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 20))
-        let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 20))
+        let completed = prefixedElement(app, prefix: "turn.activity.")
         let completion = expectation(
             for: NSPredicate(format: "label CONTAINS %@", "作業しました"), evaluatedWith: completed
         )
         wait(for: [completion], timeout: 10)
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-command-").firstMatch.exists)
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-next-command-").firstMatch.exists)
         XCTAssertFalse(progress.exists, "Completed work must hide interim commentary")
-        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.activity.")).count, 1)
+        XCTAssertEqual(
+            app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.activity."))
+                .count,
+            1
+        )
         captureScreen(app, named: "Completed work automatically collapsed")
         completed.tap()
         XCTAssertTrue(progress.waitUntilExists(timeout: 5))
@@ -147,11 +151,11 @@ extension LaunchUITests {
 
         let retrying = app.staticTexts["プロバイダーを再試行しています（1）"]
         XCTAssertTrue(retrying.waitUntilExists(timeout: 10), "Retrying stream error was not visible")
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-command-").firstMatch.exists)
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 15))
         let recovered = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: retrying)
         wait(for: [recovered], timeout: 10)
-        XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists)
+        XCTAssertTrue(prefixedElement(app, prefix: "turn.activity.").exists)
     }
 
     func testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError() throws {
@@ -162,12 +166,12 @@ extension LaunchUITests {
         startSimulatorConversation(app, promptText: "[failed] Fail turn")
 
         XCTAssertTrue(app.staticTexts["プロバイダーエラー"].waitUntilExists(timeout: 15))
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
-        let group = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-command-").firstMatch.exists)
+        let group = prefixedElement(app, prefix: "turn.activity.")
         XCTAssertTrue(group.exists)
         group.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").waitUntilExists(timeout: 5))
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-final-").exists)
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-command-").firstMatch.waitUntilExists(timeout: 5))
+        XCTAssertFalse(fixtureItems(app, containing: "fixture-final-").firstMatch.exists)
     }
 
     func testSimulatorKeepsInputRequestVisibleUntilResolved() throws {
@@ -180,17 +184,20 @@ extension LaunchUITests {
         let request = prefixedElement(app, prefix: "request.")
         XCTAssertTrue(request.waitUntilExists(timeout: 10), "Pending request was not visible")
         XCTAssertTrue(app.staticTexts["質問"].exists)
-        let turn = prefixedButton(app, prefix: "turn.interrupt.fixture-turn-")
+        let turn = prefixedButton(app, prefix: "turn.interrupt.")
         XCTAssertTrue(turn.exists)
-        let number = try XCTUnwrap(turn.identifier.split(separator: "-").dropLast().last)
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let rowIdentifier = try simulatorTaskRowIdentifier("session-identity/fixture-thread-\(number)")
+        expandSimulatorProject(app)
+        let row = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "tasks.row.", "Ask user"
+        )).firstMatch
+        XCTAssertTrue(row.waitUntilExists(timeout: 10))
+        let rowIdentifier = row.identifier
         let waiting = app.descendants(matching: .any)[
             rowIdentifier.replacingOccurrences(of: "tasks.row.", with: "tasks.waiting.")
         ]
         XCTAssertTrue(waiting.waitUntilExists(timeout: 10))
         XCTAssertEqual(waiting.label, "確認待ち")
-        let row = app.buttons[rowIdentifier]
         XCTAssertEqual(row.value as? String, "確認待ち")
         row.tap()
         XCTAssertTrue(request.waitUntilExists(timeout: 10))
@@ -198,10 +205,10 @@ extension LaunchUITests {
         XCTAssertTrue(answer.waitUntilExists(timeout: 5))
         answer.tap(); answer.typeText("Continue")
         app.buttons["request.send"].tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 15))
         let resolved = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: request)
         wait(for: [resolved], timeout: 10)
-        XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists)
+        XCTAssertTrue(prefixedElement(app, prefix: "turn.activity.").exists)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(row.waitUntilExists(timeout: 10))
         XCTAssertFalse(waiting.exists)
@@ -222,7 +229,7 @@ extension LaunchUITests {
         tapWhenStable(app.buttons["request.toggle"])
         XCTAssertTrue(choice.waitUntilExists(timeout: 5))
         choice.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 15))
         XCTAssertFalse(app.buttons["request.send"].exists)
     }
 
@@ -236,7 +243,7 @@ extension LaunchUITests {
         let skip = app.buttons["request.skip"]
         XCTAssertTrue(skip.waitUntilExists(timeout: 10))
         skip.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 15))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 15))
         XCTAssertFalse(skip.exists)
     }
 }

@@ -84,6 +84,8 @@ impl Runtime {
                 return result.map(Some);
             }
             Call::SubscribeConversation(request) => {
+                #[cfg(feature = "test-support")]
+                service.before_fixture_read(false).await?;
                 Self::ensure_imported(service, &request.session).await?;
                 return Self::open(service, session, request).await.map(Some);
             }
@@ -148,16 +150,20 @@ impl Runtime {
                 .into(),
             }
             .into(),
-            Call::ExtendConversation(request) => Response::Success {
-                result: service
-                    .inner
-                    .conversation
-                    .storage
-                    .thread_history(&request.session, &request.cursor)
-                    .map_err(storage_failure)?
-                    .into(),
+            Call::ExtendConversation(request) => {
+                #[cfg(feature = "test-support")]
+                service.before_fixture_read(true).await?;
+                Response::Success {
+                    result: service
+                        .inner
+                        .conversation
+                        .storage
+                        .thread_history(&request.session, &request.cursor)
+                        .map_err(storage_failure)?
+                        .into(),
+                }
+                .into()
             }
-            .into(),
             Call::HydrateConversation(request) => {
                 let item = service
                     .inner

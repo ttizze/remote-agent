@@ -142,13 +142,19 @@ fn row(
         description,
     } = candidate;
     let name = candidate_label(&invocation.name);
+    let description = candidate_label(&description);
+    let label = if description.is_empty() {
+        name.clone()
+    } else {
+        format!("{name}: {description}")
+    };
     let glyph = if invocation.kind == InvocationKind::Skill {
         Icon::SPARKLES
     } else {
         Icon::PUZZLE
     };
     nsh_base::button()
-        .accessibility_label(Some(SharedString::from(name.clone())))
+        .accessibility_label(Some(SharedString::from(label)))
         .flex_row()
         .items_center()
         .gap_2()
@@ -170,7 +176,7 @@ fn row(
                 .flex_shrink_0(),
         )
         .child(
-            text(candidate_label(&description))
+            text(description)
                 .text_size(px(13.0))
                 .text_color(colors::muted())
                 .number_of_lines(1)

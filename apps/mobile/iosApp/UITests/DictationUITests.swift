@@ -56,7 +56,7 @@ extension LaunchUITests {
         assertRecoveredDictationDraft(app, text: "Keep this draft after transcription failure")
         // Finish this fixture conversation so the next test cannot inherit its draft.
         app.buttons["task.send"].tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 25))
     }
 
     func testSimulatorDictationPermissionDenialPreservesDraftAndSend() throws {
@@ -80,7 +80,7 @@ extension LaunchUITests {
         XCTAssertFalse(app.buttons["dictation.cancel"].exists)
         captureScreen(app, named: "Dictation permission denied with draft retained")
         app.buttons["task.send"].tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 25))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 25))
     }
 
     private func assertRecoveredDictationDraft(_ app: XCUIApplication, text: String) {

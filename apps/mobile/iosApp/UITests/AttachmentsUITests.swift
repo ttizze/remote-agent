@@ -36,7 +36,7 @@ extension LaunchUITests {
         captureScreen(app, named: "Two separately selected photos staged")
         prompt.tap(); prompt.typeText("[success] Read both photos")
         app.buttons["task.send"].tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 30))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 30))
         XCTAssertEqual(removals.count, 0)
         selectPhotos([.photo], in: app)
         confirmPhotoSelection(in: app)
@@ -85,10 +85,10 @@ extension LaunchUITests {
         )).firstMatch
             .waitUntilExists(timeout: 20))
         XCTAssertEqual(removals.count, 0)
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitUntilExists(timeout: 30))
+        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 30))
         let completed = expectation(
             for: NSPredicate(format: "label CONTAINS %@", "作業しました"),
-            evaluatedWith: prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+            evaluatedWith: prefixedElement(app, prefix: "turn.activity.")
         )
         wait(for: [completed], timeout: 10)
         XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
@@ -101,7 +101,7 @@ extension LaunchUITests {
         try useSimulatorListFixture("worktree-conversation/upload")
         app.buttons["tasks.menu"].tap(); app.buttons["tasks.refresh"].tap()
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-upload-thread"]
+        let row = try simulatorTaskRow(app, native: "fixture-upload-thread")
         XCTAssertTrue(row.waitUntilExists(timeout: 15)); row.tap()
         let prompt = app.textFields["task.message"]
         XCTAssertTrue(prompt.waitUntilExists(timeout: 10))
@@ -130,7 +130,7 @@ extension LaunchUITests {
         wait(for: [attached], timeout: 60)
         XCTAssertEqual(notices.count, 0)
         app.buttons["task.send"].tap()
-        let final = prefixedElement(app, prefix: "item.fixture-final-")
+        let final = fixtureItems(app, containing: "fixture-final-").firstMatch
         XCTAssertTrue(final.waitUntilExists(timeout: 30))
         let finalID = final.identifier
         XCTAssertEqual(removals.count, 0)
@@ -207,7 +207,7 @@ extension LaunchUITests {
     func testSimulatorCanAttachDownloadAndPrepareAIEdit() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[success] Prepare file operations")
-        XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").waitUntilExists(timeout: 20))
+        XCTAssertTrue(prefixedElement(app, prefix: "turn.activity.").waitUntilExists(timeout: 20))
         selectAttachmentFixture(in: app)
         XCTAssertTrue(app.staticTexts["attachment-fixture.txt"].waitUntilExists(timeout: 15))
         app.terminate()

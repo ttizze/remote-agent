@@ -834,6 +834,7 @@ fn history_responses_are_cursor_fenced_and_do_not_acknowledge_live_events() {
     let mut current = snapshot(3);
     current.latest_local_turn_ordinal = Some(100);
     let page = ThreadHistoryPage {
+        nodes: vec![],
         snapshot_sequence: 20,
         items: vec![row(item("old", 1), Visibility::Local, 0)],
         next_cursor: None,
@@ -846,6 +847,52 @@ fn history_responses_are_cursor_fenced_and_do_not_acknowledge_live_events() {
     assert_eq!(merged.projection.visible_turn_items.len(), 1);
     assert_eq!(merged.history_cursor, None);
     assert!(!merged.has_more_history);
+}
+
+#[test]
+fn history_pages_restore_node_ancestry_without_replacing_live_status() {
+    let node = |id: &str, parent: Option<&str>, status: &str| {
+        serde_json::from_value::<ExecutionNode>(json!({
+            "id":id,"threadId":"thread","rootNodeId":"root","parentNodeId":parent,
+            "runId":"run","kind":"tool_call","status":status,"countsForRun":false
+        }))
+        .unwrap()
+    };
+    let mut current = snapshot(3);
+    let live = node("live", Some("root"), "completed");
+    current.projection.nodes.push(live.clone());
+    let mut older = item("older", 1);
+    older.node_id = Some("child".into());
+    let page = ThreadHistoryPage {
+        snapshot_sequence: 20,
+        items: vec![row(older, Visibility::Local, 0)],
+        nodes: vec![
+            node("root", None, "completed"),
+            node("child", Some("root"), "completed"),
+            node("live", Some("root"), "running"),
+        ],
+        next_cursor: None,
+        has_more_history: false,
+    };
+    let merged = receive_history(&current, "cursor", page).unwrap();
+    assert_eq!(merged.snapshot_sequence, 3);
+    assert_eq!(merged.projection.nodes.len(), 3);
+    assert_eq!(
+        merged
+            .projection
+            .nodes
+            .iter()
+            .find(|node| node.id == "live"),
+        Some(&live)
+    );
+    assert!(merged.projection.nodes.iter().any(|node| node.id == "root"));
+    assert!(
+        merged
+            .projection
+            .nodes
+            .iter()
+            .any(|node| node.id == "child")
+    );
 }
 
 #[test]

@@ -1374,7 +1374,8 @@ async fn generated_images_keep_t3_tool_results_and_markdown_embeds() {
         panic!("stored image result")
     };
     assert_eq!(tool["savedPath"], image.to_str().unwrap());
-    let embed = format!("![](<{}>)", image.to_str().unwrap());
+    // Markdown image destinations use forward slashes on every platform.
+    let embed = format!("![](<{}>)", image.to_str().unwrap().replace('\\', "/"));
     let (text, attachments) = current
         .projection
         .turn_items
@@ -1771,7 +1772,7 @@ async fn generated_image_bytes_are_bounded_files_instead_of_database_payloads(
         assert_eq!(status, model::TurnItemStatus::Completed);
         let path = output["savedPath"].as_str().unwrap();
         assert_eq!(std::fs::read(path).unwrap(), bytes);
-        assert!(current.projection.turn_items.iter().any(|item|matches!(&item.body,model::TurnItemBody::AssistantMessage {text,..} if text.contains(path))));
+        assert!(current.projection.turn_items.iter().any(|item|matches!(&item.body,model::TurnItemBody::AssistantMessage {text,..} if text.contains(&path.replace('\\', "/")))));
     } else {
         assert_eq!(status, model::TurnItemStatus::Failed);
         assert!(output.get("savedPath").is_none());

@@ -37,24 +37,3 @@ impl Storage {
         let _ = release.recv();
     }
 }
-
-impl Storage {
-    /// Seed only canonical native metadata, as a live child observation does.
-    pub(in crate::host_rpc) fn seed_native_header(
-        &self,
-        thread: &agent_protocol::orchestration::Thread,
-        native: &agent_protocol::orchestration::ProviderThread,
-    ) -> Result<(), String> {
-        self.with(|db| {
-            let tx = db.transaction().map_err(failure)?;
-            let source = native_bindings::header_source(thread, native)?;
-            if native_bindings::owner(&tx, &source)?
-                .is_some_and(|owner| owner.application_id() != thread.id)
-            {
-                return Err("native source is already owned".into());
-            }
-            native_threads::write_header(&tx, thread, native, &source)?;
-            tx.commit().map_err(failure)
-        })
-    }
-}
