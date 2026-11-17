@@ -176,9 +176,12 @@ extension ThreadScreen {
     private func planRow(title: String, text: String, item: ConversationItem?) -> some View {
         if let item {
             let export = planDisplay(markdown: text)
-            ConversationPlan(title: title) {
+            ConversationPlan(title: title, badge: localizedUiText(
+                language: model.snapshot.uiLanguage(),
+                source: "計画"
+            )) {
                 ConversationMarkdown(blocks: item.markdown, media: mediaAccess, selection: selectionActions)
-            } menu: {
+            } actions: {
                 Menu {
                     Button { requestPlan(.export, filename: export.filename, markdown: export.contents) } label: {
                         Label("Markdownで書き出す…", systemImage: "square.and.arrow.up")
@@ -281,6 +284,8 @@ extension ThreadScreen {
         case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId, rowId: projected.id(),
                                                                  expanded: expanded)
         case let (.error(error), _): ThreadErrorRow(error: error)
+        // The mobile projection excludes these footers; the composer owns its queue.
+        case (.queue, _), (.background, _): EmptyView()
         case (.inProgress, _), (.pendingRequest, _), (_, nil): EmptyView()
         }
     }
