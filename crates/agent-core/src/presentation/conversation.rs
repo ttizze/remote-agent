@@ -810,7 +810,7 @@ pub fn project_conversation(
         .iter()
         .filter(|(_, pending)| pending.draft_key == draft_key)
         .peekable();
-    let delivered: HashSet<_> = if candidates.peek().is_none() {
+    let delivered: HashSet<_> = if candidates.peek().is_none() && preparations.is_empty() {
         HashSet::new()
     } else {
         source
@@ -880,6 +880,7 @@ pub fn project_conversation(
     let native = source.turns.as_deref().unwrap_or_default();
     let unconfirmed: Vec<_> = preparations
         .iter()
+        .filter(|preparation| !delivered.contains(&preparation.submission.client_user_message_id))
         .map(|preparation| {
             let id = &preparation.submission.client_user_message_id;
             let item = Arc::new(models::Item::new(
@@ -1535,12 +1536,25 @@ mod preparation_tests {
             },
         );
         user.client_input_id = Some("input".into());
-        thread.preparations.clear();
         thread.turns = Some(vec![Arc::new(models::Turn {
             id: "native-turn".into(),
             items: Some(vec![Arc::new(user)]),
             ..Default::default()
         })]);
+        // The canonical input can arrive before its preparation is retired.
+        thread.preparations[0].status = PreparationStatus::Sending;
+        for pending in [&snapshot.sessions.pending_submissions, &Default::default()] {
+            let starting = project_conversation(
+                UiLanguage::Japanese,
+                &id.clone().into(),
+                pending,
+                Arc::new(thread.clone()),
+                &Some(failed.clone()),
+            );
+            assert!(starting.queued.is_empty());
+            assert_eq!(starting.turns[0].items().count(), 1);
+        }
+        thread.preparations.clear();
         let echoed = project_conversation(
             UiLanguage::Japanese,
             &snapshot.panes.primary().navigation.draft_key,

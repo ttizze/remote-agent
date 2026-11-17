@@ -711,11 +711,18 @@ async fn new_task_admits_the_initial_input_in_one_rpc() {
         thread.clone(),
         &None,
     );
-    assert_eq!(rendered.queued.len(), 1);
-    assert_eq!(
-        rendered.queued[0].data.body.as_deref(),
-        Some("initial message")
-    );
+    let messages: Vec<_> = rendered
+        .turns
+        .iter()
+        .flat_map(|turn| &turn.rows)
+        .filter_map(|row| match &row.content {
+            crate::presentation::conversation::ConversationRowContent::User { item } => Some(item),
+            _ => None,
+        })
+        .chain(&rendered.queued)
+        .collect();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].data.body.as_deref(), Some("initial message"));
     assert!(
         effects.is_empty(),
         "acceptance must not schedule another send"

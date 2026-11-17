@@ -255,6 +255,7 @@ public struct ConversationActions<Content: View>: View {
     public var body: some View {
         HStack(spacing: 8) { content }
             .font(.system(size: 12)).foregroundStyle(ConversationColors.muted).buttonStyle(ConversationActionStyle())
+            .accessibilityElement(children: .contain)
     }
 }
 

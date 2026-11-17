@@ -206,7 +206,10 @@ extension LaunchUITests {
         composer.typeText(XCUIKeyboardKey.delete.rawValue)
         waitForDraftText(composer, text: composer.placeholderValue ?? "")
         let fullCopy = app.buttons["発言をコピー"]
-        XCTAssertTrue(fullCopy.waitUntilExists(timeout: 5)); fullCopy.tap()
+        XCTAssertTrue(fullCopy.waitUntilExists(timeout: 5))
+        XCTAssertGreaterThanOrEqual(fullCopy.frame.minX, app.buttons["ここから編集"].frame.maxX,
+                                    "Copy and edit must expose separate touch targets")
+        fullCopy.tap()
         composer.press(forDuration: 1.2)
         XCTAssertTrue(paste.waitUntilExists(timeout: 5)); paste.tap()
         let fullText = expectation(for: NSPredicate(format: "value == %@", text), evaluatedWith: composer)

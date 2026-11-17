@@ -1803,6 +1803,73 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_archived_long_conversation_surfaces_the_next_live_approval() {
+    use agent_core::presentation::conversation::{
+        ConversationRowContent, PlanPresentation, TimelineStyle, rows::ConversationRows,
+    };
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let directory = tempfile::tempdir().unwrap();
+        seed_projects(directory.path(), serde_json::from_value(json!([
+            {"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}
+        ])).unwrap()).unwrap();
+        std::fs::write(directory.path().join("list-fixture.json"), json!([
+            {"id":"long","cwd":directory.path(),"historyMode":"paginated","fixtureHistory":"long"}
+        ]).to_string()).unwrap();
+        let fixture = start_host(directory.path()).await;
+        let id = SessionRef::new(ProviderKind::Codex, "long".into()).unwrap();
+        fixture.service.publish_fixture_history(&id).await.unwrap();
+        let client = fixture.local().await.unwrap();
+        let mut events = conversations::Conversation::open(&client.peer, &id).await.unwrap();
+        let initial = events.view().thread;
+        assert!(initial.history_has_more == Some(true));
+        conversations::submit(&client.peer, &serde_json::from_value::<rpc::Submission>(json!({
+            "clientUserMessageId":next_submission_id(),"threadId":id,
+            "input":[{"text":{"text":"[approval] Reopen while this turn is running"}}]
+        })).unwrap()).await.unwrap();
+        let mut previous = None;
+        let mut previous_rows = None;
+        let request = loop {
+            let source = events.view().thread;
+            let rendered = agent_core::presentation::conversation::project_conversation(
+                agent_core::localization::UiLanguage::Japanese,
+                &id.clone().into(), &Default::default(), Arc::new(source.clone()), &previous,
+            );
+            let rows = ConversationRows::project(
+                TimelineStyle { plans: PlanPresentation::Card, background_footer: false, ..TimelineStyle::NATIVE },
+                rendered.clone(),
+                agent_core::panels::PanelScope { host: "fixture".into(), storage: "fixture".into(), draft: id.clone().into() },
+                None, Default::default(), previous_rows.take(),
+            );
+            let visible = rows.rows();
+            let copies = visible.iter().filter(|row| matches!(row.data().content,
+                ConversationRowContent::User { item } if item.data.body.as_deref() == Some("[approval] Reopen while this turn is running")
+            )).count();
+            assert!(copies <= 1, "each live publication must show the submitted message once, got {copies}");
+            previous = Some(rendered);
+            previous_rows = Some(rows);
+            if let Some(request) = source.requests.values().find(|request| request.delivery == agent_protocol::session::RequestDelivery::Awaiting) {
+                assert_eq!(copies, 1, "the submitted message must remain visible with its approval");
+                assert!(visible.iter().any(|row| matches!(row.data().content,
+                    ConversationRowContent::PendingRequest { request }
+                        if request.approval.as_ref().is_some_and(|approval| approval.actions.approve.is_some())
+                )), "mobile rows must expose the approval outside collapsed historical work");
+                break json!(request);
+            }
+            events.next().await;
+        };
+        conversations::command(&client.peer, &id, uuid::Uuid::new_v4(), agent_protocol::conversation::Command::Answer {
+            id: serde_json::from_value(request["id"].clone()).unwrap(),
+            answer: agent_protocol::requests::Answer::Approval {
+                choice_id: request["body"]["approval"]["choices"][0]["id"].as_str().unwrap().into(),
+            },
+        }).await.unwrap();
+        assert_eq!(completed_turn(&mut events).await["status"], "completed");
+        client.close().await;
+        fixture.close().await.unwrap();
+    }).await.expect("archived conversation approval deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();

@@ -230,7 +230,7 @@ extension LaunchUITests {
         app.buttons["task.send"].tap()
         // The default follow-up queues input. Explicitly steer it before
         // checking that acceptance is visible ahead of the provider's echo.
-        let steer = app.buttons["追加の指示"]
+        let steer = app.buttons["今すぐ送信"]
         XCTAssertTrue(steer.waitUntilExists(timeout: 10))
         steer.tap()
         let sentMessages = app.textViews.matching(NSPredicate(

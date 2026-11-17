@@ -34,9 +34,13 @@ extension LaunchUITests {
         XCTAssertEqual(loadedItems(in: detail), initialItems,
                        "Scrolling reveals loaded history without fetching another page")
         // SwiftUI can omit the outer group from AX after an insertion; measure its native text view.
-        let anchor = try XCTUnwrap(app.textViews.matching(NSPredicate(
+        let visibleInput = try XCTUnwrap(app.textViews.matching(NSPredicate(
             format: "identifier == %@", "message.user-text"
         )).allElementsBoundByIndex.first(where: \.isHittable))
+        // A query bound by index can select a newly prepended input after the page arrives.
+        let anchor = try app.textViews.matching(NSPredicate(
+            format: "identifier == %@ AND value == %@", "message.user-text", XCTUnwrap(visibleInput.value as? String)
+        )).firstMatch
         loadEarlierPreservingPosition(app, detail: detail, anchor: anchor)
         XCTAssertFalse(latest.isHittable, "Prepending history must not jump back to the latest message")
         loadRemainingHistory(app, detail: detail)
