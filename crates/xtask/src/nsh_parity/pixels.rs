@@ -4,13 +4,13 @@
 //! and AppKit report fonts differently, so drawn pixels are what is compared.
 use std::io::Cursor;
 
-pub type Rgb = [u8; 3];
+pub(super) type Rgb = [u8; 3];
 
 /// A rectangle in points: x, y (from the top left), width, height.
-pub type Rect = [f64; 4];
+pub(super) type Rect = [f64; 4];
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Image {
+pub(super) struct Image {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<Rgb>,
@@ -23,7 +23,7 @@ pub struct Image {
 const INK: f64 = 48.0;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Ink {
+pub(super) struct Ink {
     /// The fill: the most common colour on the frame's edge.
     pub background: Rgb,
     /// The bounds of the pixels that are not the fill, in points.
@@ -36,7 +36,7 @@ pub struct Ink {
 }
 
 impl Image {
-    pub fn decode(bytes: &[u8], points_wide: f64) -> Result<Self, String> {
+    pub(super) fn decode(bytes: &[u8], points_wide: f64) -> Result<Self, String> {
         let mut decoder = png::Decoder::new(Cursor::new(bytes));
         decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
         let mut reader = decoder.read_info().map_err(|error| error.to_string())?;
@@ -65,7 +65,7 @@ impl Image {
         })
     }
 
-    pub fn encode(&self) -> Vec<u8> {
+    pub(super) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut bytes, self.width as u32, self.height as u32);
@@ -101,7 +101,7 @@ impl Image {
     /// is the most common colour a point inside the edge (clear of a border and
     /// the rounded corners), and its ink is what differs from that fill inside
     /// the corners' reach (a round button's glyph, not the page around it).
-    pub fn ink(&self, rect: Rect, radius: f64) -> Option<Ink> {
+    pub(super) fn ink(&self, rect: Rect, radius: f64) -> Option<Ink> {
         let radius = radius.clamp(0.0, rect[2].min(rect[3]) / 2.0);
         let corner = radius * (1.0 - std::f64::consts::FRAC_1_SQRT_2);
         let inset = corner.max(1.0).min(rect[2].min(rect[3]) / 4.0);
@@ -147,7 +147,7 @@ impl Image {
     }
 
     /// Outlines `rect` in `color`, two points wide.
-    pub fn outline(&mut self, rect: Rect, color: Rgb) {
+    pub(super) fn outline(&mut self, rect: Rect, color: Rgb) {
         let Some([left, top, right, bottom]) = self.span(rect) else {
             return;
         };
@@ -168,7 +168,7 @@ impl Image {
 
 /// `left` and `right` beside each other on a dark gap, `right` scaled to
 /// `left`'s pixels per point.
-pub fn side_by_side(left: &Image, right: &Image) -> Image {
+pub(super) fn side_by_side(left: &Image, right: &Image) -> Image {
     let right = resample(right, left.scale);
     let gap = (left.scale * 16.0).round() as usize;
     let width = left.width + gap + right.width;
@@ -221,7 +221,7 @@ fn middle_of_edges([left, top, right, bottom]: [usize; 4]) -> impl Iterator<Item
     across.chain(down)
 }
 
-pub fn distance(a: Rgb, b: Rgb) -> f64 {
+pub(super) fn distance(a: Rgb, b: Rgb) -> f64 {
     a.iter()
         .zip(b)
         .map(|(a, b)| (f64::from(*a) - f64::from(b)).powi(2))

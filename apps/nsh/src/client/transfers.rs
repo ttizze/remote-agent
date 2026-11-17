@@ -39,7 +39,7 @@ pub(crate) enum AttachmentSource {
 }
 
 impl Client {
-    pub fn download(
+    pub(crate) fn download(
         self: &Arc<Self>,
         host: String,
         source: String,
@@ -85,7 +85,7 @@ impl Client {
         Ok(Arc::new(file))
     }
 
-    pub fn cache_image(
+    pub(crate) fn cache_image(
         self: &Arc<Self>,
         bytes: Vec<u8>,
         extension: String,
@@ -107,7 +107,7 @@ impl Client {
     }
 
     /// A selected batch stays owned here while its originating view changes.
-    pub fn attach_batch(
+    pub(crate) fn attach_batch(
         self: &Arc<Self>,
         id: uuid::Uuid,
         host: String,

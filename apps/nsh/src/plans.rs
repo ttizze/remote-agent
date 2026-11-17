@@ -28,7 +28,7 @@ pub(crate) struct Saver {
 }
 
 impl Saver {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             plan: signal(None),
             submission: Submission::new(),
@@ -77,7 +77,7 @@ impl Saver {
         );
     }
 
-    pub fn view(self, connection: Connection) -> View {
+    pub(crate) fn view(self, connection: Connection) -> View {
         let root = view().child(self.editor(connection));
         #[cfg(target_os = "ios")]
         let root = root.child(

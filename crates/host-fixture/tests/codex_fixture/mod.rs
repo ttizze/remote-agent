@@ -1,7 +1,7 @@
 use codex_app_server::AppServerConfig;
 use std::path::Path;
 
-pub fn config(directory: &Path) -> AppServerConfig {
+pub(crate) fn config(directory: &Path) -> AppServerConfig {
     AppServerConfig {
         program: host_fixture::fixture::Config {
             stream_delay_ms: 5,

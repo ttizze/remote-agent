@@ -240,13 +240,13 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
 pub(crate) mod entries {
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, sync::Arc};
-    pub fn serialize<S: serde::Serializer, K: Serialize, V: Serialize>(
+    pub(crate) fn serialize<S: serde::Serializer, K: Serialize, V: Serialize>(
         values: &BTreeMap<K, V>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(values.iter())
     }
-    pub fn deserialize<
+    pub(crate) fn deserialize<
         'de,
         D: serde::Deserializer<'de>,
         K: Deserialize<'de> + Ord,

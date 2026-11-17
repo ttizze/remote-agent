@@ -48,17 +48,17 @@ pub(crate) struct TextFile {
 }
 
 impl Browser {
-    pub fn close(self) {
+    pub(crate) fn close(self) {
         self.workspace.hide();
         self.preview.close();
     }
 
-    pub fn show(self, path: String) {
+    pub(crate) fn show(self, path: String) {
         self.preview.close();
         self.workspace.open(PanelKind::Files, Some(path), None);
     }
 
-    pub fn new(preview: Preview) -> Self {
+    pub(crate) fn new(preview: Preview) -> Self {
         let workspace = use_context::<Workbench>().unwrap();
         let connection = use_context::<Connection>().unwrap();
         let line = computed(move || connection.state.with(|state| state.file_line));
@@ -110,7 +110,7 @@ impl Browser {
         }
     }
 
-    pub fn open(
+    pub(crate) fn open(
         self,
         source: String,
         cwd: String,
@@ -169,7 +169,7 @@ impl Browser {
 
     /// The Host path `source` names, with its position, for an editor or a
     /// menu's action; a target that does not exist yet still resolves.
-    pub fn resolve(
+    pub(crate) fn resolve(
         self,
         source: String,
         cwd: String,
@@ -201,7 +201,13 @@ impl Browser {
         });
     }
 
-    pub fn open_file(self, path: String, line: Option<u32>, host: String, client: Arc<Client>) {
+    pub(crate) fn open_file(
+        self,
+        path: String,
+        line: Option<u32>,
+        host: String,
+        client: Arc<Client>,
+    ) {
         if file_preview_mime_type(path.clone()).is_some() {
             self.preview
                 .load(crate::media::receive(client.download(host, path)));

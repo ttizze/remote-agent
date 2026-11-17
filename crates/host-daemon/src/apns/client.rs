@@ -82,7 +82,7 @@ fn rejection_result(status: u16, rejection: Rejection) -> ResultKind {
 }
 
 impl Client {
-    pub async fn load(path: &Path) -> Result<Option<Self>> {
+    pub(super) async fn load(path: &Path) -> Result<Option<Self>> {
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -180,7 +180,7 @@ impl Client {
             .map_err(|_| anyhow::anyhow!("cannot encode APNs request"))
     }
 
-    pub async fn send(
+    pub(super) async fn send(
         &self,
         environment: PushEnvironment,
         token: &[u8],

@@ -51,13 +51,13 @@ pub(super) struct Registry {
 }
 mod entries {
     use super::*;
-    pub fn serialize<S: serde::Serializer>(
+    pub(super) fn serialize<S: serde::Serializer>(
         values: &Registrations,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(values.iter())
     }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Registrations, D::Error> {
         let entries = Vec::<((String, Option<String>), Registration)>::deserialize(deserializer)?;
@@ -71,10 +71,10 @@ mod entries {
     }
 }
 impl Registry {
-    pub fn is_ready(&self) -> bool {
+    pub(super) fn is_ready(&self) -> bool {
         self.display.is_some()
     }
-    pub fn register(
+    pub(super) fn register(
         &mut self,
         owner: &str,
         params: &RegisterLiveActivity,
@@ -142,7 +142,7 @@ impl Registry {
         }
         Ok(())
     }
-    pub fn unregister(&mut self, owner: &str, activity: &str) {
+    pub(super) fn unregister(&mut self, owner: &str, activity: &str) {
         let Some(entry) = self
             .entries
             .remove(&(owner.to_owned(), Some(activity.to_owned())))
@@ -163,10 +163,10 @@ impl Registry {
             start.generation = self.generation;
         }
     }
-    pub fn revoke(&mut self, owner: &str) {
+    pub(super) fn revoke(&mut self, owner: &str) {
         self.entries.retain(|(principal, _), _| principal != owner);
     }
-    pub fn update(&mut self, display: TaskActivityDisplay, now: u64) -> bool {
+    pub(super) fn update(&mut self, display: TaskActivityDisplay, now: u64) -> bool {
         self.display = Some(display.clone());
         let previous = self.generation;
         for ((_, activity), entry) in &mut self.entries {
@@ -187,7 +187,7 @@ impl Registry {
         }
         self.generation != previous
     }
-    pub fn deliveries(&mut self, now: u64) -> Vec<Delivery> {
+    pub(super) fn deliveries(&mut self, now: u64) -> Vec<Delivery> {
         let expired: Vec<_> = self
             .entries
             .iter()
@@ -249,12 +249,12 @@ impl Registry {
         }
         deliveries
     }
-    pub fn current(&self, delivery: &Delivery) -> bool {
+    pub(super) fn current(&self, delivery: &Delivery) -> bool {
         self.entries
             .get(&(delivery.owner.clone(), delivery.activity.clone()))
             .is_some_and(|entry| entry.generation == delivery.generation)
     }
-    pub fn complete(&mut self, delivery: &Delivery, result: ResultKind, now: u64) {
+    pub(super) fn complete(&mut self, delivery: &Delivery, result: ResultKind, now: u64) {
         if !self.current(delivery) {
             return;
         }

@@ -40,7 +40,7 @@ struct Gallery {
 }
 
 impl Preview {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: signal(PreviewState::Closed),
             #[cfg(desktop)]
@@ -53,7 +53,7 @@ impl Preview {
         self.state.set(PreviewState::Ready(file));
     }
 
-    pub fn begin(self) -> uuid::Uuid {
+    pub(crate) fn begin(self) -> uuid::Uuid {
         let request = uuid::Uuid::new_v4();
         self.state.set(PreviewState::Loading(request));
         #[cfg(desktop)]
@@ -61,15 +61,23 @@ impl Preview {
         request
     }
 
-    pub fn is_pending(self, request: uuid::Uuid) -> bool {
+    pub(crate) fn is_pending(self, request: uuid::Uuid) -> bool {
         self.state.get_untracked() == PreviewState::Loading(request)
     }
 
-    pub fn load(self, transfer: impl Future<Output = Result<Shared<LocalFile>, String>> + 'static) {
+    pub(crate) fn load(
+        self,
+        transfer: impl Future<Output = Result<Shared<LocalFile>, String>> + 'static,
+    ) {
         self.load_with(transfer, move |file| self.show(file));
     }
 
-    pub fn load_image(self, connection: Connection, source: String, sources: Option<Vec<String>>) {
+    pub(crate) fn load_image(
+        self,
+        connection: Connection,
+        source: String,
+        sources: Option<Vec<String>>,
+    ) {
         let client = connection.client.get();
         let host = connection.host.get_untracked();
         let cwd = connection
@@ -110,7 +118,7 @@ impl Preview {
         });
     }
 
-    pub fn close(self) {
+    pub(crate) fn close(self) {
         self.state.set(PreviewState::Closed);
         #[cfg(desktop)]
         self.gallery.set(None);

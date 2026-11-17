@@ -1,15 +1,15 @@
 //! Canonical conversation fixtures for core's colocated tests.
 use crate::test_host::rows;
-pub use rows::orchestration::snapshot as projection;
-pub use rows::{shell, shell_thread};
+pub(crate) use rows::orchestration::snapshot as projection;
+pub(crate) use rows::{shell, shell_thread};
 #[path = "conversation_open.rs"]
 mod opening;
-pub use opening::opened;
+pub(crate) use opening::opened;
 #[path = "conversation_change.rs"]
 mod changes;
-pub use changes::changed;
+pub(crate) use changes::changed;
 
-pub fn open(
+pub(crate) fn open(
     snapshot: &mut agent_core::state::Snapshot,
     response: agent_protocol::models::ThreadResponse,
 ) {

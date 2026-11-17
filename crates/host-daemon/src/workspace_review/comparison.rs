@@ -29,11 +29,11 @@ pub(crate) fn source_ref(cwd: &Path, source: &str) -> Result<String> {
 }
 
 impl Comparison {
-    pub fn open(cwd: &Path) -> Result<Option<Self>> {
+    pub(super) fn open(cwd: &Path) -> Result<Option<Self>> {
         Self::open_with_base(cwd, None)
     }
 
-    pub fn open_with_base(cwd: &Path, requested: Option<&str>) -> Result<Option<Self>> {
+    pub(super) fn open_with_base(cwd: &Path, requested: Option<&str>) -> Result<Option<Self>> {
         match std::fs::metadata(cwd) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -100,7 +100,7 @@ impl Comparison {
         }))
     }
 
-    pub fn diff(&self, format: &str) -> Result<Vec<u8>> {
+    pub(super) fn diff(&self, format: &str) -> Result<Vec<u8>> {
         // Compare the working tree itself: a dirty submodule cannot be
         // represented by writing its parent repository's index to a tree.
         index_output(

@@ -142,7 +142,7 @@ impl Chrome {
         }
     }
 
-    pub async fn launch(profile: &Path, executable: &Path) -> Result<Self, String> {
+    pub(super) async fn launch(profile: &Path, executable: &Path) -> Result<Self, String> {
         agent_local_host::create_state_directory(profile).map_err(|e| e.to_string())?;
         let port_file = profile.join("DevToolsActivePort");
         match tokio::fs::remove_file(&port_file).await {
@@ -212,7 +212,7 @@ impl Chrome {
         }
     }
 
-    pub async fn shutdown(mut self) {
+    pub(super) async fn shutdown(mut self) {
         let _ = self.call(None, "Browser.close", json!({})).await;
         // Keep the supervisor lifetime pipe open while Chrome flushes its profile.
         if !matches!(
@@ -224,7 +224,7 @@ impl Chrome {
         }
     }
 
-    pub async fn call(
+    pub(super) async fn call(
         &mut self,
         session: Option<&str>,
         method: &str,
@@ -280,7 +280,7 @@ impl Chrome {
         }
     }
 
-    pub fn disconnected(&self) -> bool {
+    pub(super) fn disconnected(&self) -> bool {
         self.commands.is_closed()
     }
 
@@ -305,7 +305,7 @@ impl Chrome {
         Ok(())
     }
 
-    pub async fn targets(&mut self) -> Result<Vec<Target>, String> {
+    pub(super) async fn targets(&mut self) -> Result<Vec<Target>, String> {
         let targets: Vec<Target> = serde_json::from_value(
             self.call(None, "Target.getTargets", json!({})).await?["targetInfos"].clone(),
         )
@@ -321,14 +321,14 @@ impl Chrome {
         }
         Ok(targets)
     }
-    pub async fn create(&mut self) -> Result<String, String> {
+    pub(super) async fn create(&mut self) -> Result<String, String> {
         self.call(None, "Target.createTarget", json!({"url":"about:blank"}))
             .await?["targetId"]
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| "ブラウザのタブを作成できません。".into())
     }
-    pub async fn close_tab(&mut self, target: &str) -> Result<(), String> {
+    pub(super) async fn close_tab(&mut self, target: &str) -> Result<(), String> {
         self.call(None, "Target.closeTarget", json!({"targetId":target}))
             .await?;
         self.forget_target(target);
@@ -347,13 +347,18 @@ impl Chrome {
         }
     }
 
-    pub fn navigation(&self, target: &str) -> u64 {
+    pub(super) fn navigation(&self, target: &str) -> u64 {
         self.sessions
             .get(target)
             .and_then(|session| self.events.lock().unwrap().navigation.get(session).copied())
             .unwrap_or(0)
     }
-    pub async fn resize(&mut self, session: &str, width: u32, height: u32) -> Result<(), String> {
+    pub(super) async fn resize(
+        &mut self,
+        session: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
         if self.sizes.get(session) == Some(&(width, height)) {
             return Ok(());
         }
@@ -367,7 +372,7 @@ impl Chrome {
         self.sizes.insert(session.into(), (width, height));
         Ok(())
     }
-    pub async fn history(&mut self, session: &str) -> Result<(bool, bool), String> {
+    pub(super) async fn history(&mut self, session: &str) -> Result<(bool, bool), String> {
         let result = self
             .read_page(session, "Page.getNavigationHistory", json!({}))
             .await?;
@@ -379,7 +384,7 @@ impl Chrome {
                 .is_some_and(|entries| index + 1 < entries.len()),
         ))
     }
-    pub async fn attach(&mut self, target: &str) -> Result<String, String> {
+    pub(super) async fn attach(&mut self, target: &str) -> Result<String, String> {
         if let Some(session) = self.sessions.get(target) {
             return Ok(session.clone());
         }
@@ -399,10 +404,10 @@ impl Chrome {
         self.sessions.insert(target.into(), session.clone());
         Ok(session)
     }
-    pub fn dialog(&self, session: &str) -> Option<BrowserDialog> {
+    pub(super) fn dialog(&self, session: &str) -> Option<BrowserDialog> {
         self.events.lock().unwrap().dialogs.get(session).cloned()
     }
-    pub fn loading(&self, session: &str) -> bool {
+    pub(super) fn loading(&self, session: &str) -> bool {
         self.events
             .lock()
             .unwrap()
@@ -411,7 +416,7 @@ impl Chrome {
             .copied()
             .unwrap_or(false)
     }
-    pub async fn latest_image(&mut self, session: &str) -> Result<Vec<u8>, String> {
+    pub(super) async fn latest_image(&mut self, session: &str) -> Result<Vec<u8>, String> {
         let (start, streaming) = {
             let mut events = self.events.lock().unwrap();
             match events.viewers.entry(session.into()) {
@@ -468,7 +473,7 @@ impl Chrome {
         );
         Ok(image)
     }
-    pub fn cached_image(&self, session: &str) -> Option<Vec<u8>> {
+    pub(super) fn cached_image(&self, session: &str) -> Option<Vec<u8>> {
         let size = self.sizes.get(session).copied().unwrap_or((WIDTH, HEIGHT));
         self.events
             .lock()
@@ -478,7 +483,7 @@ impl Chrome {
             .filter(|frame| (frame.width, frame.height) == size)
             .map(|frame| frame.image.clone())
     }
-    pub async fn screenshot(&mut self, session: &str) -> Result<Vec<u8>, String> {
+    pub(super) async fn screenshot(&mut self, session: &str) -> Result<Vec<u8>, String> {
         self.call(Some(session), "Page.bringToFront", json!({}))
             .await?;
         let frame = self
@@ -665,7 +670,7 @@ impl Chrome {
         self.refs.insert(session.into(), (navigation, refs));
         Ok(serde_json::to_string(&nodes).unwrap())
     }
-    pub async fn action(
+    pub(super) async fn action(
         &mut self,
         session: &str,
         action: &BrowserAction,

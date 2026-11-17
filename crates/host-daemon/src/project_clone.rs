@@ -50,7 +50,7 @@ impl Registry {
 }
 
 impl Clones {
-    pub fn new(projects: ProjectStore) -> Self {
+    pub(crate) fn new(projects: ProjectStore) -> Self {
         Self(Arc::new(Owner {
             projects,
             registry: OnceCell::new(),
@@ -64,7 +64,7 @@ impl Clones {
             .path()
             .with_file_name("bex-project-clones.json")
     }
-    pub fn subscribe(&self) -> watch::Receiver<Option<ProjectClones>> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<Option<ProjectClones>> {
         self.0.changed.subscribe()
     }
     async fn registry(&self) -> Result<&Mutex<Registry>> {
@@ -124,10 +124,10 @@ impl Clones {
         self.0.changed.send_replace(Some(registry.catalog()));
         Ok(())
     }
-    pub async fn read(&self) -> Result<ProjectClones> {
+    pub(crate) async fn read(&self) -> Result<ProjectClones> {
         Ok(self.registry().await?.lock().await.catalog())
     }
-    pub async fn start(&self, mut request: CloneProject) -> Result<ProjectClones> {
+    pub(crate) async fn start(&self, mut request: CloneProject) -> Result<ProjectClones> {
         request.validate().map_err(anyhow::Error::msg)?;
         request.destination = normalize_destination(&request.destination).await?;
         let mut registry = self.registry().await?.lock().await;
@@ -174,7 +174,7 @@ impl Clones {
         self.spawn(&mut registry, request);
         Ok(registry.catalog())
     }
-    pub async fn change(&self, request: ChangeProjectClone) -> Result<ProjectClones> {
+    pub(crate) async fn change(&self, request: ChangeProjectClone) -> Result<ProjectClones> {
         validate_id(&request.id).map_err(anyhow::Error::msg)?;
         let mut registry = self.registry().await?.lock().await;
         ensure!(!registry.shutting_down, "Host is shutting down");
@@ -326,7 +326,7 @@ impl Clones {
         entry.state.progress = progress;
         self.commit(&mut registry, entries, durable).await
     }
-    pub async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) {
         if let Ok(registry) = self.registry().await {
             let mut registry = registry.lock().await;
             registry.shutting_down = true;

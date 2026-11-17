@@ -52,7 +52,9 @@ pub(crate) fn shown() -> bool {
     lifecycle == Lifecycle::Active || (cfg!(desktop) && lifecycle == Lifecycle::Inactive)
 }
 
-pub fn items(choices: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Value {
+pub(crate) fn items(
+    choices: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+) -> Value {
     json!(
         choices
             .into_iter()
@@ -61,7 +63,7 @@ pub fn items(choices: impl IntoIterator<Item = (impl Into<String>, impl Into<Str
     )
 }
 
-pub fn choices(titles: &[&str]) -> Value {
+pub(crate) fn choices(titles: &[&str]) -> Value {
     items(titles.iter().map(|title| (*title, *title)))
 }
 
@@ -136,7 +138,7 @@ pub(crate) fn zoom_area(
     })
 }
 
-pub fn image_extension(mime: &str) -> Option<String> {
+pub(crate) fn image_extension(mime: &str) -> Option<String> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         use objc2_foundation::NSString;
@@ -149,7 +151,7 @@ pub fn image_extension(mime: &str) -> Option<String> {
     agent_core::presentation::files::image_extension(mime).map(str::to_owned)
 }
 
-pub fn image_file(path: &std::path::Path) -> bool {
+pub(crate) fn image_file(path: &std::path::Path) -> bool {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         use objc2_foundation::NSString;
@@ -168,7 +170,11 @@ pub fn image_file(path: &std::path::Path) -> bool {
         .is_some_and(agent_core::presentation::files::is_image_file)
 }
 
-pub fn button(symbol: &'static str, label: &'static str, press: impl Fn() + 'static) -> NativeView {
+pub(crate) fn button(
+    symbol: &'static str,
+    label: &'static str,
+    press: impl Fn() + 'static,
+) -> NativeView {
     native("bex.button")
         .prop("symbol", json!(symbol))
         .prop("label", json!(label))
@@ -179,7 +185,7 @@ pub fn button(symbol: &'static str, label: &'static str, press: impl Fn() + 'sta
         })
 }
 
-pub fn menu(
+pub(crate) fn menu(
     symbol: &'static str,
     label: &'static str,
     items: impl IntoReactive<Value>,
@@ -198,7 +204,10 @@ pub fn menu(
         })
 }
 
-pub fn text_button(title: impl IntoReactive<Value>, press: impl Fn() + 'static) -> NativeView {
+pub(crate) fn text_button(
+    title: impl IntoReactive<Value>,
+    press: impl Fn() + 'static,
+) -> NativeView {
     native("bex.button")
         .prop("title", title)
         .on_native_event(move |event: &NativeEvent| {
@@ -208,7 +217,7 @@ pub fn text_button(title: impl IntoReactive<Value>, press: impl Fn() + 'static) 
         })
 }
 
-pub fn toolbar(title: Memo<String>, action: impl Fn(&str) + 'static) -> NativeView {
+pub(crate) fn toolbar(title: Memo<String>, action: impl Fn(&str) + 'static) -> NativeView {
     native("bex.toolbar")
         .prop("title", move || json!(title.get()))
         .on_native_event(move |event: &NativeEvent| {
@@ -220,7 +229,7 @@ pub fn toolbar(title: Memo<String>, action: impl Fn(&str) + 'static) -> NativeVi
         })
 }
 
-pub fn message(title: impl Into<String>, description: impl Into<String>) {
+pub(crate) fn message(title: impl Into<String>, description: impl Into<String>) {
     let title = title.into();
     // Callers pass their own copy or a reason Core composed.
     let description = localized(description.into());
@@ -234,7 +243,7 @@ pub fn message(title: impl Into<String>, description: impl Into<String>) {
     });
 }
 
-pub fn open_link(url: impl Into<String>) {
+pub(crate) fn open_link(url: impl Into<String>) {
     let url = url.into();
     spawn(async move {
         if !open_url(url).await {
@@ -246,7 +255,7 @@ pub fn open_link(url: impl Into<String>) {
     });
 }
 
-pub fn date_time(seconds: i64) -> String {
+pub(crate) fn date_time(seconds: i64) -> String {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         use objc2_foundation::{NSDate, NSDateFormatter, NSDateFormatterStyle};

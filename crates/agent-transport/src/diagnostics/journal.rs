@@ -32,7 +32,7 @@ fn sequence(report: &ConnectionPerformance) -> u64 {
 }
 
 impl Journal {
-    pub fn open(directory: PathBuf, trace: u64) -> io::Result<Self> {
+    pub(super) fn open(directory: PathBuf, trace: u64) -> io::Result<Self> {
         let pending = Arc::new(Mutex::new(None::<ConnectionPerformance>));
         let snapshots = pending.clone();
         let (commands, mut receiver) = mpsc::channel(8);
@@ -70,7 +70,7 @@ impl Journal {
         Ok(Self { pending, commands })
     }
 
-    pub fn checkpoint(&self, report: ConnectionPerformance) {
+    pub(super) fn checkpoint(&self, report: ConnectionPerformance) {
         let mut pending = self.pending.lock().unwrap();
         if pending
             .as_ref()
@@ -82,7 +82,7 @@ impl Journal {
         let _ = self.commands.try_send(Command::Wake);
     }
 
-    pub async fn read(&self) -> Vec<ConnectionPerformance> {
+    pub(super) async fn read(&self) -> Vec<ConnectionPerformance> {
         let (send, receive) = oneshot::channel();
         if self.commands.send(Command::Read(send)).await.is_err() {
             return Vec::new();
@@ -90,14 +90,14 @@ impl Journal {
         receive.await.unwrap_or_default()
     }
 
-    pub async fn close(&self) {
+    pub(super) async fn close(&self) {
         let (send, receive) = oneshot::channel();
         if self.commands.send(Command::Close(send)).await.is_ok() {
             let _ = receive.await;
         }
     }
 
-    pub async fn acknowledge(&self, report: &ConnectionPerformance) {
+    pub(super) async fn acknowledge(&self, report: &ConnectionPerformance) {
         let (send, receive) = oneshot::channel();
         if self
             .commands

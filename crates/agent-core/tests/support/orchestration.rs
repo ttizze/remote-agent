@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 const NOW: &str = "2026-11-14T00:00:00.000Z";
 
-pub fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
+pub(crate) fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapshot {
     let thread = &response.thread;
     let identity = thread.id.as_ref().expect("fixture thread identity");
     let provider = thread
@@ -366,7 +366,7 @@ fn push_item(projection: &mut ThreadProjection, mut item: model::TurnItem, visib
     }
 }
 
-pub fn item_record(
+pub(crate) fn item_record(
     thread: &str,
     run: Option<&str>,
     item: &agent_protocol::items::Item,

@@ -9,7 +9,7 @@ pub(crate) struct Settings {
 }
 
 impl Settings {
-    pub fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         let state = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -23,11 +23,11 @@ impl Settings {
         }
     }
 
-    pub fn read(&self) -> Result<ProviderSettings, Failure> {
+    pub(crate) fn read(&self) -> Result<ProviderSettings, Failure> {
         self.state.lock().unwrap().clone().map_err(failure)
     }
 
-    pub fn set_enabled(
+    pub(crate) fn set_enabled(
         &self,
         provider: ProviderKind,
         enabled: bool,

@@ -67,7 +67,7 @@ fn claim(
 }
 
 impl Automations {
-    pub fn open(path: &Path) -> Self {
+    pub(crate) fn open(path: &Path) -> Self {
         let result = (|| {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(failure)?;
@@ -95,10 +95,13 @@ impl Automations {
         let mut guard = self.0.lock().map_err(failure)?;
         f(guard.as_mut().map_err(|error| error.clone())?)
     }
-    pub fn list(&self, session: Option<&SessionRef>) -> Result<Reply, String> {
+    pub(crate) fn list(&self, session: Option<&SessionRef>) -> Result<Reply, String> {
         self.with(|c| all(c, session).map(|automations| Reply { automations }))
     }
-    pub fn uncertain(&self, session: Option<&SessionRef>) -> Result<Vec<Automation>, String> {
+    pub(crate) fn uncertain(
+        &self,
+        session: Option<&SessionRef>,
+    ) -> Result<Vec<Automation>, String> {
         self.with(|connection| {
             let mut statement = connection
                 .prepare(
@@ -112,7 +115,7 @@ impl Automations {
                 .collect()
         })
     }
-    pub fn change(&self, request: &Request, now: i64) -> Result<Option<Automation>, String> {
+    pub(crate) fn change(&self, request: &Request, now: i64) -> Result<Option<Automation>, String> {
         request.validate().map_err(str::to_owned)?;
         self.with(|connection| {
             let tx = connection.transaction().map_err(failure)?;
@@ -202,7 +205,7 @@ impl Automations {
             Ok(dispatch)
         })
     }
-    pub fn due(&self, now: i64) -> Result<Vec<Automation>, String> {
+    pub(crate) fn due(&self, now: i64) -> Result<Vec<Automation>, String> {
         self.with(|connection| {
             let tx = connection.transaction().map_err(failure)?;
             let candidates = {
@@ -224,7 +227,7 @@ impl Automations {
         })
     }
     /// Record what the conversation owner certified about this dispatch.
-    pub fn finish(&self, value: &Automation, state: RunState) -> Result<(), String> {
+    pub(crate) fn finish(&self, value: &Automation, state: RunState) -> Result<(), String> {
         self.with(|connection| {
             let Some(run) = &value.last_run else {
                 return Ok(());

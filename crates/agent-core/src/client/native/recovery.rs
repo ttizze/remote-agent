@@ -15,7 +15,7 @@ pub(super) struct Recovery {
     _stop: DropGuard,
 }
 impl Recovery {
-    pub fn start(
+    pub(super) fn start(
         store: Arc<Store>,
         endpoint: Endpoint,
         ticket: Ticket,
@@ -89,7 +89,7 @@ impl Recovery {
             _stop: stop.drop_guard(),
         }
     }
-    pub fn wake(&self) {
+    pub(super) fn wake(&self) {
         self.wake.notify_one();
     }
 }

@@ -26,7 +26,7 @@ impl Drop for ManagedKeys {
     }
 }
 impl ManagedKeys {
-    pub async fn load(directory: &Path) -> Result<Self, Failure> {
+    pub(super) async fn load(directory: &Path) -> Result<Self, Failure> {
         let file = match tokio::fs::File::open(directory.join("dsh-keys.json")).await {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -55,13 +55,13 @@ impl ManagedKeys {
         }
         Ok(keys)
     }
-    pub fn get(&self, provider: KeyProvider) -> Option<&str> {
+    pub(super) fn get(&self, provider: KeyProvider) -> Option<&str> {
         self.refs.get(provider.reference()).map(String::as_str)
     }
-    pub fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.refs.is_empty()
     }
-    pub fn set(&mut self, provider: KeyProvider, key: Option<&str>) {
+    pub(super) fn set(&mut self, provider: KeyProvider, key: Option<&str>) {
         if let Some(mut previous) = self.refs.remove(provider.reference()) {
             previous.zeroize();
         }
@@ -70,7 +70,7 @@ impl ManagedKeys {
                 .insert(provider.reference().into(), key.to_owned());
         }
     }
-    pub async fn save(&self, directory: &Path) -> Result<(), Failure> {
+    pub(super) async fn save(&self, directory: &Path) -> Result<(), Failure> {
         // Retire generated data before committing the authoritative file. A failed
         // replacement leaves the previous credentials authoritative and regenerable.
         match tokio::fs::remove_file(directory.join("dsh-runtime-credentials.json")).await {
@@ -80,7 +80,7 @@ impl ManagedKeys {
         }
         agent_local_host::save_private_json(&directory.join("dsh-keys.json"), self).map_err(failure)
     }
-    pub fn status(&self, external_key: Option<&str>, external_file: bool) -> Credentials {
+    pub(super) fn status(&self, external_key: Option<&str>, external_file: bool) -> Credentials {
         Credentials {
             routes: KeyProvider::ALL
                 .into_iter()

@@ -188,6 +188,11 @@ iroh-e2e:
     cargo build --locked --package agent-process --bin agent-provider-supervisor
     AGENT_RUNTIME_DIRECTORY="$PWD/target/debug" cargo test --locked --package host-fixture --test iroh_host
 
+# Lint the workspace on the configured builder without compiling native clients.
+[group('portable')]
+lint-rust:
+    bash scripts/lint-rust.sh
+
 # Lint and validate contracts without building native clients or starting E2E.
 quality language="apple":
     scripts/quality.sh "$@"

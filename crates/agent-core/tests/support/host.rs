@@ -1,6 +1,6 @@
 #[path = "conversation_rows.rs"]
-pub mod rows;
-pub use rows::orchestration;
+pub(crate) mod rows;
+pub(crate) use rows::orchestration;
 // Scripted unit-test Host over the actual QUIC/MessagePack transport.
 // JSON values below are fixture data, never an alternate transport.
 use agent_core::state::Snapshot;
@@ -19,14 +19,14 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tokio::sync::mpsc;
 
-pub struct Request {
+pub(crate) struct Request {
     call: Call,
     fixture: Value,
     send: tokio::sync::Mutex<Option<transport::HostPeer>>,
 }
 impl Request {
     /// Deliberately malformed payloads must reach the real client's typed decoder.
-    pub async fn reply_unchecked(&self, result: Value) -> std::io::Result<()> {
+    pub(crate) async fn reply_unchecked(&self, result: Value) -> std::io::Result<()> {
         let mut send = self
             .send
             .lock()
@@ -35,7 +35,7 @@ impl Request {
             .expect("request already answered");
         agent_transport::framing::write(&mut send, protocol::Response::Success { result }).await
     }
-    pub async fn acknowledge(&self) -> std::io::Result<()> {
+    pub(crate) async fn acknowledge(&self) -> std::io::Result<()> {
         let mut send = self
             .send
             .lock()
@@ -57,7 +57,7 @@ impl std::ops::Deref for Request {
         &self.fixture
     }
 }
-pub struct Reader {
+pub(crate) struct Reader {
     incoming: mpsc::Receiver<Request>,
     scripted_composer_catalog: bool,
     scripted_model_catalog: bool,
@@ -65,19 +65,19 @@ pub struct Reader {
     scripted_project_clones: bool,
 }
 impl Reader {
-    pub fn script_project_clones(&mut self) {
+    pub(crate) fn script_project_clones(&mut self) {
         self.scripted_project_clones = true;
     }
-    pub fn script_decorations(&mut self) {
+    pub(crate) fn script_decorations(&mut self) {
         self.scripted_decorations = true;
     }
-    pub fn script_model_catalog(&mut self) {
+    pub(crate) fn script_model_catalog(&mut self) {
         self.scripted_model_catalog = true;
     }
-    pub fn script_composer_catalog(&mut self) {
+    pub(crate) fn script_composer_catalog(&mut self) {
         self.scripted_composer_catalog = true;
     }
-    pub async fn read_request(&mut self) -> std::io::Result<Option<Request>> {
+    pub(crate) async fn read_request(&mut self) -> std::io::Result<Option<Request>> {
         while let Some(request) = self.incoming.recv().await {
             if !self.scripted_project_clones && matches!(&request.call, Call::ReadProjectClones(_))
             {
@@ -169,12 +169,12 @@ impl Reader {
         Ok(None)
     }
 }
-pub struct Session {
+pub(crate) struct Session {
     inner: transport::Session,
     blobs: tokio::sync::Mutex<mpsc::Receiver<transport::Stream>>,
 }
 impl Session {
-    pub async fn accept_stream(&self) -> std::io::Result<transport::Stream> {
+    pub(crate) async fn accept_stream(&self) -> std::io::Result<transport::Stream> {
         self.blobs
             .lock()
             .await
@@ -182,7 +182,7 @@ impl Session {
             .await
             .ok_or_else(|| std::io::Error::other("fixture closed"))
     }
-    pub fn close(&self) {
+    pub(crate) fn close(&self) {
         self.inner.close();
     }
 }
@@ -195,16 +195,16 @@ struct State {
     threads: HashMap<SessionRef, Value>,
     projections: HashMap<SessionRef, agent_protocol::orchestration::projection::ThreadSnapshot>,
 }
-pub struct Writer {
+pub(crate) struct Writer {
     state: Mutex<State>,
     events: tokio::sync::Mutex<transport::HostPeer>,
     streams: tokio::sync::Mutex<HashMap<uuid::Uuid, transport::HostPeer>>,
 }
-pub async fn accept(session: transport::Session) -> (Session, Reader, Writer) {
+pub(crate) async fn accept(session: transport::Session) -> (Session, Reader, Writer) {
     let events = session.accept_peer().await.unwrap();
     from_peer(session, events)
 }
-pub fn from_peer(
+pub(crate) fn from_peer(
     session: transport::Session,
     events: transport::HostPeer,
 ) -> (Session, Reader, Writer) {
@@ -256,7 +256,7 @@ pub fn from_peer(
         },
     )
 }
-pub async fn connect(
+pub(crate) async fn connect(
     snapshot: &Snapshot,
 ) -> ((Client, agent_transport::framing::Reader), Reader, Writer) {
     let host = Endpoint::bind(Identity::generate(), Relays::Loopback)
@@ -294,20 +294,20 @@ async fn reader_closed(session: &Session) -> bool {
     session.blobs.lock().await.recv().await.is_none()
 }
 impl Writer {
-    pub fn detail(
+    pub(crate) fn detail(
         &self,
         session: &SessionRef,
         item: &agent_protocol::items::Item,
     ) -> agent_protocol::orchestration::TurnItem {
         self.state.lock().unwrap().detail(session, item)
     }
-    pub fn projection(
+    pub(crate) fn projection(
         &self,
         id: &SessionRef,
     ) -> agent_protocol::orchestration::projection::ThreadSnapshot {
         self.state.lock().unwrap().projections[id].clone()
     }
-    pub async fn finish_updates(&self) {
+    pub(crate) async fn finish_updates(&self) {
         // Only end the latest subscriptions. Closing a replaced stream before
         // the client receives its new open response races with that response.
         let current: Vec<_> = self
@@ -325,7 +325,7 @@ impl Writer {
             }
         }
     }
-    pub fn current(&self, id: &SessionRef) -> Value {
+    pub(crate) fn current(&self, id: &SessionRef) -> Value {
         self.state
             .lock()
             .unwrap()
@@ -444,7 +444,7 @@ impl Writer {
         }
         Ok(Some(value))
     }
-    pub async fn send_stream(
+    pub(crate) async fn send_stream(
         &self,
         subscription: uuid::Uuid,
         message: impl serde::Serialize,
@@ -470,7 +470,7 @@ impl Writer {
             result
         }
     }
-    pub async fn reply(&self, request: &Request, value: Value) -> std::io::Result<()> {
+    pub(crate) async fn reply(&self, request: &Request, value: Value) -> std::io::Result<()> {
         let mut value = self.prepare(Some(request), value)?.unwrap();
         // The corpus is data for a typed result; only its MessagePack frame is sent.
         value["id"] = 0.into();
@@ -539,7 +539,7 @@ impl Writer {
         }
         Ok(())
     }
-    pub async fn notify(&self, value: Value) -> std::io::Result<()> {
+    pub(crate) async fn notify(&self, value: Value) -> std::io::Result<()> {
         let prepared = self.prepare(None, value)?;
         let Some(value) = prepared else {
             return Ok(());

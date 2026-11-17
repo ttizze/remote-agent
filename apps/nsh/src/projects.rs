@@ -162,7 +162,7 @@ pub(crate) struct Projects {
 }
 
 impl Projects {
-    pub fn new(
+    pub(crate) fn new(
         application: Stored<Arc<Application>>,
         list: Memo<Option<Shared<ThreadList>>>,
     ) -> Self {
@@ -178,7 +178,7 @@ impl Projects {
             .with(|application| application.snapshot().list_scope_matches(scope))
     }
 
-    pub fn select(self, command: &str) {
+    pub(crate) fn select(self, command: &str) {
         let Ok(command) = serde_json::from_str::<Command>(command) else {
             return;
         };
@@ -273,7 +273,7 @@ impl Projects {
 
     /// The project editor: an NSH dialog on the desktop, the platform's sheet on
     /// phones.
-    pub fn view(self) -> AnyElement {
+    pub(crate) fn view(self) -> AnyElement {
         if is_desktop() {
             return when(
                 move || self.editor.with(Option::is_some),

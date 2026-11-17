@@ -313,7 +313,7 @@ pub(crate) struct List {
 }
 
 impl List {
-    pub fn new(query: Signal<String>) -> Self {
+    pub(crate) fn new(query: Signal<String>) -> Self {
         let connection = use_context::<Connection>().unwrap();
         let sources = computed(move || connection.state.with(|state| state.list_sources()));
         let inputs = computed(move || connection.state.with(|state| state.list_inputs()));
@@ -381,7 +381,7 @@ impl List {
         }
     }
 
-    pub fn view(self, open: impl Fn() + Copy + 'static) -> AnyElement {
+    pub(crate) fn view(self, open: impl Fn() + Copy + 'static) -> AnyElement {
         let connection = use_context::<Connection>().unwrap();
         #[cfg(desktop)]
         let selected = self.selected;

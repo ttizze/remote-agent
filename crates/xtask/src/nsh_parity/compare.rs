@@ -10,19 +10,19 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Mode {
+pub(super) enum Mode {
     Presence,
     Appearance,
 }
 
 /// `t3.json` from `scripts/nsh-parity-t3.ts`.
 #[derive(Debug, Deserialize)]
-pub struct T3Capture {
+pub(super) struct T3Capture {
     pub elements: BTreeMap<String, Vec<T3Element>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct T3Element {
+pub(super) struct T3Element {
     pub frame: Rect,
     pub css: T3Style,
     #[serde(default)]
@@ -31,7 +31,7 @@ pub struct T3Element {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct T3Style {
+pub(super) struct T3Style {
     pub font_size: String,
     pub font_weight: String,
     pub line_height: String,
@@ -40,14 +40,14 @@ pub struct T3Style {
 
 /// `nsh.json` from the acceptance driver's `capture` step.
 #[derive(Debug, Deserialize)]
-pub struct NshCapture {
+pub(super) struct NshCapture {
     pub width: f64,
     pub height: f64,
     pub views: Vec<NshView>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct NshView {
+pub(super) struct NshView {
     pub parent: Option<usize>,
     pub class: String,
     pub frame: Rect,
@@ -60,7 +60,7 @@ pub struct NshView {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct NshLayer {
+pub(super) struct NshLayer {
     pub background: Option<[f64; 4]>,
     pub radius: f64,
     #[serde(default = "opaque")]
@@ -74,7 +74,7 @@ fn opaque() -> f64 {
 
 /// One side's element, measured.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct Measure {
+pub(super) struct Measure {
     pub frame: Rect,
     pub radius: Option<f64>,
     /// Endless animations in it or inside it. None means the renderer does
@@ -92,7 +92,7 @@ pub struct Measure {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct Difference {
+pub(super) struct Difference {
     pub element: String,
     pub metric: &'static str,
     pub reference: String,
@@ -103,7 +103,7 @@ pub struct Difference {
 }
 
 /// The reference's elements of a state: from T3's capture, or GPUI's layout.
-pub fn reference_measures(
+pub(super) fn reference_measures(
     map: &Map,
     state: &State,
     t3: Option<(&T3Capture, &Image)>,
@@ -121,7 +121,7 @@ pub fn reference_measures(
         .collect()
 }
 
-pub fn nsh_measures(
+pub(super) fn nsh_measures(
     map: &Map,
     state: &State,
     capture: &NshCapture,
@@ -143,7 +143,7 @@ fn elements<'a>(map: &'a Map, state: &'a State) -> impl Iterator<Item = &'a Elem
 }
 
 /// A metric's two components, each unless a side leaves it open.
-pub type Pair = [Option<f64>; 2];
+pub(super) type Pair = [Option<f64>; 2];
 
 fn t3_measure(capture: &T3Capture, image: &Image, element: &Element) -> Option<Measure> {
     let found = capture.elements.get(&element.id)?.get(element.t3_nth)?;
@@ -230,7 +230,7 @@ fn descends(views: &[NshView], mut view: usize, ancestor: usize) -> bool {
 
 /// The `nth` shown view `matcher` names, then the ancestor it asks for, then
 /// the descendant. An empty matcher names none: NSH draws no counterpart.
-pub fn find(views: &[NshView], matcher: &NshMatch) -> Option<usize> {
+pub(super) fn find(views: &[NshView], matcher: &NshMatch) -> Option<usize> {
     if *matcher
         == (NshMatch {
             up: matcher.up.clone(),
@@ -311,7 +311,7 @@ fn matches(view: &NshView, matcher: &NshMatch) -> bool {
 
 /// Presence mismatches, plus visual differences in appearance mode, in the
 /// state's element order. Missing matches remain failures in both modes.
-pub fn differences(
+pub(super) fn differences(
     map: &Map,
     state: &State,
     reference: &BTreeMap<String, Measure>,

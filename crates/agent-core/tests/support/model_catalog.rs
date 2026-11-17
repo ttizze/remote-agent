@@ -5,7 +5,7 @@ use agent_core::state::{
 use agent_protocol::{operations::ModelPage, session::ProviderKind};
 
 // A fixture corpus contains every provider; production publishes each independently.
-pub fn apply_catalog(snapshot: &mut Snapshot, mut catalog: ModelPage) {
+pub(crate) fn apply_catalog(snapshot: &mut Snapshot, mut catalog: ModelPage) {
     let mut errors = catalog.provider_errors.take().unwrap_or_default();
     for provider in [
         ProviderKind::Codex,

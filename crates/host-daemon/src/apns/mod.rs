@@ -62,7 +62,7 @@ impl Apns {
             .map(|delivery| serde_json::from_slice(&delivery.payload).unwrap())
             .collect()
     }
-    pub async fn load(
+    pub(crate) async fn load(
         path: &Path,
         host_name: &str,
         host_id: &str,
@@ -161,7 +161,7 @@ impl Apns {
             tracing::error!(target: "agent", operation = "host.live_activity.persist", message = "cannot persist Live Activity registrations");
         }
     }
-    pub fn activate(&self, display: TaskActivityDisplay) {
+    pub(crate) fn activate(&self, display: TaskActivityDisplay) {
         let mut registry = self
             .registry
             .lock()
@@ -173,7 +173,11 @@ impl Apns {
             self.wake.notify_one();
         }
     }
-    pub fn register(&self, owner: &str, params: &RegisterLiveActivity) -> Result<(), String> {
+    pub(crate) fn register(
+        &self,
+        owner: &str,
+        params: &RegisterLiveActivity,
+    ) -> Result<(), String> {
         if !self.client.credential_available(params.environment) {
             return Err(format!(
                 "APNs {:?} credentials are not configured",
@@ -192,7 +196,7 @@ impl Apns {
         self.wake.notify_one();
         Ok(())
     }
-    pub fn update(&self, display: TaskActivityDisplay) {
+    pub(crate) fn update(&self, display: TaskActivityDisplay) {
         let mut registry = self
             .registry
             .lock()
@@ -205,7 +209,7 @@ impl Apns {
             self.wake.notify_one();
         }
     }
-    pub fn unregister(&self, owner: &str, activity: &str) {
+    pub(crate) fn unregister(&self, owner: &str, activity: &str) {
         let mut registry = self
             .registry
             .lock()
@@ -213,7 +217,7 @@ impl Apns {
         registry.unregister(owner, activity);
         self.persist(&registry);
     }
-    pub fn revoke(&self, owner: &str) {
+    pub(crate) fn revoke(&self, owner: &str) {
         let mut registry = self
             .registry
             .lock()

@@ -615,7 +615,7 @@ pub(super) struct Buffer {
     pending: String,
 }
 impl Buffer {
-    pub fn append(&mut self, input: &str) {
+    pub(super) fn append(&mut self, input: &str) {
         let input = std::mem::take(&mut self.pending) + input;
         let screen = &mut self.screen;
         let mut cursor = 0;
@@ -660,7 +660,7 @@ impl Buffer {
             budget -= keep;
         }
     }
-    pub fn display(&self) -> (String, bool) {
+    pub(super) fn display(&self) -> (String, bool) {
         let screen = &self.screen;
         let (settled, cut) = tail(&screen.settled);
         let window = screen
@@ -672,7 +672,7 @@ impl Buffer {
         let (text, window_cut) = tail(&(settled + &window));
         (text, screen.dropped || cut || window_cut)
     }
-    pub fn resume(&self) -> String {
+    pub(super) fn resume(&self) -> String {
         let screen = &self.screen;
         let (text, _) = self.display();
         let reachable = text.bytes().filter(|byte| *byte == b'\n').take(63).count();

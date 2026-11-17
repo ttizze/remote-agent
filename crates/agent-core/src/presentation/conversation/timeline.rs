@@ -458,7 +458,7 @@ fn work_label(language: UiLanguage, item: &RenderedItem) -> String {
 
 /// The live row, as T3 Code's: a command by its program ("Running pwd"),
 /// reasoning by its trace or Thinking, other work by its title.
-pub fn live_label(language: UiLanguage, item: &RenderedItem) -> String {
+pub(super) fn live_label(language: UiLanguage, item: &RenderedItem) -> String {
     if let ItemSource::Native(native) = &item.source
         && let ItemBody::CommandExecution { command, .. } = native.body()
     {
@@ -530,7 +530,7 @@ fn counted(language: UiLanguage, (one, many): (&str, &str), count: usize) -> Str
 
 /// A group's summary, as T3 Code's: its tools by action, the two that
 /// changed most named and the rest counted; reasoning alone is Thought.
-pub fn group_summary(language: UiLanguage, items: &[&Arc<RenderedItem>]) -> String {
+pub(super) fn group_summary(language: UiLanguage, items: &[&Arc<RenderedItem>]) -> String {
     let tools: Vec<_> = items
         .iter()
         .filter(|item| item.data.kind != "reasoning")

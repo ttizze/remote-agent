@@ -6,5 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 uniffi_bindgen = { version = "=0.32.2", default-features = false }

@@ -49,7 +49,7 @@ pub(crate) enum WorktreeAction {
 }
 
 impl Application {
-    pub fn open_worktrees(self: &Arc<Self>) {
+    pub(crate) fn open_worktrees(self: &Arc<Self>) {
         let mut id = None;
         self.state.send_if_modified(|state| {
             if state.host.is_empty()
@@ -78,7 +78,7 @@ impl Application {
     }
 
     /// Returns true only when a registered conversation was opened.
-    pub fn worktree_action(self: &Arc<Self>, token: &str, action: WorktreeAction) -> bool {
+    pub(crate) fn worktree_action(self: &Arc<Self>, token: &str, action: WorktreeAction) -> bool {
         let state = self.snapshot();
         let Some(editor) = state
             .worktrees

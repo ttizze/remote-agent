@@ -3,7 +3,7 @@ use agent_core::state::Snapshot;
 use agent_protocol::{models::ThreadResponse, orchestration::projection::ThreadStreamItem};
 use std::sync::Arc;
 
-pub fn changed(
+pub(crate) fn changed(
     previous: &Snapshot,
     subscription: uuid::Uuid,
     change: agent_protocol::session::SessionChange,

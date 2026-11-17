@@ -33,11 +33,11 @@ pub(crate) struct Storage {
 pub(crate) struct HandedKeys(std::sync::Mutex<std::collections::BTreeMap<String, [u8; 32]>>);
 
 impl HandedKeys {
-    pub fn hand(&self, host: &str, key: [u8; 32]) {
+    pub(crate) fn hand(&self, host: &str, key: [u8; 32]) {
         self.keys().insert(host.into(), key);
     }
 
-    pub fn has(&self, host: &str) -> bool {
+    pub(crate) fn has(&self, host: &str) -> bool {
         self.keys().contains_key(host)
     }
 
@@ -64,7 +64,7 @@ impl Storage {
 
     /// Forgets a removed Host on this device: its state, conversations and
     /// diagnostics, and the device key it was paired with. Its session is closed.
-    pub fn forget(&self) -> Result<(), AgentError> {
+    pub(crate) fn forget(&self) -> Result<(), AgentError> {
         match std::fs::remove_dir_all(self.host_directory()) {
             Ok(()) => {}
             Err(reason) if reason.kind() == io::ErrorKind::NotFound => {}

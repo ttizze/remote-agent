@@ -69,6 +69,8 @@ jobs:
           cache-directories: ~/.cargo/targets
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+      - name: Rust formatting and lints
+        run: nix develop .#native --command just lint-rust
       - name: Build Host and CLI
         run: nix develop .#native --command cargo build --locked --features agent-core/bindings -p codex-app-server -p agent-process -p host-daemon -p agent-cli
       - name: Build the SDK runtime beside the Host

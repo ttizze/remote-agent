@@ -7,7 +7,7 @@ use super::{
 };
 
 /// What became of one state.
-pub struct Outcome<'a> {
+pub(super) struct Outcome<'a> {
     pub state: &'a State,
     pub result: Result<Vec<Difference>, String>,
 }
@@ -15,7 +15,7 @@ pub struct Outcome<'a> {
 /// All measured differences count. Recorded design exceptions remain visible
 /// context, rather than silently turning a comparison into a successful check.
 #[derive(Debug, serde::Serialize)]
-pub struct Summary<'a> {
+pub(super) struct Summary<'a> {
     pub mode: Mode,
     pub passed: bool,
     pub states_compared: usize,
@@ -29,13 +29,13 @@ pub struct Summary<'a> {
 }
 
 #[derive(Debug, serde::Serialize)]
-pub struct StateResult<'a> {
+pub(super) struct StateResult<'a> {
     pub state: &'a str,
     pub differences: &'a [Difference],
     pub error: Option<&'a str>,
 }
 
-pub fn summary<'a>(map: &Map, outcomes: &'a [Outcome], mode: Mode) -> Summary<'a> {
+pub(super) fn summary<'a>(map: &Map, outcomes: &'a [Outcome], mode: Mode) -> Summary<'a> {
     let differences: Vec<_> = outcomes
         .iter()
         .filter_map(|outcome| outcome.result.as_ref().ok())
@@ -75,7 +75,7 @@ pub fn summary<'a>(map: &Map, outcomes: &'a [Outcome], mode: Mode) -> Summary<'a
     }
 }
 
-pub fn render(run: &str, map: &Map, outcomes: &[Outcome], mode: Mode) -> String {
+pub(super) fn render(run: &str, map: &Map, outcomes: &[Outcome], mode: Mode) -> String {
     let totals = summary(map, outcomes, mode);
     let verdict = if totals.passed { "MATCH" } else { "FAIL" };
     let comparison = match mode {

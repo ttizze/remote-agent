@@ -54,7 +54,7 @@ fn size(rows: u16, cols: u16) -> io::Result<PtySize> {
     })
 }
 
-pub async fn run() -> io::Result<i32> {
+pub(super) async fn run() -> io::Result<i32> {
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut output = tokio::io::stdout();
     let line = input

@@ -122,7 +122,7 @@ impl Context {
         self.write(&json!({"id":id,"error":{"code":code,"message":message}}))
     }
 
-    pub fn notify(&self, method: &str, params: &impl Serialize) -> Result<()> {
+    pub(super) fn notify(&self, method: &str, params: &impl Serialize) -> Result<()> {
         #[derive(Serialize)]
         struct Notification<'a, T> {
             method: &'a str,
@@ -131,7 +131,7 @@ impl Context {
         self.write(&Notification { method, params })
     }
 
-    pub fn request<'a>(
+    pub(super) fn request<'a>(
         &'a self,
         method: &str,
         params: &Value,
@@ -152,7 +152,7 @@ impl Context {
         }))
     }
 
-    pub fn item_event(
+    pub(super) fn item_event(
         &self,
         method: &str,
         thread_id: &str,
@@ -176,7 +176,7 @@ impl Context {
         )
     }
 
-    pub fn stream_item(&self, thread_id: &str, turn: &Turn, item: Value) -> Result<()> {
+    pub(super) fn stream_item(&self, thread_id: &str, turn: &Turn, item: Value) -> Result<()> {
         let mut turn = turn.borrow_mut();
         self.item_event(
             "item/started",
@@ -188,7 +188,7 @@ impl Context {
         Ok(())
     }
 
-    pub fn turn_event(&self, method: &str, thread_id: &str, turn: &Value) -> Result<()> {
+    pub(super) fn turn_event(&self, method: &str, thread_id: &str, turn: &Value) -> Result<()> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct TurnEvent<'a> {
@@ -198,7 +198,7 @@ impl Context {
         self.notify(method, &TurnEvent { thread_id, turn })
     }
 
-    pub fn finish(
+    pub(super) fn finish(
         &self,
         thread: &SharedThread,
         turn: &Turn,

@@ -15,7 +15,7 @@ pub(crate) struct Workbench {
 }
 
 impl Workbench {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let connection = use_context::<Connection>().unwrap();
         let panels = computed(move || connection.state.with(|state| Shared(state.panels.clone())));
         let scope = connection.scope;
@@ -28,7 +28,7 @@ impl Workbench {
         }
     }
 
-    pub fn open(self, kind: PanelKind, path: Option<String>, line: Option<u32>) {
+    pub(crate) fn open(self, kind: PanelKind, path: Option<String>, line: Option<u32>) {
         self.application.with(|application| {
             application.open_panel(self.scope.get_untracked(), kind, path, line)
         });
@@ -41,19 +41,19 @@ impl Workbench {
     }
 
     /// Opens `url` in the in-app browser.
-    pub fn browse(self, url: String) {
+    pub(crate) fn browse(self, url: String) {
         self.open(PanelKind::Browser, None, None);
         self.reveal.set(Some(url));
     }
 
     /// Takes the URL held for the newly opened browser panel.
-    pub fn take_reveal(self) -> Option<String> {
+    pub(crate) fn take_reveal(self) -> Option<String> {
         let taken = self.reveal.get();
         self.reveal.set(None);
         taken
     }
 
-    pub fn hide(self) {
+    pub(crate) fn hide(self) {
         self.application
             .with(|application| application.set_panel_open(self.scope.get_untracked(), false));
     }
@@ -68,11 +68,11 @@ impl Workbench {
             .with(|application| application.close_panel(self.scope.get_untracked(), id));
     }
 
-    pub fn terminal_handle(self, id: u64) -> String {
+    pub(crate) fn terminal_handle(self, id: u64) -> String {
         self.application
             .with(|application| application.terminal_handle(id))
     }
-    pub fn open_setup_terminal(
+    pub(crate) fn open_setup_terminal(
         self,
         terminal: agent_core::presentation::conversation::SetupTerminal,
     ) {

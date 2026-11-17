@@ -23,7 +23,7 @@ function fixture(t) {
   const log = join(root, 'commands.log');
   mkdirSync(bin);
   mkdirSync(join(root, 'scripts'));
-  for (const script of ['quality.sh', 'ios-e2e.sh']) copyFileSync(`scripts/${script}`, join(root, 'scripts', script));
+  for (const script of ['quality.sh', 'lint-rust.sh', 'ios-e2e.sh']) copyFileSync(`scripts/${script}`, join(root, 'scripts', script));
   const remote = join(root, 'scripts/remote-run.sh');
   writeFileSync(remote, '#!/bin/bash\nprintf \'remote-run %s\\n\' "$*" >> "$NATIVE_VALIDATION_LOG"\nif [[ $1 == --native ]]; then shift; fi\nshift\nexec "$@"\n');
   chmodSync(remote, 0o755);
@@ -75,6 +75,9 @@ test('Rust formatting and contract failures stop validation', async (t) => {
   for (const [failure, lastCommand] of [
     ['cargo fmt', 'cargo fmt --all --check'],
     ['cargo clippy', 'cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings'],
+    ['cargo deny --locked check', 'cargo deny --locked check --warn unmaintained --hide-inclusion-graph'],
+    ['cargo deny --locked --manifest-path', 'cargo deny --locked --manifest-path tools/agent-peer/Cargo.toml check --warn unmaintained --hide-inclusion-graph'],
+    ['cargo machete', 'cargo machete --skip-target-dir crates apps tools/agent-peer'],
     ['just unit-tests', null],
   ]) {
     await t.test(failure, (t) => {
@@ -95,6 +98,20 @@ test('Rust quality validates contracts without native builds, acceptance or clea
   assert.ok(!result.commands.some(command => command.startsWith('remote-run ')));
   assert.ok(result.commands.at(-1).startsWith('just unit-tests '));
   assert.ok(!result.commands.some(command => /macos-e2e|conversation-ui/.test(command)));
+});
+
+test('portable Rust linting checks formatting, Clippy and dependencies without native builds or tests', (t) => {
+  const result = fixture(t).run('scripts/lint-rust.sh', []);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.commands, [
+    'cargo fmt --all --check',
+    'cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings',
+    'cargo deny --locked check --warn unmaintained --hide-inclusion-graph',
+    'cargo deny --locked --manifest-path tools/agent-peer/Cargo.toml check --warn unmaintained --hide-inclusion-graph',
+    'cargo machete --skip-target-dir crates apps tools/agent-peer',
+  ]);
+  assert.match(readFileSync('justfile', 'utf8'), /\[group\('portable'\)\]\nlint-rust:\n    bash scripts\/lint-rust\.sh/);
+  assert.match(readFileSync('.github/workflows/portable.yml', 'utf8'), /run: nix develop \.#native --command just lint-rust/);
 });
 
 test('Swift quality checks sources without compiling or starting a Simulator', (t) => {

@@ -42,7 +42,7 @@ impl Default for Observer {
     }
 }
 impl Observer {
-    pub fn send(&self, progress: Progress) -> Result<()> {
+    pub(crate) fn send(&self, progress: Progress) -> Result<()> {
         (self.notify)(progress)
     }
 }

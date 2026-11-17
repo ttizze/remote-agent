@@ -20,7 +20,7 @@ use std::{
 };
 use uuid::Uuid;
 
-pub struct Projection {
+pub(crate) struct Projection {
     pub snapshot: ThreadSnapshot,
     session: SessionRef,
     provider: ProviderKind,
@@ -30,7 +30,7 @@ pub struct Projection {
 }
 
 impl Projection {
-    pub fn new(opened: records::Opened) -> Self {
+    pub(crate) fn new(opened: records::Opened) -> Self {
         let mut snapshot = None;
         for message in opened.initial {
             snapshot = agent_core::orchestration::receive(
@@ -50,7 +50,7 @@ impl Projection {
         }
     }
 
-    pub fn receive(&mut self, message: ThreadStreamItem) {
+    pub(crate) fn receive(&mut self, message: ThreadStreamItem) {
         self.snapshot = agent_core::orchestration::receive(
             &self.session.application_id(),
             Some(&self.snapshot),
@@ -60,7 +60,7 @@ impl Projection {
         .expect("snapshot remains available");
     }
 
-    pub fn view(&self) -> ThreadResponse {
+    pub(crate) fn view(&self) -> ThreadResponse {
         agent_core::orchestration::project(
             &self.snapshot,
             &self.session,
@@ -73,14 +73,14 @@ impl Projection {
     }
 }
 
-pub struct Conversation {
+pub(crate) struct Conversation {
     reader: Reader,
     pub projection: Projection,
     completed: HashSet<TurnId>,
 }
 
 impl Conversation {
-    pub async fn open(client: &Client, session: &SessionRef) -> Result<Self, PeerError> {
+    pub(crate) async fn open(client: &Client, session: &SessionRef) -> Result<Self, PeerError> {
         let (opened, reader) = client
             .request_stream::<records::Opened>(&Call::SubscribeConversation(records::Subscribe {
                 session: session.clone(),
@@ -115,11 +115,11 @@ impl Conversation {
         Ok(conversation)
     }
 
-    pub fn view(&self) -> ThreadResponse {
+    pub(crate) fn view(&self) -> ThreadResponse {
         self.projection.view()
     }
 
-    pub async fn next(&mut self) -> ThreadResponse {
+    pub(crate) async fn next(&mut self) -> ThreadResponse {
         let message: ThreadStreamItem =
             tokio::time::timeout(Duration::from_secs(15), self.reader.read())
                 .await
@@ -130,7 +130,7 @@ impl Conversation {
         self.view()
     }
 
-    pub async fn extend(&mut self, client: &Client) -> ThreadResponse {
+    pub(crate) async fn extend(&mut self, client: &Client) -> ThreadResponse {
         let cursor = self
             .projection
             .snapshot
@@ -150,7 +150,7 @@ impl Conversation {
         self.view()
     }
 
-    pub async fn finished(&mut self) -> Turn {
+    pub(crate) async fn finished(&mut self) -> Turn {
         loop {
             for turn in self.view().thread.turns.iter().flatten() {
                 if turn.status != agent_protocol::execution::TurnStatus::Running
@@ -163,7 +163,7 @@ impl Conversation {
         }
     }
 
-    pub async fn hydrate(
+    pub(crate) async fn hydrate(
         &mut self,
         client: &Client,
         transport: &agent_transport::transport::Session,
@@ -206,7 +206,7 @@ impl Conversation {
         }
     }
 
-    pub async fn input_turn(&mut self, input: &ClientInputId, completed: bool) -> Turn {
+    pub(crate) async fn input_turn(&mut self, input: &ClientInputId, completed: bool) -> Turn {
         loop {
             if let Some(turn) = self.view().thread.turns.iter().flatten().find(|turn| {
                 (!completed || turn.status != agent_protocol::execution::TurnStatus::Running)
@@ -223,7 +223,7 @@ impl Conversation {
     }
 }
 
-pub async fn command(
+pub(crate) async fn command(
     client: &Client,
     session: &SessionRef,
     operation: Uuid,
@@ -247,7 +247,7 @@ pub async fn command(
     Ok(result)
 }
 
-pub async fn submit(
+pub(crate) async fn submit(
     client: &Client,
     input: &op::Submission,
 ) -> Result<records::Acknowledged, PeerError> {
@@ -270,7 +270,7 @@ pub async fn submit(
     .await
 }
 
-pub fn create_request(
+pub(crate) fn create_request(
     provider: ProviderKind,
     cwd: Option<String>,
     model: Option<agent_protocol::models::ModelRef>,
@@ -289,7 +289,7 @@ pub fn create_request(
     }
 }
 
-pub async fn created(
+pub(crate) async fn created(
     client: &Client,
     request: records::Create,
 ) -> Result<ThreadResponse, PeerError> {
@@ -297,14 +297,14 @@ pub async fn created(
     Ok(Projection::new(opened).view())
 }
 
-pub struct Catalog {
+pub(crate) struct Catalog {
     reader: Reader,
     pub snapshot: agent_protocol::orchestration::shell::ShellSnapshot,
     pub max_wire_bytes: usize,
 }
 
 impl Catalog {
-    pub async fn open(client: &Client) -> Self {
+    pub(crate) async fn open(client: &Client) -> Self {
         let (opened, reader) = client
             .request_stream::<records::OpenedList>(&Call::SubscribeList(records::SubscribeList {
                 refresh: true,
@@ -328,7 +328,7 @@ impl Catalog {
             max_wire_bytes,
         }
     }
-    pub async fn next(&mut self) {
+    pub(crate) async fn next(&mut self) {
         let message = tokio::time::timeout(
             Duration::from_secs(15),
             self.reader
@@ -346,12 +346,15 @@ impl Catalog {
                 .unwrap()
                 .unwrap();
     }
-    pub async fn wait_rows(&mut self, count: usize) {
+    pub(crate) async fn wait_rows(&mut self, count: usize) {
         while self.snapshot.threads.len() < count {
             self.next().await;
         }
     }
-    pub fn page(&self, query: agent_protocol::models::ListQuery) -> agent_core::state::Snapshot {
+    pub(crate) fn page(
+        &self,
+        query: agent_protocol::models::ListQuery,
+    ) -> agent_core::state::Snapshot {
         use agent_core::state::{Connection, Event, Lists, Snapshot, reduce};
         let subscription = Uuid::new_v4();
         let state = Snapshot {
@@ -381,7 +384,7 @@ impl Catalog {
         )
         .0
     }
-    pub fn activity(&self) -> agent_protocol::live_activity::TaskActivityState {
+    pub(crate) fn activity(&self) -> agent_protocol::live_activity::TaskActivityState {
         agent_protocol::orchestration::shell::activity(
             self.snapshot.threads.iter().map(AsRef::as_ref),
         )
@@ -391,7 +394,11 @@ impl Catalog {
 
 /// The fixture archives provider data under its private source, while public
 /// assertions continue to address the original conversation UUID.
-pub fn native_source(root: &std::path::Path, id: &SessionRef, provider: ProviderKind) -> String {
+pub(crate) fn native_source(
+    root: &std::path::Path,
+    id: &SessionRef,
+    provider: ProviderKind,
+) -> String {
     let source = host_daemon::canonical_test_support::active_native_source(
         &root.join(host_daemon::CONVERSATION_DATABASE_FILE),
         id,
@@ -406,7 +413,7 @@ pub fn native_source(root: &std::path::Path, id: &SessionRef, provider: Provider
     source.id
 }
 
-pub fn list_ids(
+pub(crate) fn list_ids(
     items: Vec<agent_protocol::orchestration::shell::ShellStreamItem>,
 ) -> Vec<SessionRef> {
     let mut snapshot = None;

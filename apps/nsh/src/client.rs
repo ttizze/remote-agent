@@ -69,7 +69,7 @@ pub(crate) const LOCAL: &str = "local";
 
 impl Client {
     #[cfg(test)]
-    pub fn new(root: PathBuf, local: Option<HostScope>) -> Result<Started, AgentError> {
+    pub(crate) fn new(root: PathBuf, local: Option<HostScope>) -> Result<Started, AgentError> {
         Self::start(root, local)
     }
 
@@ -347,7 +347,7 @@ impl Client {
         });
     }
 
-    pub fn dispatch(&self, host: &str, pane: Option<u64>, intent: Intent) {
+    pub(crate) fn dispatch(&self, host: &str, pane: Option<u64>, intent: Intent) {
         // Core enqueues effects synchronously and publishes their errors.
         // A receipt is needed only when its result or resource lifetime is needed.
         if let Err(reason) = self.execute(host, pane, intent) {
@@ -376,7 +376,7 @@ impl Client {
             .dispatch(intent)
     }
 
-    pub fn request(
+    pub(crate) fn request(
         &self,
         host: &str,
         pane: Option<u64>,
@@ -401,7 +401,7 @@ impl Client {
         receive
     }
 
-    pub fn worktree_settings(
+    pub(crate) fn worktree_settings(
         &self,
         host: &str,
     ) -> Option<agent_protocol::models::WorktreeSettings> {
@@ -413,13 +413,13 @@ impl Client {
             .cloned()
     }
 
-    pub fn reconnect(self: &Arc<Self>, host: String) {
+    pub(crate) fn reconnect(self: &Arc<Self>, host: String) {
         self.connect_then(host, None);
     }
 
     /// Reaches `host`, then dispatches `intent` to it: a project picked in a
     /// distro's folder is added once its Host runs.
-    pub fn connect_then(self: &Arc<Self>, host: String, intent: Option<Intent>) {
+    pub(crate) fn connect_then(self: &Arc<Self>, host: String, intent: Option<Intent>) {
         let owner = self.clone();
         self.spawn(async move {
             let profile = owner
@@ -441,7 +441,7 @@ impl Client {
     }
 
     /// The view of `thread`'s tab in `host`'s browser, once its Host is ready.
-    pub fn browser_session(
+    pub(crate) fn browser_session(
         &self,
         host: String,
         thread: agent_protocol::session::SessionRef,
@@ -468,7 +468,7 @@ impl Client {
 
     /// The browser's next update, which Core reads on this client's runtime;
     /// none once the view is hidden.
-    pub fn browser_next(
+    pub(crate) fn browser_next(
         &self,
         browser: Arc<BrowserSession>,
     ) -> async_channel::Receiver<Option<BrowserUpdate>> {
@@ -479,7 +479,7 @@ impl Client {
         receive
     }
 
-    pub fn pair(self: &Arc<Self>, invitation: agent_protocol::models::Invitation) {
+    pub(crate) fn pair(self: &Arc<Self>, invitation: agent_protocol::models::Invitation) {
         let owner = self.clone();
         self.spawn(async move {
             let result = owner
@@ -550,7 +550,7 @@ impl Client {
 
     /// Forgets a paired Host: it leaves the saved list and its session closes,
     /// then its files and device key on this device are deleted.
-    pub fn remove(self: &Arc<Self>, host: String) {
+    pub(crate) fn remove(self: &Arc<Self>, host: String) {
         let owner = self.clone();
         self.spawn(async move {
             if let Err(reason) = owner.remove_host(host).await {
@@ -623,11 +623,11 @@ impl Client {
     }
 
     /// The Host's latest state, which its publication follows.
-    pub fn snapshot(&self, host: &str) -> Option<Arc<agent_core::state::Snapshot>> {
+    pub(crate) fn snapshot(&self, host: &str) -> Option<Arc<agent_core::state::Snapshot>> {
         Some(self.sessions.session(host.into())?.snapshot())
     }
 
-    pub fn scene(&self, active: bool) {
+    pub(crate) fn scene(&self, active: bool) {
         self.sessions.record_scene(if active { 1 } else { 0 });
         if !active {
             let sessions = self.sessions.clone();
@@ -684,7 +684,7 @@ impl Client {
         }
     }
 
-    pub async fn shutdown(&self) -> Result<(), AgentError> {
+    pub(crate) async fn shutdown(&self) -> Result<(), AgentError> {
         self.closing.cancel();
         self.close_panes();
         let hosts = self.hosts.lock().await;

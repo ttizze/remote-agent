@@ -22,6 +22,14 @@ resolver = "2"
 edition = "2024"
 license = "MIT"
 rust-version = "1.98"
+publish = false
+
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
 
 # Reuse optimized workspace code between local edits. CI sets CARGO_INCREMENTAL=0.
 # Keep the non-incremental release codegen count instead of the incremental default.

@@ -5,7 +5,13 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{fs, io::Read, path::Path, process::Command};
 
-pub fn write(cwd: &Path, records: &Path, app: &Path, fixture: &Path, map: &Path) -> Result<()> {
+pub(super) fn write(
+    cwd: &Path,
+    records: &Path,
+    app: &Path,
+    fixture: &Path,
+    map: &Path,
+) -> Result<()> {
     let app_info = app
         .parent()
         .and_then(Path::parent)
@@ -29,7 +35,7 @@ pub fn write(cwd: &Path, records: &Path, app: &Path, fixture: &Path, map: &Path)
     Ok(())
 }
 
-pub fn reference(records: &Path, app: &str, root: &Path, fixture: &Path) -> Result<()> {
+pub(super) fn reference(records: &Path, app: &str, root: &Path, fixture: &Path) -> Result<()> {
     let info = Path::new(app).join("Contents/Info.plist");
     let candidate: serde_json::Value =
         serde_json::from_slice(&fs::read(records.join("manifest.json"))?)?;

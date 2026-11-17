@@ -145,7 +145,7 @@ impl Default for State {
 }
 
 impl State {
-    pub fn account_locked(&self) -> bool {
+    pub(crate) fn account_locked(&self) -> bool {
         self.account_pending
             || self.publications.get(&self.host).is_some_and(|p| {
                 p.settings.account_login().is_some()
@@ -244,7 +244,7 @@ impl State {
         }
     }
 
-    pub fn uploading(&self, host: &str, draft: &DraftKey) -> bool {
+    pub(crate) fn uploading(&self, host: &str, draft: &DraftKey) -> bool {
         self.uploads
             .values()
             .any(|(target, key)| target == host && key == draft)
@@ -278,7 +278,7 @@ impl Application {
     }
 
     /// `local` is this machine's Host scope, which the desktop starts and updates.
-    pub fn new(
+    pub(crate) fn new(
         root: PathBuf,
         local: Option<agent_local_host::launch::HostScope>,
     ) -> Result<(tokio::runtime::Runtime, Arc<Self>), AgentError> {
@@ -493,14 +493,14 @@ impl Application {
         }
     }
 
-    pub fn snapshot(&self) -> Arc<State> {
+    pub(crate) fn snapshot(&self) -> Arc<State> {
         self.state.borrow().clone()
     }
-    pub fn subscribe(&self) -> watch::Receiver<Arc<State>> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<Arc<State>> {
         self.state.subscribe()
     }
 
-    pub fn pair(&self, invitation: agent_protocol::models::Invitation) {
+    pub(crate) fn pair(&self, invitation: agent_protocol::models::Invitation) {
         let start = self.state.send_if_modified(|state| {
             if state.pairing {
                 return false;
@@ -516,7 +516,7 @@ impl Application {
     /// Saves the file list's width and publishes it; a width that cannot be
     /// saved still holds until the app ends, and the failure shows.
     #[cfg(any(desktop, test))]
-    pub fn set_explorer_width(&self, width: f32) {
+    pub(crate) fn set_explorer_width(&self, width: f32) {
         let saved = agent_local_host::save_private_json(&self.explorer_width_path, &width);
         self.state.send_modify(|state| {
             let state = Arc::make_mut(state);
@@ -529,7 +529,7 @@ impl Application {
 
     /// Saves which files show rendered and publishes it, as the file list's
     /// width.
-    pub fn set_file_rendering(
+    pub(crate) fn set_file_rendering(
         &self,
         preferences: agent_core::presentation::files::FileRenderingPreferences,
     ) {
@@ -544,7 +544,7 @@ impl Application {
     }
 
     #[cfg(any(desktop, test))]
-    pub fn select_sidebar_projects(
+    pub(crate) fn select_sidebar_projects(
         &self,
         selected: Vec<agent_core::presentation::sidebar::ProjectKey>,
     ) {
@@ -571,7 +571,7 @@ impl Application {
 
     /// Saves the UI language, then publishes it so the root is made again in it.
     #[cfg(any(desktop, test))]
-    pub fn select_language(&self, language: UiLanguage) {
+    pub(crate) fn select_language(&self, language: UiLanguage) {
         if let Err(reason) = self.client.device.select_language(language) {
             self.fail(reason.to_string());
             return;
@@ -595,17 +595,17 @@ impl Application {
 
     /// Shows `reason` as the application's failure until it is dismissed.
     #[cfg(any(desktop, test))]
-    pub fn fail(&self, reason: String) {
+    pub(crate) fn fail(&self, reason: String) {
         self.state
             .send_modify(|state| Arc::make_mut(state).failure = Some(reason));
     }
 
-    pub fn dismiss_failure(&self) {
+    pub(crate) fn dismiss_failure(&self) {
         self.state
             .send_modify(|state| Arc::make_mut(state).failure = None);
     }
 
-    pub fn navigate(&self, action: Navigation) {
+    pub(crate) fn navigate(&self, action: Navigation) {
         self.state.send_modify(|state| {
             let state = Arc::make_mut(state);
             match action {
@@ -625,7 +625,7 @@ impl Application {
         });
     }
 
-    pub fn account_request(self: &Arc<Self>, host: String, intent: Intent) {
+    pub(crate) fn account_request(self: &Arc<Self>, host: String, intent: Intent) {
         if self.stop.is_cancelled() {
             return;
         }
@@ -656,14 +656,14 @@ impl Application {
     }
 
     #[cfg(any(desktop, test))]
-    pub fn set_panel_maximized(&self, scope: PanelScope, maximized: bool) {
+    pub(crate) fn set_panel_maximized(&self, scope: PanelScope, maximized: bool) {
         self.state.send_modify(|state| {
             let panels = state.panels.clone().set_maximized(scope, maximized);
             Arc::make_mut(state).panels = panels;
         });
     }
 
-    pub fn attach(
+    pub(crate) fn attach(
         &self,
         host: String,
         pane: Option<u64>,
@@ -684,7 +684,7 @@ impl Application {
         self.client.attach_batch(id, host, pane, draft, sources);
     }
 
-    pub fn open_side_chat(
+    pub(crate) fn open_side_chat(
         &self,
         scope: PanelScope,
         cwd: String,
@@ -715,7 +715,7 @@ impl Application {
     }
 
     /// Asks side chat `id` to explain `text` in a conversation of its own.
-    pub fn explain_in_side_chat(&self, id: u64, text: String) {
+    pub(crate) fn explain_in_side_chat(&self, id: u64, text: String) {
         self.state.send_modify(|state| {
             if let Some(chat) = Arc::make_mut(state).side_chats.get_mut(&id) {
                 chat.start = SideChatStart::Explain(text);
@@ -724,7 +724,7 @@ impl Application {
         self.prepare_side_chat(id);
     }
 
-    pub fn prepare_side_chat(&self, id: u64) {
+    pub(crate) fn prepare_side_chat(&self, id: u64) {
         let mut request = None;
         self.state.send_if_modified(|state| {
             let Some(scope) = state.panels.scope(id) else {
@@ -756,7 +756,7 @@ impl Application {
         }
     }
 
-    pub fn open_panel(
+    pub(crate) fn open_panel(
         &self,
         scope: PanelScope,
         kind: PanelKind,
@@ -782,14 +782,14 @@ impl Application {
         });
     }
 
-    pub fn set_panel_open(&self, scope: PanelScope, open: bool) {
+    pub(crate) fn set_panel_open(&self, scope: PanelScope, open: bool) {
         self.state.send_modify(|state| {
             let panels = state.panels.clone().set_open(scope, open);
             Arc::make_mut(state).panels = panels;
         });
     }
 
-    pub fn open_setup_terminal(
+    pub(crate) fn open_setup_terminal(
         &self,
         scope: PanelScope,
         terminal: agent_core::presentation::conversation::SetupTerminal,
@@ -800,14 +800,14 @@ impl Application {
         });
     }
 
-    pub fn activate_panel(&self, scope: PanelScope, id: u64) {
+    pub(crate) fn activate_panel(&self, scope: PanelScope, id: u64) {
         self.state.send_modify(|state| {
             let panels = state.panels.clone().activate(scope, id).panels;
             Arc::make_mut(state).panels = panels;
         });
     }
 
-    pub fn close_panel(&self, scope: PanelScope, id: u64) {
+    pub(crate) fn close_panel(&self, scope: PanelScope, id: u64) {
         let handle = self.terminal_handle(id);
         let mut terminal = false;
         let closed = self.state.send_if_modified(|state| {
@@ -839,7 +839,7 @@ impl Application {
         }
     }
 
-    pub fn terminal_handle(&self, id: u64) -> String {
+    pub(crate) fn terminal_handle(&self, id: u64) -> String {
         let state = self.snapshot();
         state
             .panels
@@ -856,7 +856,7 @@ impl Application {
             .unwrap_or_else(|| format!("agent-terminal-{}-{id}", self.instance))
     }
 
-    pub async fn shutdown(&self) -> Result<(), AgentError> {
+    pub(crate) async fn shutdown(&self) -> Result<(), AgentError> {
         self.stop.cancel();
         self.jobs.close();
         self.jobs.wait().await;

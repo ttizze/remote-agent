@@ -11,7 +11,7 @@ pub(crate) struct Shimmer {
 }
 
 impl Shimmer {
-    pub fn opacity(&self, x: f64, extent: f64, seconds: f64, scale: f64) -> f64 {
+    pub(super) fn opacity(&self, x: f64, extent: f64, seconds: f64, scale: f64) -> f64 {
         let band = self.band * scale;
         if band <= 0.0 || self.period <= 0.0 {
             return 0.0;

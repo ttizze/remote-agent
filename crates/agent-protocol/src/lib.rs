@@ -1,4 +1,6 @@
 //! Shared wire contracts and deterministic value operations. No client state or I/O.
+#![forbid(unsafe_code)]
+
 pub mod attribution;
 pub mod automations;
 pub mod browser;

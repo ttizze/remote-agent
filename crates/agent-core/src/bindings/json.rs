@@ -54,7 +54,7 @@ impl TryFrom<JsonValue> for Value {
     }
 }
 #[uniffi::export]
-pub fn request_answer_from_json(
+pub(super) fn request_answer_from_json(
     body: agent_protocol::requests::RequestBody,
     text: String,
 ) -> Result<agent_protocol::requests::Answer, AgentError> {

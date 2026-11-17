@@ -1,7 +1,7 @@
 //! Shared reference resolution and offline sandbox document for both native WebViews.
 use std::path::{Component, Path, PathBuf};
 
-pub fn visualization_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
+pub(crate) fn visualization_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
     if source.is_empty() || source.contains('\0') || source.contains("://") {
         return Err("visualize requires a local HTML path".into());
     }
@@ -34,7 +34,7 @@ pub fn visualization_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
 
 /// No origin, native bridge, external resources, forms, popups or top navigation.
 /// The outer CSP also constrains fragments that attempt to replace their own policy.
-pub fn visualization_document(fragment: &str) -> String {
+pub(crate) fn visualization_document(fragment: &str) -> String {
     let policy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
     let inner = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"{policy}\"><style>{}</style><script>{}</script><script>{}</script></head><body><details><summary>Bexでの表示について</summary>選択とプレビューは利用できます。Tweakの調整パネル、Codex専用操作、外部通信は利用できません。選択状態は開き直すと初期値に戻ります。</details>{fragment}</body></html>",

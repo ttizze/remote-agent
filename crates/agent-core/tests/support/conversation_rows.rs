@@ -1,9 +1,9 @@
 #[path = "orchestration.rs"]
-pub mod orchestration;
+pub(crate) mod orchestration;
 use agent_protocol::{execution::SessionStatus, models::ThreadResponse};
 use std::sync::Arc;
 
-pub fn shell(
+pub(crate) fn shell(
     list: agent_protocol::models::ThreadList,
     sequence: u64,
 ) -> agent_protocol::orchestration::shell::ShellSnapshot {
@@ -48,7 +48,7 @@ pub fn shell(
     }
 }
 
-pub fn shell_thread(
+pub(crate) fn shell_thread(
     thread: agent_protocol::models::Thread,
 ) -> agent_protocol::orchestration::shell::ThreadShell {
     use agent_protocol::orchestration::{RunStatus, shell::ThreadShell};

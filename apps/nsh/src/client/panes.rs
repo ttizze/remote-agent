@@ -23,7 +23,7 @@ impl Pane {
 }
 
 impl Client {
-    pub fn prepare_side_chat(
+    pub(crate) fn prepare_side_chat(
         self: &Arc<Self>,
         id: u64,
         host: String,
@@ -81,7 +81,7 @@ impl Client {
         });
     }
 
-    pub fn close_pane(&self, id: u64) {
+    pub(crate) fn close_pane(&self, id: u64) {
         let pane = self.panes.lock().unwrap().remove(&id);
         if let Some(pane) = pane {
             pane.close();

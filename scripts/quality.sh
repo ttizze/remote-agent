@@ -14,9 +14,8 @@ if [[ $language == apple || $language == rust ]]; then
         exec scripts/remote-run.sh --native "$AGENT_REMOTE_BUILDER" just quality rust
     fi
     actionlint
-    cargo fmt --all --check
+    bash scripts/lint-rust.sh
     nix build .#agent-peer --no-link
-    cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings
     integration_targets=(
         --test errors --test iroh --test iroh_host --test browser_bridge
         --test management --test codex_accounts --test claude --test adapter_conformance

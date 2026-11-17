@@ -6,9 +6,9 @@ use agent_core::state::{
 use agent_protocol::models::ThreadResponse;
 use std::sync::Arc;
 
-pub type Opened = <ReadThread as Operation>::Output;
+pub(super) type Opened = <ReadThread as Operation>::Output;
 
-pub fn opened(response: ThreadResponse, snapshot: &mut Snapshot) -> Opened {
+pub(crate) fn opened(response: ThreadResponse, snapshot: &mut Snapshot) -> Opened {
     let id = response.thread.id.clone().expect("fixture thread identity");
     let provider = response
         .thread

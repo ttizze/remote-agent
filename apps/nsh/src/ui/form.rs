@@ -12,7 +12,7 @@ pub(crate) struct Submission {
 }
 
 impl Submission {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             busy: signal(false),
             failure: signal(String::new()),
@@ -20,7 +20,7 @@ impl Submission {
         }
     }
 
-    pub fn submit(
+    pub(crate) fn submit(
         self,
         connection: Connection,
         host: &str,
@@ -48,7 +48,7 @@ impl Submission {
         });
     }
 
-    pub fn dialog(self, cancel: impl Fn() + 'static) -> nsh_core::element::Modal {
+    pub(crate) fn dialog(self, cancel: impl Fn() + 'static) -> nsh_core::element::Modal {
         nsh_base::dialog()
             .presentation(ModalPresentation::FormSheet)
             .close_on_escape(move || !self.busy.get())
@@ -59,7 +59,7 @@ impl Submission {
             .justify_center()
     }
 
-    pub fn field(
+    pub(crate) fn field(
         self,
         value: Signal<String>,
         submit: impl Fn() + 'static,
@@ -71,7 +71,7 @@ impl Submission {
             .disabled(self.busy)
     }
 
-    pub fn error(self) -> impl IntoElement {
+    pub(crate) fn error(self) -> impl IntoElement {
         when(
             move || !self.failure.get().is_empty(),
             move || {
@@ -82,7 +82,7 @@ impl Submission {
         )
     }
 
-    pub fn buttons(
+    pub(crate) fn buttons(
         self,
         title: &'static str,
         valid: impl Fn() -> bool + Copy + 'static,

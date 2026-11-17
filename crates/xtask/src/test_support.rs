@@ -9,11 +9,11 @@ use tokio::{process::Command, sync::watch};
 pub(crate) struct Fixture(tempfile::TempDir);
 
 impl Fixture {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(tempfile::tempdir().unwrap())
     }
 
-    pub async fn project(&self, name: &str) -> PathBuf {
+    pub(crate) async fn project(&self, name: &str) -> PathBuf {
         let root = self.0.path().join(name);
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/main.rs"), r#"
@@ -85,7 +85,7 @@ fn main() {
         root
     }
 
-    pub fn executable(root: &Path) -> PathBuf {
+    pub(crate) fn executable(root: &Path) -> PathBuf {
         root.join("fixture")
     }
 }

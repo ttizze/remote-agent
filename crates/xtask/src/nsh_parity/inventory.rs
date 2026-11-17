@@ -7,7 +7,7 @@ use super::{
 };
 use std::{collections::BTreeSet, fs, path::Path};
 
-pub fn render(records: &Path, states: &[&State]) -> String {
+pub(super) fn render(records: &Path, states: &[&State]) -> String {
     let mut text = String::from("\n## Texts and labels only one client shows\n");
     for state in states {
         let directory = records.join(&state.name);

@@ -262,11 +262,11 @@ pub(super) struct TaskOutcome<'a> {
 
 impl TaskOutcome<'_> {
     /// The finished work as the notification of the turn Claude wakes for names it.
-    pub fn report(&self, body: &ItemBody) -> BackgroundReport {
+    pub(super) fn report(&self, body: &ItemBody) -> BackgroundReport {
         background_report(body, background_outcome(self.status))
     }
 
-    pub fn item(&self, id: ItemId, body: &ItemBody) -> Option<Item> {
+    pub(super) fn item(&self, id: ItemId, body: &ItemBody) -> Option<Item> {
         if !matches!(
             body,
             ItemBody::CommandExecution { .. }

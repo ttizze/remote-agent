@@ -446,7 +446,7 @@ impl Writer {
 impl Document {
     /// Native object positions remain in the control, while copying and quoting
     /// return labels without the decorative icons or their gap.
-    pub fn selected(&self, start: usize, end: usize) -> String {
+    pub(super) fn selected(&self, start: usize, end: usize) -> String {
         let units: Vec<_> = self
             .text
             .encode_utf16()

@@ -70,7 +70,7 @@ impl State {
         })
     }
 
-    pub fn list_sources(&self) -> Vec<ListSource> {
+    pub(crate) fn list_sources(&self) -> Vec<ListSource> {
         self.list_publications()
             .map(|(host, value)| ListSource {
                 scope: ListScope {
@@ -82,7 +82,7 @@ impl State {
             .collect()
     }
 
-    pub fn list_inputs(&self) -> Vec<(String, Shared<ThreadList>)> {
+    pub(crate) fn list_inputs(&self) -> Vec<(String, Shared<ThreadList>)> {
         self.list_publications()
             .filter_map(|(host, value)| {
                 value
@@ -94,7 +94,7 @@ impl State {
     }
 
     #[cfg(any(desktop, test))]
-    pub fn sidebar_catalog_ready(&self) -> bool {
+    pub(crate) fn sidebar_catalog_ready(&self) -> bool {
         self.list_hosts().all(|host| {
             self.publications.get(&host.id).is_some_and(|value| {
                 value.composer.controls.connected
@@ -104,7 +104,7 @@ impl State {
         })
     }
 
-    pub fn list_scope_matches(&self, scope: &ListScope) -> bool {
+    pub(crate) fn list_scope_matches(&self, scope: &ListScope) -> bool {
         self.list_publications().any(|(host, value)| {
             host == scope.host && value.snapshot.connection.storage_scope == scope.storage
         })
@@ -154,7 +154,7 @@ impl Application {
         );
     }
 
-    pub fn select_host(&self, host: String) {
+    pub(crate) fn select_host(&self, host: String) {
         if self.activate_host(&host, false) {
             #[cfg(any(desktop, test))]
             self.select_sidebar_projects(Vec::new());
@@ -166,7 +166,7 @@ impl Application {
     /// Host: it becomes the chosen Host, which runs `intent` for the folder's
     /// Linux path once it is reached. Whether the folder was a distro's.
     #[cfg(any(desktop, test))]
-    pub fn open_wsl_folder(
+    pub(crate) fn open_wsl_folder(
         &self,
         path: &Path,
         intent: impl FnOnce(String) -> Intent,
@@ -206,7 +206,7 @@ impl Application {
         })
     }
 
-    pub fn select_all_hosts(&self) {
+    pub(crate) fn select_all_hosts(&self) {
         self.state.send_if_modified(|state| {
             if self.stop.is_cancelled()
                 || state.account_locked()
@@ -221,7 +221,7 @@ impl Application {
     }
 
     /// A row can belong to another Host without changing the list scope.
-    pub fn list_action(&self, scope: &ListScope, intent: Intent, navigate: bool) -> bool {
+    pub(crate) fn list_action(&self, scope: &ListScope, intent: Intent, navigate: bool) -> bool {
         if self.stop.is_cancelled() {
             return false;
         }
@@ -236,7 +236,7 @@ impl Application {
         true
     }
 
-    pub fn request_list(&self, request: ListRequest) {
+    pub(crate) fn request_list(&self, request: ListRequest) {
         if self.stop.is_cancelled() {
             return;
         }
@@ -261,7 +261,7 @@ impl Application {
         }
     }
 
-    pub fn search_list(&self, search_term: &str) {
+    pub(crate) fn search_list(&self, search_term: &str) {
         if self.stop.is_cancelled() {
             return;
         }

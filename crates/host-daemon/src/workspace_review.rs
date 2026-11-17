@@ -9,7 +9,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub async fn inspect_workspace(cwd: String, base_ref: Option<String>) -> Result<WorkspaceReview> {
+pub(crate) async fn inspect_workspace(
+    cwd: String,
+    base_ref: Option<String>,
+) -> Result<WorkspaceReview> {
     tokio::task::spawn_blocking(move || {
         collect_workspace_review(PathBuf::from(cwd), base_ref.as_deref())
     })

@@ -855,7 +855,7 @@ impl ListSource<'_> {
 
 impl ListSource<'_> {
     /// Recent top-level chats across standalone and project pages, regardless of expansion.
-    pub fn recent_thread_list(&self) -> Option<ThreadList> {
+    pub(crate) fn recent_thread_list(&self) -> Option<ThreadList> {
         let source = self.lists.threads.as_deref()?;
         let ranks = self.search_ranks();
         let (mut list, placements) = self.list_projection(source, false, ranks.as_ref());
@@ -929,7 +929,7 @@ impl ListSource<'_> {
         Some(list)
     }
 
-    pub fn thread_list(&self) -> Option<ThreadList> {
+    pub(crate) fn thread_list(&self) -> Option<ThreadList> {
         let list = self.lists.threads.as_deref()?;
         Some(
             self.list_projection(list, true, self.search_ranks().as_ref())

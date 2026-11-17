@@ -35,7 +35,7 @@ struct Component {
     parts: Vec<String>,
 }
 
-pub fn write(cwd: &Path, target: &Path) -> Result<()> {
+pub(super) fn write(cwd: &Path, target: &Path) -> Result<()> {
     let catalog: Catalog = toml::from_str(&fs::read_to_string(
         cwd.join("apps/nsh/parity/components.toml"),
     )?)?;
