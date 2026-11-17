@@ -430,6 +430,7 @@ impl Claude {
         &self,
         cursor: Option<String>,
         owned: Option<HashSet<String>>,
+        recovery: std::collections::BTreeSet<PathBuf>,
         limit: u32,
     ) -> anyhow::Result<SessionPage> {
         let home = self.native_home.clone();
@@ -444,7 +445,14 @@ impl Claude {
             })
             .collect();
         tokio::task::spawn_blocking(move || {
-            history::list_page(&home, running, cursor.as_deref(), owned.as_ref(), limit)
+            history::list_page(
+                &home,
+                running,
+                cursor.as_deref(),
+                owned.as_ref(),
+                &recovery,
+                limit,
+            )
         })
         .await?
     }
@@ -2483,23 +2491,26 @@ impl crate::providers::Discovery for Claude {
         scope: SessionListScope<'_>,
         limit: u32,
     ) -> Result<SessionPage, Failure> {
-        let owned = match scope {
+        let (owned, recovery) = match scope {
             SessionListScope::Descendants(_) => {
                 return Ok(SessionPage {
                     data: vec![],
                     next_cursor: None,
                 });
             }
-            SessionListScope::Roots(owned) => Some(
-                owned
-                    .iter()
-                    .filter(|id| id.provider == Some(ProviderKind::Claude))
-                    .map(|id| id.id.clone())
-                    .collect(),
+            SessionListScope::Roots { owned, directories } => (
+                Some(
+                    owned
+                        .iter()
+                        .filter(|id| id.provider == Some(ProviderKind::Claude))
+                        .map(|id| id.id.clone())
+                        .collect(),
+                ),
+                directories.clone(),
             ),
-            SessionListScope::All => None,
+            SessionListScope::All => (None, Default::default()),
         };
-        Claude::read_catalog(self, cursor, owned, limit)
+        Claude::read_catalog(self, cursor, owned, recovery, limit)
             .await
             .map_err(|e| Failure::new("session_list_failed", e))
     }
@@ -2902,7 +2913,10 @@ pub(crate) mod execution_tests {
         let recent = crate::providers::Discovery::catalog_page(
             &claude,
             None,
-            SessionListScope::Roots(&[]),
+            SessionListScope::Roots {
+                owned: &[],
+                directories: &Default::default(),
+            },
             30,
         )
         .await
@@ -2945,8 +2959,20 @@ pub(crate) mod execution_tests {
             },
         ];
         for (scope, expected) in [
-            (SessionListScope::Roots(&[]), vec!["cli"]),
-            (SessionListScope::Roots(&owned), vec!["cli", "sdk-ts"]),
+            (
+                SessionListScope::Roots {
+                    owned: &[],
+                    directories: &Default::default(),
+                },
+                vec!["cli"],
+            ),
+            (
+                SessionListScope::Roots {
+                    owned: &owned,
+                    directories: &Default::default(),
+                },
+                vec!["cli", "sdk-ts"],
+            ),
             (
                 SessionListScope::All,
                 vec!["cli", "sdk-cli", "sdk-py", "sdk-ts"],

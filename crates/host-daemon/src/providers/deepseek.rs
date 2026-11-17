@@ -1483,7 +1483,13 @@ mod tests {
         })
         .collect::<BTreeMap<_, _>>();
         *adapter.0.records.lock().await = records.clone();
-        for scope in [SessionListScope::All, SessionListScope::Roots(&[])] {
+        for scope in [
+            SessionListScope::All,
+            SessionListScope::Roots {
+                owned: &[],
+                directories: &Default::default(),
+            },
+        ] {
             let ids = ["a", "b", "c", "d"];
             let result = crate::providers::Discovery::catalog_page(&adapter, None, scope, 10)
                 .await
@@ -1507,7 +1513,10 @@ mod tests {
         for (cursor, scope, limit, ids, next) in [
             (
                 None,
-                SessionListScope::Roots(&[]),
+                SessionListScope::Roots {
+                    owned: &[],
+                    directories: &Default::default(),
+                },
                 2,
                 vec!["a", "b"],
                 Some("b"),

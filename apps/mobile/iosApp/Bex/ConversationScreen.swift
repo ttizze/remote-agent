@@ -178,8 +178,7 @@ struct ThreadScreen: View {
 /// Conversation navigation
 extension ThreadScreen {
     private var project: ProjectSummary? {
-        let directory = model.selectedDirectory
-        return environment.list?.projects.first { $0.roots.contains { $0.path == directory } }
+        model.conversationContext.workspaceProject()
     }
 
     /// The project and environment beneath the title, followed by the connection state while it connects.
@@ -217,19 +216,22 @@ extension ThreadScreen {
 
     private var newThreadContext: some View {
         let directory = model.selectedDirectory
-        let emptyFolderLabel = localizedUiText(language: locale.appLanguage, source: "チャット")
+        let emptyFolderLabel = localizedUiText(language: locale.appLanguage, source: "プロジェクトなし")
         return VStack(spacing: 24) {
             VStack(spacing: 8) {
                 Text("何を作りましょうか？")
                     .accessibilityIdentifier("task.prompt")
                 Menu {
                     Picker("フォルダ", selection: Binding(get: { directory }, set: { model.openNewThread(cwd: $0) })) {
-                        Label("チャット", systemImage: "bubble.left.and.bubble.right").tag("")
-                        ForEach(environment.list?.projects ?? [], id: \.id) { project in
-                            ForEach(project.roots, id: \.path) { root in
-                                Label(project.roots.count == 1 ? project.name : root.path, systemImage: "folder")
-                                    .tag(root.path)
-                            }
+                        ForEach(
+                            projectChoices(language: locale.appLanguage, projects: environment.list?.projects ?? []),
+                            id: \.directory
+                        ) { choice in
+                            Label(
+                                choice.name,
+                                systemImage: choice.directory.isEmpty ? "bubble.left.and.bubble.right" : "folder"
+                            )
+                            .tag(choice.directory)
                         }
                     }
                     .pickerStyle(.inline)

@@ -274,12 +274,30 @@ impl Runtime {
             Self::default_selection(service, request.provider, &request.selection).await?
         };
         let selected_cwd = request.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty());
-        let cwd = match selected_cwd {
+        let projects = service.project_snapshot().await?;
+        let scratch = selected_cwd.is_none_or(|cwd| {
+            crate::projects::state::scratch_root(&projects.scratch_roots, std::path::Path::new(cwd))
+                .is_some()
+        });
+        let cwd = match selected_cwd.filter(|_| !scratch) {
             Some(cwd) => cwd.to_owned(),
             None => service
                 .inner
                 .projects
-                .create_chat_directory()
+                .create_chat_directory(
+                    request
+                        .initial
+                        .as_ref()
+                        .and_then(|(_, content)| {
+                            content.parts.iter().find_map(|part| match part {
+                                agent_protocol::operations::Input::Text { text } => {
+                                    Some(text.as_str())
+                                }
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or_default(),
+                )
                 .await
                 .map_err(|error| Failure::new("workspace_unavailable", error))?
                 .to_str()
@@ -294,9 +312,9 @@ impl Runtime {
             _ => None,
         };
         // T3 normalizes Scratch worktree launches to root before allocation.
-        // Missing, empty and whitespace cwd all select Bex's ordinary chat folder.
-        let requested = match (&request.workspace, selected_cwd) {
-            (None | Some(agent_protocol::workspace::WorkspaceStrategy::Worktree { .. }), None) => {
+        // An empty selection or the managed root always gets a private Scratch folder.
+        let requested = match (&request.workspace, scratch) {
+            (None | Some(agent_protocol::workspace::WorkspaceStrategy::Worktree { .. }), true) => {
                 Some(agent_protocol::workspace::WorkspaceStrategy::Root)
             }
             _ => request.workspace.clone(),

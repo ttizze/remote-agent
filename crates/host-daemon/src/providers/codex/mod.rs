@@ -834,7 +834,9 @@ impl crate::providers::Discovery for Codex {
             .expect("list access is open");
         let (source_kinds, ancestor_thread_id): (&'static [&'static str], Option<&str>) =
             match scope {
-                SessionListScope::Roots(_) => (&["cli", "vscode", "appServer", "unknown"], None),
+                SessionListScope::Roots { .. } => {
+                    (&["cli", "vscode", "appServer", "unknown"], None)
+                }
                 SessionListScope::All => (
                     &[
                         "cli",
@@ -1935,7 +1937,13 @@ rl.on('line', line => {
         let agent = super::Codex::new(Ok(server));
         let _events = super::Agent::event_stream(&agent).unwrap();
         for (scope, expected) in [
-            (super::SessionListScope::Roots(&[]), vec!["task"]),
+            (
+                super::SessionListScope::Roots {
+                    owned: &[],
+                    directories: &Default::default(),
+                },
+                vec!["task"],
+            ),
             (
                 super::SessionListScope::All,
                 vec!["task", "review", "helper"],

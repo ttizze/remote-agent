@@ -220,7 +220,7 @@ extension LaunchUITests {
         let app = try connectedSimulatorApp()
         try useAutomaticWorktrees(app)
         app.buttons["tasks.new.chat"].tap()
-        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: チャット")
+        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: プロジェクトなし")
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("[success] Keep this chat unassigned")
         app.buttons["task.send"].tap()
@@ -237,19 +237,22 @@ extension LaunchUITests {
         XCTAssertEqual(prompt.value as? String, prompt.placeholderValue)
         XCTAssertFalse(app.staticTexts["notice"].exists)
         app.buttons["task.new"].tap()
-        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: チャット")
+        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: プロジェクトなし")
         app.terminate()
         _ = try connectedSimulatorApp(expandProject: false)
+        let scratch = app.buttons["tasks.project.bex:scratch"]
+        XCTAssertTrue(scratch.waitUntilExists(timeout: 20))
+        scratch.tap()
         let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
         let row = try app
             .descendants(matching: .any)[simulatorTaskRowIdentifier("session-identity/fixture-thread-\(number)")]
-        XCTAssertTrue(row.waitUntilExists(timeout: 20), "The chat must be outside collapsed projects")
+        XCTAssertTrue(row.waitUntilExists(timeout: 20), "The chat must be in the No project group")
         row.tap()
         XCTAssertTrue(app.descendants(matching: .any)[answerID].waitUntilExists(timeout: 20))
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Unassigned chat after reopening")
         app.buttons["task.new"].tap()
-        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: チャット")
+        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: プロジェクトなし")
     }
 
     func testSimulatorApprovalEditorAndDraftSurviveReconnect() throws {

@@ -53,7 +53,10 @@ impl HostRpcService {
             .storage
             .active_sources()
             .map_err(super::super::runtime::storage_failure)?;
-        let scope = SessionListScope::Roots(&owned);
+        let scope = SessionListScope::Roots {
+            owned: &owned,
+            directories: &projects.scratch_roots,
+        };
         let deadline = tokio::time::Instant::now() + SESSION_LIST_TIMEOUT;
         let sources = futures_util::future::join_all(
             self.inner
@@ -101,12 +104,14 @@ impl HostRpcService {
                 scan.warnings.insert(provider.key().into(), warning);
             }
         }
-        let chat_directory = self.inner.projects.chat_directory();
-        scan.projects = tokio::task::spawn_blocking(move || candidates(threads, &chat_directory))
+        let roots = projects.scratch_roots.clone();
+        scan.projects = tokio::task::spawn_blocking(move || candidates(threads, &roots, &owned))
             .await
             .map_err(|error| Failure::new("project_scan_failed", error))?;
         for candidate in &mut scan.projects {
-            candidate.registered = projects.project_for_workspace(&candidate.path).is_some();
+            // Scratch remains selectable to recover additional native histories.
+            candidate.registered =
+                !candidate.is_scratch && projects.project_for_workspace(&candidate.path).is_some();
         }
         Ok(scan)
     }
@@ -130,12 +135,18 @@ impl HostRpcService {
                 }
             }
         }
-        super::super::runtime::Runtime::import_project_threads(self, &result.imported).await?;
+        let errors =
+            super::super::runtime::Runtime::import_project_threads(self, &result.imported).await?;
+        result.imported.retain(|path| !errors.contains_key(path));
+        result.errors.extend(errors);
         Ok(result)
     }
 }
 
-fn workspace(cwd: &str, chat_directory: &Path) -> Option<(PathBuf, bool)> {
+fn workspace(
+    cwd: &str,
+    scratch_roots: &std::collections::BTreeSet<PathBuf>,
+) -> Option<(PathBuf, bool, bool)> {
     if agent_local_host::wsl::folder(cwd).ok()?.is_some() {
         return None;
     }
@@ -143,8 +154,16 @@ fn workspace(cwd: &str, chat_directory: &Path) -> Option<(PathBuf, bool)> {
     if !cwd.is_absolute() {
         return None;
     }
+    if let Some(root) = crate::projects::state::scratch_root(scratch_roots, cwd) {
+        // Native transcripts retain cwd even when the catalog or folder is gone.
+        return Some((
+            dunce::canonicalize(root).unwrap_or_else(|_| root.to_owned()),
+            false,
+            true,
+        ));
+    }
     let cwd = dunce::canonicalize(cwd).ok()?;
-    if !cwd.is_dir() || cwd == chat_directory {
+    if !cwd.is_dir() {
         return None;
     }
     for ancestor in cwd.ancestors() {
@@ -154,15 +173,18 @@ fn workspace(cwd: &str, chat_directory: &Path) -> Option<(PathBuf, bool)> {
             return None;
         }
         if git.is_dir() {
-            return Some((ancestor.to_owned(), true));
+            return Some((ancestor.to_owned(), true, false));
         }
     }
-    Some((cwd, false))
+    Some((cwd, false, false))
 }
 
-fn candidates(threads: Vec<Thread>, chat_directory: &Path) -> Vec<ProjectCandidate> {
-    let chat_directory =
-        dunce::canonicalize(chat_directory).unwrap_or_else(|_| chat_directory.to_owned());
+fn candidates(
+    threads: Vec<Thread>,
+    scratch_roots: &std::collections::BTreeSet<PathBuf>,
+    owned: &[agent_protocol::session::SessionRef],
+) -> Vec<ProjectCandidate> {
+    let owned: HashSet<_> = owned.iter().collect();
     let mut directories = HashMap::new();
     let mut seen = HashSet::new();
     let mut candidates = BTreeMap::<String, ProjectCandidate>::new();
@@ -170,15 +192,18 @@ fn candidates(threads: Vec<Thread>, chat_directory: &Path) -> Vec<ProjectCandida
         let (Some(id), Some(cwd)) = (thread.id, thread.cwd) else {
             continue;
         };
-        if !seen.insert(id.clone()) {
+        if thread.parent_id.is_some() || !seen.insert(id.clone()) {
             continue;
         }
-        let Some((root, repository)) = directories
+        let Some((root, repository, scratch)) = directories
             .entry(cwd.clone())
-            .or_insert_with(|| workspace(&cwd, &chat_directory))
+            .or_insert_with(|| workspace(&cwd, scratch_roots))
         else {
             continue;
         };
+        if *scratch && owned.contains(&id) {
+            continue;
+        }
         let Some(path) = root.to_str() else {
             continue;
         };
@@ -186,14 +211,18 @@ fn candidates(threads: Vec<Thread>, chat_directory: &Path) -> Vec<ProjectCandida
             .entry(path.into())
             .or_insert_with(|| ProjectCandidate {
                 path: path.into(),
-                name: root
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.into()),
+                name: if *scratch {
+                    "No project".into()
+                } else {
+                    root.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.into())
+                },
                 providers: vec![],
                 conversation_count: 0,
                 last_active_at: None,
                 is_repository: *repository,
+                is_scratch: *scratch,
                 registered: false,
             });
         candidate.conversation_count += 1;
@@ -229,12 +258,207 @@ fn candidates(threads: Vec<Thread>, chat_directory: &Path) -> Vec<ProjectCandida
 mod tests {
     use super::*;
 
+    #[rstest::rstest]
+    #[case(ProviderKind::Codex)]
+    #[case(ProviderKind::Claude)]
+    #[tokio::test]
+    async fn scratch_import_reports_unreadable_history_and_retries_without_duplicates(
+        #[case] provider: ProviderKind,
+    ) {
+        use crate::host_rpc::runtime::native_fixture::NativeAgent;
+        use agent_protocol::{
+            execution::{ItemStatus, TurnStatus},
+            items::{Item, ItemBody},
+            models::{Thread, ThreadResponse, Turn},
+            session::SessionRef,
+        };
+        use std::sync::Arc;
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let mut agent = NativeAgent::new(provider);
+        Arc::get_mut(&mut agent).unwrap().deferred_history = true;
+        let native = SessionRef::new(provider, "source-chat".into()).unwrap();
+        agent.records.lock().unwrap().insert(
+            native.id.clone(),
+            ThreadResponse {
+                thread: Thread {
+                    id: Some(native.clone()),
+                    cwd: Some(root.join("scratch/private-chat").to_str().unwrap().into()),
+                    turns: Some(vec![Arc::new(Turn {
+                        id: "turn".into(),
+                        status: TurnStatus::Completed,
+                        items: Some(vec![Arc::new(Item::new(
+                            "question".into(),
+                            ItemStatus::Completed,
+                            ItemBody::UserMessage {
+                                text: Some("saved question".into()),
+                                content: vec![],
+                            },
+                        ))]),
+                        ..Default::default()
+                    })]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        agent.unreadable.lock().unwrap().insert("question".into());
+        let service = HostRpcService::new([agent.backend()], root.join("projects.json"));
+        let path = service.scan_projects().await.unwrap().projects[0]
+            .path
+            .clone();
+        let failed = service.import_projects(&[path.clone()]).await.unwrap();
+        assert!(failed.imported.is_empty());
+        assert!(failed.errors.contains_key(&path));
+        assert!(
+            service
+                .inner
+                .conversation
+                .storage
+                .active_sources()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!service.scan_projects().await.unwrap().projects[0].registered);
+        agent.unreadable.lock().unwrap().clear();
+        let imported = service.import_projects(&[path.clone()]).await.unwrap();
+        assert!(imported.errors.is_empty(), "{imported:?}");
+        assert_eq!(imported.imported, [path.clone()]);
+        service.import_projects(&[path]).await.unwrap();
+        assert_eq!(
+            service.inner.conversation.storage.active_sources().unwrap(),
+            [native]
+        );
+    }
+
+    async fn recovery_service(root: &Path) -> HostRpcService {
+        let claude = crate::providers::Claude::load(
+            root.join("missing-cli"),
+            root.join("adapter"),
+            Some(root.join("native")),
+        )
+        .await
+        .unwrap();
+        HostRpcService::new([claude.into()], root.join("projects.json"))
+    }
+
+    #[tokio::test]
+    async fn scratch_reimports_sdk_history_after_database_loss_without_creating_projects_per_chat()
+    {
+        use agent_protocol::models::SCRATCH_PROJECT_ID;
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let transcripts = root.join("native/projects/shared");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let sources = [uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let folders = [root.join("scratch/first"), root.join("scratch/second")];
+        for (id, cwd) in sources.iter().zip(&folders) {
+            let user = serde_json::json!({"type":"user","uuid":"question","parentUuid":null,"sessionId":id,"cwd":cwd,"entrypoint":"sdk-ts","promptSource":"sdk","message":{"content":"saved question"}});
+            let answer = serde_json::json!({"type":"assistant","uuid":"answer","parentUuid":"question","sessionId":id,"cwd":cwd,"message":{"id":"reply","role":"assistant","content":[{"type":"text","text":"saved answer"}]}});
+            std::fs::write(
+                transcripts.join(format!("{id}.jsonl")),
+                format!("{user}\n{answer}\n"),
+            )
+            .unwrap();
+        }
+        // An automated task outside Scratch is still excluded from recovery.
+        let other = uuid::Uuid::new_v4();
+        let automated = serde_json::json!({"type":"user","sessionId":other,"cwd":root.join("elsewhere"),"entrypoint":"sdk-ts","promptSource":"sdk","message":{"content":"agent task"}});
+        std::fs::write(
+            transcripts.join(format!("{other}.jsonl")),
+            format!("{automated}\n"),
+        )
+        .unwrap();
+        for round in 0..2 {
+            let service = recovery_service(&root).await;
+            assert!(
+                service
+                    .inner
+                    .projects
+                    .load()
+                    .await
+                    .unwrap()
+                    .projects
+                    .is_empty()
+            );
+            let scan = service.scan_projects().await.unwrap();
+            assert_eq!(scan.projects.len(), 1);
+            let candidate = &scan.projects[0];
+            assert!(candidate.is_scratch);
+            assert!(!candidate.registered);
+            assert_eq!(candidate.conversation_count, 2);
+            let result = service
+                .import_projects(&[candidate.path.clone()])
+                .await
+                .unwrap();
+            assert!(result.errors.is_empty(), "{result:?}");
+            assert_eq!(result.imported, [candidate.path.clone()]);
+            let before = service.inner.conversation.storage.active_sources().unwrap();
+            assert_eq!(before.len(), 2);
+            service
+                .import_projects(&[candidate.path.clone()])
+                .await
+                .unwrap();
+            assert_eq!(
+                service.inner.conversation.storage.active_sources().unwrap(),
+                before
+            );
+            let projects = service.inner.projects.load().await.unwrap();
+            assert_eq!(projects.projects.len(), 1);
+            assert_eq!(projects.projects[0].id, SCRATCH_PROJECT_ID);
+            for (source, cwd) in sources.iter().zip(&folders) {
+                let native = agent_protocol::session::SessionRef::new(
+                    ProviderKind::Claude,
+                    source.to_string(),
+                )
+                .unwrap();
+                let snapshot = super::super::super::runtime::native_fixture::canonical_snapshot(
+                    &service, &native,
+                )
+                .unwrap();
+                assert_eq!(
+                    snapshot.projection.thread.project_id.as_deref(),
+                    Some(SCRATCH_PROJECT_ID)
+                );
+                assert_eq!(
+                    snapshot.projection.thread.worktree_path.as_deref(),
+                    cwd.to_str()
+                );
+                assert!(snapshot.projection.turn_items.iter().any(|item| matches!(&item.body, agent_protocol::orchestration::TurnItemBody::UserMessage {text,..} if text == "saved question")));
+                assert!(snapshot.projection.turn_items.iter().any(|item| matches!(&item.body, agent_protocol::orchestration::TurnItemBody::AssistantMessage {text,..} if text == "saved answer")));
+            }
+            assert_eq!(
+                service
+                    .restore_workspace(folders[0].to_str().unwrap())
+                    .await
+                    .unwrap(),
+                round == 0
+            );
+            let artifact = folders[0].join("result.txt");
+            if round == 0 {
+                std::fs::write(&artifact, "keep generated files").unwrap();
+            }
+            assert_eq!(
+                std::fs::read_to_string(artifact).unwrap(),
+                "keep generated files"
+            );
+            drop(service);
+            if round == 0 {
+                // Remove only this test's application DB, retaining native transcripts.
+                std::fs::remove_file(
+                    root.join(super::super::super::storage::CONVERSATION_DATABASE_FILE),
+                )
+                .unwrap();
+            }
+        }
+    }
+
     #[test]
     fn discovery_ignores_unusable_folders_and_deduplicates_native_identities() {
         let root = tempfile::tempdir().unwrap();
         let repository = root.path().join("repository");
         let linked = root.path().join("linked");
-        let chats = root.path().join("bex-chats");
+        let chats = root.path().join("scratch");
         for path in [
             &repository.join(".git"),
             &repository.join("src"),
@@ -269,9 +493,13 @@ mod tests {
                 ),
                 thread(ProviderKind::Claude, "relative", Path::new("relative")),
             ],
-            &chats,
+            &[dunce::canonicalize(&chats).unwrap()].into(),
+            &[],
         );
-        assert_eq!(found.len(), 1);
+        assert_eq!(found.len(), 2);
+        let scratch = found.iter().find(|candidate| candidate.is_scratch).unwrap();
+        assert_eq!(scratch.conversation_count, 1);
+        assert_eq!(scratch.name, "No project");
         assert_eq!(found[0].conversation_count, 2);
         assert_eq!(
             found[0].providers,
@@ -361,7 +589,10 @@ mod tests {
         let page = crate::providers::Discovery::catalog_page(
             agent.as_ref(),
             None,
-            SessionListScope::Roots(&[]),
+            SessionListScope::Roots {
+                owned: &[],
+                directories: &Default::default(),
+            },
             100,
         )
         .await

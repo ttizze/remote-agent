@@ -33,14 +33,25 @@ impl WorktreeBlockers {
 impl HostRpcService {
     // Callers hold worktree_access so removal cannot race restoration.
     pub(in crate::host_rpc) async fn restore_workspace(&self, cwd: &str) -> Result<bool, Failure> {
-        let Some(directory) = self
+        let directory = match self
             .inner
-            .worktrees
-            .ensure_available(cwd)
+            .projects
+            .restore_chat_directory(std::path::Path::new(cwd))
             .await
-            .map_err(|error| Failure::new("worktree_creation_failed", error))?
-        else {
-            return Ok(false);
+            .map_err(|error| Failure::new("workspace_unavailable", error))?
+        {
+            Some(false) => return Ok(false),
+            Some(true) => std::path::PathBuf::from(cwd),
+            None => match self
+                .inner
+                .worktrees
+                .ensure_available(cwd)
+                .await
+                .map_err(|error| Failure::new("worktree_creation_failed", error))?
+            {
+                Some(directory) => directory,
+                None => return Ok(false),
+            },
         };
         self.inner
             .providers

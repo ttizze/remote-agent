@@ -1032,7 +1032,7 @@ async fn failed_chat_creation_keeps_draft_and_retry_survives_reconnect() {
         )
         .await
         .unwrap();
-        let blocked = root.join("bex-chats");
+        let blocked = root.join("scratch");
         std::fs::write(&blocked, "not a directory").unwrap();
         store
             .dispatch(Intent::NewChat { cwd: String::new() })
@@ -1221,10 +1221,10 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
             }
             else {
                 assert!(store.snapshot().selected_directory(store.snapshot().panes.primary()).is_empty(), "an unselected chat must remain unselected: {cwd}");
-                assert_eq!(Path::new(&cwd), root.join("bex-chats"));
+                assert_eq!(Path::new(&cwd).parent(), Some(root.join("scratch").as_path()));
                 let snapshot = store.snapshot();
-                assert_eq!(snapshot.sessions.conversations[&id].project_id, models::ProjectMembership::Unassigned {});
-                assert_eq!(snapshot.sessions.conversations[&id].cwd.as_deref(), root.join("bex-chats").to_str());
+                assert_eq!(snapshot.sessions.conversations[&id].project_id, models::ProjectMembership::Assigned(models::SCRATCH_PROJECT_ID.into()));
+                assert_eq!(snapshot.sessions.conversations[&id].cwd.as_deref(), Some(cwd.as_str()));
             }
             store.dispatch(Intent::ShowThreadList).await.unwrap();
             store.dispatch(Intent::ListSessions(Default::default())).await.unwrap();
@@ -1253,7 +1253,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes(
             assert!(snapshot.sessions.pending_submissions.is_empty());
             let page = if project { &snapshot.lists.project_threads["default"] } else { snapshot.lists.threads.as_ref().unwrap() };
             let listed = page.data.iter().find(|thread| thread.id.as_ref() == Some(&id)).expect("sent conversation must be listed");
-            assert_eq!(listed.project_id, if project { models::ProjectMembership::Assigned("default".into()) } else { models::ProjectMembership::Unassigned {} });
+            assert_eq!(listed.project_id, models::ProjectMembership::Assigned(if project { "default" } else { models::SCRATCH_PROJECT_ID }.into()));
             let restored: agent_core::state::Snapshot = serde_json::from_slice(&serde_json::to_vec(snapshot.as_ref()).unwrap()).unwrap();
             assert_eq!(restored.selected_directory(restored.panes.primary()), snapshot.selected_directory(snapshot.panes.primary()));
 
@@ -1955,7 +1955,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         }
         threads.extend([
             json!({"id":"explicit","projectId":"ignored-native-assignment","cwd":directory.path().join("project-3"),"name":"Explicit assignment","updatedAt":90000}),
-            json!({"id":"projectless","projectId":"ignored-native-assignment","cwd":directory.path().join("bex-chats"),"name":"Explicit chat","updatedAt":90001}),
+            json!({"id":"projectless","projectId":"ignored-native-assignment","cwd":directory.path().join("scratch"),"name":"Explicit chat","updatedAt":90001}),
             json!({"id":"worktree","projectId":"ignored-native-assignment","cwd":directory.path().join("worktree"),"name":"Worktree conversation","updatedAt":90002}),
         ]);
         let rollout = directory.path().join("external-rollout.jsonl");
@@ -2189,8 +2189,14 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
                 });
             }
             let thread = completed_chat(&local.peer, request).await;
-            assert_eq!(thread.cwd.as_deref(), root.join("bex-chats").to_str());
-            assert!(thread.project_id.is_none());
+            assert_eq!(
+                Path::new(thread.cwd.as_ref().unwrap()).parent(),
+                Some(root.join("scratch").as_path())
+            );
+            assert_eq!(
+                thread.project_id.as_deref(),
+                Some(models::SCRATCH_PROJECT_ID)
+            );
             chat_ids.push(thread.id.unwrap());
         }
         let memory = fixture.memory.clone();
@@ -2218,8 +2224,14 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
                 .unwrap()
                 .view()
                 .thread;
-            assert_eq!(thread.cwd.as_deref(), root.join("bex-chats").to_str());
-            assert!(thread.project_id.is_none());
+            assert_eq!(
+                Path::new(thread.cwd.as_ref().unwrap()).parent(),
+                Some(root.join("scratch").as_path())
+            );
+            assert_eq!(
+                thread.project_id.as_deref(),
+                Some(models::SCRATCH_PROJECT_ID)
+            );
         }
         let catalog = conversations::Catalog::open(&local.peer).await;
         let listed = catalog.page(models::ListQuery {
@@ -2241,7 +2253,10 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
                 .unwrap()
                 .data
                 .iter()
-                .any(|thread| thread.id.as_ref() == Some(id) && thread.project_id.is_none())
+                .any(|thread| {
+                    thread.id.as_ref() == Some(id)
+                        && thread.project_id.as_deref() == Some(models::SCRATCH_PROJECT_ID)
+                })
         }));
         let after = std::process::Command::new("git")
             .current_dir(&workspace)

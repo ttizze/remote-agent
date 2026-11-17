@@ -199,3 +199,51 @@ fn empty_draft_has_no_workspace_controls_or_comparison() {
     assert!(effects.is_empty());
     assert!(next.panes.primary().workspace.comparison.is_none());
 }
+
+#[test]
+fn scratch_drafts_and_conversations_share_a_project_label_without_git_controls() {
+    use crate::models::{ProjectMembership, SCRATCH_PROJECT_ID};
+    let mut snapshot = workspace();
+    snapshot.lists.threads = Some(Arc::new(crate::models::ThreadList {
+        projects: vec![crate::models::Project {
+            id: SCRATCH_PROJECT_ID.into(),
+            name: "No project".into(),
+            roots: vec![crate::models::ProjectRoot {
+                path: "/project".into(),
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    assert!(
+        snapshot
+            .selected_directory(snapshot.panes.primary())
+            .is_empty()
+    );
+    assert_eq!(
+        snapshot.directory_project("").unwrap().id,
+        SCRATCH_PROJECT_ID
+    );
+    assert_eq!(workspace_actions(&snapshot, ""), Default::default());
+    let id = crate::session::SessionRef::new(None, "scratch-chat".into()).unwrap();
+    Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).thread_id =
+        Some(id.clone());
+    Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).cwd =
+        "/project/private-chat".into();
+    Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+        id.clone(),
+        Arc::new(crate::models::Thread {
+            id: Some(id),
+            cwd: Some("/project/private-chat".into()),
+            project_id: ProjectMembership::Assigned(SCRATCH_PROJECT_ID.into()),
+            ..Default::default()
+        }),
+    );
+    assert!(
+        snapshot
+            .selected_directory(snapshot.panes.primary())
+            .is_empty()
+    );
+    assert_eq!(workspace_actions(&snapshot, ""), Default::default());
+    assert!(operations::review_workspace(&mut snapshot, "").is_none());
+}

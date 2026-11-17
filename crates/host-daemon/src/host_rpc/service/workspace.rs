@@ -146,8 +146,9 @@ impl HostRpcService {
             return Ok(None);
         };
         let projects = self.project_snapshot().await?;
-        if projects.is_chat_directory(Path::new(cwd))
-            || projects.is_chat_directory(Path::new(&source))
+        if crate::projects::state::scratch_root(&projects.scratch_roots, Path::new(cwd)).is_some()
+            || crate::projects::state::scratch_root(&projects.scratch_roots, Path::new(&source))
+                .is_some()
         {
             return Ok(None);
         }

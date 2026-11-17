@@ -143,19 +143,24 @@ impl Runtime {
     pub(in crate::host_rpc) async fn import_project_threads(
         service: &HostRpcService,
         roots: &[String],
-    ) -> Result<(), Failure> {
+    ) -> Result<std::collections::BTreeMap<String, String>, Failure> {
         let projects = service.project_snapshot().await?;
-        let selected: std::collections::BTreeSet<_> = roots
+        let selected: std::collections::BTreeMap<_, _> = roots
             .iter()
-            .filter_map(|root| projects.project_for_workspace(root).map(str::to_owned))
+            .filter_map(|root| {
+                projects
+                    .project_for_workspace(root)
+                    .map(|id| (id.to_owned(), root.clone()))
+            })
             .collect();
         if selected.is_empty() {
-            return Ok(());
+            return Ok(Default::default());
         }
         let runtime = &service.inner.conversation;
         let owned = runtime.storage.active_sources().map_err(storage_failure)?;
         let owned_index: std::collections::HashSet<_> = owned.iter().collect();
         let mut candidates = Vec::new();
+        let mut errors = std::collections::BTreeMap::new();
         for (provider, agent) in service.inner.providers.all() {
             if service.require_provider_enabled(provider).is_err() {
                 continue;
@@ -164,7 +169,10 @@ impl Runtime {
             // must not expire while an unrelated transcript is being imported.
             let pages = crate::providers::native_pages(
                 agent.as_ref(),
-                crate::providers::SessionListScope::Roots(&owned),
+                crate::providers::SessionListScope::Roots {
+                    owned: &owned,
+                    directories: &projects.scratch_roots,
+                },
                 100,
                 50,
                 Some(tokio::time::Instant::now() + std::time::Duration::from_secs(5)),
@@ -176,7 +184,9 @@ impl Runtime {
                     Ok(Some(page)) => page,
                     Ok(None) => break,
                     Err(error) => {
-                        tracing::warn!(target:"agent",operation="project.scan-native",%error);
+                        for root in selected.values() {
+                            errors.insert(root.clone(), error.to_string());
+                        }
                         break;
                     }
                 };
@@ -187,17 +197,21 @@ impl Runtime {
                     let Some(cwd) = summary.cwd.as_deref() else {
                         continue;
                     };
-                    if !projects
+                    let Some(root) = projects
                         .project_for_workspace(cwd)
-                        .is_some_and(|id| selected.contains(id))
-                    {
+                        .and_then(|id| selected.get(id))
+                    else {
                         continue;
-                    }
+                    };
                     let Some(native) = summary.id.filter(|id| id.provider == Some(provider)) else {
                         continue;
                     };
                     if !owned_index.contains(&native) {
-                        candidates.push((summary.updated_at.unwrap_or_default(), native));
+                        candidates.push((
+                            summary.updated_at.unwrap_or_default(),
+                            native,
+                            root.clone(),
+                        ));
                     }
                 }
             }
@@ -208,9 +222,9 @@ impl Runtime {
                 .then_with(|| a.1.cmp(&b.1))
         });
         let mut seen = std::collections::HashSet::new();
-        for (_, native) in candidates
+        for (_, native, root) in candidates
             .into_iter()
-            .filter(|(_, native)| seen.insert(native.clone()))
+            .filter(|(_, native, _)| seen.insert(native.clone()))
             .take(PROJECT_TRANSCRIPTS)
         {
             let provider = native
@@ -230,10 +244,10 @@ impl Runtime {
             if let Err(error) =
                 Self::import_native(service, &native, &native, Some(PROJECT_MESSAGES)).await
             {
-                tracing::warn!(target:"agent",operation="project.import-native",%error);
+                errors.insert(root, error.to_string());
             }
         }
-        Ok(())
+        Ok(errors)
     }
 
     pub(super) async fn import_native(
@@ -293,7 +307,27 @@ impl Runtime {
                 service_tier: response.service_tier.clone(),
             },
         );
-        let projects = service.project_snapshot().await?;
+        let mut projects = service.project_snapshot().await?;
+        if !projects
+            .projects
+            .iter()
+            .any(|project| project.id == agent_protocol::models::SCRATCH_PROJECT_ID)
+            && response.thread.cwd.as_ref().is_some_and(|cwd| {
+                crate::projects::state::scratch_root(
+                    &projects.scratch_roots,
+                    std::path::Path::new(cwd),
+                )
+                .is_some()
+            })
+        {
+            service
+                .inner
+                .projects
+                .ensure_scratch()
+                .await
+                .map_err(|error| Failure::new("workspace_unavailable", error))?;
+            projects = service.project_snapshot().await?;
+        }
         let (mut thread, mut provider_thread) = super::native_metadata::records(
             &response.thread,
             selected,

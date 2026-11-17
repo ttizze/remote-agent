@@ -997,8 +997,10 @@ fn main() {
             .iter()
             .any(|arg| arg.contains("skip-permissions") || arg == "--bare")
     );
-    let config: Value = fs::read("claude-fixture.json")
-        .ok()
+    let config: Value = std::env::current_dir()
+        .unwrap()
+        .ancestors()
+        .find_map(|directory| fs::read(directory.join("claude-fixture.json")).ok())
         .map(|bytes| serde_json::from_slice(&bytes).unwrap())
         .unwrap_or(json!({}));
     let session = option(&args, "--resume")

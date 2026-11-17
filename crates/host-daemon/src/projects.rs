@@ -7,36 +7,8 @@ use std::{
 };
 
 pub(crate) mod icons;
+mod scratch;
 pub(crate) mod state;
-
-/// Reserved paths include the physical parent before the chat folder exists.
-pub(crate) fn chat_directories(
-    state_file: &Path,
-) -> io::Result<std::collections::BTreeSet<PathBuf>> {
-    let configured = state_file.with_file_name("bex-chats");
-    let mut paths = std::collections::BTreeSet::from([configured.clone()]);
-    for path in [
-        state_file
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or(Path::new(".")),
-        configured.as_path(),
-    ] {
-        match std::fs::canonicalize(path) {
-            Ok(physical) => {
-                let physical = dunce::simplified(&physical);
-                paths.insert(if path == configured {
-                    physical.to_owned()
-                } else {
-                    physical.join("bex-chats")
-                });
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(paths)
-}
 
 /// The Host owns project registration independently of native provider catalogs.
 #[derive(Debug, Clone)]
@@ -73,16 +45,6 @@ impl ProjectStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
-    pub(crate) fn chat_directory(&self) -> PathBuf {
-        self.path.with_file_name("bex-chats")
-    }
-    pub(crate) async fn create_chat_directory(&self) -> anyhow::Result<PathBuf> {
-        let directory = self.chat_directory();
-        tokio::fs::create_dir_all(&directory).await?;
-        let directory = tokio::fs::canonicalize(&directory).await?;
-        Ok(dunce::simplified(&directory).to_owned())
-    }
-
     async fn read_projects(&self) -> anyhow::Result<Vec<Project>> {
         let storage = self.storage.clone();
         tokio::task::spawn_blocking(move || storage.projects())
@@ -90,18 +52,15 @@ impl ProjectStore {
             .map_err(anyhow::Error::msg)
     }
     pub(crate) async fn register(&self, root: &Path) -> anyhow::Result<String> {
-        let state_path = self.path.clone();
-        let chats = tokio::task::spawn_blocking(move || chat_directories(&state_path)).await??;
-        let root = if chats.contains(dunce::simplified(root)) {
-            root.to_owned()
-        } else {
-            resolve_root(root).await?
-        };
+        let roots = self.scratch_roots().await?;
+        if crate::projects::state::scratch_root(&roots, root).is_some() {
+            let root = self.ensure_scratch().await?;
+            self.synchronize_projectless().await?;
+            return Ok(root.to_str().context("project path is not UTF-8")?.into());
+        }
+        let root = resolve_root(root).await?;
         let root = dunce::simplified(&root);
         let path = root.to_str().context("project path is not UTF-8")?;
-        if chats.contains(root) {
-            return Ok(path.into());
-        }
         anyhow::ensure!(
             tokio::fs::metadata(root).await?.is_dir(),
             "project path must be a directory"
@@ -142,20 +101,15 @@ impl ProjectStore {
             .map_err(anyhow::Error::msg)
     }
     pub(crate) async fn load(&self) -> anyhow::Result<state::Snapshot> {
-        let state_file = self.path.clone();
-        let chat_directories =
-            tokio::task::spawn_blocking(move || chat_directories(&state_file)).await??;
+        let scratch_roots = self.scratch_roots().await?;
         let mut snapshot = state::Snapshot {
-            chat_directories,
+            scratch_roots,
             ..Default::default()
         };
         for mut project in self.read_projects().await? {
             for root in std::mem::take(&mut project.roots) {
                 if let Ok(path) = resolve_root(Path::new(&root.path)).await {
                     let path = dunce::simplified(&path);
-                    if snapshot.chat_directories.contains(path) {
-                        continue;
-                    }
                     snapshot
                         .resolved_roots
                         .insert(root.path.clone(), path.to_owned());
@@ -214,13 +168,15 @@ mod tests {
         }
         assert_eq!(snapshot.project_for_workspace("alias/src"), None);
 
-        let chats = store.create_chat_directory().await.unwrap();
+        let chats = store.create_chat_directory("").await.unwrap();
         let chat_alias = root.join("chat-alias");
         std::os::unix::fs::symlink(chats, &chat_alias).unwrap();
         let snapshot = store.load().await.unwrap();
         assert_eq!(
             snapshot.project_membership(chat_alias.to_str()),
-            agent_protocol::models::ProjectMembership::Unassigned {}
+            agent_protocol::models::ProjectMembership::Assigned(
+                agent_protocol::models::SCRATCH_PROJECT_ID.into()
+            )
         );
     }
 
@@ -339,8 +295,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reserved_chat_directory_is_unassigned_before_and_after_creation() {
-        use agent_protocol::models::ProjectMembership;
+    async fn scratch_registration_reserves_children_and_survives_catalog_reopen() {
+        use agent_protocol::models::{ProjectMembership, SCRATCH_PROJECT_ID};
         let directory = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(directory.path()).unwrap();
         #[cfg(unix)]
@@ -353,64 +309,36 @@ mod tests {
         let configured = root.clone();
         let store = ProjectStore::fixture(configured.join("bex-worktrees.json"));
         store.register(&root).await.unwrap();
-        let chats = store.chat_directory();
-        assert!(!chats.exists());
-        for created in [false, true] {
-            if created {
-                std::fs::create_dir(&chats).unwrap();
-            }
-            store.register(&chats).await.unwrap();
-            assert_eq!(store.storage.projects().unwrap().len(), 1);
-            let snapshot = store.load().await.unwrap();
+        let scratch = store.scratch_directory();
+        assert!(!scratch.exists());
+        let child = scratch.join("missing-conversation");
+        assert!(
+            crate::projects::state::scratch_root(
+                &store.load().await.unwrap().scratch_roots,
+                &child
+            )
+            .is_some()
+        );
+        let registered = store.register(&child).await.unwrap();
+        assert_eq!(
+            Path::new(&registered),
+            dunce::canonicalize(&scratch).unwrap()
+        );
+        store.register(&scratch).await.unwrap();
+        let snapshot = ProjectStore::fixture(store.path()).load().await.unwrap();
+        assert_eq!(snapshot.projects.len(), 2);
+        for path in [&scratch, &child, &root.join("scratch/other")] {
             assert_eq!(
-                snapshot.project_membership(chats.to_str()),
-                ProjectMembership::Unassigned {}
+                snapshot.project_membership(path.to_str()),
+                ProjectMembership::Assigned(SCRATCH_PROJECT_ID.into())
             );
-            assert_eq!(
-                snapshot.project_membership(root.to_str()),
-                ProjectMembership::Assigned(snapshot.projects[0].id.clone())
-            );
-            if created {
-                assert_eq!(
-                    snapshot.project_membership(dunce::canonicalize(&chats).unwrap().to_str()),
-                    ProjectMembership::Unassigned {}
-                );
-            }
         }
+        assert_ne!(
+            snapshot.project_for_workspace(root.join("scratch-other").to_str().unwrap()),
+            Some(SCRATCH_PROJECT_ID)
+        );
     }
 
-    #[tokio::test]
-    async fn standalone_chat_directory_does_not_become_a_project() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = dunce::canonicalize(directory.path()).unwrap();
-        let chats = root.join("bex-chats");
-        std::fs::create_dir(&chats).unwrap();
-        let workspace = root.join("workspace");
-        std::fs::create_dir(&workspace).unwrap();
-        let projects = serde_json::json!([
-            {"id":"chats","name":"Chats","roots":[{"path":chats}]},
-            {"id":"mixed","name":"Workspace","roots":[{"path":workspace}]}
-        ]);
-        let store = ProjectStore::fixture(root.join("bex-worktrees.json"));
-        store
-            .storage
-            .replace_projects(&serde_json::from_value::<Vec<_>>(projects).unwrap())
-            .unwrap();
-        let snapshot = store.load().await.unwrap();
-        assert_eq!(snapshot.projects.len(), 1);
-        assert_eq!(snapshot.projects[0].id, "mixed");
-        assert_eq!(snapshot.projects[0].roots.len(), 1);
-        assert_eq!(Path::new(&snapshot.projects[0].roots[0].path), workspace);
-        assert_eq!(
-            snapshot.project_for_workspace(chats.to_str().unwrap()),
-            None
-        );
-        assert!(
-            !snapshot
-                .resolved_roots
-                .contains_key(chats.to_str().unwrap())
-        );
-    }
     #[tokio::test]
     async fn registration_is_durable_idempotent_and_refreshes_worktree_roots() {
         let directory = tempfile::tempdir().unwrap();

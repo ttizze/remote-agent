@@ -41,6 +41,37 @@ pub struct ProjectSummary {
     pub has_more: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ProjectChoice {
+    pub name: String,
+    pub directory: String,
+}
+
+/// A Scratch selection starts a fresh folder, never another chat in its root.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn project_choices(language: UiLanguage, projects: Vec<ProjectSummary>) -> Vec<ProjectChoice> {
+    let mut choices = vec![ProjectChoice {
+        name: language.text("プロジェクトなし").into(),
+        directory: String::new(),
+    }];
+    for project in projects
+        .into_iter()
+        .filter(|project| project.id != crate::models::SCRATCH_PROJECT_ID)
+    {
+        let multiple = project.roots.len() > 1;
+        choices.extend(project.roots.into_iter().map(|root| ProjectChoice {
+            name: if multiple {
+                root.path.clone()
+            } else {
+                project.name.clone()
+            },
+            directory: root.path,
+        }));
+    }
+    choices
+}
+
 /// Native lists share the existing sidebar's section boundaries and pinned group.
 pub fn project_headings<'a>(
     projects: impl IntoIterator<Item = (bool, Option<&'a str>)>,
@@ -110,7 +141,12 @@ mod heading_tests {
     }
 }
 
-fn project_summary(project: &Project, display_name: &str) -> ProjectSummary {
+fn project_summary(language: UiLanguage, project: &Project, display_name: &str) -> ProjectSummary {
+    let display_name = if project.id == crate::models::SCRATCH_PROJECT_ID {
+        language.text("プロジェクトなし")
+    } else {
+        display_name
+    };
     let name = project.name.trim();
     let mut words = name
         .split(|c: char| !c.is_alphanumeric())
@@ -385,22 +421,23 @@ impl Snapshot {
         )
     }
 }
+fn project_for_directory<'a>(projects: &'a [Project], directory: &str) -> Option<&'a Project> {
+    projects.iter().find(|project| {
+        if directory.is_empty() {
+            project.id == crate::models::SCRATCH_PROJECT_ID
+        } else {
+            project
+                .roots
+                .first()
+                .is_some_and(|root| root.path == directory)
+        }
+    })
+}
+
 impl Snapshot {
-    /// The listed project whose first folder is `directory`, named and marked
-    /// as the sidebar shows it.
+    /// Present the selected folder, or the managed project for an empty selection.
     pub(crate) fn directory_project(&self, directory: &str) -> Option<ProjectSummary> {
-        let project = self
-            .lists
-            .threads
-            .as_ref()?
-            .projects
-            .iter()
-            .find(|project| {
-                project
-                    .roots
-                    .first()
-                    .is_some_and(|root| !directory.is_empty() && root.path == directory)
-            })?;
+        let project = project_for_directory(&self.lists.threads.as_ref()?.projects, directory)?;
         let name = self
             .lists
             .project_preferences
@@ -408,7 +445,7 @@ impl Snapshot {
             .and_then(|preferences| preferences.get(&project.id))
             .and_then(|preferences| preferences.name.as_deref())
             .unwrap_or(&project.name);
-        Some(project_summary(project, name))
+        Some(project_summary(self.catalog.ui_language, project, name))
     }
 
     /// The selected folder is separate from the provider's execution directory.
@@ -420,7 +457,15 @@ impl Snapshot {
             .and_then(|id| self.thread_metadata(id));
         if thread.is_some_and(|thread| {
             thread.project_id == (crate::models::ProjectMembership::Unassigned {})
-        }) {
+                || thread.project_id.as_deref() == Some(crate::models::SCRATCH_PROJECT_ID)
+        }) || (thread.is_none()
+            && self
+                .lists
+                .threads
+                .as_ref()
+                .and_then(|list| project_for_directory(&list.projects, &pane.navigation.cwd))
+                .is_some_and(|project| project.id == crate::models::SCRATCH_PROJECT_ID))
+        {
             String::new()
         } else {
             pane.navigation.cwd.clone()
@@ -582,6 +627,7 @@ impl ListSource<'_> {
             let prefs = preferences.and_then(|prefs| prefs.get(&project.id));
             if prefs.is_some_and(|prefs| prefs.hidden) {
                 hidden_projects.push(project_summary(
+                    self.language,
                     project,
                     prefs
                         .and_then(|prefs| prefs.name.as_deref())
@@ -651,6 +697,7 @@ impl ListSource<'_> {
                     .into_iter()
                     .map(|(project, prefs, page, expanded)| {
                         let mut summary = project_summary(
+                            self.language,
                             project,
                             prefs
                                 .and_then(|prefs| prefs.name.as_deref())
@@ -976,8 +1023,55 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn scratch_labels_and_choices_ignore_saved_names_and_never_select_its_shared_root() {
+        let scratch = Project {
+            id: models::SCRATCH_PROJECT_ID.into(),
+            name: "renamed".into(),
+            roots: vec![models::ProjectRoot {
+                path: "/data/scratch".into(),
+            }],
+            ..Default::default()
+        };
+        for (language, label) in [
+            (UiLanguage::English, "No project"),
+            (UiLanguage::Japanese, "プロジェクトなし"),
+        ] {
+            let summary = project_summary(language, &scratch, "custom preference");
+            assert_eq!(summary.name, label);
+            let regular = project_summary(
+                language,
+                &Project {
+                    id: "regular".into(),
+                    name: "Work".into(),
+                    roots: vec![models::ProjectRoot {
+                        path: "/work".into(),
+                    }],
+                    ..Default::default()
+                },
+                "Work",
+            );
+            let choices = project_choices(language, vec![summary, regular]);
+            assert_eq!(
+                choices,
+                [
+                    ProjectChoice {
+                        name: label.into(),
+                        directory: String::new()
+                    },
+                    ProjectChoice {
+                        name: "Work".into(),
+                        directory: "/work".into()
+                    },
+                ]
+            );
+            assert_eq!(project_choices(language, vec![]), choices[..1]);
+        }
+    }
+
+    #[test]
     fn only_native_claude_projects_link_to_their_coordinator() {
         let summary = project_summary(
+            UiLanguage::Japanese,
             &Project {
                 id: "claude-project:chan_01Q7KpeXNrNrvTTahXT6YE2S".into(),
                 ..Default::default()
@@ -1015,7 +1109,7 @@ mod tests {
             name: name.into(),
             ..Default::default()
         };
-        let summary = project_summary(&project, &project.name);
+        let summary = project_summary(UiLanguage::Japanese, &project, &project.name);
         assert_eq!(summary.monogram, monogram);
         assert!(summary.icon.is_none());
     }
@@ -1034,7 +1128,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let summary = project_summary(&project, "Project");
+            let summary = project_summary(UiLanguage::Japanese, &project, "Project");
             assert_eq!(summary.icon.is_some(), expected);
             if let Some(images) = summary.icon {
                 assert_eq!(images.light_png, [1, 2, 3]);
@@ -1049,8 +1143,8 @@ mod tests {
             let project = |name| Project { name, ..Default::default() };
             let plain_project = project(name);
             let padded_project = project(format!(" \t{}\n ", plain_project.name));
-            let plain = project_summary(&plain_project, &plain_project.name);
-            let padded = project_summary(&padded_project, &padded_project.name);
+            let plain = project_summary(UiLanguage::Japanese, &plain_project, &plain_project.name);
+            let padded = project_summary(UiLanguage::Japanese, &padded_project, &padded_project.name);
             proptest::prop_assert_eq!(plain.monogram.chars().count(), 2);
             proptest::prop_assert_eq!(plain.monogram, padded.monogram);
             proptest::prop_assert_eq!(plain.icon_color, padded.icon_color);

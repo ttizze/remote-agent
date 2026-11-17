@@ -282,12 +282,13 @@ pub(crate) fn draft_hero() -> View {
                 .into_iter()
                 .filter(|(list_host, _)| *list_host == host)
                 .flat_map(|(_, list)| {
-                    list.projects
-                        .iter()
-                        .filter_map(|project| {
-                            Some((project.name.clone(), project.roots.first()?.path.clone()))
-                        })
-                        .collect::<Vec<_>>()
+                    agent_core::presentation::list::project_choices(
+                        crate::l10n::language(),
+                        list.projects.clone(),
+                    )
+                    .into_iter()
+                    .map(|choice| (choice.name, choice.directory))
+                    .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
         })

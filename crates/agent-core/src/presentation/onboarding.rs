@@ -156,7 +156,11 @@ impl Snapshot {
                     .iter()
                     .map(|project| ImportCandidate {
                         path: project.path.clone(),
-                        name: project.name.clone(),
+                        name: if project.is_scratch {
+                            self.catalog.ui_language.text("プロジェクトなし").into()
+                        } else {
+                            project.name.clone()
+                        },
                         registered: project.registered,
                         checked: project.registered || state.selected.contains(&project.path),
                         selectable: !busy && !project.registered,
@@ -285,6 +289,7 @@ mod tests {
             conversation_count: 4,
             last_active_at: None,
             is_repository: true,
+            is_scratch: false,
             registered,
         }
     }

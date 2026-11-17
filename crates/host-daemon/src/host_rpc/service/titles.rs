@@ -65,9 +65,13 @@ impl HostRpcService {
             projects
                 .into_iter()
                 .map(|(id, roots)| {
-                    let icon = roots.iter().find_map(|root| {
-                        crate::projects::icons::resolve(std::path::Path::new(root))
-                    });
+                    let icon = if id == agent_protocol::models::SCRATCH_PROJECT_ID {
+                        crate::projects::icons::scratch()
+                    } else {
+                        roots.iter().find_map(|root| {
+                            crate::projects::icons::resolve(std::path::Path::new(root))
+                        })
+                    };
                     (id, icon)
                 })
                 .collect()

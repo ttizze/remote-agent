@@ -60,6 +60,24 @@ impl IconSource {
     }
 }
 
+pub(crate) fn scratch() -> Option<ProjectIcon> {
+    let render = |dark| {
+        let color = if dark { "#a1a1aa" } else { "#71717a" };
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path stroke-dasharray="3 3" d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/></svg>"##
+        );
+        Some(base64::engine::general_purpose::STANDARD.encode(thumbnail(
+            svg.as_bytes(),
+            true,
+            dark,
+        )?))
+    };
+    Some(ProjectIcon {
+        light_png: render(false)?,
+        dark_png: render(true)?,
+    })
+}
+
 /// Resolve both appearances off the async executor. Clients can change their
 /// appearance without a refresh, and a missing icon never blocks the list.
 pub(crate) fn resolve(root: &Path) -> Option<ProjectIcon> {

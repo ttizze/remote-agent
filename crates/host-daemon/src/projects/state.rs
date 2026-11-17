@@ -9,7 +9,7 @@ pub(crate) struct Snapshot {
     pub(crate) projects: Vec<Project>,
     pub(super) resolved_roots: HashMap<String, PathBuf>,
     pub(super) worktree_roots: HashMap<String, String>,
-    pub(super) chat_directories: BTreeSet<PathBuf>,
+    pub(crate) scratch_roots: BTreeSet<PathBuf>,
 }
 
 enum WorkspaceMatch<'a> {
@@ -18,27 +18,46 @@ enum WorkspaceMatch<'a> {
     Ambiguous,
 }
 
-impl Snapshot {
-    pub(crate) fn is_chat_directory(&self, path: &Path) -> bool {
-        self.chat_directories.contains(path)
-    }
+/// Include missing children, configured aliases and their physical targets.
+/// Membership, discovery and SDK provenance recovery share this boundary.
+pub(crate) fn scratch_root<'a>(roots: &'a BTreeSet<PathBuf>, path: &Path) -> Option<&'a Path> {
+    let physical = dunce::canonicalize(path).ok();
+    let path = if path
+        .components()
+        .any(|part| part == std::path::Component::ParentDir)
+    {
+        physical.as_deref()?
+    } else {
+        path
+    };
+    roots
+        .iter()
+        .find(|root| {
+            path.starts_with(root) || physical.as_ref().is_some_and(|path| path.starts_with(root))
+        })
+        .map(PathBuf::as_path)
+}
 
+impl Snapshot {
     pub(crate) fn project_membership(&self, cwd: Option<&str>) -> ProjectMembership {
         let Some(cwd) = cwd else {
             return ProjectMembership::Unknown {};
         };
-        if self.is_chat_directory(Path::new(cwd)) {
-            ProjectMembership::Unassigned {}
-        } else {
-            self.project_for_workspace(cwd)
-                .map(|id| ProjectMembership::Assigned(id.to_owned()))
-                .unwrap_or(ProjectMembership::Unassigned {})
-        }
+        self.project_for_workspace(cwd)
+            .map(|id| ProjectMembership::Assigned(id.to_owned()))
+            .unwrap_or(ProjectMembership::Unassigned {})
     }
     pub(crate) fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
         let workspace = Path::new(workspace);
         if !workspace.is_absolute() {
             return None;
+        }
+        if scratch_root(&self.scratch_roots, workspace).is_some() {
+            return self
+                .projects
+                .iter()
+                .any(|project| project.id == agent_protocol::models::SCRATCH_PROJECT_ID)
+                .then_some(agent_protocol::models::SCRATCH_PROJECT_ID);
         }
         match self.match_workspace(workspace) {
             WorkspaceMatch::Project(id) => Some(id),
@@ -48,9 +67,6 @@ impl Snapshot {
                 // its alias (for example /tmp instead of /private/tmp on macOS).
                 // Keep known and unavailable roots readable without filesystem I/O.
                 let physical = dunce::canonicalize(workspace).ok()?;
-                if self.is_chat_directory(&physical) {
-                    return None;
-                }
                 match self.match_workspace(&physical) {
                     WorkspaceMatch::Project(id) => Some(id),
                     WorkspaceMatch::Missing | WorkspaceMatch::Ambiguous => None,
@@ -170,7 +186,7 @@ mod tests {
             .worktree_roots
             .insert(fixture_path("/checkout"), fixture_path("/work/a"));
         snapshot
-            .chat_directories
+            .scratch_roots
             .insert(fixture_path("/work/a/chats").into());
         for (cwd, expected) in [
             ("/work/a/src", ProjectMembership::Assigned("a".into())),

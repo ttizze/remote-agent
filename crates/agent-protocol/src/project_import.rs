@@ -18,6 +18,7 @@ pub struct ProjectCandidate {
     pub conversation_count: u32,
     pub last_active_at: Option<f64>,
     pub is_repository: bool,
+    pub is_scratch: bool,
     pub registered: bool,
 }
 

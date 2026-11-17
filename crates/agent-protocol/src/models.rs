@@ -8,6 +8,10 @@ use std::{
 
 pub const MAX_INLINE_ITEM_BYTES: usize = 1024 * 1024;
 
+/// Host-local managed project. A stable identity survives rebuilding the catalog
+/// from native transcripts; clients never infer membership from filesystem paths.
+pub const SCRATCH_PROJECT_ID: &str = "bex:scratch";
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invitation {

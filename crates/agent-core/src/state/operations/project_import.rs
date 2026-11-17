@@ -121,6 +121,7 @@ mod tests {
             conversation_count: 3,
             last_active_at: Some(100.),
             is_repository: true,
+            is_scratch: false,
             registered: false,
         }
     }
@@ -172,7 +173,7 @@ mod tests {
             let scan = ProjectScan { projects: vec![ProjectCandidate {
                 path: "/project".into(), name: "project".into(), providers: vec![],
                 conversation_count: count, last_active_at: has_activity.then_some(now - f64::from(age_days) * 86400.),
-                is_repository: repository, registered,
+                is_repository: repository, is_scratch: false, registered,
             }], ..Default::default() };
             let mut snapshot = Snapshot::default();
             apply_scan(&mut snapshot, scan, now);
@@ -194,6 +195,7 @@ mod tests {
                     conversation_count: 0,
                     last_active_at: None,
                     is_repository: false,
+                    is_scratch: false,
                     registered,
                 })
                 .collect(),

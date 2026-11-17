@@ -14,7 +14,7 @@ extension LaunchUITests {
         XCTAssertLessThan(folder.frame.maxY, prompt.frame.minY)
         folder.tap()
         app.buttons["チャット"].tap()
-        XCTAssertEqual(folder.label, "フォルダ: チャット")
+        XCTAssertEqual(folder.label, "フォルダ: プロジェクトなし")
         folder.tap()
         app.buttons["検証プロジェクト"].tap()
         XCTAssertEqual(folder.label, "フォルダ: 検証プロジェクト")
@@ -61,7 +61,7 @@ extension LaunchUITests {
         try useAutomaticWorktrees(app)
         let compose = app.buttons["tasks.new.chat"]
         XCTAssertTrue(compose.waitUntilExists(timeout: 10)); compose.tap()
-        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: チャット")
+        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: プロジェクトなし")
         app.buttons["task.attach"].tap()
         XCTAssertTrue(app.buttons["task.attach.photos"].waitUntilExists(timeout: 5))
         XCTAssertTrue(app.buttons["task.attach.camera"].exists)

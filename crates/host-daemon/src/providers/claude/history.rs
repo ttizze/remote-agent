@@ -102,6 +102,7 @@ pub(super) fn list_page(
     running: Vec<Thread>,
     cursor: Option<&str>,
     owned: Option<&HashSet<String>>,
+    recovery: &std::collections::BTreeSet<PathBuf>,
     limit: u32,
 ) -> Result<super::SessionPage> {
     let mut candidates: Vec<_> = files(home)?
@@ -156,9 +157,13 @@ pub(super) fn list_page(
         let mut summary = if let Some(path) = path {
             match summary(&path) {
                 Ok(Summary {
-                    automated: true, ..
+                    automated: true,
+                    ref thread,
                 }) if owned.is_some_and(|owned| !owned.contains(id.as_str()))
-                    && !active.contains(&id) =>
+                    && !active.contains(&id)
+                    && !thread.cwd.as_ref().is_some_and(|cwd| {
+                        crate::projects::state::scratch_root(recovery, Path::new(cwd)).is_some()
+                    }) =>
                 {
                     continue;
                 }
@@ -1130,7 +1135,15 @@ mod tests {
                 )
                 .unwrap();
         }
-        let first = list_page(root.path(), vec![], None, Some(&HashSet::new()), 3).unwrap();
+        let first = list_page(
+            root.path(),
+            vec![],
+            None,
+            Some(&HashSet::new()),
+            &Default::default(),
+            3,
+        )
+        .unwrap();
         assert_eq!(
             first
                 .data
@@ -1145,6 +1158,7 @@ mod tests {
             vec![],
             first.next_cursor.as_deref(),
             Some(&HashSet::new()),
+            &Default::default(),
             3,
         )
         .unwrap();
@@ -1161,13 +1175,34 @@ mod tests {
             vec![],
             second.next_cursor.as_deref(),
             Some(&HashSet::new()),
+            &Default::default(),
             3,
         )
         .unwrap();
         assert_eq!(last.data.len(), 2);
         assert!(last.next_cursor.is_none());
-        assert!(list_page(root.path(), vec![], Some("bad"), Some(&HashSet::new()), 3).is_err());
-        assert!(list_page(root.path(), vec![], Some("9"), Some(&HashSet::new()), 3).is_err());
+        assert!(
+            list_page(
+                root.path(),
+                vec![],
+                Some("bad"),
+                Some(&HashSet::new()),
+                &Default::default(),
+                3
+            )
+            .is_err()
+        );
+        assert!(
+            list_page(
+                root.path(),
+                vec![],
+                Some("9"),
+                Some(&HashSet::new()),
+                &Default::default(),
+                3
+            )
+            .is_err()
+        );
     }
     #[test]
     fn task_listings_omit_unowned_sdk_runs_started_by_other_agents() {
@@ -1209,12 +1244,19 @@ mod tests {
             .into_iter()
             .collect();
         let listed = |owned| {
-            let mut names: Vec<_> = list_page(root.path(), vec![running.clone()], None, owned, 10)
-                .unwrap()
-                .data
-                .into_iter()
-                .map(|summary| summary.preview.unwrap())
-                .collect();
+            let mut names: Vec<_> = list_page(
+                root.path(),
+                vec![running.clone()],
+                None,
+                owned,
+                &Default::default(),
+                10,
+            )
+            .unwrap()
+            .data
+            .into_iter()
+            .map(|summary| summary.preview.unwrap())
+            .collect();
             names.sort();
             names
         };
@@ -1257,12 +1299,13 @@ mod tests {
         }
         let owned = HashSet::from([Uuid::from_u128(2).to_string()]);
         let listed = |owned| {
-            let mut names: Vec<_> = list_page(root.path(), vec![], None, owned, 10)
-                .unwrap()
-                .data
-                .into_iter()
-                .map(|summary| summary.preview.unwrap())
-                .collect();
+            let mut names: Vec<_> =
+                list_page(root.path(), vec![], None, owned, &Default::default(), 10)
+                    .unwrap()
+                    .data
+                    .into_iter()
+                    .map(|summary| summary.preview.unwrap())
+                    .collect();
             names.sort();
             names
         };

@@ -644,11 +644,11 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
             assert_eq!(snapshot.input.drafts[&agent_core::state::DraftKey::from(&id)].effort.as_deref(), Some("low"));
             let cwd = snapshot.panes.primary().navigation.cwd.clone();
             if let Some(previous) = &previous_cwd { assert_eq!(&cwd, previous); }
-            assert_project_directory(
-                Path::new(&cwd),
-                &if selected { workspace.clone() } else { root.join("bex-chats") },
-                (selected && automatic).then_some(root.join("worktrees").as_path()),
-            );
+            if selected {
+                assert_project_directory(Path::new(&cwd), &workspace, automatic.then_some(root.join("worktrees").as_path()));
+            } else {
+                assert_eq!(Path::new(&cwd).parent(), Some(root.join("scratch").as_path()));
+            }
             let turn = &snapshot.sessions.conversations[&id].turns.as_ref().unwrap()[number];
             let items = turn.items.as_ref().unwrap();
             assert!(items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::Reasoning { .. }) && item_text(item) == Some("Fixture reasoning")));
@@ -1271,11 +1271,11 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
             assert!(snapshot.input.drafts[&agent_core::state::DraftKey::from(&id)].text.is_empty() && snapshot.sessions.pending_submissions.is_empty());
             let current = snapshot.sessions.conversations[&id].cwd.clone().unwrap();
             if let Some(previous) = &cwd { assert_eq!(previous, &current); }
-            assert_project_directory(
-                Path::new(&current),
-                &if selected { workspace.clone() } else { root.join("bex-chats") },
-                (selected && automatic).then_some(root.join("worktrees").as_path()),
-            );
+            if selected {
+                assert_project_directory(Path::new(&current), &workspace, automatic.then_some(root.join("worktrees").as_path()));
+            } else {
+                assert_eq!(Path::new(&current).parent(), Some(root.join("scratch").as_path()));
+            }
             let turns = snapshot.sessions.conversations[&id].turns.as_ref().unwrap();
             assert!(turns[index].items.as_ref().unwrap().iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| text.starts_with(&format!("reply {}: independent {index}", index + 1)))));
             let snapshot = listed(&store, &id, selected.then_some(workspace.as_path())).await;
@@ -1502,7 +1502,7 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
  {
     tokio::time::timeout(Duration::from_secs(45), async {
         let root = tempfile::tempdir().unwrap();
-        let cwd = root.path().join("bex-chats");
+        let cwd = root.path().join("scratch");
         std::fs::create_dir(&cwd).unwrap();
         let config = cwd.join("claude-fixture.json");
         std::fs::write(&config, json!({"unauthenticated":true}).to_string()).unwrap();

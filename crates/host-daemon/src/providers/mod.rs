@@ -192,9 +192,12 @@ pub(crate) struct SessionPage {
 
 #[derive(Clone, Copy)]
 pub(crate) enum SessionListScope<'a> {
-    /// Tasks a person opened, including these Host-owned native sessions.
-    /// Unowned SDK and noninteractive CLI runs belong to other agents or scripts.
-    Roots(&'a [SessionRef]),
+    /// Human roots and Host-owned sessions, plus automated roots recovered
+    /// from explicitly supplied managed folders after the Host catalog is lost.
+    Roots {
+        owned: &'a [SessionRef],
+        directories: &'a std::collections::BTreeSet<std::path::PathBuf>,
+    },
     /// Every native session, including agent-started runs whose activity
     /// still occupies a workspace.
     All,
