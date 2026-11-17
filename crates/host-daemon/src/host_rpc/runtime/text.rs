@@ -248,6 +248,7 @@ impl Runtime {
     /// Recheck ownership at publication, without a SQL read for every character.
     pub(in crate::host_rpc::runtime) async fn append_buffered_change(
         service: &HostRpcService,
+        source: Option<&Arc<resources::Source>>,
         event: &AgentChange,
         execution: Option<Uuid>,
     ) -> Result<bool, String> {
@@ -272,14 +273,6 @@ impl Runtime {
         ) {
             return Ok(false);
         }
-        let source = service
-            .inner
-            .conversation
-            .resources
-            .lock()
-            .unwrap()
-            .get(native)
-            .cloned();
         let Some(source) = source else {
             return Ok(false);
         };
@@ -311,7 +304,7 @@ impl Runtime {
         };
         Self::text_delta(
             service,
-            &source,
+            source,
             native,
             owner,
             Delta {

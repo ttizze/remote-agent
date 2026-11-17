@@ -38,8 +38,7 @@ pub fn observe_external_request(
     else {
         return Ok(Decision::default());
     };
-    if state.active_run().is_some()
-        || state.has_uncertain_input()
+    if !state.accepts_external_observation()
         || state
             .runtime_requests
             .get(&request.id)

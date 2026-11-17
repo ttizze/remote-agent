@@ -148,7 +148,9 @@ pub fn checkpoint_captured(
             changes: changes.clone(),
             effects: Vec::new(),
         });
-        if let Some(next) = projected.next_queued_run() {
+        if !projected.native_work_blocks_delivery()
+            && let Some(next) = projected.next_queued_run()
+        {
             let activation = activate_queued(&projected, &next.id, context)?;
             changes.extend(activation.changes);
             effects = activation.effects;

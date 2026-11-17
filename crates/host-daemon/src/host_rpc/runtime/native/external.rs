@@ -90,9 +90,7 @@ impl Runtime {
         // Late items still carry results for known background work. The pure
         // item boundary checks that ownership before committing any change.
         let status = state.provider_turns[&context.provider_turn_id].status;
-        if (state.active_run().is_some()
-            || state.has_uncertain_input()
-            || status != model::ProviderTurnStatus::Running)
+        if (!state.accepts_external_observation() || status != model::ProviderTurnStatus::Running)
             && !(status == model::ProviderTurnStatus::Completed
                 && matches!(&change, SessionChange::Item { .. }))
         {

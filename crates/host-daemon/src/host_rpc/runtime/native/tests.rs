@@ -1,7 +1,74 @@
 use super::super::native_fixture::{NativeAgent, bound_execution, call};
 use super::*;
 use agent_protocol::conversation as decision;
-use agent_protocol::{execution::ItemStatus, items::ItemBody, protocol::Call};
+use agent_protocol::{
+    execution::{ItemStatus, TurnStatus},
+    items::ItemBody,
+    models::Turn,
+    protocol::Call,
+};
+
+#[tokio::test]
+async fn background_callbacks_keep_their_items_while_the_previous_checkpoint_is_pending() {
+    let root = tempfile::tempdir().unwrap();
+    let mut agent = NativeAgent::new(ProviderKind::DeepSeek);
+    Arc::get_mut(&mut agent).unwrap().submit_gate = Some(tokio::sync::Semaphore::new(0));
+    let _release = scopeguard::guard(agent.clone(), |agent| {
+        agent.submit_gate.as_ref().unwrap().add_permits(1);
+    });
+    let service = HostRpcService::new([agent.backend()], root.path().join("projects.json"));
+    let submitted = agent.submit_started.notified();
+    let target = launch(&service, root.path().to_str().unwrap(), "foreground").await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), submitted)
+        .await
+        .unwrap();
+    let (native, execution) = bound_execution(&service, &target);
+    assistant(&service, &native, execution, "foreground", "")
+        .await
+        .unwrap();
+    Runtime::observe(
+        &service,
+        AgentChange::Session {
+            session: native.clone(),
+            change: SessionChange::Turn {
+                turn: Turn {
+                    id: format!("turn-{execution}").into(),
+                    status: TurnStatus::Completed,
+                    items: Some(Vec::new()),
+                    ..Default::default()
+                },
+                completed: true,
+            },
+        },
+        Some(execution),
+    )
+    .await
+    .unwrap();
+    let storage = &service.inner.conversation.storage;
+    let state = storage.thread_state(&target.id, &[]).unwrap();
+    assert_eq!(
+        state.active_run().unwrap().status,
+        model::RunStatus::Waiting
+    );
+    // The start receipt is still gated, so its checkpoint effect cannot take
+    // the FIFO lane. Exercise the real callback owner before releasing it.
+    assistant(&service, &native, Uuid::new_v4(), "background: report", "")
+        .await
+        .unwrap();
+    assert!(
+        messages(&service, &target)
+            .iter()
+            .any(|(_, _, text)| text == "background: report")
+    );
+    let state = storage.thread_state(&target.id, &[]).unwrap();
+    assert!(
+        state
+            .provider_turns
+            .values()
+            .any(|turn| turn.run_attempt_id.is_none()
+                && turn.status == model::ProviderTurnStatus::Running)
+    );
+}
 
 async fn launch(service: &HostRpcService, cwd: &str, text: &str) -> SessionRef {
     let connection = service.open_session();

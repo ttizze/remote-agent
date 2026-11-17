@@ -50,6 +50,29 @@ pub(super) fn message(hwnd: HWND, id: u32, w: usize, l: isize) -> LRESULT {
     unsafe { SendMessageW(hwnd, id, Some(WPARAM(w)), Some(LPARAM(l))) }
 }
 
+fn load_document(window: HWND, document: &Document) -> windows::core::Result<()> {
+    let mut input = std::io::Cursor::new(document.rtf.as_slice());
+    let mut stream = EDITSTREAM {
+        dwCookie: (&mut input as *mut std::io::Cursor<&[u8]>) as usize,
+        pfnCallback: Some(read_stream),
+        ..Default::default()
+    };
+    message(
+        window,
+        EM_STREAMIN,
+        SF_RTF as usize,
+        (&mut stream as *mut EDITSTREAM) as isize,
+    );
+    windows::core::HRESULT::from_win32(stream.dwError).ok()?;
+    for image in &document.images {
+        if let Err(error) = pictures::insert(window, image) {
+            tracing::warn!(%error, "could not insert native conversation image");
+        }
+    }
+    mark_links(window, &document.links);
+    Ok(())
+}
+
 fn mark_links(window: HWND, links: &[rich_document::Link]) {
     // Friendly-name RTF fields insert hidden URL instructions into native
     // character positions. The application already owns destinations; mark
@@ -546,7 +569,6 @@ impl Item {
             );
         }
         if !button && !context.rule && !context.icon_kind {
-            pictures::install(window);
             message(window, EM_EXLIMITTEXT, 0, i32::MAX as isize);
             message(
                 window,
@@ -692,7 +714,10 @@ impl Item {
         if self.edit.context.wrap.replace(wrap) != wrap {
             self.edit.context.width.set(0);
         }
-        if self.edit.context.document.borrow().rtf != document.rtf {
+        let previous = self.edit.context.document.borrow();
+        let changed = previous.rtf != document.rtf || previous.images != document.images;
+        drop(previous);
+        if changed {
             self.edit.set_document(document);
         }
     }
@@ -1082,19 +1107,9 @@ impl Edit {
         let retained = range.cpMax.max(0) as usize <= next.text.encode_utf16().count()
             && next.selected(range.cpMin.max(0) as usize, range.cpMax.max(0) as usize) == selected;
         message(self.window, WM_SETREDRAW, 0, 0);
-        let mut input = std::io::Cursor::new(next.rtf.as_slice());
-        let mut stream = EDITSTREAM {
-            dwCookie: (&mut input as *mut std::io::Cursor<&[u8]>) as usize,
-            dwError: 0,
-            pfnCallback: Some(read_stream),
-        };
-        message(
-            self.window,
-            EM_STREAMIN,
-            SF_RTF as usize,
-            (&mut stream as *mut EDITSTREAM) as isize,
-        );
-        mark_links(self.window, &next.links);
+        if let Err(error) = load_document(self.window, next) {
+            tracing::warn!(%error, "could not load native conversation document");
+        }
         *self.context.document.borrow_mut() = next.clone();
         let mut restored = if retained {
             range

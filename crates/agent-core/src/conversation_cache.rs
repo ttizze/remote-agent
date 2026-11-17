@@ -129,15 +129,8 @@ fn write(
 }
 
 fn write_value(path: &Path, value: impl Serialize) -> std::io::Result<()> {
-    use std::io::Write as _;
     let bytes = agent_protocol::protocol::encode(value)?;
-    let parent = path.parent().expect("cache files have a directory");
-    std::fs::create_dir_all(parent)?;
-    // Independent windows/processes must never share a partially written file.
-    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
-    pending.write_all(&bytes)?;
-    pending.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    agent_local_host::save_private_bytes(path, &bytes).map_err(std::io::Error::other)
 }
 
 /// Add the most recently saved copies that `snapshot` does not hold yet.
