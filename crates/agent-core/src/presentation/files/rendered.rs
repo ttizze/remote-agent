@@ -99,10 +99,7 @@ pub fn mermaid_file_markdown(text: &str) -> Option<String> {
     // letters fold case and bound words, `^` also follows a lone CR and the
     // Unicode line separators, and `\s` is JavaScript's own set of spaces.
     static REFUSED: LazyLock<Regex> = LazyLock::new(|| {
-        const SPACE: &str = concat!(
-            r"[\t\n\x0B\x0C\r \xA0\x{1680}\x{2000}-\x{200A}",
-            r"\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]*",
-        );
+        let space = format!("{}*", crate::text::SPACE);
         Regex::new(&format!(
             concat!(
                 r"(?mR)%%{space}\{{|(?:^|[\x{{2028}}\x{{2029}}]){space}---",
@@ -110,7 +107,7 @@ pub fn mermaid_file_markdown(text: &str) -> Option<String> {
                 r"|(?:^|[^0-9a-z_])(?:img|image){space}:",
                 r"|url{space}\(|@import|(?:https?|data|blob|file):",
             ),
-            space = SPACE,
+            space = space,
         ))
         .unwrap()
     });

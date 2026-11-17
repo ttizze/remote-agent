@@ -51,8 +51,9 @@ final class SideChatRequest {
 }
 
 extension ConversationModel {
-    func addSelectionToChat(_ text: String) {
-        draft = appendSelectionToDraft(draft: draft, selection: text)
+    func addSelectionToChat(_ text: String, scope: PanelScope) {
+        guard snapshot.panelScope(host: host, draft: inputDraftKey) == scope else { return }
+        perform(.quoteSelection(storageScope: scope.storage, threadId: scope.draft, text: text))
         composerFocusRequest = UUID()
     }
 
@@ -66,11 +67,15 @@ extension ConversationModel {
 
 extension ThreadScreen {
     var selectionActions: ConversationSelectionActions {
+        let inputScope = model.snapshot.panelScope(host: model.host, draft: model.inputDraftKey)
         let ask: ((String) -> Void)? = isSideChat ? nil : { text in
             model.askSelectionInSideChat(text)
             openTools?(.sideChat)
         }
-        return ConversationSelectionActions(addToChat: model.addSelectionToChat, askInSideChat: ask)
+        return ConversationSelectionActions(
+            addToChat: { model.addSelectionToChat($0, scope: inputScope) },
+            askInSideChat: ask
+        )
     }
 }
 

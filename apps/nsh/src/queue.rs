@@ -1,28 +1,37 @@
-//! The messages waiting for the running turn, as T3 Code's queue above its
-//! composer: each can be edited in the composer, sent as a steer now, or
-//! removed, and the queue folds to its count. The Host owns the queue, so every
-//! client shows the same one.
+//! Windows' queue surface. Shared core owns order, previews and every action;
+//! the Swift renderer consumes the same queue in its scrolling timeline.
 use crate::{
     Connection,
-    l10n::{tr, tr_format},
+    l10n::tr,
     ui::{self, Icon, colors},
 };
-use agent_core::{
-    presentation::composer::QueuedMessage,
-    state::{Intent, follow_up::QueueAction},
-};
+use agent_core::presentation::queue::{QueueControl, QueuePresentation, QueuedMessage};
+use agent_protocol::ids::ClientInputId;
 use nsh_core::prelude::*;
+use std::sync::Arc;
+
+#[derive(Clone, PartialEq)]
+struct Drag {
+    id: ClientInputId,
+    target: Option<(ClientInputId, bool)>,
+}
 
 pub(crate) fn queued(connection: Connection) -> View {
-    let follow_up = computed(move || connection.composer.with(|c| c.controls.follow_up.clone()));
-    let expanded = signal(true);
-    let count = move || follow_up.with(|f| f.queue.len());
-    let act = move |action| {
-        if let Some(thread_id) = connection
+    let queue = computed(move || {
+        connection
             .composer
-            .with_untracked(|c| c.controls.navigation.thread_id.clone())
-        {
-            connection.dispatch(Intent::Queue { thread_id, action });
+            .with(|c| c.controls.follow_up.queue.clone())
+    });
+    let expanded = signal(true);
+    let count = move || queue.with(|q| q.message_count());
+    let act = move |id, control| {
+        if let Some(intent) = queue.with_untracked(|q| q.action(id, control)) {
+            connection.dispatch(intent);
+        }
+    };
+    let reorder = move |id, target, after| {
+        if let Some(intent) = queue.with_untracked(|q| q.drop_on(id, target, after)) {
+            connection.dispatch(intent);
         }
     };
     let header = view()
@@ -82,45 +91,18 @@ pub(crate) fn queued(connection: Connection) -> View {
         .child(when(expanded, move || {
             let drag = signal(None::<Drag>);
             scroll().max_h(px(128.0)).child(view().gap_1().child(each(
-                move || follow_up.with(|f| f.queue.clone()),
+                move || queue.with(|q| q.messages(true)),
                 |message: &QueuedMessage| message.id.to_string(),
-                move |message, index| row(follow_up, message, index, drag, act),
+                move |message, _| row(queue, message, drag, act, reorder),
             )))
         }))
 }
 
-/// A queued message's height.
-const ROW_HEIGHT: f32 = 28.0;
-
-/// A queued message being dragged, and the queue position (0..=len) it would
-/// drop at, as T3 Code tracks its drag over the rows.
-#[derive(Clone, PartialEq)]
-struct Drag {
-    id: agent_protocol::ids::ClientInputId,
-    insert: Option<usize>,
-}
-
-/// The waiting messages the Host holds, which a drag reorders.
-fn held_ids(
-    follow_up: Memo<agent_core::presentation::composer::FollowUpControls>,
-) -> Vec<agent_protocol::ids::ClientInputId> {
-    follow_up.with_untracked(|f| {
-        f.queue
-            .iter()
-            .filter(|row| !row.pending)
-            .map(|row| row.id.clone())
-            .collect()
-    })
-}
-
-/// T3 Code's grip: dragging it from its row drops the message where the
-/// insertion line shows, and the arrow keys move it by one while it has
-/// the keyboard focus.
 fn grip(
     drag: Signal<Option<Drag>>,
-    id: impl Fn() -> agent_protocol::ids::ClientInputId + Copy + 'static,
-    drop_at: impl Fn(usize) + Copy + 'static,
-    index: ReadSignal<usize>,
+    id: impl Fn() -> ClientInputId + Copy + 'static,
+    adjacent: impl Fn(bool) + Copy + 'static,
+    reorder: impl Fn(ClientInputId, ClientInputId, bool) + Copy + 'static,
 ) -> View {
     let focused = signal(false);
     view()
@@ -141,14 +123,19 @@ fn grip(
         .on_pan_start(move |_: &PanEvent| {
             drag.set(Some(Drag {
                 id: id(),
-                insert: None,
+                target: None,
             }))
         })
         .on_pan_end(move |event: &PanEvent| {
-            let insert = drag.with_untracked(|drag| drag.as_ref().and_then(|drag| drag.insert));
+            let dropped = drag.with_untracked(Clone::clone);
             drag.set(None);
-            if let Some(insert) = insert.filter(|_| !event.cancelled) {
-                drop_at(insert);
+            if !event.cancelled
+                && let Some(Drag {
+                    id,
+                    target: Some((target, after)),
+                }) = dropped
+            {
+                reorder(id, target, after);
             }
         })
         .child(ui::icon(Icon::GRIP, 14.0))
@@ -157,67 +144,62 @@ fn grip(
                 .child(crate::composer::shortcut(
                     "up",
                     nsh_core::keymap::When::NotEditing,
-                    move |_| {
-                        if let Some(insert) = index.get_untracked().checked_sub(1) {
-                            drop_at(insert);
-                        }
-                    },
+                    move |_| adjacent(true),
                 ))
                 .child(crate::composer::shortcut(
                     "down",
                     nsh_core::keymap::When::NotEditing,
-                    move |_| drop_at(index.get_untracked() + 2),
+                    move |_| adjacent(false),
                 ))
         }))
 }
 
-/// One waiting message: its text and what can be done with it.
 fn row(
-    follow_up: Memo<agent_core::presentation::composer::FollowUpControls>,
+    queue: Memo<Arc<QueuePresentation>>,
     message: ReadSignal<QueuedMessage>,
-    index: ReadSignal<usize>,
     drag: Signal<Option<Drag>>,
-    act: impl Fn(QueueAction) + Copy + 'static,
+    act: impl Fn(ClientInputId, QueueControl) + Copy + 'static,
+    reorder: impl Fn(ClientInputId, ClientInputId, bool) + Copy + 'static,
 ) -> View {
     let id = move || message.with(|message| message.id.clone());
-    let editing = move || follow_up.with(|f| f.editing.as_ref() == Some(&id()));
-    let idle = move || !message.with(|message| message.pending) && !follow_up.with(|f| f.busy);
-    let preview = move || {
-        message.with(|message| {
-            if message.text.trim().is_empty() {
-                tr_format("添付 {0}件", [&message.attachments])
-            } else {
-                message.text.lines().collect::<Vec<_>>().join(" ")
-            }
+    let controls = computed(move || queue.with(|q| q.controls(id())));
+    let can_reorder = move || {
+        controls.with(|controls| {
+            controls.iter().any(|control| {
+                matches!(
+                    control.action,
+                    QueueControl::MoveUp | QueueControl::MoveDown
+                ) && control.enabled
+            })
         })
     };
-    let drop_at = move |insert: usize| {
-        if let Some(action) =
-            agent_core::state::follow_up::drop_at(&held_ids(follow_up), &id(), insert)
-        {
-            act(action);
-        }
+    let height = signal(28.0);
+    let adjacent = move |up| {
+        act(
+            id(),
+            if up {
+                QueueControl::MoveUp
+            } else {
+                QueueControl::MoveDown
+            },
+        )
     };
-    // Where a drag over this row would drop, as T3 Code's dragover: above
-    // its middle before it, below after it.
     let over = move |event: &MouseEvent| {
-        let pending = message.with_untracked(|message| message.pending);
-        if pending || event.pressed_button.is_none() {
+        if !can_reorder() || event.pressed_button.is_none() {
             return;
         }
-        let index = index.get_untracked();
-        let insert = if event.position.y.0 < ROW_HEIGHT / 2.0 {
-            index
-        } else {
-            index + 1
-        };
+        let target = (id(), event.position.y.0 >= height.get_untracked() / 2.0);
         drag.update(|drag| {
-            if let Some(drag) = drag.as_mut().filter(|drag| drag.insert != Some(insert)) {
-                drag.insert = Some(insert);
+            if let Some(drag) = drag.as_mut() {
+                drag.target = Some(target);
             }
         });
     };
-    let insert = move || drag.with(|drag| drag.as_ref().and_then(|drag| drag.insert));
+    let insertion = move |after| {
+        drag.with(|drag| {
+            drag.as_ref().and_then(|drag| drag.target.as_ref()) == Some(&(id(), after))
+        })
+    };
     let line = |edge: f32| {
         view()
             .absolute()
@@ -232,33 +214,32 @@ fn row(
         .flex_row()
         .items_center()
         .gap_1()
-        .h(px(ROW_HEIGHT))
+        .min_h(px(28.0))
+        .on_layout(move |bounds: &Bounds<Points>| {
+            let next = bounds.size.height.0;
+            if height.get_untracked() != next {
+                height.set(next);
+            }
+        })
         .rounded(px(ui::RADIUS))
-        // The dragged row dims, as in T3 Code.
         .style_when(
             move || drag.with(|drag| drag.as_ref().is_some_and(|drag| drag.id == id())),
             |s| s.opacity(0.5),
         )
         .bg(move || {
-            if editing() {
+            if queue.with(|q| q.editing() == Some(id())) {
                 colors::SELECTED
             } else {
                 rgba(0x00000000)
             }
         })
         .on_mouse_move(over)
+        .child(when(move || insertion(false), move || line(0.0)))
         .child(when(
-            move || insert() == Some(index.get()),
-            move || line(0.0),
+            move || insertion(true),
+            move || line(height.get() - 2.0),
         ))
-        .child(when(
-            move || {
-                let last = follow_up.with(|f| f.queue.iter().filter(|row| !row.pending).count());
-                index.get() + 1 == last && insert() == Some(last)
-            },
-            move || line(ROW_HEIGHT - 2.0),
-        ))
-        .child(when(idle, move || grip(drag, id, drop_at, index)))
+        .child(when(can_reorder, move || grip(drag, id, adjacent, reorder)))
         .child(when(
             move || message.with(|message| message.pending),
             || {
@@ -268,50 +249,60 @@ fn row(
                     .child(ui::icon(Icon::SAVING, 12.0))
             },
         ))
-        .child(
-            text(preview)
-                .text_size(px(13.0))
-                .number_of_lines(1)
-                .flex_1()
-                .min_w_0(),
-        )
-        .child(when(editing, move || {
-            ui::row_text_button(tr("キャンセル"), move || act(QueueAction::CancelEdit))
-        }))
         .child(when(
-            move || !editing(),
-            move || {
+            move || message.with(|message| message.fresh_context),
+            || {
                 view()
-                    .flex_row()
-                    .items_center()
-                    .child(
-                        ui::icon_button(
-                            Icon::PENCIL,
-                            tr("コンポーザーで編集"),
-                            move || {
-                                act(QueueAction::Edit {
-                                    client_user_message_id: id(),
-                                })
-                            },
-                        )
-                        .disabled(move || !idle()),
-                    )
-                    .child(
-                        ui::row_labeled_button(Icon::STEER_NOW, tr("追加の指示"), move || {
-                            act(QueueAction::Steer {
-                                client_user_message_id: id(),
-                            })
+                    .label(tr("新しいセッション"))
+                    .tooltip(ui::tooltip(tr("新しいセッション")))
+                    .text_color(colors::muted())
+                    .child(ui::icon(Icon::CLOSE, 14.0))
+            },
+        ))
+        .child(
+            view().flex_1().min_w_0().child(
+                text(move || message.with(|message| message.text.clone())).text_size(px(13.0)),
+            ),
+        )
+        .child(dynamic(move || {
+            let view = view();
+            if let Some(label) = queue.with(|q| q.attachment_label(id())) {
+                view.child(text(label).text_size(px(12.0)).text_color(colors::muted()))
+            } else {
+                view
+            }
+        }))
+        .child(each(
+            move || {
+                controls.with(|controls| {
+                    controls
+                        .iter()
+                        .filter(|control| {
+                            !matches!(
+                                control.action,
+                                QueueControl::MoveUp | QueueControl::MoveDown
+                            )
                         })
-                        .disabled(move || !idle() || !follow_up.with(|f| f.can_steer)),
-                    )
-                    .child(
-                        ui::icon_button(Icon::CLOSE, tr("キューから削除"), move || {
-                            act(QueueAction::Remove {
-                                client_user_message_id: id(),
-                            })
-                        })
-                        .disabled(move || !idle()),
-                    )
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+            },
+            |control: &agent_core::presentation::queue::QueueControlPresentation| {
+                control.action as u8
+            },
+            move |control, _| {
+                let action = control.with_untracked(|control| control.action);
+                let title = move || -> SharedString {
+                    control.with(|control| control.title.clone()).into()
+                };
+                let press = move || act(id(), action);
+                let button = match action {
+                    QueueControl::Edit => ui::icon_button(Icon::PENCIL, title, press),
+                    QueueControl::Remove => ui::icon_button(Icon::CLOSE, title, press),
+                    QueueControl::Steer => ui::row_labeled_button(Icon::STEER_NOW, title, press),
+                    _ => ui::row_text_button(title, press),
+                };
+                button.disabled(move || !control.with(|control| control.enabled))
             },
         ))
 }

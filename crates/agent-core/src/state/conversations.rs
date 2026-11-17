@@ -260,6 +260,7 @@ pub(crate) fn install(
     Arc::make_mut(&mut snapshot.sessions.conversations)
         .insert(id.clone(), Arc::new(projected.thread.clone()));
     Arc::make_mut(&mut snapshot.sessions.subscriptions).insert(id.clone(), output.subscription);
+    super::follow_up::reconcile_edit(snapshot, &id);
     super::reconcile_pending(snapshot, &id);
     Some(projected)
 }
@@ -379,6 +380,11 @@ pub(crate) fn refresh(snapshot: &mut Snapshot, id: &SessionRef) -> Result<Vec<Ef
     promote_draft(snapshot, id, projected.thread.cwd.as_deref());
     let thread = Arc::new(projected.thread);
     Arc::make_mut(&mut snapshot.sessions.conversations).insert(id.clone(), thread.clone());
+    // Cached queues are cleared while restoring. Only a live subscription's
+    // projection can establish that an edited message has left the queue.
+    if snapshot.sessions.subscriptions.contains_key(id) {
+        super::follow_up::reconcile_edit(snapshot, id);
+    }
     super::reconcile_pending(snapshot, id);
     super::outputs::retire(snapshot);
     let completed = thread.turns.iter().flatten().any(|turn| {

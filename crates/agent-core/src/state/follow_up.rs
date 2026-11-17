@@ -3,7 +3,7 @@
 //! running turn, and Mod+Enter or a Ctrl/⌘-click does the opposite for one
 //! message. Waiting messages can be edited in the composer, removed, sent as a
 //! steer now, and resumed after a stop or failure held them.
-use super::{DraftKey, Effect, Snapshot, Thread};
+use super::{Draft, DraftKey, Effect, Snapshot, Thread};
 use agent_protocol::{
     ids::ClientInputId,
     operations::{self as rpc, FollowUp, QueueChange},
@@ -80,27 +80,18 @@ pub fn waits(thread: &Thread, follow_up: FollowUp) -> bool {
 /// turn waiting on background work, which takes new input as its next turn
 /// (T3 Code's Waiting).
 pub fn working(thread: &Thread) -> bool {
-    // The answered turn stays the one Stop ends while its work runs on.
-    let waiting = !thread.background.is_empty()
-        && thread
-            .turns
-            .iter()
-            .flatten()
-            .all(|turn| turn.status != crate::models::TurnStatus::Running);
-    !waiting
-        && (thread.active_turn_id().is_some()
-            || thread.status == crate::models::SessionStatus::Running)
+    thread.foreground_turn_id().is_some()
+        || (thread.background.is_empty() && thread.status == crate::models::SessionStatus::Running)
 }
 
-/// A queued message loaded into its conversation's composer. The composer's own
-/// text waits here until the edit is saved or cancelled.
-#[derive(Debug, Clone, PartialEq)]
+/// The queued editor has its own draft identity, as T3's queuedRunEditDraftId.
+/// The original conversation draft stays at its normal key while uploads and
+/// callbacks keep the exact editor occurrence they started in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedEdit {
     pub client_user_message_id: ClientInputId,
-    /// The queued text, which tells an unsaved edit from an untouched one.
-    pub original: String,
-    /// The composer text the edit replaced.
-    pub saved: String,
+    pub key: DraftKey,
+    pub original: Arc<Draft>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,19 +153,45 @@ fn queued<'a>(thread: &'a Thread, id: &ClientInputId) -> Option<&'a rpc::Submiss
         .find(|input| &input.client_user_message_id == id)
 }
 
-fn set_text(snapshot: &mut Snapshot, key: &DraftKey, text: String) {
-    let draft = Arc::make_mut(
-        Arc::make_mut(&mut snapshot.input.drafts)
-            .entry(key.clone())
-            .or_default(),
-    );
-    draft.text = text;
-}
-
-/// Ends the conversation's edit and gives the composer back its own text.
+/// Dispose only this editor; the conversation's own draft never moved.
 fn end_edit(snapshot: &mut Snapshot, thread_id: &crate::session::SessionRef) {
     if let Some(edit) = Arc::make_mut(&mut snapshot.input.queued_edits).remove(thread_id) {
-        set_text(snapshot, &thread_id.into(), edit.saved);
+        Arc::make_mut(&mut snapshot.input.drafts).remove(&edit.key);
+    }
+}
+
+impl Snapshot {
+    pub(crate) fn composer_key(
+        &self,
+        session: Option<&crate::session::SessionRef>,
+        draft: &DraftKey,
+    ) -> DraftKey {
+        session
+            .and_then(|id| self.input.queued_edits.get(id))
+            .map_or_else(|| draft.clone(), |edit| edit.key.clone())
+    }
+    /// An upload may finish after cancellation. Its old key must not resurrect
+    /// the editor or append to a later reopening of the same queued message.
+    pub(crate) fn accepts_draft_result(&self, key: &DraftKey) -> bool {
+        match key {
+            DraftKey::Queued { session, .. } => self
+                .input
+                .queued_edits
+                .get(session)
+                .is_some_and(|edit| &edit.key == key),
+            _ => true,
+        }
+    }
+    pub(crate) fn retained_invocations(
+        &self,
+        key: &DraftKey,
+    ) -> &[agent_protocol::composer::Invocation] {
+        match key {
+            DraftKey::Queued { session, .. } if self.accepts_draft_result(key) => {
+                &self.input.queued_edits[session].original.invocations
+            }
+            _ => &[],
+        }
     }
 }
 
@@ -187,32 +204,58 @@ pub(super) fn reduce(
         QueueAction::Edit {
             client_user_message_id,
         } => {
-            let Some(original) = snapshot
+            let Some(input) = snapshot
                 .sessions
                 .conversations
                 .get(&thread_id)
                 .and_then(|thread| queued(thread, &client_user_message_id))
-                .map(queued_text)
             else {
                 return Vec::new();
             };
-            let key = DraftKey::from(&thread_id);
-            let saved = match snapshot.input.queued_edits.get(&thread_id) {
-                Some(edit) => edit.saved.clone(),
-                None => snapshot
-                    .input
-                    .drafts
-                    .get(&key)
-                    .map(|draft| draft.text.clone())
-                    .unwrap_or_default(),
+            let conversation_key = DraftKey::from(&thread_id);
+            let provider = input
+                .model
+                .as_ref()
+                .map(|model| model.provider)
+                .or_else(|| {
+                    snapshot
+                        .sessions
+                        .conversations
+                        .get(&thread_id)
+                        .and_then(|thread| thread.active_provider)
+                })
+                .or(thread_id.provider);
+            let Some(mut original) =
+                crate::composer::input::from_input(&input.input, provider, input.fresh_context)
+            else {
+                return Vec::new();
             };
-            set_text(snapshot, &key, original.clone());
+            let own = snapshot
+                .input
+                .drafts
+                .get(&conversation_key)
+                .cloned()
+                .unwrap_or_default();
+            original.model = input.model.clone().or_else(|| {
+                own.model
+                    .clone()
+                    .filter(|model| Some(model.provider) == provider)
+            });
+            original.effort = input.effort.clone();
+            original.service_tier = input.service_tier.clone();
+            end_edit(snapshot, &thread_id);
+            let key = DraftKey::Queued {
+                session: thread_id.clone(),
+                edit: uuid::Uuid::new_v4(),
+            };
+            let original = Arc::new(original);
+            Arc::make_mut(&mut snapshot.input.drafts).insert(key.clone(), original.clone());
             Arc::make_mut(&mut snapshot.input.queued_edits).insert(
                 thread_id,
                 QueuedEdit {
                     client_user_message_id,
+                    key,
                     original,
-                    saved,
                 },
             );
             return Vec::new();
@@ -253,49 +296,158 @@ pub(super) fn reduce(
     vec![Effect::execute(rpc::ChangeQueue { thread_id, change })]
 }
 
-/// Sending while a queued message is edited saves the composer's text into it,
-/// keeping the message's other parts, and gives the composer back its text.
+/// Saving sends exactly the edited content. Keep both drafts until the Host
+/// acknowledges it; an RPC failure must leave the edit available for retry.
 pub(super) fn save_edit(
-    snapshot: &mut Snapshot,
-    thread_id: &crate::session::SessionRef,
-) -> Option<Vec<Effect>> {
-    let edit = snapshot.input.queued_edits.get(thread_id)?.clone();
-    let text = snapshot
+    snapshot: &Snapshot,
+    key: &DraftKey,
+    completing: Option<&super::op::OperationKey>,
+) -> Vec<Effect> {
+    let DraftKey::Queued {
+        session: thread_id, ..
+    } = key
+    else {
+        return Vec::new();
+    };
+    let Some(edit) = snapshot
+        .input
+        .queued_edits
+        .get(thread_id)
+        .filter(|edit| &edit.key == key)
+    else {
+        return Vec::new();
+    };
+    use super::op::OperationKey;
+    let Some(thread) = snapshot.sessions.conversations.get(thread_id) else {
+        return Vec::new();
+    };
+    if !snapshot.connection.connected
+        || [
+            OperationKey::Queue {
+                session: thread_id.clone(),
+            },
+            OperationKey::Attachment {
+                draft_key: key.clone(),
+            },
+            OperationKey::Dictation {
+                draft_key: key.clone(),
+            },
+            OperationKey::Submission {
+                draft_key: key.clone(),
+            },
+        ]
+        .iter()
+        .any(|operation| {
+            Some(operation) != completing && snapshot.operation_running(operation.clone())
+        })
+    {
+        return Vec::new();
+    }
+    let draft = snapshot
         .input
         .drafts
-        .get(&DraftKey::from(thread_id))
-        .map(|draft| draft.text.clone())
+        .get(&edit.key)
+        .cloned()
         .unwrap_or_default();
-    let others = snapshot
-        .sessions
-        .conversations
-        .get(thread_id)
-        .and_then(|thread| queued(thread, &edit.client_user_message_id))
-        .map(|input| {
-            input
-                .input
-                .iter()
-                .filter(|part| !matches!(part, rpc::Input::Text { .. }))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if text.trim().is_empty() && others.is_empty() {
-        return Some(Vec::new());
+    let provider = queued(thread, &edit.client_user_message_id)
+        .and_then(|input| input.model.as_ref().map(|model| model.provider))
+        .or(thread.active_provider)
+        .or(thread_id.provider);
+    let input = crate::composer::input::to_input(
+        draft.text.trim(),
+        &draft.attachments,
+        crate::composer::input::selected_invocations(
+            &draft.invocations,
+            &draft.text,
+            provider,
+            &edit.original.invocations,
+        ),
+        &draft.contexts,
+    );
+    if input.is_empty() {
+        return Vec::new();
     }
-    end_edit(snapshot, thread_id);
-    let input = (!text.trim().is_empty())
-        .then_some(rpc::Input::Text { text })
-        .into_iter()
-        .chain(others)
-        .collect();
-    Some(vec![Effect::execute(rpc::ChangeQueue {
-        thread_id: thread_id.clone(),
-        change: QueueChange::Edit {
-            client_user_message_id: edit.client_user_message_id,
-            input,
-        },
-    })])
+    vec![Effect::execute(QueuedSave {
+        session: thread_id.clone(),
+        key: key.clone(),
+        message: edit.client_user_message_id.clone(),
+        submitted: draft,
+        parts: input,
+    })]
+}
+
+/// The local editor owns the submitted snapshot at dispatch, before scheduler
+/// admission. Capturing the live draft only when the RPC starts can otherwise
+/// close over newer text while sending older parts.
+#[derive(Debug)]
+struct QueuedSave {
+    session: crate::session::SessionRef,
+    key: DraftKey,
+    message: ClientInputId,
+    submitted: Arc<Draft>,
+    parts: Vec<rpc::Input>,
+}
+
+impl super::op::Operation for QueuedSave {
+    type Input = ();
+    type Output = u64;
+    fn key(&self) -> Option<super::op::OperationKey> {
+        Some(super::op::OperationKey::Queue {
+            session: self.session.clone(),
+        })
+    }
+    fn navigation_bound(&self) -> bool {
+        false
+    }
+    fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<(), crate::peer::PeerError> {
+        snapshot
+            .input
+            .queued_edits
+            .get(&self.session)
+            .is_some_and(|edit| edit.key == self.key)
+            .then_some(())
+            .ok_or_else(|| {
+                crate::peer::PeerError::InvalidMessage("queued editor was closed".into())
+            })
+    }
+    async fn run(
+        &self,
+        _input: (),
+        context: &mut crate::store::Execution<'_>,
+    ) -> Result<Self::Output, crate::peer::PeerError> {
+        super::op::command(
+            context,
+            &self.session,
+            agent_protocol::conversation::Command::EditInput {
+                id: self.message.clone(),
+                parts: self.parts.clone(),
+            },
+        )
+        .await
+    }
+    fn apply(self, snapshot: &mut Snapshot, _pane: &str, _sequence: Self::Output) -> Vec<Effect> {
+        let Some(edit) = snapshot.input.queued_edits.get(&self.session) else {
+            return Vec::new();
+        };
+        if edit.key != self.key {
+            return Vec::new();
+        }
+        if snapshot
+            .input
+            .drafts
+            .get(&self.key)
+            .is_some_and(|current| current.same_content(&self.submitted))
+        {
+            end_edit(snapshot, &self.session);
+        } else {
+            // Input typed during the request is still an unsaved edit.
+            Arc::make_mut(&mut snapshot.input.queued_edits)
+                .get_mut(&self.session)
+                .unwrap()
+                .original = self.submitted;
+        }
+        Vec::new()
+    }
 }
 
 /// A queued message that started or was removed ends its edit, as in T3 Code:
@@ -313,18 +465,28 @@ pub(super) fn reconcile_edit(snapshot: &mut Snapshot, thread_id: &crate::session
     {
         return;
     }
-    let key = DraftKey::from(thread_id);
-    let current = snapshot
+    if snapshot.operation_running(super::op::OperationKey::Queue {
+        session: thread_id.clone(),
+    }) {
+        return;
+    }
+    let key = edit.key.clone();
+    let current = snapshot.input.drafts.get(&key).cloned().unwrap_or_default();
+    let own_key = DraftKey::from(thread_id);
+    let own = snapshot
         .input
         .drafts
-        .get(&key)
-        .map(|draft| draft.text.clone())
+        .get(&own_key)
+        .cloned()
         .unwrap_or_default();
-    let keep = current != edit.original && edit.saved.trim().is_empty();
+    let keep = !current.same_content(&edit.original)
+        && own.text.trim().is_empty()
+        && own.attachments.is_empty()
+        && own.invocations.is_empty()
+        && own.contexts.is_empty();
+    end_edit(snapshot, thread_id);
     if keep {
-        Arc::make_mut(&mut snapshot.input.queued_edits).remove(thread_id);
-    } else {
-        end_edit(snapshot, thread_id);
+        Arc::make_mut(&mut snapshot.input.drafts).insert(own_key, current);
     }
 }
 

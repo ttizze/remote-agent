@@ -17,9 +17,7 @@ impl AgentPane {
     }
     pub fn dispatch(&self, intent: Intent) -> Result<Arc<Receipt>, AgentError> {
         let receipt = self.pane.dispatch(intent);
-        Ok(Arc::new(Receipt {
-            result: Mutex::new(Some(Box::pin(async move { receipt.await.map_err(error) }))),
-        }))
+        Ok(Receipt::new(async move { receipt.await.map_err(error) }))
     }
     pub async fn next_presentation(
         &self,
@@ -54,6 +52,15 @@ impl AgentPane {
 
 /// Rust clients start a side chat with either first input.
 impl AgentPane {
+    pub fn dispatch_scoped(
+        &self,
+        scope: crate::store::DispatchScope,
+        intent: Intent,
+    ) -> Result<Arc<Receipt>, AgentError> {
+        let receipt = self.pane.dispatch_scoped(scope, intent);
+        Ok(Receipt::new(async move { receipt.await.map_err(error) }))
+    }
+
     pub async fn start_side_chat(
         &self,
         provider: Option<crate::session::ProviderKind>,

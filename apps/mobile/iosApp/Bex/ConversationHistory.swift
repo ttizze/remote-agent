@@ -118,6 +118,146 @@ extension ThreadScreen {
     @ViewBuilder
     func nativeConversationRow(_ projected: VisibleConversationRow, item: ConversationItem?,
                                expanded: Bool) -> some View {
+        if let timeline = projected.timeline() {
+            timelineRow(timeline, projected: projected, item: item, itemExpanded: expanded)
+        } else {
+            baseConversationRow(projected, item: item, expanded: expanded)
+        }
+    }
+
+    @ViewBuilder
+    private func timelineRow(_ timeline: TurnRow, projected: VisibleConversationRow,
+                             item: ConversationItem?, itemExpanded: Bool) -> some View {
+        switch timeline {
+        case .row, .work:
+            baseConversationRow(projected, item: item, expanded: itemExpanded)
+        case .actions:
+            responseMessageRow(projected, item: item, actionsOnly: true)
+        case .commentary:
+            if let item {
+                ThreadMessageRow(
+                    row: projected,
+                    item: item,
+                    isUser: false,
+                    media: mediaAccess,
+                    selection: selectionActions
+                )
+            }
+        default: timelineActivityRow(timeline, projected: projected, item: item)
+        }
+    }
+
+    @ViewBuilder
+    private func timelineActivityRow(_ timeline: TurnRow, projected: VisibleConversationRow,
+                                     item: ConversationItem?) -> some View {
+        switch timeline {
+        case let .fold(activity, open):
+            activityHeader(activity, id: projected.id(), expanded: open)
+        case let .group(_, summary, _, _, open), let .subagents(_, summary, _, open):
+            workDisclosure(summary, id: projected.id(), open: open)
+        case let .live(_, label, _, _, open, thought):
+            VStack(alignment: .leading, spacing: 4) {
+                if let thought, !open {
+                    Text(verbatim: thought).font(.subheadline).lineLimit(2)
+                }
+                workDisclosure(label, id: projected.id(), open: open)
+            }
+        case let .plan(_, title, text):
+            planRow(title: title, text: text, item: item)
+        case .subagent:
+            decoratedActivity(model.activityDecorations[projected.id()] ?? [])
+        case let .divider(_, label):
+            ConversationDivider(label: label)
+        default: timelineStatusRow(timeline, projected: projected)
+        }
+    }
+
+    @ViewBuilder
+    private func planRow(title: String, text: String, item: ConversationItem?) -> some View {
+        if let item {
+            let export = planDisplay(markdown: text)
+            ConversationPlan(title: title) {
+                ConversationMarkdown(blocks: item.markdown, media: mediaAccess, selection: selectionActions)
+            } menu: {
+                Menu {
+                    Button { requestPlan(.export, filename: export.filename, markdown: export.contents) } label: {
+                        Label("Markdownで書き出す…", systemImage: "square.and.arrow.up")
+                    }
+                    Button { requestPlan(.workspace, filename: export.filename, markdown: export.contents)
+                    } label: {
+                        Label("ワークスペースに保存…", systemImage: "folder")
+                    }.disabled(!model.isConnected || model.cwd.isEmpty)
+                } label: { Image(systemName: "ellipsis") }
+                    .accessibilityLabel("計画のメニュー")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func timelineStatusRow(_ timeline: TurnRow, projected: VisibleConversationRow) -> some View {
+        switch timeline {
+        case .working:
+            TimelineView(.periodic(from: .now, by: 1)) { clock in
+                Text(verbatim: projected.progressLabel(
+                    language: model.snapshot.uiLanguage(),
+                    nowSeconds: clock.date.timeIntervalSince1970
+                ) ?? "")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        case .thinking:
+            Label("思考中", systemImage: "brain").font(.caption).foregroundStyle(.secondary)
+        case let .requested(label, _), let .retrying(label):
+            Text(verbatim: label).font(.caption).foregroundStyle(.secondary)
+        case .interrupted:
+            Text("実行を中断しました").font(.caption).foregroundStyle(.secondary)
+        default: EmptyView()
+        }
+    }
+
+    private func workDisclosure(_ title: String, id: String, open: Bool) -> some View {
+        Button {
+            scroll.following = false
+            model.toggleActivity(id)
+        } label: {
+            HStack {
+                Image(systemName: open ? "chevron.down" : "chevron.right")
+                Text(verbatim: title)
+            }.font(.caption).foregroundStyle(.secondary)
+        }.buttonStyle(.plain)
+    }
+
+    private func requestPlan(_ destination: ConversationPlanRequest.Destination, filename: String, markdown: String) {
+        planRequest = ConversationPlanRequest(
+            destination: destination,
+            cwd: model.cwd,
+            filename: filename,
+            markdown: markdown
+        )
+    }
+
+    private func decoratedActivity(_ values: [ActivityDecoration]) -> some View {
+        ThreadDecoratedActivity(values: values, open: model.openThread)
+    }
+
+    @ViewBuilder
+    private func responseMessageRow(
+        _ projected: VisibleConversationRow,
+        item: ConversationItem?,
+        actionsOnly: Bool = false
+    ) -> some View {
+        if let item, case let .response(_, showActions, turnId) = projected.data().content {
+            ThreadMessageRow(row: projected, item: item, isUser: false, media: mediaAccess, selection: selectionActions,
+                             showActions: showActions, actionsOnly: actionsOnly,
+                             timestampMs: projected.data().timestampMs,
+                             fork: turnId.map { id in { model.forkAndOpen(through: id) { _ in } } },
+                             forking: turnId.map { model.conversationContext.forkPhase(turn: $0) == .running } ?? false,
+                             forkError: turnId.flatMap { model.conversationContext.forkError(turn: $0) }).equatable()
+        }
+    }
+
+    @ViewBuilder
+    func baseConversationRow(_ projected: VisibleConversationRow, item: ConversationItem?,
+                             expanded: Bool) -> some View {
         let row = projected.data()
         switch (row.content, item) {
         case let (.preparation(preparation), _):
@@ -132,20 +272,7 @@ extension ThreadScreen {
         case let (.user, item?):
             userMessageRow(item, row: projected, timestampMs: row.timestampMs)
                 .padding(.top, projected.origin() == .queued ? 0 : 16)
-        case (let .response(_, showActions, turnId), let item?):
-            ThreadMessageRow(
-                row: projected,
-                item: item,
-                isUser: false,
-                media: mediaAccess,
-                selection: selectionActions,
-                showActions: showActions,
-                timestampMs: row.timestampMs,
-                fork: turnId
-                    .map { id in { model.forkAndOpen(through: id) { _ in } } },
-                forking: turnId.map { model.conversationContext.forkPhase(turn: $0) == .running } ?? false,
-                forkError: turnId.flatMap { model.conversationContext.forkError(turn: $0) }
-            ).equatable()
+        case (.response, _): responseMessageRow(projected, item: item)
         case let (.activityHeader(activity), _): activityHeader(
                 activity,
                 id: projected.id(),
@@ -173,7 +300,8 @@ extension ThreadScreen {
                 if let thread {
                     editRequest = ConversationEditRequest(
                         thread: thread,
-                        turn: turn
+                        turn: turn,
+                        scope: model.snapshot.panelScope(host: model.host, draft: model.coreDraftKey)
                     )
                 }
             } },
@@ -190,22 +318,7 @@ extension ThreadScreen {
             itemId: item.data.nativeId ?? item.data.id
         ) }
         if !values.isEmpty {
-            ThreadDecoratedActivity(
-                values: values,
-                blocks: item.markdown,
-                media: mediaAccess,
-                selection: selectionActions,
-                canSave: model.isConnected && !model.cwd.isEmpty,
-                open: model.openThread,
-                plan: { destination, filename, markdown in
-                    planRequest = ConversationPlanRequest(
-                        destination: destination,
-                        cwd: model.cwd,
-                        filename: filename,
-                        markdown: markdown
-                    )
-                }
-            )
+            decoratedActivity(values)
         } else {
             ThreadItemRow(
                 item: item,

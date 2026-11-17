@@ -1,8 +1,10 @@
 //! A turn as T3 Code's timeline shows it. Once the turn completes, its work
 //! folds under "Worked for …"; while it runs, a working header leads it and
-//! its latest work is the live row; a failed or interrupted turn stays open.
+//! its latest work is the live row. Bex keeps its existing disclosure for
+//! failed and interrupted work, with the terminal outcome outside the fold.
 //! Open work reads as the commentary between it, groups of tools under their
 //! summary ("Ran 2 commands") and a lone tool on its own row.
+use super::proposed_plan::plan_title;
 use super::{
     ActivityPresentation, ConversationRow, ConversationRowContent, ItemSource, LiveActivity,
     RenderedItem, RenderedTurn, activity_is_expanded,
@@ -11,8 +13,46 @@ use crate::localization::{UiLanguage, localized_ui_format};
 use crate::models::{ItemBody, TurnStatus};
 use std::{collections::HashSet, sync::Arc};
 
+/// Existing surfaces choose their visual contracts independently. Projection,
+/// admission and row identity remain shared for every combination.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct TimelineStyle {
+    pub terminal_work: WorkDisclosure,
+    pub plans: PlanPresentation,
+    pub group_subagents: bool,
+    pub background_footer: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum WorkDisclosure {
+    Completed,
+    Settled,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum PlanPresentation {
+    Card,
+    Message,
+}
+impl TimelineStyle {
+    pub const T3: Self = Self {
+        terminal_work: WorkDisclosure::Completed,
+        plans: PlanPresentation::Card,
+        group_subagents: true,
+        background_footer: false,
+    };
+    pub const NATIVE: Self = Self {
+        terminal_work: WorkDisclosure::Settled,
+        plans: PlanPresentation::Message,
+        group_subagents: false,
+        background_footer: true,
+    };
+}
+
 /// One row of a turn on T3 Code's timeline.
 #[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum TurnRow {
     /// A row of the turn's projection as it is: the user's message, the
     /// answer, an error, a notification.
@@ -33,35 +73,53 @@ pub enum TurnRow {
         /// What its tools are, as an item's kind (reasoning alone is
         /// `reasoning`), or `mixed`.
         kind: String,
+        attempt: Option<uuid::Uuid>,
         open: bool,
     },
     /// A tool's row, alone or a member of an open group.
     Work { row: ConversationRow, label: String },
-    /// The running turn's latest work.
-    Live { row: ConversationRow, label: String },
+    /// The running group's current work. Its toggle opens all group members.
+    Live {
+        row: ConversationRow,
+        label: String,
+        group_id: String,
+        kind: String,
+        open: bool,
+        /// The latest thought in this group, above the status only while closed.
+        thought: Option<String>,
+    },
     /// A running turn with nothing live.
     Thinking,
     /// The turn waits for the user's answer to a request, which T3 Code's
     /// live row names: what an approval is for, or that input is requested.
-    Requested { label: String, approval: bool },
+    Requested {
+        label: String,
+        request: super::Request,
+    },
     /// The provider stream dropped and is being retried, which the error's
     /// title says.
     Retrying { label: String },
-    /// A plan the agent proposed, as T3 Code's plan card: its title (the
-    /// plan's first heading, else Proposed plan) over its Markdown.
-    Plan {
-        id: String,
-        title: String,
-        text: String,
-    },
     /// A subagent the turn started, as T3 Code's subagent row: its name and
     /// its latest word.
     Subagent {
         id: String,
         agent: crate::presentation::agents::SubagentPresentation,
+        attempt: Option<uuid::Uuid>,
+    },
+    /// Adjacent children in the same provider turn share a disclosure.
+    Subagents {
+        id: String,
+        label: String,
+        members: Vec<SubagentMember>,
+        open: bool,
     },
     /// A divider across the work, as T3 Code's context compaction.
     Divider { id: String, label: String },
+    Plan {
+        id: String,
+        title: String,
+        text: String,
+    },
     /// The actions (fork, copy, time) of the settled turn's last answer when
     /// work ends the turn below it: as T3 Code's, they follow that work and
     /// stay in view.
@@ -70,9 +128,98 @@ pub enum TurnRow {
     Interrupted,
 }
 
+#[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct SubagentMember {
+    pub id: String,
+    pub agent: crate::presentation::agents::SubagentPresentation,
+}
+
+/// A disclosure which must be open to show a selected message. The renderer
+/// owns the expansion state and applies these values idempotently.
+#[derive(Clone)]
+pub(super) struct MessageDisclosure {
+    pub id: String,
+    pub status: Option<String>,
+}
+
+fn work_is_foldable(style: TimelineStyle, status: TurnStatus, can_collapse: bool) -> bool {
+    can_collapse
+        && match style.terminal_work {
+            WorkDisclosure::Completed => status == TurnStatus::Completed,
+            WorkDisclosure::Settled => matches!(
+                status,
+                TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+            ),
+        }
+}
+
+/// Search ordinary messages independently of the current work disclosures.
+/// Reuse the timeline's classification, including superseded attempts; the
+/// result also tells its owner exactly which disclosures hide each message.
+pub(super) fn turn_message_search_rows(
+    style: TimelineStyle,
+    turn: &RenderedTurn,
+) -> Vec<(TurnRow, Vec<MessageDisclosure>)> {
+    let attempts = super::attempts::attempt_folds(&turn.source);
+    let groups = attempts
+        .iter()
+        .map(|fold| format!("attempt:{}", fold.id))
+        .collect();
+    let mut expanded = std::collections::HashMap::new();
+    let mut paths = std::collections::HashMap::new();
+    let mut parent = None;
+    for row in &turn.rows {
+        match &row.content {
+            ConversationRowContent::ActivityHeader { activity } => {
+                parent =
+                    work_is_foldable(style, turn.source.status, activity.activity_can_collapse)
+                        .then(|| MessageDisclosure {
+                            id: activity.id.clone(),
+                            status: Some(activity.status.clone()),
+                        });
+                if let Some(parent) = &parent {
+                    expanded.insert(parent.id.clone(), activity.status.clone());
+                }
+            }
+            ConversationRowContent::Activity { item, .. } if is_commentary(item) => {
+                let mut path: Vec<_> = parent.iter().cloned().collect();
+                if let ItemSource::Native(native) = &item.source {
+                    for fold in &attempts {
+                        if fold.items.contains(&native.id) {
+                            path.push(MessageDisclosure {
+                                id: format!("attempt:{}", fold.id),
+                                status: None,
+                            });
+                        }
+                    }
+                }
+                paths.insert(item.data.id.clone(), path);
+            }
+            _ => {}
+        }
+    }
+    turn_rows(style, turn, &expanded, &groups)
+        .into_iter()
+        .filter_map(|row| match &row {
+            TurnRow::Commentary(item) => {
+                let path = paths.remove(&item.data.id).unwrap_or_default();
+                Some((row, path))
+            }
+            TurnRow::Row(ConversationRow {
+                content:
+                    ConversationRowContent::User { .. } | ConversationRowContent::Response { .. },
+                ..
+            }) => Some((row, Vec::new())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The turn's rows: folds open by `expanded` (a fold's ID and the status it
 /// was opened at, as [`activity_is_expanded`]) and groups open by `groups`.
-pub fn turn_rows(
+pub(super) fn turn_rows(
+    style: TimelineStyle,
     turn: &RenderedTurn,
     expanded: &std::collections::HashMap<String, String>,
     groups: &HashSet<String>,
@@ -80,9 +227,12 @@ pub fn turn_rows(
     let language = turn.language;
     let status = turn.source.status;
     let running = status == TurnStatus::Running;
-    // As T3 Code, failed and interrupted work stays in view.
-    let folds = status == TurnStatus::Completed;
     let live = turn.live_activity();
+    let show_running_work = running
+        && turn
+            .requests
+            .iter()
+            .all(|request| super::approval_input(&request.body).is_some());
     let mut out = Vec::new();
     let mut work: Vec<&ConversationRow> = Vec::new();
     let mut hidden = false;
@@ -91,22 +241,13 @@ pub fn turn_rows(
         .iter()
         .flat_map(|fold| fold.items.iter().map(move |item| (item.as_str(), fold)))
         .collect();
-    let flush = |work: &mut Vec<&ConversationRow>, out: &mut Vec<TurnRow>, last: bool| {
+    // Core already identified a unique live row. A notice outside the work
+    // must not retire its preceding command merely by splitting the layout.
+    let flush = |work: &mut Vec<&ConversationRow>, out: &mut Vec<TurnRow>| {
         let rows = std::mem::take(work);
-        let live = last
-            .then_some(live.as_ref())
-            .flatten()
-            .and_then(|live| match live {
-                LiveActivity::Row(id) => rows.iter().rev().find(|row| &row.id == id),
-                LiveActivity::Thinking => None,
-            });
+        let live = current_work(&rows, show_running_work, live.as_ref());
         if let Some(row) = live {
-            let label =
-                activity_item(row).map_or_else(String::new, |item| live_label(language, item));
-            out.push(TurnRow::Live {
-                row: (*row).clone(),
-                label,
-            });
+            out.extend(live_group(language, &rows, row, groups));
             return;
         }
         pieces(language, &rows, status == TurnStatus::Failed, groups, out);
@@ -115,10 +256,10 @@ pub fn turn_rows(
         if let Some(ItemSource::Native(native)) = activity_item(row).map(|item| &item.source)
             && let Some(fold) = folded_items.get(native.id.as_str())
         {
-            let id = format!("attempt:{}", fold.id);
+            let id = fold.group_id();
             let open = groups.contains(&id);
             if fold.items.first() == Some(&native.id) && !hidden {
-                flush(&mut work, &mut out, false);
+                flush(&mut work, &mut out);
                 out.push(TurnRow::Group {
                     id,
                     summary: language
@@ -129,6 +270,7 @@ pub fn turn_rows(
                         })
                         .into(),
                     kind: "attempt".into(),
+                    attempt: Some(fold.id),
                     open,
                 });
             }
@@ -136,11 +278,20 @@ pub fn turn_rows(
                 continue;
             }
         }
+        if style.plans == PlanPresentation::Message
+            && let Some(item) = activity_item(row)
+            && let ItemSource::Native(native) = &item.source
+            && matches!(native.body(), ItemBody::Plan { .. })
+        {
+            flush(&mut work, &mut out);
+            out.push(TurnRow::Row(plan_message(turn, row, item)));
+            continue;
+        }
         match &row.content {
             ConversationRowContent::ActivityHeader { activity } => {
-                flush(&mut work, &mut out, false);
+                flush(&mut work, &mut out);
                 hidden = false;
-                if folds && activity.activity_can_collapse {
+                if work_is_foldable(style, status, activity.activity_can_collapse) {
                     let open =
                         activity_is_expanded(&activity.status, expanded.get(&activity.id).cloned());
                     hidden = !open;
@@ -151,15 +302,19 @@ pub fn turn_rows(
                 }
             }
             ConversationRowContent::Activity { item, .. } if is_commentary(item) => {
-                flush(&mut work, &mut out, false);
+                flush(&mut work, &mut out);
                 if !hidden {
                     out.push(TurnRow::Commentary(item.clone()));
                 }
             }
             ConversationRowContent::Activity { item, .. } => match place(language, item) {
+                Place::OutsideWork(rows) => {
+                    flush(&mut work, &mut out);
+                    out.extend(rows);
+                }
                 Place::Work if !hidden => work.push(row),
                 Place::Alone(rows) => {
-                    flush(&mut work, &mut out, false);
+                    flush(&mut work, &mut out);
                     if !hidden {
                         out.extend(rows);
                     }
@@ -167,22 +322,18 @@ pub fn turn_rows(
                 Place::Work | Place::Hidden => {}
             },
             ConversationRowContent::InProgress { .. } => {
-                flush(&mut work, &mut out, true);
+                flush(&mut work, &mut out);
                 if live == Some(LiveActivity::Thinking) {
                     out.push(TurnRow::Thinking);
                 }
             }
             // As T3 Code, a request waiting for its answer and a retry of
             // the provider are the live work, the work before them its group.
-            ConversationRowContent::PendingRequest { request } => {
-                work.clear();
+            ConversationRowContent::PendingRequest { request } if request.approval.is_none() => {
+                flush(&mut work, &mut out);
                 out.push(TurnRow::Requested {
                     label: request_label(language, request),
-                    approval: matches!(
-                        request.request_body,
-                        agent_protocol::requests::RequestBody::Approval { .. }
-                            | agent_protocol::requests::RequestBody::Permission { .. }
-                    ),
+                    request: (**request).clone(),
                 });
             }
             ConversationRowContent::Error { error } if error.is_reconnecting => {
@@ -192,14 +343,49 @@ pub fn turn_rows(
                 });
             }
             _ => {
-                flush(&mut work, &mut out, false);
+                flush(&mut work, &mut out);
                 hidden = false;
                 out.push(TurnRow::Row(row.clone()));
             }
         }
     }
-    flush(&mut work, &mut out, false);
-    if running {
+    flush(&mut work, &mut out);
+    finish_turn(out, status, language, groups, style)
+}
+
+fn plan_message(
+    turn: &RenderedTurn,
+    row: &ConversationRow,
+    item: &Arc<RenderedItem>,
+) -> ConversationRow {
+    let show_actions = super::shows_actions(turn.source.status, &item.data.kind, true);
+    let terminal = turn.rows.iter().rev().find_map(|row| match &row.content {
+        ConversationRowContent::Response { item, .. } => Some(item),
+        ConversationRowContent::Activity { item, .. }
+            if matches!(&item.source, ItemSource::Native(native) if matches!(native.body(), ItemBody::Plan { .. })) => Some(item),
+        _ => None,
+    }).is_some_and(|last| Arc::ptr_eq(last, item));
+    ConversationRow {
+        content: ConversationRowContent::Response {
+            item: item.clone(),
+            show_actions,
+            fork_turn_id: (turn.supports_fork && show_actions && terminal)
+                .then(|| turn.source.id.clone()),
+        },
+        ..row.clone()
+    }
+}
+
+/// Turn-wide composition follows row projection: the header's stable position,
+/// one live status, merged child cards and the answer's trailing actions.
+fn finish_turn(
+    mut out: Vec<TurnRow>,
+    status: TurnStatus,
+    language: UiLanguage,
+    groups: &HashSet<String>,
+    style: TimelineStyle,
+) -> Vec<TurnRow> {
+    if status == TurnStatus::Running {
         // As T3 Code, the header stays below the message that started the
         // turn, however the work below it grows.
         let at = out
@@ -210,20 +396,152 @@ pub fn turn_rows(
             })
             .map_or(0, |index| index + 1);
         out.insert(at, TurnRow::Working);
-        // A retry is the live work.
-        if out
+        let retrying = out
             .iter()
-            .any(|row| matches!(row, TurnRow::Retrying { .. }))
-        {
-            out.retain(|row| !matches!(row, TurnRow::Live { .. } | TurnRow::Thinking));
-        }
+            .any(|row| matches!(row, TurnRow::Retrying { .. }));
+        let has_work = out.iter().any(|row| matches!(row, TurnRow::Live { .. }));
+        out.retain(|row| match row {
+            TurnRow::Live { .. } => !retrying,
+            TurnRow::Thinking => !retrying && !has_work,
+            _ => true,
+        });
     }
     let mut out = merge_subagents(out);
+    if style.group_subagents {
+        out = group_subagents(out, language, groups);
+    }
     trailing_actions(&mut out);
     if status == TurnStatus::Interrupted {
         out.push(TurnRow::Interrupted);
     }
+    let mut previous_steer = false;
+    for row in &mut out {
+        let steer = matches!(row, TurnRow::Row(row) if row.steer);
+        if let TurnRow::Row(row) = row {
+            row.steer = steer && !previous_steer;
+        }
+        previous_steer = steer;
+    }
     out
+}
+
+fn group_subagents(
+    rows: Vec<TurnRow>,
+    language: UiLanguage,
+    groups: &HashSet<String>,
+) -> Vec<TurnRow> {
+    let mut rows = rows.into_iter().peekable();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next() {
+        let TurnRow::Subagent { id, agent, attempt } = row else {
+            out.push(row);
+            continue;
+        };
+        let mut members = vec![SubagentMember { id, agent }];
+        while matches!(rows.peek(), Some(TurnRow::Subagent { attempt: next, .. }) if *next == attempt)
+        {
+            if let Some(TurnRow::Subagent { id, agent, .. }) = rows.next() {
+                members.push(SubagentMember { id, agent });
+            }
+        }
+        if members.len() == 1 {
+            let SubagentMember { id, agent } = members.pop().unwrap();
+            out.push(TurnRow::Subagent { id, agent, attempt });
+        } else {
+            let id = format!("subagent-group:{}", members[0].id);
+            let open = groups.contains(&id);
+            out.push(TurnRow::Subagents {
+                id,
+                label: localized_ui_format(
+                    language,
+                    "subagent.group.count".into(),
+                    vec![members.len().to_string()],
+                ),
+                members: members.clone(),
+                open,
+            });
+            if open {
+                out.extend(members.into_iter().map(|member| TurnRow::Subagent {
+                    id: member.id,
+                    agent: member.agent,
+                    attempt,
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// Earlier groups can still contain running tools while the tail is an approval
+/// or commentary. Completed work only stays live at the active response's tail.
+fn current_work<'a>(
+    rows: &[&'a ConversationRow],
+    show_running: bool,
+    tail: Option<&LiveActivity>,
+) -> Option<&'a ConversationRow> {
+    if show_running
+        && let Some(row) = rows.iter().rev().find(|row| {
+            activity_item(row).is_some_and(|item| {
+                visible(item)
+                    && (item.data.kind != "reasoning"
+                        || matches!(tail, Some(LiveActivity::Row(id)) if &row.id == id))
+                    && matches!(&item.source, ItemSource::Native(native) if native.status == crate::models::ItemStatus::Running)
+            })
+        })
+    {
+        return Some(row);
+    }
+    match tail {
+        Some(LiveActivity::Row(id)) => rows.iter().rev().find(|row| &row.id == id).copied(),
+        _ => None,
+    }
+}
+
+fn live_group(
+    language: UiLanguage,
+    rows: &[&ConversationRow],
+    live: &ConversationRow,
+    groups: &HashSet<String>,
+) -> Vec<TurnRow> {
+    let rows: Vec<_> = rows
+        .iter()
+        .copied()
+        .filter(|row| activity_item(row).is_some_and(|item| visible(item)))
+        .collect();
+    let group_id = format!("group:{}", rows[0].id);
+    let open = groups.contains(&group_id);
+    let items: Vec<_> = rows.iter().filter_map(|row| activity_item(row)).collect();
+    let thought = (!open)
+        .then(|| {
+            rows.iter().rev().find_map(|row| {
+                let item = activity_item(row)?;
+                let ItemSource::Native(native) = &item.source else {
+                    return None;
+                };
+                super::super::body::reasoning_live_preview(native, item.data.preview.as_deref()?)
+                    .map(|text| (&row.id, text))
+            })
+        })
+        .flatten();
+    let label = activity_item(live).map_or_else(String::new, |item| {
+        if thought.as_ref().is_some_and(|(id, _)| *id == &live.id) {
+            item.work_row_label(true).heading
+        } else {
+            live_label(language, item)
+        }
+    });
+    let mut result = vec![TurnRow::Live {
+        row: live.clone(),
+        label,
+        group_id,
+        kind: group_kind(&items),
+        open,
+        thought: thought.map(|(_, text)| text),
+    }];
+    if open {
+        result.extend(rows.into_iter().map(|row| work_row(language, row)));
+    }
+    result
 }
 
 /// A child keeps its first row's position while later activity updates it.
@@ -231,10 +549,10 @@ fn merge_subagents(rows: Vec<TurnRow>) -> Vec<TurnRow> {
     let mut out = Vec::new();
     let mut positions = std::collections::HashMap::new();
     for row in rows {
-        if let TurnRow::Subagent { agent, .. } = &row
+        if let TurnRow::Subagent { agent, attempt, .. } = &row
             && let Some(target) = &agent.target
         {
-            if let Some(&index) = positions.get(target) {
+            if let Some(&index) = positions.get(&(target.clone(), *attempt)) {
                 if let TurnRow::Subagent { agent: old, .. } = &mut out[index] {
                     if !agent.message.is_empty() {
                         old.message = agent.message.clone();
@@ -242,10 +560,24 @@ fn merge_subagents(rows: Vec<TurnRow>) -> Vec<TurnRow> {
                     if agent.status != TurnStatus::Unknown {
                         old.status = agent.status;
                     }
+                    if agent.result.is_some() {
+                        old.result = agent.result.clone();
+                    }
+                    if agent.model.is_some() || agent.effort.is_some() {
+                        let (model, effort) = crate::presentation::agents::subagent_selection(
+                            old.model.as_deref(),
+                            old.effort.as_deref(),
+                            agent.model.as_deref(),
+                            agent.effort.as_deref(),
+                        );
+                        let (model, effort) = (model.map(str::to_owned), effort.map(str::to_owned));
+                        old.model = model;
+                        old.effort = effort;
+                    }
                 }
                 continue;
             }
-            positions.insert(target.clone(), out.len());
+            positions.insert((target.clone(), *attempt), out.len());
         }
         out.push(row);
     }
@@ -272,7 +604,7 @@ fn trailing_actions(out: &mut Vec<TurnRow>) {
     let work = out[answer + 1..]
         .iter()
         .take_while(|row| match row {
-            TurnRow::Group { .. } | TurnRow::Work { .. } => true,
+            TurnRow::Fold { .. } | TurnRow::Group { .. } | TurnRow::Work { .. } => true,
             TurnRow::Row(row) => matches!(row.content, ConversationRowContent::Error { .. }),
             _ => false,
         })
@@ -296,15 +628,14 @@ fn trailing_actions(out: &mut Vec<TurnRow>) {
 /// A request's live row, as T3 Code's: an approval by what it is for, other
 /// requests as input requested.
 fn request_label(language: UiLanguage, request: &super::Request) -> String {
-    use agent_protocol::requests::RequestBody;
-    match &request.request_body {
-        RequestBody::Approval { .. } | RequestBody::Permission { .. }
-            if !request.body.trim().is_empty() =>
-        {
+    if request.request_body.is_approval() {
+        if request.body.trim().is_empty() {
+            request.title.clone()
+        } else {
             request.body.trim().to_owned()
         }
-        RequestBody::Approval { .. } | RequestBody::Permission { .. } => request.title.clone(),
-        _ => language.text("入力を求めています").into(),
+    } else {
+        language.text("入力を求めています").into()
     }
 }
 
@@ -312,7 +643,9 @@ fn request_label(language: UiLanguage, request: &super::Request) -> String {
 pub(super) enum Place {
     /// Among the work, in its group or alone.
     Work,
-    /// Apart from the work, which it ends: a plan, a subagent, a divider.
+    /// Plans and notices remain visible when completed work collapses.
+    OutsideWork(Vec<TurnRow>),
+    /// A separate row within the work: a subagent or divider.
     Alone(Vec<TurnRow>),
     /// Not at all: a sleep, review mode entered or left.
     Hidden,
@@ -323,7 +656,11 @@ pub(super) fn place(language: UiLanguage, item: &RenderedItem) -> Place {
         return Place::Work;
     };
     match native.body() {
-        ItemBody::Plan { text } => Place::Alone(vec![TurnRow::Plan {
+        ItemBody::SystemNotice { message } => Place::OutsideWork(vec![TurnRow::Divider {
+            id: item.data.id.clone(),
+            label: message.clone(),
+        }]),
+        ItemBody::Plan { text } => Place::OutsideWork(vec![TurnRow::Plan {
             id: item.data.id.clone(),
             title: plan_title(text).unwrap_or_else(|| language.text("work.plan.proposed").into()),
             text: text.clone(),
@@ -335,6 +672,7 @@ pub(super) fn place(language: UiLanguage, item: &RenderedItem) -> Place {
                 .map(|(index, agent)| TurnRow::Subagent {
                     id: format!("{}:{index}", item.data.id),
                     agent,
+                    attempt: native.attempt,
                 })
                 .collect(),
         ),
@@ -353,32 +691,6 @@ pub(super) fn place(language: UiLanguage, item: &RenderedItem) -> Place {
     }
 }
 
-/// A plan's title, as T3 Code's: its first heading.
-fn plan_title(text: &str) -> Option<String> {
-    text.lines()
-        .find_map(|line| line.trim_start().strip_prefix('#'))
-        .map(|heading| heading.trim_start_matches('#').trim().to_owned())
-        .filter(|heading| !heading.is_empty())
-}
-
-/// The suggested name and complete Markdown exported by a plan's actions.
-pub fn plan_export(text: &str) -> (String, String) {
-    let title = plan_title(text).unwrap_or_default();
-    let mut name = String::new();
-    for character in title.to_lowercase().chars() {
-        if character.is_ascii_alphanumeric() {
-            name.push(character);
-        } else if !"`'\".,!?()[]{}".contains(character) && !name.ends_with('-') {
-            name.push('-');
-        }
-    }
-    let name = name.trim_matches('-');
-    (
-        format!("{}.md", if name.is_empty() { "plan" } else { name }),
-        format!("{}\n", text.trim_end()),
-    )
-}
-
 fn activity_item(row: &ConversationRow) -> Option<&Arc<RenderedItem>> {
     match &row.content {
         ConversationRowContent::Activity { item, .. } => Some(item),
@@ -388,6 +700,7 @@ fn activity_item(row: &ConversationRow) -> Option<&Arc<RenderedItem>> {
 
 fn is_commentary(item: &RenderedItem) -> bool {
     matches!(item.data.kind.as_str(), "commentary" | "agent")
+        && !matches!(&item.source, ItemSource::Native(native) if matches!(native.body(), ItemBody::Plan { .. }))
 }
 
 /// As T3 Code, reasoning shows only with a trace to show.
@@ -414,10 +727,7 @@ fn pieces(
         .copied()
         .filter(|row| activity_item(row).is_some_and(|item| visible(item)))
         .collect();
-    let work = |row: &ConversationRow| TurnRow::Work {
-        row: row.clone(),
-        label: activity_item(row).map_or_else(String::new, |item| work_label(language, item)),
-    };
+    let work = |row: &ConversationRow| work_row(language, row);
     match rows.as_slice() {
         [] => {}
         [row] if failed || activity_item(row).is_some_and(|item| item.data.kind != "reasoning") => {
@@ -431,6 +741,7 @@ fn pieces(
             out.push(TurnRow::Group {
                 summary: group_summary(language, &items),
                 kind: group_kind(&items),
+                attempt: None,
                 id,
                 open,
             });
@@ -438,6 +749,13 @@ fn pieces(
                 out.extend(rows.iter().map(|row| work(row)));
             }
         }
+    }
+}
+
+fn work_row(language: UiLanguage, row: &ConversationRow) -> TurnRow {
+    TurnRow::Work {
+        row: row.clone(),
+        label: activity_item(row).map_or_else(String::new, |item| work_label(language, item)),
     }
 }
 

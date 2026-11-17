@@ -1,6 +1,6 @@
 use crate::l10n::{localized, tr, tr_format};
 use crate::{Connection, native, workbench::Workbench};
-use agent_core::state::{Intent, follow_up::QueueAction, operations as op};
+use agent_core::state::{Intent, operations as op};
 use agent_core::{panels::PanelKind, presentation::composer::footer};
 use agent_protocol::operations::FollowUp;
 use nsh_core::{GlassEffect, element::input, prelude::*};
@@ -85,7 +85,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             && !controls.with(|c| c.transcribing)
             && answering.with(Option::is_none)
             && !composed()
-            && follow_up.with(|f| f.editing.is_none())
+            && follow_up.with(|f| f.queue.editing().is_none())
             && empty()
     };
     // Work an answered turn left running is stopped from its own strip.
@@ -98,7 +98,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
     // What a send does while a turn runs: queue or steer, as T3 Code labels it.
     let action = move || {
         follow_up.with(|f| {
-            (f.active && f.editing.is_none()).then(|| {
+            (f.active && f.queue.editing().is_none()).then(|| {
                 if alternate_held.get() {
                     f.alternate_action
                 } else {
@@ -125,7 +125,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             tr("スレッドを再開").into()
         } else if recording.get() {
             tr("文字起こしして送信").into()
-        } else if follow_up.with(|f| f.editing.is_some()) {
+        } else if follow_up.with(|f| f.queue.editing().is_some()) {
             tr("キューのメッセージを更新").into()
         } else {
             match action() {
@@ -144,7 +144,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
         };
         follow_up
             .with(|f| {
-                (f.active && f.editing.is_none() && !stopping() && !resuming()).then(|| {
+                (f.active && f.queue.editing().is_none() && !stopping() && !resuming()).then(|| {
                     tr_format(
                         "クリックで{0}、Ctrl/⌘-クリックまたは {1} で{2}",
                         [
@@ -164,9 +164,11 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                 if answering.with(Option::is_some) {
                     c.can_advance_question()
                 } else if stopping() {
-                    c.can_interrupt()
+                    c.can_interrupt(c.controls.running_turn.clone())
                 } else if resuming() {
-                    !connection.uploading() && c.can_send(true) && !c.controls.follow_up.busy
+                    !connection.uploading()
+                        && c.can_send(true)
+                        && !c.controls.follow_up.queue.busy()
                 } else {
                     // Text being composed is content Core is yet to hear of,
                     // as a recording is.
@@ -195,16 +197,11 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             })
     };
     let interrupt = move || {
-        if composer.with_untracked(|c| c.can_interrupt())
+        if composer.with_untracked(|c| c.can_interrupt(c.controls.running_turn.clone()))
             && let Some((thread_id, turn_id)) = controls
                 .with_untracked(|c| c.navigation.thread_id.clone().zip(c.running_turn.clone()))
         {
             connection.dispatch(Intent::Interrupt(op::Interrupt { thread_id, turn_id }));
-        }
-    };
-    let queue = move |action| {
-        if let Some(thread_id) = controls.with_untracked(|c| c.navigation.thread_id.clone()) {
-            connection.dispatch(Intent::Queue { thread_id, action });
         }
     };
     // `alternate` does the opposite of the follow-up behavior for this message.
@@ -242,11 +239,9 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
             field_ref.focus();
         } else {
             following.set(true);
-            connection.dispatch(Intent::Submit {
-                thread_id: controls.with_untracked(|c| c.navigation.thread_id.clone()),
-                client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
-                alternate,
-            });
+            connection.dispatch(composer.with_untracked(|c| {
+                c.submit_intent(uuid::Uuid::new_v4().to_string().into(), alternate)
+            }));
         }
     };
     let submit = move || send(false);
@@ -258,32 +253,11 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
     // edits the latest queued message.
     let caret_at_start = signal(true);
     let terminal = use_context::<crate::terminal::Focus>().unwrap();
-    let steerable = move || {
-        follow_up.with(|f| {
-            f.can_steer
-                .then(|| f.queue.iter().find(|row| !row.pending))
-                .flatten()
-                .map(|row| row.id.clone())
-        })
-    };
-    let editable = move || {
-        follow_up.with(|f| {
-            (f.editing.is_none() && !f.busy)
-                .then(|| f.queue.iter().rev().find(|row| !row.pending))
-                .flatten()
-                .map(|row| row.id.clone())
-        })
-    };
+    let steerable = move || follow_up.with(|f| f.queue.steer_next().is_some());
+    let editable = move || follow_up.with(|f| f.queue.edit_latest().is_some());
     let steer_first = move |_: &str| {
-        if let Some(id) = follow_up.with_untracked(|f| {
-            f.queue
-                .iter()
-                .find(|row| !row.pending)
-                .map(|row| row.id.clone())
-        }) {
-            queue(QueueAction::Steer {
-                client_user_message_id: id,
-            });
+        if let Some(intent) = follow_up.with_untracked(|f| f.queue.steer_next()) {
+            connection.dispatch(intent);
         }
     };
     let shortcuts = move || {
@@ -296,19 +270,17 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                 })
             }))
             .child(when(
-                move || focused.get() && caret_at_start.get() && editable().is_some(),
+                move || focused.get() && caret_at_start.get() && editable(),
                 move || {
                     shortcut("alt+up", When::Always, move |_| {
-                        if let Some(id) = editable() {
-                            queue(QueueAction::Edit {
-                                client_user_message_id: id,
-                            });
+                        if let Some(intent) = follow_up.with_untracked(|f| f.queue.edit_latest()) {
+                            connection.dispatch(intent);
                         }
                     })
                 },
             ))
             .child(when(
-                move || steerable().is_some() && !terminal.get(),
+                move || steerable() && !terminal.get(),
                 move || shortcut("mod+shift+enter", When::Always, steer_first),
             ))
     };
@@ -567,7 +539,11 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                                 .min_w(px(44.0))
                                 .min_h(px(44.0))
                                 .prop("enabled", move || {
-                                    json!(composer.with(|c| c.can_interrupt()))
+                                    json!(
+                                        composer
+                                            .with(|c| c
+                                                .can_interrupt(c.controls.running_turn.clone()))
+                                    )
                                 })
                                 .prop("label", move || json!(stop_label()))
                         },
@@ -744,7 +720,9 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
                                                 Icon::STOP
                                             } else if resuming() {
                                                 Icon::RESUME
-                                            } else if follow_up.with(|f| f.editing.is_some()) {
+                                            } else if follow_up
+                                                .with(|f| f.queue.editing().is_some())
+                                            {
                                                 Icon::CHECK
                                             } else {
                                                 match action() {
@@ -908,7 +886,7 @@ pub(crate) fn composer(following: Signal<bool>) -> impl IntoElement {
         .child(when(is_desktop, shortcuts))
         .child(workspace::controls())
         .child(when(
-            move || follow_up.with(|f| !f.queue.is_empty()),
+            move || follow_up.with(|f| f.queue.message_count() > 0),
             move || crate::queue::queued(connection),
         ))
         // A waiting request's banner sits on the composer's top edge, its foot

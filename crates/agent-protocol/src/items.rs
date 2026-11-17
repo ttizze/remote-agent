@@ -143,6 +143,9 @@ pub enum ItemBody {
     Hook {
         fragments: Vec<String>,
     },
+    SystemNotice {
+        message: String,
+    },
     AutomaticApproval {
         status: ApprovalReviewStatus,
         reason: Option<String>,
@@ -323,7 +326,9 @@ impl Item {
                     }
                 }
             }
-            ItemBody::AssistantText { text, .. } => truncate(text),
+            ItemBody::AssistantText { text, .. } | ItemBody::SystemNotice { message: text } => {
+                truncate(text)
+            }
             ItemBody::Plan { text } | ItemBody::Review { text, .. } => truncate(text),
             ItemBody::Reasoning { content, summary } => {
                 content.clear();

@@ -84,21 +84,24 @@ impl ArtifactTemplate {
         }
         Ok(())
     }
-    pub fn presentation_label(&self) -> &'static str {
-        use ArtifactTemplateKind::*;
-        match self.artifact_kind {
-            Document => "Document template",
-            Presentation => "Presentation template",
-            Spreadsheet => "Spreadsheet template",
-            Site => "Site template",
-            GoogleDocs => "Google Doc template",
-            GoogleSlides => "Google Slides template",
-            GoogleSheets => "Google Sheet template",
-            Image => "Image template",
-            Email => "Email template",
-            Slack => "Slack template",
-        }
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn artifact_template_presentation_label(kind: ArtifactTemplateKind) -> String {
+    use ArtifactTemplateKind::*;
+    match kind {
+        Document => "Document template",
+        Presentation => "Presentation template",
+        Spreadsheet => "Spreadsheet template",
+        Site => "Site template",
+        GoogleDocs => "Google Doc template",
+        GoogleSlides => "Google Slides template",
+        GoogleSheets => "Google Sheet template",
+        Image => "Image template",
+        Email => "Email template",
+        Slack => "Slack template",
     }
+    .into()
 }
 
 /// Called only for complete paragraph lines outside code/math spans.
@@ -257,7 +260,7 @@ pub(super) fn blocks(
             let text = format!(
                 "{} ({})",
                 template.display_name,
-                template.presentation_label()
+                artifact_template_presentation_label(template.artifact_kind)
             );
             output.push(super::MarkdownBlock::Paragraph {
                 runs: vec![super::MarkdownRun {
@@ -335,7 +338,10 @@ mod tests {
         assert_eq!(template.artifact_kind, ArtifactTemplateKind::Document);
         assert_eq!(template.skill_name, "artifact-template-report");
         assert_eq!(template.skill_directory, "/skills/artifact-template-report");
-        assert_eq!(template.presentation_label(), "Document template");
+        assert_eq!(
+            artifact_template_presentation_label(template.artifact_kind),
+            "Document template"
+        );
         for path in [
             r"C:\Users\skills\artifact-template-report",
             r"\\server\share\template",

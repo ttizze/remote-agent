@@ -47,13 +47,21 @@ extension ConversationModel {
         navigation.draftKey
     }
 
+    var inputDraftKey: DraftKey {
+        composerControls.navigation.draftKey
+    }
+
     var draftKey: DraftIdentity {
-        DraftIdentity(profile: host, key: coreDraftKey)
+        DraftIdentity(
+            profile: host,
+            storage: snapshot.panelScope(host: host, draft: inputDraftKey).storage,
+            key: inputDraftKey
+        )
     }
 
     var draft: String {
         get { composer.draft().text }
-        set { perform(.setDraftText(threadId: coreDraftKey, text: newValue)) }
+        set { perform(.setDraftText(threadId: inputDraftKey, text: newValue)) }
     }
 
     func loadOlderHistory(_ id: SessionRef) {
@@ -63,11 +71,7 @@ extension ConversationModel {
     }
 
     func send() {
-        perform(.submit(
-            threadId: navigation.threadId,
-            clientUserMessageId: UUID().uuidString,
-            alternate: false
-        )) { [weak self] _ in
+        perform(composer.submitIntent(clientUserMessageId: UUID().uuidString, alternate: false)) { [weak self] _ in
             self?.persist()
         }
     }
@@ -79,9 +83,13 @@ extension ConversationModel {
         persist()
     }
 
-    func rewind(thread: SessionRef, through turn: String) {
-        guard selectedThreadId == thread else { return }
-        perform(.rewindSession(RewindSession(threadId: thread, turnId: turn))) { [weak self] result in
+    func rewind(thread: SessionRef, through turn: String, scope: PanelScope) {
+        guard selectedThreadId == thread, snapshot.panelScope(host: host, draft: coreDraftKey) == scope else { return }
+        perform(.rewindSession(RewindSession(
+            threadId: thread,
+            turnId: turn,
+            storageScope: scope.storage
+        ))) { [weak self] result in
             switch result {
             case .success: self?.composerFocusRequest = UUID(); self?.persist()
             case let .failure(error): self?.notice = error.localizedDescription
@@ -101,7 +109,7 @@ extension ConversationModel {
                     preparation: DictationPreparation?) {
         guard !transcribing, key == draftKey else { return }
         perform(.transcribe(Dictate(
-            draftKey: coreDraftKey,
+            draftKey: inputDraftKey,
             preparation: preparation?.id(),
             audio: audio,
             send: sendImmediately,

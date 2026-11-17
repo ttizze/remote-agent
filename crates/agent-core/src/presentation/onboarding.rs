@@ -331,7 +331,7 @@ mod tests {
         let (deselected, _) = crate::state::reduce(
             &scanned(),
             "",
-            Event::Intent(Intent::SelectAllImportProjects { selected: false }),
+            Event::from(Intent::SelectAllImportProjects { selected: false }),
         );
         let view = deselected.project_import_view();
         assert_eq!(view.selected, 0);

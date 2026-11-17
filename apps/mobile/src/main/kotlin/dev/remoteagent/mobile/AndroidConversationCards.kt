@@ -36,6 +36,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.ConversationContext
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.MarkdownFileKind
 import dev.remoteagent.core.MarkdownFileReference
@@ -47,6 +48,7 @@ import dev.remoteagent.core.ReadItem
 import dev.remoteagent.core.RenderedItem
 import dev.remoteagent.core.SetupTerminal
 import dev.remoteagent.core.preparationElapsed
+import dev.remoteagent.core.preparationStepElapsed
 import kotlinx.coroutines.delay
 
 private const val SETUP_CLOCK_INTERVAL_MS = 1000L
@@ -104,9 +106,8 @@ private fun PreparationStage(step: PreparationStep, now: ULong) {
             )
         Text(step.label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
         step.detail?.let { Text(it, style = MaterialTheme.typography.labelSmall) }
-        if (step.state != "pending" && step.state != "skipped") {
-            val elapsed = step.startedAtMs?.let { preparationElapsed(language, it, step.endedAtMs, now) }.orEmpty()
-            Text(elapsed, style = MaterialTheme.typography.labelSmall)
+        preparationStepElapsed(language, step.state, step.startedAtMs, step.endedAtMs, now)?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall)
         }
     }
     if (step.tail.isNotEmpty())
@@ -244,12 +245,15 @@ internal fun MessageFooter(text: String, timestampMs: ULong?, fork: (() -> Unit)
 @Composable
 internal fun ThreadActivityCard(
     item: RenderedItem,
-    cwd: String,
+    context: ConversationContext,
+    turnId: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    read: ReadItem?,
-    detailState: dev.remoteagent.core.ItemDetail?,
 ) {
     val content = remember(item) { item.presentation() }
+    val navigation = context.navigation()
+    val cwd = navigation.cwd
+    val read = navigation.threadId?.let { ReadItem(it, turnId, content.nativeId ?: content.id) }
+    val detailState = read?.let(context::itemDetail)
     var expanded by remember(content.id) { mutableStateOf(false) }
     WatchActivityOutput(read, content.nativeId, content.kind == "command", expanded, perform)
 
@@ -274,15 +278,7 @@ internal fun ThreadActivityCard(
                 )
             }
             if (expanded) {
-                detailState?.error?.let { ErrorTextView(it) }
-                if (detailState?.loading == true) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                if (content.deferred) {
-                    val body = remember(item) { item.expandedBody() }
-                    Text(body, maxLines = 1)
-                } else {
-                    val blocks = remember(item) { item.detailBlocks() }
-                    ConversationBlocks(blocks, cwd, perform)
-                }
+                ActivityDetails(item, content.deferred, cwd, perform, detailState)
             } else {
                 content.body?.let { Text(it, maxLines = 1) }
             }

@@ -1,13 +1,22 @@
 //! Conversation chrome and actions, with no dependency on a draft's text.
 use super::{
     conversation::HistoryControl,
-    error::{ErrorNotice, ErrorScope},
+    error::{ErrorNotice, ErrorScope, ordered_notices},
 };
 use crate::state::{
     Navigation, Snapshot,
     operations::{OperationKey, OperationPhase},
 };
 use std::{collections::BTreeMap, sync::Arc};
+
+pub(crate) fn request_answer_enabled(
+    connected: bool,
+    can_respond: bool,
+    phase: Option<OperationPhase>,
+    native_busy: bool,
+) -> bool {
+    connected && can_respond && !native_busy && phase != Some(OperationPhase::Running)
+}
 
 #[derive(Clone, PartialEq)]
 struct OperationControl {
@@ -41,19 +50,20 @@ impl ConversationOpening {
     }
 }
 
-/// T3 Code's thread error banner over the timeline: the latest turn's failure
-/// while it stands, unless it is a usage limit, which the timeline's row
-/// already explains.
-fn thread_error(
+/// Only the latest settled failure belongs above this conversation.
+fn thread_failure(
     language: crate::localization::UiLanguage,
     thread: &crate::models::Thread,
-) -> Option<String> {
-    use agent_protocol::execution::{ErrorCategory, TurnStatus};
+) -> Option<agent_protocol::execution::ExecutionError> {
+    use agent_protocol::execution::TurnStatus;
     let turn = thread.turns.as_ref()?.last()?;
-    let error = turn.error.as_ref().filter(|error| {
-        turn.status == TurnStatus::Failed && error.category != ErrorCategory::UsageLimit
-    })?;
-    Some(language.text(&error.message).into())
+    let mut error = turn
+        .error
+        .as_ref()
+        .filter(|_| turn.status == TurnStatus::Failed)?
+        .clone();
+    error.message = language.text(&error.message).into();
+    Some(error)
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -67,7 +77,7 @@ pub struct ConversationContext {
     pub home: Option<String>,
     directory: String,
     project: Option<super::list::ProjectSummary>,
-    thread_error: Option<String>,
+    thread_failure: Option<agent_protocol::execution::ExecutionError>,
     pub history: Option<HistoryControl>,
     pub docked: Vec<super::conversation::Request>,
     notices: Vec<ErrorNotice>,
@@ -84,6 +94,19 @@ impl ConversationContext {
     ) -> Arc<Self> {
         let session = pane.navigation.thread_id.as_ref();
         let directory = snapshot.selected_directory(pane);
+        let mut notices = snapshot.error_notices(
+            pane_id,
+            ErrorScope::Conversation {
+                draft_key: pane.navigation.draft_key.clone(),
+            },
+        );
+        let input = snapshot.composer_key(session, &pane.navigation.draft_key);
+        if input != pane.navigation.draft_key {
+            notices.extend(
+                snapshot.error_notices(pane_id, ErrorScope::Conversation { draft_key: input }),
+            );
+            notices = ordered_notices(notices);
+        }
         let next = Self {
             workspace_error: snapshot.operation_error(OperationKey::WorkspaceReview {
                 pane: (pane_id).to_owned(),
@@ -118,16 +141,11 @@ impl ConversationContext {
             home: snapshot.connection.host_home_directory.clone(),
             project: snapshot.directory_project(&directory),
             directory,
-            thread_error: session
+            thread_failure: session
                 .and_then(|id| snapshot.sessions.conversations.get(id))
-                .and_then(|thread| thread_error(snapshot.catalog.ui_language, thread)),
+                .and_then(|thread| thread_failure(snapshot.catalog.ui_language, thread)),
             history: session.and_then(|id| snapshot.history_control(id.clone())),
-            notices: snapshot.error_notices(
-                pane_id,
-                ErrorScope::Conversation {
-                    draft_key: pane.navigation.draft_key.clone(),
-                },
-            ),
+            notices,
             operations: snapshot
                 .operations
                 .iter()
@@ -199,6 +217,17 @@ impl ConversationContext {
                 .find_map(|key| self.operation_error(key).cloned()),
         }
     }
+    /// Fold controls reflect the existing item operations, including a partial load failure.
+    pub fn attempt_detail(&self, reads: Vec<crate::state::operations::ReadItem>) -> ItemDetail {
+        reads
+            .into_iter()
+            .fold(ItemDetail::default(), |mut result, read| {
+                let detail = self.item_detail(read);
+                result.loading |= detail.loading;
+                result.error = result.error.or(detail.error);
+                result
+            })
+    }
     pub fn navigation(&self) -> Navigation {
         self.navigation.clone()
     }
@@ -213,7 +242,15 @@ impl ConversationContext {
         self.project.clone()
     }
     pub fn thread_error(&self) -> Option<String> {
-        self.thread_error.clone()
+        self.thread_failure
+            .as_ref()
+            .filter(|error| error.category != agent_protocol::execution::ErrorCategory::UsageLimit)
+            .map(|error| error.message.clone())
+    }
+    pub fn thread_error_banner(&self) -> Option<super::thread_error::ThreadErrorBanner> {
+        self.thread_failure
+            .as_ref()
+            .map(super::thread_error::ThreadErrorBanner::from_failure)
     }
     pub fn workspace_error(&self) -> Option<super::error::ErrorText> {
         self.workspace_error.clone()
@@ -237,6 +274,22 @@ impl ConversationContext {
         self.operations
             .get(&OperationKey::Request { id })
             .map(|control| control.phase.clone())
+    }
+    /// Delivery permission, connectivity and both UI/operation in-flight states
+    /// must allow a response. `submitting` covers mobile callbacks before the
+    /// next publication and child requests whose operations this pane omits.
+    pub fn can_answer_request(
+        &self,
+        id: agent_protocol::ids::RequestId,
+        can_respond: bool,
+        native_busy: bool,
+    ) -> bool {
+        request_answer_enabled(
+            self.connected,
+            can_respond,
+            self.request_phase(id),
+            native_busy,
+        )
     }
     pub fn request_error(
         &self,
@@ -272,6 +325,27 @@ mod tests {
         requests::{Request, RequestBody, RequestTarget},
         session::{ProviderKind, RequestDelivery, SessionRef},
     };
+
+    #[test]
+    fn request_answers_require_a_live_delivery_and_no_outstanding_submission() {
+        let id = agent_protocol::ids::RequestId::from("request");
+        let mut context = ConversationContext::default();
+        assert!(!context.can_answer_request(id.clone(), true, false));
+        context.connected = true;
+        assert!(context.can_answer_request(id.clone(), true, false));
+        assert!(!context.can_answer_request(id.clone(), false, false));
+        assert!(!context.can_answer_request(id.clone(), true, true));
+        context.operations.insert(
+            OperationKey::Request { id: id.clone() },
+            OperationControl {
+                phase: OperationPhase::Running,
+                error: None,
+            },
+        );
+        assert!(!context.can_answer_request(id.clone(), true, false));
+        context.operations.clear();
+        assert!(context.can_answer_request(id, true, false));
+    }
 
     #[test]
     fn actions_follow_the_selected_conversation_and_reuse_unchanged_controls() {
@@ -520,6 +594,42 @@ mod opening_tests {
     };
 
     #[test]
+    fn answering_requires_a_connection_an_awaiting_request_and_idle_delivery() {
+        let mut context = ConversationContext::default();
+        for (connected, awaiting, native_busy, phase, expected) in [
+            (true, true, false, None, true),
+            (false, true, false, None, false),
+            (true, false, false, None, false),
+            (true, true, true, None, false),
+            (true, true, false, Some(OperationPhase::Running), false),
+            (
+                true,
+                true,
+                false,
+                Some(OperationPhase::Failed {
+                    message: "retry".into(),
+                }),
+                true,
+            ),
+        ] {
+            context.connected = connected;
+            context.operations.clear();
+            if let Some(phase) = phase {
+                context.operations.insert(
+                    OperationKey::Request {
+                        id: "answer".into(),
+                    },
+                    OperationControl { phase, error: None },
+                );
+            }
+            assert_eq!(
+                context.can_answer_request("answer".into(), awaiting, native_busy),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn a_selected_conversation_without_history_loads_then_offers_a_retry() {
         let session = SessionRef::new(ProviderKind::Codex, "opening".into()).unwrap();
         let mut snapshot = Snapshot::default();
@@ -565,6 +675,68 @@ mod opening_tests {
             .insert(session, Arc::new(models::Thread::default()));
         assert_eq!(opening(&snapshot), None, "its history shows instead");
     }
+    #[test]
+    fn attempt_detail_retains_partial_failures_and_clears_them_on_retry() {
+        use crate::state::operations::ReadItem;
+        let session = SessionRef::new(ProviderKind::Codex, "attempt".into()).unwrap();
+        let reads: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|id| ReadItem {
+                thread_id: session.clone(),
+                turn_id: "turn".into(),
+                item_id: id.into(),
+            })
+            .collect();
+        let key = |index: usize| OperationKey::Item {
+            item: reads[index].clone(),
+        };
+        let failure = super::super::error::error_text(
+            crate::localization::UiLanguage::English,
+            "unavailable",
+        );
+        let mut context = ConversationContext::default();
+        context.operations.insert(
+            key(0),
+            OperationControl {
+                phase: OperationPhase::Failed {
+                    message: "unavailable".into(),
+                },
+                error: Some(failure.clone()),
+            },
+        );
+        context.operations.insert(
+            key(1),
+            OperationControl {
+                phase: OperationPhase::Running,
+                error: None,
+            },
+        );
+        assert_eq!(
+            context.attempt_detail(reads.clone()),
+            ItemDetail {
+                loading: true,
+                error: Some(failure)
+            }
+        );
+        context.operations.insert(
+            key(0),
+            OperationControl {
+                phase: OperationPhase::Running,
+                error: None,
+            },
+        );
+        assert_eq!(
+            context.attempt_detail(reads.clone()),
+            ItemDetail {
+                loading: true,
+                error: None
+            }
+        );
+        context.operations.clear();
+        assert_eq!(context.attempt_detail(reads), ItemDetail::default());
+        assert_eq!(context.attempt_detail(Vec::new()), ItemDetail::default());
+    }
+
     #[test]
     fn command_output_loading_and_failure_are_visible_in_its_own_detail() {
         use crate::state::operations::{OperationState, ReadItem};

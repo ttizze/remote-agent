@@ -211,9 +211,9 @@ impl Turn {
 pub use crate::{execution::*, items::*};
 
 impl Thread {
-    /// The turn a stop request targets. The Host routes a preparing task's
-    /// submission ID to its preparation, so the same stop control covers both.
-    pub fn active_turn_id(&self) -> Option<crate::ids::TurnId> {
+    /// Current foreground work, including input still being prepared or sent.
+    /// An answered turn with background resources is not foreground work.
+    pub fn foreground_turn_id(&self) -> Option<crate::ids::TurnId> {
         if let Some(preparation) = self
             .preparations
             .iter()
@@ -241,12 +241,19 @@ impl Thread {
                     .find(|input| input.status == crate::session::PreparationStatus::Sending)
                     .map(|input| input.submission.client_user_message_id.to_string().into())
             })
-            .or_else(|| {
-                turns
-                    .last()
-                    .filter(|_| !self.background.is_empty())
-                    .map(|turn| turn.id.clone())
-            })
+    }
+
+    /// The foreground target takes precedence over an older answered turn's
+    /// background work. The Host routes preparation IDs through the same stop.
+    pub fn active_turn_id(&self) -> Option<crate::ids::TurnId> {
+        self.foreground_turn_id().or_else(|| {
+            self.turns
+                .as_deref()
+                .unwrap_or_default()
+                .last()
+                .filter(|_| !self.background.is_empty())
+                .map(|turn| turn.id.clone())
+        })
     }
 }
 
@@ -857,6 +864,12 @@ mod tests {
             Some("input".into()),
             "an unacknowledged foreground input takes priority over older background work"
         );
+        assert_eq!(thread.foreground_turn_id(), Some("input".into()));
+        thread.preparations[0].status = PreparationStatus::Preparing;
+        assert_eq!(thread.foreground_turn_id(), Some("input".into()));
+        thread.preparations[0].status = PreparationStatus::Interrupted;
+        assert_eq!(thread.foreground_turn_id(), None);
+        assert_eq!(thread.active_turn_id(), Some("older".into()));
     }
 
     #[test]

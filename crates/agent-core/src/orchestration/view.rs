@@ -565,32 +565,50 @@ fn timeline(
             .filter_map(|id| native_by_id.get(id).copied())
             .collect::<Vec<_>>();
         let native_turn = native_turns.iter().min_by_key(|turn| turn.ordinal).copied();
+        let imported = run.is_none() && native_turns.is_empty();
         let started_at = run
             .and_then(|run| run.started_at.as_deref())
-            .or_else(|| native_turn.and_then(|turn| turn.started_at.as_deref()));
-        let completed_at = run.and_then(|run| run.completed_at.as_deref()).or_else(|| {
-            // A successful app run settles after its root checkpoint. Other
-            // late items (images, commands and child results) do not extend it.
-            let checkpoint = native_turns
-                .iter()
-                .all(|turn| turn.status == model::ProviderTurnStatus::Completed)
-                .then(|| {
-                    group
-                        .iter()
-                        .filter_map(|row| {
-                            matches!(row.item.body, model::TurnItemBody::Checkpoint { .. })
-                                .then_some(row.item.completed_at.as_deref())
-                                .flatten()
-                        })
-                        .max()
-                })
-                .flatten();
-            native_turns
-                .iter()
-                .filter_map(|turn| turn.completed_at.as_deref())
-                .chain(checkpoint)
-                .max()
-        });
+            .or_else(|| native_turn.and_then(|turn| turn.started_at.as_deref()))
+            .or_else(|| {
+                imported
+                    .then(|| group.iter().find_map(|row| row.item.started_at.as_deref()))
+                    .flatten()
+            });
+        let completed_at = run
+            .and_then(|run| run.completed_at.as_deref())
+            .or_else(|| {
+                // A successful app run settles after its root checkpoint. Other
+                // late items (images, commands and child results) do not extend it.
+                let checkpoint = native_turns
+                    .iter()
+                    .all(|turn| turn.status == model::ProviderTurnStatus::Completed)
+                    .then(|| {
+                        group
+                            .iter()
+                            .filter_map(|row| {
+                                matches!(row.item.body, model::TurnItemBody::Checkpoint { .. })
+                                    .then_some(row.item.completed_at.as_deref())
+                                    .flatten()
+                            })
+                            .max()
+                    })
+                    .flatten();
+                native_turns
+                    .iter()
+                    .filter_map(|turn| turn.completed_at.as_deref())
+                    .chain(checkpoint)
+                    .max()
+            })
+            .or_else(|| {
+                imported
+                    .then(|| {
+                        group
+                            .iter()
+                            .rev()
+                            .find_map(|row| row.item.completed_at.as_deref())
+                    })
+                    .flatten()
+            });
         turns.push(Arc::new(models::Turn {
             id: group_id(row).into(),
             provider: if local {
@@ -935,6 +953,20 @@ pub(crate) fn context_parts(context: Option<&serde_json::Value>) -> Vec<items::M
         .collect()
 }
 
+/// The invocation/mention/context input contract is shared by queued display
+/// projection and saved-input restoration.
+pub(crate) fn context_input(context: Option<&serde_json::Value>) -> Vec<op::Input> {
+    context_parts(context)
+        .into_iter()
+        .map(|part| match part {
+            items::MessagePart::Attachment { name, path } => op::Input::Mention { name, path },
+            items::MessagePart::Invocation { name, path } => op::Input::Skill { name, path },
+            items::MessagePart::Context { context } => op::Input::Context { context },
+            _ => unreachable!("context records are mentions, skills or contexts"),
+        })
+        .collect()
+}
+
 fn delivery_uncertain(projection: &ThreadProjection, item_id: &str) -> bool {
     projection.turn_items.iter().any(|error| {
         error.parent_item_id.as_deref()==Some(item_id) && error.status==model::TurnItemStatus::Failed
@@ -979,14 +1011,7 @@ fn submission(
             _ => unreachable!(),
         });
     }
-    for part in context_parts(context.as_ref()) {
-        input.push(match part {
-            items::MessagePart::Attachment { name, path } => op::Input::Mention { name, path },
-            items::MessagePart::Invocation { name, path } => op::Input::Skill { name, path },
-            items::MessagePart::Context { context } => op::Input::Context { context },
-            _ => unreachable!("context records are mentions, skills or contexts"),
-        });
-    }
+    input.extend(context_input(context.as_ref()));
     Ok(op::Submission {
         fresh_context: run.fresh_context,
         thread_id: id.clone(),
@@ -1023,7 +1048,7 @@ fn request_views(
             model::TurnItemBody::UserInputRequest {questions,..}=>requests::RequestBody::Question {questions:questions.iter().map(|question|requests::Question {
                 id:question.id.clone(),header:question.header.clone(),prompt:question.question.clone(),secret:question.is_secret.unwrap_or(false),
                 allow_free_text:question.allow_custom_answer.unwrap_or(true),multiple:question.multi_select.unwrap_or(false),
-                choices:question.options.iter().map(|option|requests::QuestionChoice {id:option.value.clone().unwrap_or_else(||option.label.clone()),label:option.label.clone(),description:option.description.clone()}).collect(),
+                choices:question.options.iter().map(|option|requests::QuestionChoice {id:option.value.clone().unwrap_or_else(||option.label.clone()),label:option.label.clone(),description:option.description.clone(),preview:option.preview.clone()}).collect(),
             }).collect()},
             model::TurnItemBody::ApprovalRequest {prompt,reason,options,..}=> {
                 let description=prompt.clone().unwrap_or_else(||"Approval required".into());
@@ -1271,11 +1296,14 @@ fn item_view(
             })
         }
         Body::Compaction { .. } => items::ItemBody::Compaction {},
-        Body::SystemNotice { message }
-        | Body::RunInterruptRequest { message }
-        | Body::RunInterruptResult { message } => items::ItemBody::Hook {
-            fragments: vec![message.clone()],
+        Body::SystemNotice { message } => items::ItemBody::SystemNotice {
+            message: message.clone(),
         },
+        Body::RunInterruptRequest { message } | Body::RunInterruptResult { message } => {
+            items::ItemBody::Hook {
+                fragments: vec![message.clone()],
+            }
+        }
         Body::Handoff { summary, .. } => items::ItemBody::Custom {
             provider,
             kind: "context_handoff".into(),

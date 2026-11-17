@@ -1,15 +1,56 @@
 //! Every client renders Markdown through this crate's common GFM parser.
-use ::markdown::{
-    ParseOptions,
-    mdast::{AlignKind, Node},
-};
+/// HTML block boundaries shared by search documents and plain-text previews.
+pub const MARKDOWN_BLOCK_TAGS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "dd",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "figcaption",
+    "figure",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+];
+
+use ::markdown::mdast::{AlignKind, Node};
 use agent_protocol::markdown::{definitions, image, parse, parse_options};
 use std::{borrow::Cow, collections::HashMap};
 mod code;
+mod shell;
 mod structure;
 mod template;
 use structure::{disclosures, without_disclosure_tags};
-pub use template::{ArtifactTemplate, ArtifactTemplateGallery, ArtifactTemplateKind};
+pub use template::{
+    ArtifactTemplate, ArtifactTemplateGallery, ArtifactTemplateKind,
+    artifact_template_presentation_label,
+};
 #[cfg(feature = "diagrams")]
 mod diagram;
 #[cfg(feature = "diagrams")]
@@ -98,6 +139,8 @@ pub struct MarkdownStyle {
     pub list_depth: u32,
     pub language: Option<String>,
     pub filename: Option<String>,
+    #[cfg_attr(feature = "bindings", uniffi(default = None))]
+    pub shell_command: Option<String>,
     pub rule: bool,
 }
 
@@ -157,6 +200,7 @@ pub fn markdown_blocks(source: String) -> Vec<MarkdownBlock> {
 /// File links and code paths as workspace chips. A chip's
 /// run names the file, resolved against `cwd` and the Host's `home`, with a parent
 /// where another chip shares its basename; an authored caption stays as text before it.
+#[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn workspace_markdown_blocks(
     source: String,
     cwd: String,
@@ -448,7 +492,10 @@ fn inline_runs(
 
 fn literal_runs(source: &str, context: &Context<'_>, style: MarkdownRun) -> Vec<MarkdownRun> {
     let source = fragment_source(source, context);
-    let node = ::markdown::to_mdast(&source, &ParseOptions::gfm()).expect("GFM is infallible");
+    // Currency and escaped dollars must be reparsed without math constructs:
+    // using the shared math parser here would re-enter this literal fallback.
+    let node =
+        ::markdown::to_mdast(&source, &::markdown::ParseOptions::gfm()).expect("GFM is infallible");
     let mut runs = Vec::new();
     inline(&node, &source, context, style, &mut runs);
     runs
@@ -593,11 +640,11 @@ fn block(
     if let Node::Blockquote(quote) = node
         && let Some((kind, children)) = structure::callout(quote, source)
     {
-        style.quoted = true;
         let mut content = Vec::new();
         for child in &children {
             block(child, source, context, style.clone(), &mut content);
         }
+        style.quoted = true;
         blocks.push(MarkdownBlock::Callout {
             kind,
             blocks: content,
@@ -691,6 +738,13 @@ fn block(
             style.language = code.lang.clone();
             style.filename = code::fence_filename(code.meta.as_deref())
                 .or_else(|| code::fence_filename(code.lang.as_deref()));
+            style.shell_command = code.position.as_ref().and_then(|position| {
+                shell::command(
+                    code.lang.as_deref(),
+                    &code.value,
+                    &source[position.start.offset..position.end.offset],
+                )
+            });
             blocks.push(MarkdownBlock::Paragraph {
                 runs: code::highlight(&code.value, code.lang.as_deref()),
                 style,

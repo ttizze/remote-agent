@@ -216,6 +216,10 @@ fn native_display_preserves_inherited_groups_without_creating_application_runs()
     assert_eq!(turns[0].status, execution::TurnStatus::Completed);
     assert_eq!(turns[1].id.as_str(), "run");
     assert_eq!(turns[1].status, execution::TurnStatus::Running);
+    // This run owns its interval, which is still unknown in this snapshot.
+    // A completed item is not evidence that its owning run has ended.
+    assert_eq!(turns[1].started_at_ms, None);
+    assert_eq!(turns[1].completed_at_ms, None);
     assert!(matches!(
         turns[1].items.as_ref().unwrap()[0].body(),
         items::ItemBody::AssistantText {
@@ -521,6 +525,9 @@ fn imported_messages_group_at_user_inputs_without_inventing_application_runs() {
     for index in 0..4 {
         let mut item = item(&format!("history-{index}"), index + 1);
         item.run_id = None;
+        let at = format!("2024-01-02T03:04:0{index}.000Z");
+        item.started_at = Some(at.clone());
+        item.completed_at = Some(at);
         if index % 2 == 0 {
             item.body = TurnItemBody::UserMessage {
                 message_id: format!("user-{index}"),
@@ -558,6 +565,12 @@ fn imported_messages_group_at_user_inputs_without_inventing_application_runs() {
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[0].items.as_ref().unwrap().len(), 2);
     assert_eq!(turns[1].items.as_ref().unwrap().len(), 2);
+    // Imported history owns message clocks even though it creates neither a
+    // run nor a provider turn. Its two questions must retain separate dates.
+    assert_eq!(turns[0].started_at_ms, Some(1_704_164_640_000));
+    assert_eq!(turns[0].completed_at_ms, Some(1_704_164_641_000));
+    assert_eq!(turns[1].started_at_ms, Some(1_704_164_642_000));
+    assert_eq!(turns[1].completed_at_ms, Some(1_704_164_643_000));
     assert!(snapshot.projection.runs.is_empty());
     assert!(snapshot.projection.attempts.is_empty());
 }
@@ -1215,4 +1228,52 @@ fn attempts_senders_and_fresh_starts_reach_the_turn_view_from_t3_records() {
         Some(&Author::Automation { id: automation })
     );
     assert_eq!(items[2].author, None);
+}
+
+#[test]
+fn imported_history_notices_keep_their_plain_message_in_shared_presentation() {
+    use crate::localization::UiLanguage;
+    let message =
+        "700 earlier messages were not imported. The original session transcript is unchanged.";
+    let mut history = snapshot(1);
+    let mut notice = item("omitted-history", 0);
+    notice.run_id = None;
+    notice.body = TurnItemBody::SystemNotice {
+        message: message.into(),
+    };
+    history.projection.turn_items.push(Arc::new(notice.clone()));
+    history
+        .projection
+        .visible_turn_items
+        .push(row(notice, Visibility::Local, 0));
+    let owner = agent_protocol::session::SessionRef::new(None, "thread".into()).unwrap();
+    let native = project(
+        &history,
+        &owner,
+        agent_protocol::session::ProviderKind::Codex,
+        Default::default(),
+        None,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let item = &native.thread.turns.as_ref().unwrap()[0]
+        .items
+        .as_ref()
+        .unwrap()[0];
+    let display = crate::presentation::item_presentation(UiLanguage::English, item, None);
+    assert_eq!(
+        display.title.as_deref(),
+        Some(message),
+        "the omission notice must not become a generic hook label"
+    );
+    assert!(
+        !display.collapsible,
+        "reading an import notice requires no disclosure action"
+    );
+    assert_eq!(
+        crate::presentation::body::item_body(UiLanguage::English, item)
+            .text
+            .as_deref(),
+        Some(message)
+    );
 }

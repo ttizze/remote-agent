@@ -765,6 +765,7 @@ mod tests {
             WorkspaceSummary {
                 host: "接続先".into(),
                 actions: agent_core::presentation::workspace::WorkspaceActions {
+                    branch: "feature/native".into(),
                     can_change: true,
                     ..Default::default()
                 },

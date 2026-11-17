@@ -34,28 +34,34 @@ import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.Answer
 import dev.remoteagent.core.Choice
+import dev.remoteagent.core.ConversationContext
 import dev.remoteagent.core.ElicitationAnswer
 import dev.remoteagent.core.ElicitationInput
 import dev.remoteagent.core.Question
 import dev.remoteagent.core.Request
 import dev.remoteagent.core.RequestBody
+import dev.remoteagent.core.Respond
 import dev.remoteagent.core.buildQuestionAnswer
 import dev.remoteagent.core.requestAnswerFromJson
 import dev.remoteagent.core.requestInputDefault
 
 @Composable
-internal fun RequestCard(request: Request, submit: (Answer, (String?) -> Unit) -> Unit) {
+internal fun RequestCard(
+    request: Request,
+    context: ConversationContext,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+) {
     val language = LocalUiLanguage.current
     var busy by remember(request.id) { mutableStateOf(false) }
     var error by remember(request.id) { mutableStateOf<String?>(null) }
     fun respond(answer: Answer) {
         busy = true
-        submit(answer) {
+        perform(Intent.Respond(Respond(request.id, answer))) {
             busy = false
-            error = it
+            error = it.exceptionOrNull()?.displayMessage()
         }
     }
-    val disabled = busy || !request.canRespond
+    val disabled = !context.canAnswerRequest(request.id, request.canRespond, busy)
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(request.title, style = MaterialTheme.typography.labelLarge)

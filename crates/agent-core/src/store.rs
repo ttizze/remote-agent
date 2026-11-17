@@ -31,6 +31,24 @@ const MAX_TERMINAL_QUEUE: usize = 128;
 const MAX_ITEM_READS: usize = 132;
 const MAX_ITEM_TRANSFERS: usize = 4;
 
+/// A client-side admission target, never a Host RPC field. Resource dialogs
+/// retain a namespace; live view events also require their displayed draft.
+pub struct DispatchScope {
+    pub storage: String,
+    pub draft: Option<crate::state::DraftKey>,
+}
+
+pub const STALE_DISPATCH_SCOPE: &str = "The conversation changed. Reopen it before continuing.";
+
+pub fn dispatch_scope_matches(
+    storage: &str,
+    draft: Option<&crate::state::DraftKey>,
+    current_storage: &str,
+    current_draft: Option<&crate::state::DraftKey>,
+) -> bool {
+    storage == current_storage && draft.is_none_or(|draft| Some(draft) == current_draft)
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Outcome {
@@ -860,6 +878,24 @@ impl Store {
         pane: &str,
         intent: Intent,
     ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
+        self.dispatch_targeted(pane, intent, None)
+    }
+
+    pub fn dispatch_scoped(
+        &self,
+        pane: &str,
+        scope: DispatchScope,
+        intent: Intent,
+    ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
+        self.dispatch_targeted(pane, intent, Some(scope))
+    }
+
+    fn dispatch_targeted(
+        &self,
+        pane: &str,
+        intent: Intent,
+        scope: Option<DispatchScope>,
+    ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
         let choice = match &intent {
             Intent::SelectModel { thread_id, .. } => Some((thread_id.clone(), ModelChoice::Model)),
             Intent::SelectEffort { thread_id, .. } => {
@@ -891,13 +927,27 @@ impl Store {
                     receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
                     return false;
                 }
+                if scope.as_ref().is_some_and(|scope| {
+                    !dispatch_scope_matches(
+                        &scope.storage,
+                        scope.draft.as_ref(),
+                        &current.connection.storage_scope,
+                        current
+                            .panes
+                            .get(pane)
+                            .map(|pane| &pane.navigation.draft_key),
+                    )
+                }) {
+                    receipt = Err(PeerError::InvalidMessage(STALE_DISPATCH_SCOPE.into()));
+                    return false;
+                }
                 let mut candidate = current.clone();
                 if current.panes.get(pane).is_none() {
                     receipt = Err(PeerError::InvalidMessage("pane is closed".into()));
                     return false;
                 }
                 adopt_preferences(&mut candidate, &self.preferences.current());
-                let (effects, _) = apply_pane_locked(&mut candidate, Event::Intent(intent), pane);
+                let (effects, _) = apply_pane_locked(&mut candidate, Event::from(intent), pane);
                 if let Some(attempt) = &attempt {
                     attempt.cancel();
                     match self.request_disconnect() {
@@ -1229,7 +1279,12 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
             next.connection.connected,
             next.panes
                 .get(pane_id)
-                .and_then(|pane| next.input.drafts.get(&pane.navigation.draft_key))
+                .and_then(|pane| {
+                    next.input.drafts.get(&next.composer_key(
+                        pane.navigation.thread_id.as_ref(),
+                        &pane.navigation.draft_key,
+                    ))
+                })
                 .and_then(|draft| draft.model.as_ref()),
             &next.catalog.models,
             next.operations.keys(),
@@ -1999,7 +2054,7 @@ mod model_reconnection_tests {
         let (opened, effects) = reduce(
             &connected,
             "",
-            Event::Intent(Intent::SetProjectExpanded {
+            Event::from(Intent::SetProjectExpanded {
                 project_id: "p".into(),
                 expanded: true,
             }),
@@ -2081,7 +2136,7 @@ mod model_reconnection_tests {
                     },
                 );
             }
-            let (_, effects) = reduce(&state, "", Event::Intent(Intent::ReadItem(read)));
+            let (_, effects) = reduce(&state, "", Event::from(Intent::ReadItem(read)));
             let keys: Vec<_> = effects
                 .iter()
                 .filter_map(|effect| effect.operation.key())

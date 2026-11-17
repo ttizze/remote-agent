@@ -1,12 +1,14 @@
 use crate::localization::UiLanguage;
 use agent_protocol::composer::*;
+pub mod code;
+pub mod completions;
 pub mod context;
+pub(crate) mod input;
 pub mod snapshot;
 pub mod stash;
 pub(crate) mod template;
 
 /// Keep selected lines quoted and leave room for the user's question.
-#[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn append_selection_to_draft(draft: &str, selection: &str) -> String {
     let quote = selection
         .split('\n')
@@ -31,12 +33,51 @@ pub(crate) fn should_refresh_catalog(
 ) -> bool {
     loading.is_none_or(|loading| !loading && filter.is_empty() && text_changed)
 }
-/// Cursor and range are UTF-8 byte offsets. Reject mail addresses, paths and URLs.
-pub(crate) fn query(
-    text: &str,
-    cursor: usize,
-) -> Option<(std::ops::Range<usize>, InvocationKind, &str)> {
+static CURRENCY_PREFIX: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^\p{Sc}+").expect("currency prefix grammar"));
+
+pub(crate) struct CompletionQuery<'a> {
+    range: std::ops::Range<usize>,
+    kind: InvocationKind,
+    pub(crate) filter: &'a str,
+    currency: bool,
+}
+
+// T3's currency trigger splits on these four ASCII characters. Unicode space
+// remains in the query and is normalized by search, not by moving its range.
+fn currency_query(before: &str) -> Option<CompletionQuery<'_>> {
+    static CURRENCY_AMOUNT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^\.?[0-9][0-9,._]*(?:[kKmMbBtT]|[eE][0-9]+)?[.,;:!?)]*$")
+            .expect("currency amount grammar")
+    });
+    let start = source_token_start(before);
+    let token = &before[start..];
+    if !CURRENCY_PREFIX.is_match(token) {
+        return None;
+    }
+    let filter = &token[token.chars().next()?.len_utf8()..];
+    if CURRENCY_AMOUNT.is_match(filter) {
+        return None;
+    }
+    Some(CompletionQuery {
+        range: start..before.len(),
+        kind: InvocationKind::Skill,
+        filter,
+        currency: true,
+    })
+}
+
+fn source_token_start(before: &str) -> usize {
+    before.rfind([' ', '\n', '\t', '\r']).map_or(0, |i| i + 1)
+}
+
+/// UTF-8 byte offsets. Currency skills use T3's token grammar; existing
+/// slash/plugin prefixes retain their Unicode word and punctuation boundaries.
+pub(crate) fn query(text: &str, cursor: usize) -> Option<CompletionQuery<'_>> {
     let before = text.get(..cursor)?;
+    if let Some(query) = currency_query(before) {
+        return Some(query);
+    }
     let start = before
         .rfind(char::is_whitespace)
         .map_or(0, |i| i + before[i..].chars().next().unwrap().len_utf8());
@@ -51,7 +92,12 @@ pub(crate) fn query(
     if filter.contains(['/', '@', ':', '\\', '[', ']', '(', ')', '`']) {
         return None;
     }
-    Some((start..cursor, kind, filter))
+    Some(CompletionQuery {
+        range: start..cursor,
+        kind,
+        filter,
+        currency: false,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,45 +105,82 @@ pub(crate) fn query(
 pub struct ComposerSuggestions {
     pub candidates: Vec<ComposerCandidate>,
     pub status: Option<String>,
+    pub query_key: String,
 }
 
-pub(crate) fn suggestions(
+/// Provider-scoped immutable input for a native editor's caret-local queries.
+/// The editor owns its selection; Core owns filtering and status precedence.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct CompletionCatalog {
+    pub candidates: Vec<ComposerCandidate>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub language: UiLanguage,
+}
+
+pub(crate) fn completion_catalog(
     language: UiLanguage,
     catalog: Option<&agent_protocol::composer::ComposerCatalog>,
     provider: Option<agent_protocol::session::ProviderKind>,
-    text: String,
-    cursor: u32,
-) -> Option<ComposerSuggestions> {
-    let (_, kind, filter) = query(&text, cursor as usize)?;
-    let filter = filter.to_lowercase();
-    let candidates: Vec<_> = catalog
-        .into_iter()
-        .flat_map(|c| &c.candidates)
-        .filter(|c| {
-            Some(c.invocation.provider) == provider
-                && c.invocation.kind == kind
-                && (filter.is_empty()
-                    || c.invocation.name.to_lowercase().contains(&filter)
-                    || c.description.to_lowercase().contains(&filter))
+) -> CompletionCatalog {
+    CompletionCatalog {
+        candidates: catalog
+            .into_iter()
+            .flat_map(|c| &c.candidates)
+            .filter(|c| Some(c.invocation.provider) == provider)
+            .cloned()
+            .collect(),
+        loading: catalog.is_none_or(|c| c.loading),
+        error: catalog
+            .and_then(|c| provider.and_then(|p| c.errors.get(&p)))
+            .filter(|errors| !errors.is_empty())
+            .map(|errors| errors.join("\n")),
+        language,
+    }
+}
+
+impl CompletionCatalog {
+    pub fn suggestions(&self, text: &str, cursor: u32) -> Option<ComposerSuggestions> {
+        let query = query(text, cursor as usize)?;
+        let query_key = format!(
+            "{:?}:{}:{}",
+            query.kind,
+            query.currency,
+            crate::text::trim(query.filter).to_lowercase()
+        );
+        let filter = crate::text::trim(query.filter);
+        let filter = if query.currency {
+            CURRENCY_PREFIX.replace(filter, "").to_lowercase()
+        } else {
+            filter.to_lowercase()
+        };
+        let candidates: Vec<_> = self
+            .candidates
+            .iter()
+            .filter(|c| {
+                c.invocation.kind == query.kind
+                    && (filter.is_empty()
+                        || c.invocation.name.to_lowercase().contains(&filter)
+                        || c.description.to_lowercase().contains(&filter))
+            })
+            .cloned()
+            .collect();
+        let status = if self.loading && candidates.is_empty() {
+            Some(self.language.text("候補を読み込み中…").into())
+        } else if let Some(error) = &self.error {
+            Some(error.clone())
+        } else if candidates.is_empty() {
+            Some(self.language.text("該当する候補がありません").into())
+        } else {
+            None
+        };
+        Some(ComposerSuggestions {
+            candidates,
+            status,
+            query_key,
         })
-        .cloned()
-        .collect();
-    let status = match catalog {
-        None => Some(language.text("候補を読み込み中…").into()),
-        Some(c) if c.loading && candidates.is_empty() => {
-            Some(language.text("候補を読み込み中…").into())
-        }
-        Some(c)
-            if provider
-                .and_then(|provider| c.errors.get(&provider))
-                .is_some_and(|errors| !errors.is_empty()) =>
-        {
-            Some(c.errors[&provider.unwrap()].join("\n"))
-        }
-        Some(_) if candidates.is_empty() => Some(language.text("該当する候補がありません").into()),
-        _ => None,
-    };
-    Some(ComposerSuggestions { candidates, status })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -109,22 +192,36 @@ pub struct ComposerInsertion {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn insert_invocation(
-    mut text: String,
+    text: String,
     cursor: u32,
     kind: InvocationKind,
     name: String,
 ) -> Option<ComposerInsertion> {
-    let (range, trigger, _) = query(&text, cursor as usize)?;
-    if kind != trigger {
+    let query = query(&text, cursor as usize)?;
+    if kind != query.kind {
         return None;
     }
     let token = format!("{}{name}", kind.sigil());
+    let range = query.range;
+    Some(insert_completion(text, range, &token))
+}
+
+// Both invocation tokens and file links consume exactly one following ASCII
+// separator. Additional spaces and every non-ASCII separator remain intact.
+fn insert_completion(
+    mut text: String,
+    mut range: std::ops::Range<usize>,
+    token: &str,
+) -> ComposerInsertion {
     let cursor = range.start + token.len() + 1;
+    if text.as_bytes().get(range.end) == Some(&b' ') {
+        range.end += 1;
+    }
     text.replace_range(range, &format!("{token} "));
-    Some(ComposerInsertion {
+    ComposerInsertion {
         text,
         cursor: cursor as u32,
-    })
+    }
 }
 
 /// What a key does while the composer lists completions, as the desktop
@@ -137,23 +234,306 @@ pub enum CompletionKey {
     Dismiss,
 }
 
-/// `key` (`up`, `down`, `return`, `tab`, `escape`) over `count` candidates with
-/// `highlighted` highlighted; `None` leaves the key to the field.
-pub fn completion_key(key: &str, highlighted: usize, count: usize) -> Option<CompletionKey> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionBoundary {
+    Stop,
+    Wrap,
+}
+
+/// The TSX source menu cycles at its edges and dismisses even empty results.
+/// Existing bounded native lists keep their own edge behavior explicitly.
+pub fn completion_key(
+    key: &str,
+    highlighted: usize,
+    count: usize,
+    boundary: CompletionBoundary,
+) -> Option<CompletionKey> {
+    if key == "escape" && boundary == CompletionBoundary::Wrap {
+        return Some(CompletionKey::Dismiss);
+    }
     let last = count.checked_sub(1)?;
+    let index = match boundary {
+        CompletionBoundary::Stop => highlighted.min(last),
+        CompletionBoundary::Wrap => {
+            if highlighted < count {
+                highlighted
+            } else {
+                0
+            }
+        }
+    };
     Some(match key {
-        "up" => CompletionKey::Highlight(highlighted.min(last).saturating_sub(1)),
-        "down" => CompletionKey::Highlight((highlighted + 1).min(last)),
-        "return" | "tab" => CompletionKey::Insert(highlighted.min(last)),
+        "up" => CompletionKey::Highlight(if index == 0 && boundary == CompletionBoundary::Wrap {
+            last
+        } else {
+            index.saturating_sub(1)
+        }),
+        "down" => {
+            CompletionKey::Highlight(if index == last && boundary == CompletionBoundary::Wrap {
+                0
+            } else {
+                (index + 1).min(last)
+            })
+        }
+        "return" | "tab" => CompletionKey::Insert(index),
         "escape" => CompletionKey::Dismiss,
         _ => return None,
     })
+}
+
+/// Keep a selected item only within the same query and current result set.
+/// Empty async results retire it; restored results start at their first item.
+pub fn completion_selection(
+    current_query: Option<&str>,
+    highlighted_query: Option<&str>,
+    highlighted: Option<&str>,
+    keys: &[String],
+) -> Option<String> {
+    if current_query == highlighted_query
+        && let Some(key) = highlighted.filter(|key| keys.iter().any(|candidate| candidate == key))
+    {
+        return Some(key.into());
+    }
+    keys.first().cloned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{Draft, Event, Intent, Snapshot, reduce};
+
+    #[test]
+    fn source_completion_keys_cycle_and_dismiss_an_empty_menu() {
+        for (key, highlighted, count, expected) in [
+            ("up", 0, 3, Some(CompletionKey::Highlight(2))),
+            ("down", 2, 3, Some(CompletionKey::Highlight(0))),
+            ("up", 1, 3, Some(CompletionKey::Highlight(0))),
+            ("down", 0, 3, Some(CompletionKey::Highlight(1))),
+            ("escape", 0, 0, Some(CompletionKey::Dismiss)),
+            ("return", 0, 0, None),
+            ("return", 3, 3, Some(CompletionKey::Insert(0))),
+            ("return", 7, 3, Some(CompletionKey::Insert(0))),
+        ] {
+            assert_eq!(
+                completion_key(key, highlighted, count, CompletionBoundary::Wrap),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn completion_selection_uses_query_and_item_identity_and_retires_async_emptiness() {
+        let keys = vec!["first".into(), "second".into()];
+        assert_eq!(
+            completion_selection(Some("q"), Some("q"), Some("second"), &keys),
+            Some("second".into())
+        );
+        let reversed = vec!["second".into(), "first".into()];
+        assert_eq!(
+            completion_selection(Some("q"), Some("q"), Some("second"), &reversed),
+            Some("second".into())
+        );
+        assert_eq!(
+            completion_selection(Some("new"), Some("q"), Some("second"), &keys),
+            Some("first".into())
+        );
+        assert_eq!(
+            completion_selection(Some("q"), Some("q"), Some("missing"), &keys),
+            Some("first".into())
+        );
+        let retired = completion_selection(Some("q"), Some("q"), Some("second"), &[]);
+        assert_eq!(retired, None);
+        assert_eq!(
+            completion_selection(Some("q"), Some("q"), retired.as_deref(), &keys),
+            Some("first".into())
+        );
+    }
+
+    #[test]
+    fn completion_query_identity_is_normalized_raw_query_not_position_or_matcher_text() {
+        let source = completion_catalog(UiLanguage::English, None, None);
+        let key = |text: &str| {
+            source
+                .suggestions(text, text.len() as u32)
+                .unwrap()
+                .query_key
+        };
+        assert_eq!(key("one $REV"), key("two €rev"));
+        assert_eq!(key("$\u{a0}REV\u{a0}"), key("$rev"));
+        assert_ne!(key("$rev"), key("/rev"));
+        assert_ne!(key("$rev"), key("$$rev"));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn completion_keys_never_address_a_missing_result(highlighted in proptest::prelude::any::<usize>(), count in 0usize..64) {
+            for boundary in [CompletionBoundary::Stop, CompletionBoundary::Wrap] {
+                for key in ["up", "down", "return", "tab", "escape"] {
+                    if let Some(CompletionKey::Highlight(index) | CompletionKey::Insert(index)) = completion_key(key, highlighted, count, boundary) {
+                        proptest::prop_assert!(index < count);
+                    }
+                }
+            }
+        }
+    }
+
+    // Pinned composer-logic.ts detects /^\p{Sc}/u, and shared/composerTrigger.ts
+    // rejects money while still allowing skill names beginning with digits.
+    #[rstest::rstest]
+    #[case("$rev", Some("rev"))]
+    #[case("€review", Some("review"))]
+    #[case("£", Some(""))]
+    #[case("￥レビュー", Some("レビュー"))]
+    #[case("＄review/name", Some("review/name"))]
+    #[case("$[review]", Some("[review]"))]
+    #[case("$123skill", Some("123skill"))]
+    #[case("$1e-3", Some("1e-3"))]
+    #[case("$500", None)]
+    #[case("€1,234.50", None)]
+    #[case("£.5", None)]
+    #[case("￥2k", None)]
+    #[case("$1e3", None)]
+    #[case("$12.00!", None)]
+    #[case("cost$review", None)]
+    #[case("\u{a0}$review", None)]
+    #[case("$review\u{a0}tail", Some("review\u{a0}tail"))]
+    #[case("$review\u{2003}tail", Some("review\u{2003}tail"))]
+    #[case("$review\u{b}", Some("review\u{b}"))]
+    #[case("$500\u{a0}", Some("500\u{a0}"))]
+    fn currency_skill_trigger_follows_the_pinned_source(
+        #[case] text: &str,
+        #[case] expected: Option<&str>,
+    ) {
+        let found = query(text, text.len());
+        assert_eq!(found.as_ref().map(|query| query.filter), expected);
+        if let Some(query) = found {
+            assert_eq!(query.range, 0..text.len());
+            assert_eq!(query.kind, InvocationKind::Skill);
+        }
+    }
+
+    #[test]
+    fn currency_skill_search_trims_ecmascript_space_instead_of_changing_token_boundaries() {
+        let catalog = ComposerCatalog {
+            candidates: vec![ComposerCandidate {
+                invocation: skill(),
+                description: "Review changes".into(),
+            }],
+            ..Default::default()
+        };
+        let source =
+            completion_catalog(UiLanguage::English, Some(&catalog), Some(skill().provider));
+        for (text, count) in [
+            ("$\u{a0}REV\u{a0}", 1),
+            ("€\u{feff}review\u{feff}", 1),
+            ("$$review", 1),
+            ("$\u{85}review\u{85}", 0),
+        ] {
+            let menu = source.suggestions(text, text.len() as u32).unwrap();
+            assert_eq!(menu.candidates.len(), count, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn currency_invocations_preserve_the_ascii_token_boundary_and_suffix() {
+        for (text, before, start, expected, caret) in [
+            (
+                "prefix $rev suffix",
+                "prefix $rev",
+                7,
+                "prefix $review suffix",
+                15,
+            ),
+            (
+                "日本語\t€rev tail",
+                "日本語\t€rev",
+                10,
+                "日本語\t$review tail",
+                18,
+            ),
+            ("x\n￥rev tail", "x\n￥rev", 2, "x\n$review tail", 10),
+            ("x\r£rev", "x\r£rev", 2, "x\r$review ", 10),
+        ] {
+            let query = query(text, before.len()).unwrap();
+            assert_eq!(query.range, start..before.len());
+            assert_eq!(query.filter, "rev");
+            let insertion =
+                insert_invocation(text.into(), before.len() as u32, skill().kind, skill().name)
+                    .unwrap();
+            assert_eq!(insertion.text, expected);
+            assert_eq!(insertion.cursor, caret);
+        }
+    }
+
+    #[test]
+    fn native_catalog_queries_preserve_provider_status_and_caret_boundaries() {
+        use agent_protocol::session::ProviderKind::{Claude, Codex};
+        let candidate = |provider, kind, name: &str| ComposerCandidate {
+            invocation: Invocation {
+                provider,
+                kind,
+                name: name.into(),
+                path: format!("/{name}"),
+            },
+            description: format!("Use {name}"),
+        };
+        let mut catalog = ComposerCatalog {
+            candidates: vec![
+                candidate(Codex, InvocationKind::Skill, "review"),
+                candidate(Claude, InvocationKind::Skill, "review"),
+                candidate(Codex, InvocationKind::Plugin, "plugin"),
+            ],
+            errors: [(Codex, vec!["Catalog warning".into()])].into(),
+            loading: true,
+            ..Default::default()
+        };
+        let source = completion_catalog(UiLanguage::English, Some(&catalog), Some(Codex));
+        let menu = source.suggestions("前😀 /REV tail", 12).unwrap();
+        assert_eq!(menu.candidates, vec![catalog.candidates[0].clone()]);
+        assert_eq!(menu.status.as_deref(), Some("Catalog warning"));
+        assert_eq!(
+            source.suggestions("/missing", 8).unwrap().status.as_deref(),
+            Some("Loading suggestions…")
+        );
+        assert!(source.suggestions("前😀 /REV tail", 15).is_none());
+        assert!(
+            source.suggestions("前😀 /REV tail", 4).is_none(),
+            "invalid UTF-8 boundary"
+        );
+        assert_eq!(
+            source.suggestions("@pl suffix", 3).unwrap().candidates,
+            vec![catalog.candidates[2].clone()]
+        );
+        catalog.loading = false;
+        let source = completion_catalog(UiLanguage::English, Some(&catalog), Some(Codex));
+        assert_eq!(
+            source.suggestions("/missing", 8).unwrap().status.as_deref(),
+            Some("Catalog warning")
+        );
+        catalog.errors.clear();
+        let source = completion_catalog(UiLanguage::English, Some(&catalog), Some(Codex));
+        assert_eq!(
+            source.suggestions("/missing", 8).unwrap().status.as_deref(),
+            Some("No matching suggestions")
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(0, Some(0))]
+    #[case(1, Some(3))]
+    #[case(2, None)]
+    #[case(3, Some(7))]
+    #[case(4, Some(8))]
+    #[case(5, None)]
+    fn native_caret_converts_only_complete_unicode_boundaries(
+        #[case] units: u32,
+        #[case] expected: Option<usize>,
+    ) {
+        assert_eq!(
+            agent_protocol::context::byte_offset("前😀a", units),
+            expected
+        );
+    }
 
     #[rstest::rstest]
     #[case("down", 0, 3, Some(CompletionKey::Highlight(1)))]
@@ -173,7 +553,10 @@ mod tests {
         #[case] count: usize,
         #[case] expected: Option<CompletionKey>,
     ) {
-        assert_eq!(completion_key(key, highlighted, count), expected);
+        assert_eq!(
+            completion_key(key, highlighted, count, CompletionBoundary::Stop),
+            expected
+        );
     }
     use agent_protocol::operations::Input;
 
@@ -219,7 +602,7 @@ mod tests {
         let (snapshot, _) = reduce(
             &Snapshot::default(),
             "",
-            Event::Intent(Intent::SetDraft {
+            Event::from(Intent::SetDraft {
                 thread_id: "origin".into(),
                 draft: draft.clone(),
             }),
@@ -227,7 +610,7 @@ mod tests {
         let (snapshot, _) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::SetDraftText {
+            Event::from(Intent::SetDraftText {
                 thread_id: "other".into(),
                 text: "別の下書き".into(),
             }),
@@ -235,14 +618,14 @@ mod tests {
         let (snapshot, _) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/other".into(),
             }),
         );
         let (next, effects) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::QuoteSelection {
+            Event::from(Intent::QuoteSelection {
                 storage_scope: String::new(),
                 thread_id: "origin".into(),
                 text: "日本語 👋\n引用".into(),
@@ -272,7 +655,7 @@ mod tests {
         let (stale, effects) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::QuoteSelection {
+            Event::from(Intent::QuoteSelection {
                 storage_scope: "previous-account".into(),
                 thread_id: "origin".into(),
                 text: "古い選択".into(),
@@ -288,7 +671,7 @@ mod tests {
         let (next, effects) = reduce(
             &previous,
             "",
-            Event::Intent(Intent::QuoteSelection {
+            Event::from(Intent::QuoteSelection {
                 storage_scope: "previous-account".into(),
                 thread_id: previous.panes.primary().navigation.draft_key.clone(),
                 text: "stale selection".into(),
@@ -331,14 +714,14 @@ mod tests {
         let text = "日本語 /rev 後半";
         let cursor = "日本語 /rev".len() as u32;
         let inserted = insert_invocation(text.into(), cursor, skill().kind, skill().name).unwrap();
-        assert_eq!(inserted.text, "日本語 $review  後半");
+        assert_eq!(inserted.text, "日本語 $review 後半");
         assert_eq!(inserted.cursor as usize, "日本語 $review ".len());
         assert_eq!(
-            query("＠rev", "＠rev".len()).unwrap().1,
+            query("＠rev", "＠rev".len()).unwrap().kind,
             InvocationKind::Plugin
         );
         assert_eq!(
-            query("／rev", "／rev".len()).unwrap().1,
+            query("／rev", "／rev".len()).unwrap().kind,
             InvocationKind::Skill
         );
         for text in [
@@ -351,6 +734,33 @@ mod tests {
             assert!(query(text, text.len()).is_none(), "{text}");
         }
         assert!(query("日本語 /", 1).is_none());
+    }
+
+    // Pinned ChatComposer's skill insertion uses
+    // composer-logic::extendReplacementRangeForTrailingSpace: consume exactly
+    // one existing ASCII space. Additional or different whitespace is content.
+    #[rstest::rstest]
+    #[case("", "前😀 $review ")]
+    #[case(" tail", "前😀 $review tail")]
+    #[case("  tail", "前😀 $review  tail")]
+    #[case("\ttail", "前😀 $review \ttail")]
+    #[case("\ntail", "前😀 $review \ntail")]
+    #[case("\u{a0}tail", "前😀 $review \u{a0}tail")]
+    #[case("後半", "前😀 $review 後半")]
+    fn completion_replaces_one_existing_ascii_separator(
+        #[case] suffix: &str,
+        #[case] expected: &str,
+    ) {
+        let prefix = "前😀 /rev";
+        let inserted = insert_invocation(
+            format!("{prefix}{suffix}"),
+            prefix.len() as u32,
+            skill().kind,
+            skill().name,
+        )
+        .unwrap();
+        assert_eq!(inserted.text, expected);
+        assert_eq!(inserted.cursor, "前😀 $review ".len() as u32);
     }
 
     #[test]
@@ -377,7 +787,7 @@ mod tests {
             let (next, _) = reduce(
                 &snapshot,
                 "",
-                Event::Intent(Intent::SetDraftText {
+                Event::from(Intent::SetDraftText {
                     thread_id: "chat".into(),
                     text: text.into(),
                 }),
@@ -570,7 +980,7 @@ mod tests {
         let (snapshot, effects) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::EditComposer {
+            Event::from(Intent::EditComposer {
                 thread_id: key.clone(),
                 text: "/".into(),
                 cursor: 1,
@@ -589,7 +999,7 @@ mod tests {
         let (snapshot, effects) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::EditComposer {
+            Event::from(Intent::EditComposer {
                 thread_id: key.clone(),
                 text: "/rev suffix".into(),
                 cursor: 4,
@@ -605,7 +1015,7 @@ mod tests {
         let snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::SetDraft {
+            Event::from(Intent::SetDraft {
                 thread_id: key.clone(),
                 draft,
             }),
@@ -614,7 +1024,7 @@ mod tests {
         let snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::InsertInvocation {
+            Event::from(Intent::InsertInvocation {
                 thread_id: key.clone(),
                 text: "$review suffix".into(),
                 invocation: skill(),
@@ -637,7 +1047,7 @@ mod tests {
         let (offline, _) = reduce(
             &Snapshot::default(),
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/project".into(),
             }),
         );
@@ -659,7 +1069,7 @@ mod tests {
         let (edited, effects) = reduce(
             &connected,
             "",
-            Event::Intent(Intent::EditComposer {
+            Event::from(Intent::EditComposer {
                 thread_id: connected.panes.primary().navigation.draft_key.clone(),
                 text: "/".into(),
                 cursor: 1,
@@ -680,7 +1090,7 @@ mod tests {
         let (other, _) = reduce(
             &edited,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/other".into(),
             }),
         );
@@ -804,7 +1214,7 @@ mod tests {
             snapshot = reduce(
                 &snapshot,
                 "",
-                Event::Intent(Intent::InsertInvocation {
+                Event::from(Intent::InsertInvocation {
                     thread_id: "chat".into(),
                     text: insertion.text,
                     invocation,

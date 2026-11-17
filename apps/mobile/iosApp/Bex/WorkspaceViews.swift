@@ -14,6 +14,7 @@ struct ConversationDirectorySheet: View {
     let close: () -> Void
 
     var body: some View {
+        let inputScope = model.snapshot.panelScope(host: model.host, draft: model.inputDraftKey)
         NavigationStack {
             WorkspaceScreen(
                 model: model,
@@ -64,12 +65,16 @@ struct WorkspaceScreen: View {
             downloadFile: model.download,
             previewAccess: WorkspaceFilePreviewAccess(
                 media: { model.mediaAccess(presentation: $0, open: $1) },
-                addToChat: model.addSelectionToChat
+                addToChat: { text in
+                    model.addSelectionToChat(text, scope: inputScope)
+                }
             ),
-            aiEdit: { model.perform(.setDraftText(
-                threadId: draft,
-                text: fileEditPrompt(path: $0)
-            )) },
+            aiEdit: { path in
+                guard model.coreDraftKey == draft,
+                      model.snapshot.panelScope(host: model.host, draft: model.inputDraftKey) == inputScope
+                else { return }
+                model.perform(.setDraftText(threadId: inputScope.draft, text: fileEditPrompt(path: path)))
+            },
             close: close
         )
         .background(Color(uiColor: .systemGroupedBackground))

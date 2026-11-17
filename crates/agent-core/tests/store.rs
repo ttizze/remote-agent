@@ -1,6 +1,14 @@
 use agent_core::state::DraftKey;
+#[path = "store/dispatch_scope.rs"]
+mod dispatch_scope;
 #[path = "store/panes.rs"]
 mod panes;
+#[path = "store/queued_edit.rs"]
+mod queued_edit;
+#[path = "store/rename.rs"]
+mod rename;
+#[path = "store/rewind.rs"]
+mod rewind;
 use agent_protocol::orchestration::projection::{ThreadHistoryPage, ThreadStreamItem};
 use agent_protocol::session::{ProviderKind, SessionRef};
 #[path = "support/host.rs"]
@@ -868,7 +876,7 @@ async fn feedback_upload_survives_navigation_without_duplicate_sends_and_reports
     use agent_core::presentation::feedback::FeedbackPhase;
     use agent_protocol::feedback::UploadFeedback;
     let mut initial = authenticated_snapshot();
-    initial.connection.storage_scope = "fixture-storage".into();
+    initial.connection.storage_scope = "authenticated-node:fixture-storage".into();
     let (store, mut reader, writer) = setup(initial).await;
     let session = SessionRef::new(ProviderKind::Codex, "session".into()).unwrap();
     let scope = store.snapshot().connection.storage_scope.clone();
@@ -883,7 +891,7 @@ async fn feedback_upload_survives_navigation_without_duplicate_sends_and_reports
     let call = read(&mut reader).await;
     assert_eq!(call["method"], "host/feedback/upload");
     assert_eq!(call["params"]["includeLogs"], false);
-    assert_eq!(call["params"]["storageScope"], scope);
+    assert_eq!(call["params"]["storageScope"], "fixture-storage");
     let notice = store.snapshot().feedback_notice(session.clone()).unwrap();
     assert_eq!(notice.phase, FeedbackPhase::Uploading);
     assert!(!notice.can_dismiss);
@@ -3028,6 +3036,111 @@ async fn gallery_drains_live_frames_while_image_hydration_waits_for_the_host() {
 }
 
 #[tokio::test]
+async fn terminal_script_opens_a_shell_and_writes_once_before_later_input() {
+    use agent_protocol::operations::{TerminalSize, TerminalWrite};
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let script = store.dispatch(Intent::RunTerminalScript(op::RunTerminalScript {
+        handle: "script".into(),
+        cwd: "/fixture".into(),
+        command: "printf once".into(),
+    }));
+    let mount = || {
+        Intent::EnsureTerminal(op::StartTerminal {
+            handle: "script".into(),
+            cwd: "/fixture".into(),
+            command: None,
+            size: TerminalSize { cols: 80, rows: 24 },
+        })
+    };
+    let starting_mount = store.dispatch(mount());
+    let server = tokio::spawn(async move {
+        let start = read(&mut reader).await;
+        assert_eq!(start["method"], "host/terminal/start");
+        assert_eq!(start["params"]["cwd"], "/fixture");
+        assert!(
+            start["params"]["command"].is_null(),
+            "the script runs in an interactive shell"
+        );
+        assert_eq!(start["params"]["size"]["cols"], 120);
+        assert_eq!(start["params"]["size"]["rows"], 30);
+        writer.reply(&start, json!({"result": {}})).await.unwrap();
+        let write = read(&mut reader).await;
+        assert_eq!(write["method"], "host/terminal/write");
+        let params: TerminalWrite = serde_json::from_value(write["params"].clone()).unwrap();
+        assert_eq!(params.data, b" printf once\r");
+        writer.reply(&write, json!({"result": {}})).await.unwrap();
+        let later = read(&mut reader).await;
+        assert_eq!(
+            later["method"], "host/terminal/write",
+            "automatic mounts must not restart the shell"
+        );
+        let params: TerminalWrite = serde_json::from_value(later["params"].clone()).unwrap();
+        assert_eq!(params.data, b"later input");
+        writer.reply(&later, json!({"result": {}})).await.unwrap();
+        assert!(reader.read_request().await.unwrap().is_none());
+    });
+    script.await.unwrap();
+    starting_mount.await.unwrap();
+    store.dispatch(mount()).await.unwrap();
+    store
+        .dispatch(Intent::WriteTerminal(op::WriteTerminal {
+            handle: "script".into(),
+            data: b"later input".to_vec(),
+        }))
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_script_does_not_write_when_opening_its_shell_fails() {
+    use agent_protocol::operations::TerminalSize;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let server = tokio::spawn(async move {
+        let start = read(&mut reader).await;
+        assert_eq!(start["method"], "host/terminal/start");
+        writer
+            .reply(
+                &start,
+                json!({"error": {"code": "fixture_refused", "message": "directory unavailable"}}),
+            )
+            .await
+            .unwrap();
+        let barrier = read(&mut reader).await;
+        assert_eq!(
+            barrier["method"], "host/terminal/resize",
+            "a failed start must not send the command"
+        );
+        writer.reply(&barrier, json!({"result": {}})).await.unwrap();
+        assert!(reader.read_request().await.unwrap().is_none());
+    });
+    assert!(
+        store
+            .dispatch(Intent::RunTerminalScript(op::RunTerminalScript {
+                handle: "script".into(),
+                cwd: "/fixture".into(),
+                command: "printf once".into(),
+            }))
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        store.snapshot().terminals["script"].phase,
+        agent_core::state::TerminalPhase::Failed(_)
+    ));
+    store
+        .dispatch(Intent::ResizeTerminal(op::ResizeTerminal {
+            handle: "script".into(),
+            size: TerminalSize { cols: 80, rows: 24 },
+        }))
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
     use agent_core::state::TerminalPhase;
     use agent_protocol::operations::TerminalSize;
@@ -3719,6 +3832,7 @@ async fn rewinding_drops_the_later_turns_and_returns_the_message_to_the_composer
     let rewind = store.dispatch(Intent::RewindSession(op::RewindSession::new(
         source.clone(),
         "edit".into(),
+        store.snapshot().connection.storage_scope.clone(),
     )));
     tokio::pin!(rewind);
     let (request, scoped) = rewind_request(&mut reader, &writer, &source, &base).await;
@@ -3905,6 +4019,7 @@ async fn rewind_waits_for_the_matching_native_outcome_and_preserves_newer_drafts
     let rewind = store.dispatch(Intent::RewindSession(op::RewindSession::new(
         source.clone(),
         "edit".into(),
+        store.snapshot().connection.storage_scope.clone(),
     )));
     tokio::pin!(rewind);
     let (request, scoped) = rewind_request(&mut reader, &writer, &source, &base).await;

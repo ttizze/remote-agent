@@ -4,22 +4,24 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import dev.remoteagent.core.ConversationRowPolicy
 import dev.remoteagent.core.ConversationRows
-import dev.remoteagent.core.ProgressRows
 import dev.remoteagent.core.Snapshot
-
-private val fixtureRowPolicy = ConversationRowPolicy(requests = true, progress = ProgressRows.ALWAYS)
 
 /** Construct native action fixtures through the production core projector. */
 internal fun projectConversationRows(snapshot: Snapshot): ConversationRows? {
     val value = dev.remoteagent.core.Presentation.fromSnapshot(snapshot, "")
     return value.conversation()?.let { rendered ->
         ConversationRows.project(
+            dev.remoteagent.core.TimelineStyle(
+                dev.remoteagent.core.WorkDisclosure.SETTLED,
+                dev.remoteagent.core.PlanPresentation.CARD,
+                false,
+                false,
+            ),
             rendered,
             snapshot.panelScope("fixture", value.conversationContext().navigation().draftKey),
+            null,
             emptyMap(),
-            fixtureRowPolicy,
             null,
         )
     }
@@ -43,14 +45,21 @@ internal fun ThreadDetailFixture(
             perform,
             { id ->
                 current?.let { before ->
-                    before.toggleActivity(id, expansion)?.let { change ->
-                        expansion = change
+                    before.toggleDisclosure(id, expansion)?.let { change ->
+                        expansion = change.expansion
+                        change.load?.let { perform(it) {} }
                         current =
                             ConversationRows.project(
+                                dev.remoteagent.core.TimelineStyle(
+                                    dev.remoteagent.core.WorkDisclosure.SETTLED,
+                                    dev.remoteagent.core.PlanPresentation.CARD,
+                                    false,
+                                    false,
+                                ),
                                 before.source(),
                                 before.scope(),
-                                change,
-                                fixtureRowPolicy,
+                                null,
+                                change.expansion,
                                 before,
                             )
                     }

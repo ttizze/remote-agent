@@ -1,11 +1,24 @@
 use crate::state::Snapshot;
 use agent_protocol::context::{AssistantCitation, ContextContent, MessageContext};
 use serde::{Deserialize, Serialize};
+mod drag;
+pub(crate) mod navigation;
+pub use drag::{thread_context, thread_drag_contexts, thread_drag_payload};
+pub use navigation::{
+    CitationDocumentRange, CitationExpansion, CitationExpansionChoice, CitationSourceStatus,
+    locate_citation_documents,
+};
+
+/// Native selection menus use the protocol's UTF-16 bound before offering a citation.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn citation_text_limit() -> u32 {
+    agent_protocol::context::CITATION_TEXT_LIMIT as u32
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ContextAction {
-    Add { context: Box<MessageContext> },
+    Add { contexts: Vec<MessageContext> },
     Remove { id: String },
     Comment { id: String, text: String },
 }
@@ -16,11 +29,14 @@ pub(crate) fn change(
 ) -> Result<Vec<MessageContext>, &'static str> {
     let mut next = current.to_vec();
     match action {
-        ContextAction::Add { context } => {
-            if let Some(index) = next.iter().position(|item| item.id == context.id) {
-                next[index] = *context;
-            } else {
-                next.push(*context);
+        ContextAction::Add { contexts } => {
+            for context in contexts {
+                context.validate()?;
+                if let Some(index) = next.iter().position(|item| item.id == context.id) {
+                    next[index] = context;
+                } else {
+                    next.push(context);
+                }
             }
         }
         ContextAction::Remove { id } => {
@@ -68,19 +84,7 @@ impl Snapshot {
         item_id: agent_protocol::ids::ItemId,
     ) -> Option<agent_protocol::context::CitationSource> {
         let thread = self.sessions.conversations.get(&session)?;
-        let mut turns = thread.turns.as_ref()?.iter().filter(|turn| {
-            turn.items.iter().flatten().any(|item| {
-                item.id == item_id
-                    && matches!(
-                        item.body(),
-                        agent_protocol::items::ItemBody::AssistantText { .. }
-                    )
-            })
-        });
-        let turn = turns.next()?;
-        if turns.next().is_some() {
-            return None;
-        }
+        let turn = navigation::citation_turn(thread, &item_id)?;
         let source = agent_protocol::context::CitationSource {
             host,
             storage_scope: self.connection.storage_scope.clone(),
@@ -167,7 +171,7 @@ pub(crate) fn display_text(context: &MessageContext) -> String {
     }
 }
 
-fn literal(text: &str) -> String {
+pub(crate) fn literal(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     for character in text.chars() {
         if character.is_ascii_punctuation() {
@@ -224,7 +228,7 @@ mod tests {
         let current = change(
             &[],
             ContextAction::Add {
-                context: Box::new(citation()),
+                contexts: vec![citation()],
             },
         )
         .unwrap();
@@ -252,7 +256,7 @@ mod tests {
             change(
                 &updated,
                 ContextAction::Add {
-                    context: Box::new(citation())
+                    contexts: vec![citation()]
                 }
             )
             .unwrap()

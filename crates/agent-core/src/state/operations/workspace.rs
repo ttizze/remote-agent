@@ -176,10 +176,11 @@ impl SaveFile {
     }
 }
 
+pub use agent_protocol::operations::ChangeWorkspace;
+
 pub use agent_protocol::operations::WriteWorkspaceFile;
 
-/// A file written into a workspace, as T3 Code saves a plan there: its
-/// dialog shows the write running and why it failed, so no notice does.
+/// Workspace export owns its dialog error rather than creating a second notice.
 impl Operation for WriteWorkspaceFile {
     rpc_operation!();
     const REPORT_ERROR: bool = false;
@@ -196,8 +197,6 @@ impl Operation for WriteWorkspaceFile {
         Ok(())
     }
 }
-
-pub use agent_protocol::operations::ChangeWorkspace;
 
 impl Operation for ChangeWorkspace {
     fn key(&self) -> Option<OperationKey> {
@@ -544,7 +543,7 @@ mod read_result_tests {
         let (edited, effects) = crate::state::reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::SetFileDraft {
+            Event::from(Intent::SetFileDraft {
                 path: path.clone(),
                 text: "new user text".into(),
             }),

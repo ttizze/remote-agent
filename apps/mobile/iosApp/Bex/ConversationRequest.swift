@@ -326,9 +326,10 @@ extension ConversationComposer {
     /// While a question awaits an answer, the primary action answers it.
     @ViewBuilder
     func questionActions(_ question: QuestionPrompt, runningTurnId: String?) -> some View {
+        let stopScope = model.snapshot.panelScope(host: model.host, draft: model.coreDraftKey)
         if let runningTurnId {
             ComposerStopButton(turnId: runningTurnId, interrupting: model.interruptingTurnId == runningTurnId,
-                               stop: model.interrupt)
+                               stop: { turn in model.interrupt(turn, scope: stopScope) })
         }
         if question.canGoBack {
             Button("前へ") { model.answerQuestion(question.requestId, .back) }

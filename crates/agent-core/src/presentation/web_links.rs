@@ -13,6 +13,7 @@ pub enum WebLinkTarget {
 }
 
 /// Only HTTP(S) links have an in-app browser destination.
+#[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn web_link_target(
     link: &str,
     preference: WebLinkTarget,

@@ -76,7 +76,11 @@ impl SettingsPresentation {
         provider: Option<ProviderKind>,
         previous: Option<&Presentation>,
     ) -> Arc<Self> {
-        let key = &pane.navigation.draft_key;
+        let input = snapshot.composer_key(
+            pane.navigation.thread_id.as_ref(),
+            &pane.navigation.draft_key,
+        );
+        let key = &input;
         if let Some(previous) = previous {
             let before = &previous.snapshot;
             let draft = |state: &Snapshot| {
@@ -88,7 +92,7 @@ impl SettingsPresentation {
                     )
                 })
             };
-            if key == &previous.pane().navigation.draft_key
+            if key == &previous.settings.key
                 && provider == previous.settings.provider
                 && snapshot.catalog.same(&before.catalog)
                 && snapshot.operations.same(&before.operations)

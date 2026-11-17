@@ -1,23 +1,21 @@
 use crate::{session::SessionRef, state::Snapshot};
 
-#[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
-    pub fn fresh_context_turns(&self, session: SessionRef) -> Vec<agent_protocol::ids::TurnId> {
-        self.sessions
-            .conversations
-            .get(&session)
-            .into_iter()
-            .flat_map(|thread| thread.turns.iter().flatten())
-            .filter(|turn| turn.fresh_context)
-            .map(|turn| turn.id.clone())
-            .collect()
-    }
-    pub fn fresh_context_available(&self, session: SessionRef) -> bool {
+    pub(crate) fn can_set_fresh_context(&self, session: &SessionRef, enabled: bool) -> bool {
+        if self.input.queued_edits.contains_key(session) {
+            return false;
+        }
+        if !enabled {
+            return self
+                .input
+                .drafts
+                .contains_key(&crate::state::DraftKey::from(session));
+        }
         self.connection.connected
             && self
                 .sessions
                 .conversations
-                .get(&session)
+                .get(session)
                 .is_some_and(|thread| {
                     thread.preparations.is_empty()
                         && thread.requests.is_empty()
@@ -74,7 +72,7 @@ mod tests {
         reduce(
             state,
             "",
-            Event::Intent(Intent::SetFreshContext {
+            Event::from(Intent::SetFreshContext {
                 storage_scope: scope.into(),
                 session: session.clone(),
                 enabled,
@@ -87,7 +85,7 @@ mod tests {
     fn fresh_context_arming_and_cancellation_preserve_input_and_reject_foreign_hosts() {
         let (state, session) = ready();
         let key = DraftKey::from(&session);
-        assert!(state.fresh_context_available(session.clone()));
+        assert!(state.can_set_fresh_context(&session, true));
         let unchanged = arm(&state, &session, "other-host", true);
         assert!(!unchanged.input.drafts[&key].fresh_context);
         let armed = arm(&state, &session, "host", true);
@@ -95,6 +93,13 @@ mod tests {
         assert_eq!(armed.input.drafts[&key].text, "next prompt");
         let cancelled = arm(&armed, &session, "host", false);
         assert_eq!(cancelled.input.drafts[&key], state.input.drafts[&key]);
+        let mut offline = armed.clone();
+        offline.connection.connected = false;
+        assert!(offline.can_set_fresh_context(&session, false));
+        assert_eq!(
+            arm(&offline, &session, "host", false).input.drafts[&key],
+            state.input.drafts[&key]
+        );
         let saved = serde_json::to_vec(&armed).unwrap();
         let restored: Snapshot = serde_json::from_slice(&saved).unwrap();
         assert!(restored.input.drafts[&key].fresh_context);
@@ -121,7 +126,7 @@ mod tests {
         let (sent, effects) = reduce(
             &state,
             "",
-            Event::Intent(Intent::Submit {
+            Event::from(Intent::Submit {
                 thread_id: Some(session.clone()),
                 client_user_message_id: "input".into(),
                 alternate: false,
@@ -164,7 +169,7 @@ mod tests {
             }
             thread.parent_id = parent.then(|| session.clone());
             thread.can_accept_direct_input = direct;
-            assert_eq!(state.fresh_context_available(session.clone()), expected);
+            assert_eq!(state.can_set_fresh_context(&session, true), expected);
             let armed = arm(&state, &session, "host", true);
             assert_eq!(
                 armed.input.drafts[&DraftKey::from(&session)].fresh_context,

@@ -53,6 +53,12 @@ impl Snapshot {
             })
         })
     }
+    pub fn workspace_actions(
+        &self,
+        pane_id: &str,
+    ) -> crate::presentation::workspace::WorkspaceActions {
+        crate::presentation::workspace::workspace_actions(self, pane_id)
+    }
     pub fn draft(&self, key: crate::state::DraftKey) -> Draft {
         self.input
             .drafts

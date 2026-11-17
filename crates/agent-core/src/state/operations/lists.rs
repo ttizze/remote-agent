@@ -222,7 +222,7 @@ mod agent_tests {
         let (mut offline, effects) = super::super::super::reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::WatchAgents {
+            Event::from(Intent::WatchAgents {
                 thread_id: Some(root.clone()),
             }),
         );
@@ -271,7 +271,7 @@ mod agent_tests {
         let (mut closed, _) = super::super::super::reduce(
             &offline,
             "",
-            Event::Intent(Intent::WatchAgents { thread_id: None }),
+            Event::from(Intent::WatchAgents { thread_id: None }),
         );
         let before = closed.clone();
         assert!(

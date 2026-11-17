@@ -134,6 +134,7 @@ struct ConversationComposer: View {
                                 .font(.body)
                         } else {
                             ComposerMessageField(model: model, composerFocused: $composerFocused)
+                                .id(model.draftKey)
                                 .font(.body)
                         }
                     }
@@ -188,6 +189,7 @@ struct ConversationComposer: View {
     /// Dictation and the primary action, which answers an awaiting question.
     @ViewBuilder
     func trailingActions(answering: QuestionPrompt?, runningTurnId: String?, hasAttachments: Bool) -> some View {
+        let stopScope = model.snapshot.panelScope(host: model.host, draft: model.coreDraftKey)
         if let answering {
             questionActions(answering, runningTurnId: runningTurnId)
         } else {
@@ -196,7 +198,7 @@ struct ConversationComposer: View {
                !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
                model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !hasAttachments {
                 ComposerStopButton(turnId: runningTurnId, interrupting: model.interruptingTurnId == runningTurnId,
-                                   stop: model.interrupt)
+                                   stop: { turn in model.interrupt(turn, scope: stopScope) })
             } else if model.composer.canResume(), !dictation.isRecording, !dictation.requestingPermission {
                 Button { model.resume() } label: {
                     Image(systemName: "play.fill").font(.system(size: 16, weight: .semibold))

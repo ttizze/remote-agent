@@ -212,7 +212,27 @@ pub struct ThreadCopyItem {
     pub value: Option<String>,
 }
 
-fn thread_copy_items(
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum ThreadRename {
+    Unchanged,
+    Empty,
+    Name(String),
+}
+
+/// ChatHeader's rename commit: ECMAScript trim, then empty and unchanged
+/// checks. Both editors and the operation boundary use this decision.
+pub fn thread_rename(original: &str, value: &str) -> ThreadRename {
+    let name = crate::text::trim(value);
+    if name.is_empty() {
+        ThreadRename::Empty
+    } else if name == original {
+        ThreadRename::Unchanged
+    } else {
+        ThreadRename::Name(name.into())
+    }
+}
+
+pub fn thread_copy_items(
     language: UiLanguage,
     title: &str,
     id: &str,
@@ -1010,6 +1030,8 @@ fn thread_summaries<'a>(
 #[cfg(test)]
 mod placed_tests;
 #[cfg(test)]
+mod rename_tests;
+#[cfg(test)]
 mod root_tests;
 #[cfg(test)]
 mod waiting_tests;
@@ -1185,7 +1207,7 @@ mod tests {
         state = reduce(
             &state,
             "",
-            Event::Intent(Intent::MoveChatToProject {
+            Event::from(Intent::MoveChatToProject {
                 thread_id: placed,
                 project_id: "project".into(),
             }),

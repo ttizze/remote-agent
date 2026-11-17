@@ -109,7 +109,7 @@ pub fn file_tree_mention(root: &str, workspace: &str, path: &str) -> String {
     })
 }
 
-pub fn append_file_mentions(text: &str, mentions: &str) -> String {
+pub(crate) fn append_file_mentions(text: &str, mentions: &str) -> String {
     let boundary = if text.chars().last().is_some_and(|ch| !ch.is_whitespace()) {
         " "
     } else {

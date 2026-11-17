@@ -22,6 +22,14 @@ use agent_protocol::snapshot::*;
 use agent_protocol::workspace::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
+#[uniffi::remote(Enum)]
+enum TurnStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+    Unknown,
+}
 #[uniffi::remote(Record)]
 struct Automations {
     pub session: SessionRef,
@@ -923,6 +931,7 @@ struct QuestionChoice {
     pub id: String,
     pub label: String,
     pub description: String,
+    pub preview: Option<String>,
 }
 
 #[uniffi::remote(Enum)]
@@ -1083,16 +1092,23 @@ enum WorkspaceAction {
     },
 }
 #[uniffi::remote(Record)]
+struct ProjectScript {
+    pub name: String,
+    pub command: String,
+}
+#[uniffi::remote(Record)]
+struct WorkspaceControls {
+    pub branches: Vec<String>,
+    pub references: Vec<String>,
+    pub remotes: Vec<String>,
+    pub can_push: bool,
+    pub scripts: Vec<ProjectScript>,
+}
+#[uniffi::remote(Record)]
 struct ChangeWorkspace {
     pub cwd: String,
     pub branch: String,
     pub action: agent_protocol::operations::WorkspaceAction,
-}
-#[uniffi::remote(Record)]
-struct WriteWorkspaceFile {
-    pub cwd: String,
-    pub relative_path: String,
-    pub text: String,
 }
 #[uniffi::remote(Record)]
 struct RemoveWorktree {
@@ -1127,6 +1143,7 @@ struct ForkSession {
 struct RewindSession {
     pub thread_id: SessionRef,
     pub turn_id: agent_protocol::ids::TurnId,
+    pub storage_scope: String,
 }
 
 #[uniffi::remote(Enum)]
@@ -1384,4 +1401,11 @@ struct MessageContext {
     pub id: String,
     pub label: String,
     pub content: ContextContent,
+}
+
+#[uniffi::remote(Record)]
+struct WriteWorkspaceFile {
+    pub cwd: String,
+    pub relative_path: String,
+    pub text: String,
 }

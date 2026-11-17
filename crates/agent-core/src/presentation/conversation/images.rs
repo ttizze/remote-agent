@@ -141,6 +141,7 @@ mod tests {
                     &previous,
                 );
                 let visible = turn_rows(
+                    crate::presentation::conversation::TimelineStyle::T3,
                     &projected.turns[0],
                     &Default::default(),
                     &Default::default(),

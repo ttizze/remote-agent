@@ -435,6 +435,12 @@ impl Context {
                     message: fragments.join("\n"),
                 },
             ),
+            ItemBody::SystemNotice { message } => (
+                Kind::System,
+                Body::SystemNotice {
+                    message: message.clone(),
+                },
+            ),
             ItemBody::Review { entering, text } => (
                 Kind::System,
                 Body::SystemNotice {

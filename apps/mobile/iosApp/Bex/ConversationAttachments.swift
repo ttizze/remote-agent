@@ -54,7 +54,7 @@ struct ComposerAttachmentStrip: View {
 
 extension ConversationModel {
     func removeAttachment(_ id: Int) {
-        perform(.removeAttachment(draftKey: coreDraftKey, index: UInt32(id))) { [weak self] _ in self?.persist() }
+        perform(.removeAttachment(draftKey: inputDraftKey, index: UInt32(id))) { [weak self] _ in self?.persist() }
     }
 
     func attach(_ url: URL, temporaryDirectory: URL? = nil) async throws {
@@ -74,7 +74,7 @@ extension ConversationModel {
         let attachment = Attachment(path: url.path, name: url.lastPathComponent,
                                     isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true)
         _ = try await outcome(for: .uploadAttachment(UploadAttachment(
-            draftKey: coreDraftKey,
+            draftKey: inputDraftKey,
             attachment: attachment,
             snapshot: nil
         )))

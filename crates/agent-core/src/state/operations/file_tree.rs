@@ -269,7 +269,7 @@ mod tests {
         let (mut next, effects) = crate::state::reduce(
             &before,
             "",
-            crate::state::Event::Intent(Intent::FileTree {
+            crate::state::Event::from(Intent::FileTree {
                 key: key("/workspace"),
                 action: FileTreeAction::Open {
                     surface: FileTreeSurface::Mobile,

@@ -307,6 +307,17 @@ mod tests {
     }
 
     #[test]
+    fn callout_container_owns_the_border_and_nested_quotes_keep_their_own_decoration() {
+        let blocks = markdown_blocks("> [!NOTE]\n> Body\n>\n> > Nested quote".into());
+        let [MarkdownBlock::Callout { blocks, style, .. }] = blocks.as_slice() else {
+            panic!("callout");
+        };
+        assert!(style.quoted);
+        assert!(matches!(&blocks[0], MarkdownBlock::Paragraph { style, .. } if !style.quoted));
+        assert!(matches!(&blocks[1], MarkdownBlock::Paragraph { style, .. } if style.quoted));
+    }
+
+    #[test]
     fn every_callout_kind_keeps_its_formatted_body_and_normal_quotes_stay_quotes() {
         for (name, kind) in [
             ("NOTE", MarkdownCallout::Note),

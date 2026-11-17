@@ -8,7 +8,22 @@ pub struct FeedbackSubmission {
 }
 
 impl Operation for UploadFeedback {
-    rpc_operation!();
+    no_input!();
+    type Output = agent_protocol::feedback::FeedbackReceipt;
+    async fn run(&self, _: (), context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        // The local draft namespace includes the authenticated node; the Host owns only its suffix.
+        let (_, storage) = self
+            .storage_scope
+            .split_once(':')
+            .filter(|(node, storage)| !node.is_empty() && !storage.is_empty())
+            .ok_or_else(|| PeerError::InvalidMessage("Host storage identity is missing".into()))?;
+        context
+            .call(&Self {
+                storage_scope: storage.into(),
+                ..self.clone()
+            })
+            .await
+    }
     const REPORT_ERROR: bool = false;
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn key(&self) -> Option<OperationKey> {

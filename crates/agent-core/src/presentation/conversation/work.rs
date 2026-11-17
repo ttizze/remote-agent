@@ -1,22 +1,58 @@
 //! T3 Code's live work: what a running turn shows as live, and how a work row
 //! reads, reasoning as its thinking.
-use super::{ConversationRowContent, ItemSource, RenderedItem, RenderedTurn};
+use super::{ConversationRowContent, ItemSource, RenderedConversation, RenderedItem, RenderedTurn};
 use crate::models::{ItemStatus, TurnStatus};
+
+/// An expanded item reads once while live, then for each settled body revision.
+/// A new connection also retires a failed or unavailable read from the old one.
+pub fn item_detail_key(streaming: bool, body_revision: Option<&str>, epoch: u64) -> String {
+    match (streaming, body_revision) {
+        (true, _) => format!("{epoch}:live"),
+        (false, Some(revision)) => format!("{epoch}:{revision}"),
+        (false, None) => format!("{epoch}:settled"),
+    }
+}
+
+pub(super) fn item_is_settled(item: ItemStatus, turn: TurnStatus) -> bool {
+    item != ItemStatus::Running && (item != ItemStatus::Unknown || turn != TurnStatus::Running)
+}
 
 /// What a running turn shows as live, as T3 Code's live activity row: it
 /// stays shown while the turn's work is folded, and shimmers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LiveActivity {
+pub(super) enum LiveActivity {
     /// The work row last reached, by row ID.
     Row(String),
     /// No work is live: the turn is thinking (T3 Code's Thinking row).
     Thinking,
 }
 
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl RenderedConversation {
+    /// Hydrated provider history can omit item status even while its turn streams.
+    pub fn shell_command_settled(&self, item_id: agent_protocol::ids::ItemId) -> bool {
+        let mut matches = self
+            .turns
+            .iter()
+            .flat_map(|turn| {
+                turn.source
+                    .items
+                    .iter()
+                    .flatten()
+                    .map(move |item| (turn.source.status, item))
+            })
+            .filter(|(_, item)| item.id == item_id);
+        let Some((turn, item)) = matches.next() else {
+            return false;
+        };
+        matches.next().is_none() && item_is_settled(item.status, turn)
+    }
+}
+
 impl RenderedTurn {
     /// None once the turn has ended, while a request waits for its answer
     /// (nothing works then) and while a response streams (it is the live part).
-    pub fn live_activity(&self) -> Option<LiveActivity> {
+    pub(super) fn live_activity(&self) -> Option<LiveActivity> {
         if self.source.status != TurnStatus::Running || !self.requests.is_empty() {
             return None;
         }
@@ -25,7 +61,8 @@ impl RenderedTurn {
             ItemSource::Pending(..) => ItemStatus::Unknown,
         };
         let last = self.rows.iter().rev().find(|row| match &row.content {
-            ConversationRowContent::User { .. } | ConversationRowContent::Activity { .. } => true,
+            ConversationRowContent::User { .. } => true,
+            ConversationRowContent::Activity { item, .. } => item.data.kind != "systemNotice",
             ConversationRowContent::Response { item, .. } => {
                 !matches!(item.data.kind.as_str(), "imageView" | "imageGeneration")
                     || status(item) == ItemStatus::Running
@@ -84,6 +121,64 @@ mod tests {
     use crate::{models, state::Snapshot};
     use serde_json::{Value, json};
     use std::sync::Arc;
+
+    #[test]
+    fn detail_keys_track_settled_bytes_and_connections_but_ignore_live_byte_updates() {
+        for (streaming, revision, epoch, expected) in [
+            (true, None, 0, "0:live"),
+            (true, Some("1"), 0, "0:live"),
+            (true, Some("2"), 0, "0:live"),
+            (false, None, 0, "0:settled"),
+            (false, Some("0"), 0, "0:0"),
+            (false, Some("3"), 0, "0:3"),
+            (false, Some("4"), 0, "0:4"),
+            (true, Some("2"), 1, "1:live"),
+            (false, Some("3"), 1, "1:3"),
+            (
+                false,
+                Some("18446744073709551615"),
+                0,
+                "0:18446744073709551615",
+            ),
+        ] {
+            assert_eq!(item_detail_key(streaming, revision, epoch), expected);
+        }
+    }
+
+    #[test]
+    fn shell_actions_wait_for_a_stable_item_in_its_own_turn() {
+        let render = |turns| {
+            let source: models::Thread = serde_json::from_value(json!({
+                "id":{"provider":"codex","id":"shell"}, "turns": turns
+            }))
+            .unwrap();
+            project_conversation(
+                crate::localization::UiLanguage::English,
+                &Default::default(),
+                &Default::default(),
+                Arc::new(source),
+                &None,
+            )
+        };
+        let source = render(json!([
+            {"id":"old","status":"completed","items":[text("old", "unknown", "final")]},
+            {"id":"run","status":"running","items":[text("hydrated", "unknown", "final"), text("streaming", "running", "final"), text("complete", "completed", "final")]}
+        ]));
+        assert!(source.shell_command_settled("old".into()));
+        assert!(source.shell_command_settled("complete".into()));
+        assert!(!source.shell_command_settled("hydrated".into()));
+        assert!(!source.shell_command_settled("streaming".into()));
+        assert!(!source.shell_command_settled("absent".into()));
+        let finished = render(json!([
+            {"id":"run","status":"completed","items":[text("hydrated", "unknown", "final")]}
+        ]));
+        assert!(finished.shell_command_settled("hydrated".into()));
+        let ambiguous = render(json!([
+            {"id":"one","status":"completed","items":[text("same", "completed", "final")]},
+            {"id":"two","status":"completed","items":[text("same", "completed", "final")]}
+        ]));
+        assert!(!ambiguous.shell_command_settled("same".into()));
+    }
 
     fn item(id: &str, status: &str, body: Value) -> Value {
         json!({"id":id,"status":status,"clientInputId":null,"body":{"inline":{"body":body}}})
@@ -156,15 +251,24 @@ mod tests {
 
     /// The native ID of the live row, or "thinking".
     fn live(turn: &RenderedTurn) -> Option<String> {
-        Some(match turn.live_activity()? {
-            LiveActivity::Thinking => "thinking".into(),
-            LiveActivity::Row(id) => {
-                let row = turn.rows.iter().find(|row| row.id == id).unwrap();
+        // Verify the output consumed by both clients, not only the tail hint
+        // before grouping, request placement and turn-wide composition.
+        super::super::turn_rows(
+            crate::presentation::conversation::TimelineStyle::T3,
+            turn,
+            &Default::default(),
+            &Default::default(),
+        )
+        .into_iter()
+        .find_map(|row| match row {
+            super::super::TurnRow::Thinking => Some("thinking".into()),
+            super::super::TurnRow::Live { row, .. } => {
                 let ConversationRowContent::Activity { item, .. } = &row.content else {
                     panic!("a live row is work")
                 };
-                item.data.native_id.clone().unwrap().to_string()
+                Some(item.data.native_id.clone().unwrap().to_string())
             }
+            _ => None,
         })
     }
 
@@ -175,6 +279,7 @@ mod tests {
     #[case::running_tool(vec![user("u"), reasoning("r", "completed", &["plan"]), command("c", "running")], Some("c"))]
     // As T3 Code, finished work stays live until the next arrives.
     #[case::finished_tool(vec![user("u"), command("c", "completed")], Some("c"))]
+    #[case::superseded_reasoning(vec![user("u"), reasoning("r", "running", &["plan"]), command("c", "completed")], Some("c"))]
     #[case::failed_tool(vec![user("u"), command("c", "failed")], Some("thinking"))]
     #[case::declined_tool(vec![user("u"), command("c", "declined")], Some("thinking"))]
     #[case::after_commentary(vec![user("u"), command("c", "completed"), text("a", "completed", "commentary")], Some("thinking"))]
@@ -321,6 +426,47 @@ mod tests {
         assert_eq!(
             summary(earlier(command("c", "completed")))[0],
             "コマンドを実行しました"
+        );
+    }
+    #[test]
+    fn system_notices_do_not_replace_the_live_work_or_become_work_themselves() {
+        let notice = || {
+            item(
+                "notice",
+                "completed",
+                json!({"systemNotice":{"message":"Provider information"}}),
+            )
+        };
+        assert_eq!(
+            live(&turn(
+                "running",
+                vec![user("u"), command("build", "running"), notice()],
+                false
+            ))
+            .as_deref(),
+            Some("build")
+        );
+        let running = turn(
+            "running",
+            vec![user("u"), command("build", "running"), notice()],
+            false,
+        );
+        let rows = super::super::turn_rows(
+            crate::presentation::conversation::TimelineStyle::T3,
+            &running,
+            &Default::default(),
+            &Default::default(),
+        );
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, super::super::TurnRow::Live { row, .. }
+            if matches!(&row.content, ConversationRowContent::Activity { item, .. }
+                if item.data.native_id.as_ref().is_some_and(|id| id.as_str() == "build")))),
+            "the native timeline keeps the actual command live before the notice"
+        );
+        assert_eq!(
+            live(&turn("running", vec![user("u"), notice()], false)).as_deref(),
+            Some("thinking")
         );
     }
 }

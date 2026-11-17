@@ -31,7 +31,7 @@ fn comparison_survives_refresh_and_stale_panels_cannot_replace_it() {
     let (mut selected, effects) = reduce(
         &workspace(),
         "",
-        Event::Intent(Intent::SetWorkspaceComparison {
+        Event::from(Intent::SetWorkspaceComparison {
             cwd: "/project".into(),
             base_ref: Some("HEAD".into()),
         }),
@@ -50,7 +50,7 @@ fn comparison_survives_refresh_and_stale_panels_cannot_replace_it() {
     let (stale, effects) = reduce(
         &selected,
         "",
-        Event::Intent(Intent::SetWorkspaceComparison {
+        Event::from(Intent::SetWorkspaceComparison {
             cwd: "/old".into(),
             base_ref: Some("other".into()),
         }),
@@ -70,7 +70,7 @@ fn comparison_survives_refresh_and_stale_panels_cannot_replace_it() {
     let (automatic, _) = reduce(
         &selected,
         "",
-        Event::Intent(Intent::SetWorkspaceComparison {
+        Event::from(Intent::SetWorkspaceComparison {
             cwd: "/project".into(),
             base_ref: None,
         }),
@@ -79,7 +79,7 @@ fn comparison_survives_refresh_and_stale_panels_cannot_replace_it() {
     let (next, _) = reduce(
         &stale,
         "",
-        Event::Intent(Intent::NewChat {
+        Event::from(Intent::NewChat {
             cwd: "/project".into(),
         }),
     );
@@ -161,7 +161,7 @@ fn unassigned_conversation_hides_execution_directory_and_rejects_workspace_contr
     let (mut snapshot, effects) = reduce(
         &snapshot,
         "",
-        Event::Intent(Intent::SetWorkspaceComparison {
+        Event::from(Intent::SetWorkspaceComparison {
             cwd: "/project".into(),
             base_ref: Some("HEAD".into()),
         }),
@@ -191,7 +191,7 @@ fn empty_draft_has_no_workspace_controls_or_comparison() {
     let (next, effects) = reduce(
         &snapshot,
         "",
-        Event::Intent(Intent::SetWorkspaceComparison {
+        Event::from(Intent::SetWorkspaceComparison {
             cwd: String::new(),
             base_ref: Some("HEAD".into()),
         }),

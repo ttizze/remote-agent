@@ -91,6 +91,7 @@ pub(crate) fn snapshot(response: ThreadResponse, sequence: u64) -> ThreadSnapsho
                 input.service_tier.as_deref(),
             ),
         );
+        queued.fresh_context = input.fresh_context;
         queued.queue_position = Some(position as u64 + 1);
         queued.queue_held = thread.queue.held;
         projection.runs.push(queued);

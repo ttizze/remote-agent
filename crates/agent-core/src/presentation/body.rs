@@ -25,7 +25,23 @@ fn context_images(
     }
     images
 }
-fn attachment(language: UiLanguage, text: &mut String, name: &str, path: &str) {
+fn attachment(
+    language: UiLanguage,
+    text: &mut String,
+    index: usize,
+    name: &str,
+    path: &str,
+    format: ContextFormat,
+) {
+    if matches!(format, ContextFormat::References) {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&super::message_attachment::attachment_reference(
+            index, name,
+        ));
+        return;
+    }
     if !text.is_empty() {
         text.push('\n');
     }
@@ -35,8 +51,33 @@ fn attachment(language: UiLanguage, text: &mut String, name: &str, path: &str) {
         vec![name.into(), path.into()],
     ));
 }
-fn message(language: UiLanguage, text: Option<&str>, content: &[MessagePart]) -> String {
-    let mut result = text.map(str::to_owned).unwrap_or_else(|| {
+#[derive(Clone, Copy)]
+pub(crate) enum ContextFormat {
+    Readable,
+    References,
+    Separate,
+}
+
+fn append_context(
+    text: &mut String,
+    context: &agent_protocol::context::MessageContext,
+    format: ContextFormat,
+) {
+    if matches!(format, ContextFormat::Separate) {
+        return;
+    }
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(&match format {
+        ContextFormat::Readable => crate::composer::context::display_text(context),
+        ContextFormat::Separate => unreachable!(),
+        ContextFormat::References => super::message_context::context_reference(context),
+    });
+}
+
+pub(crate) fn message_text(text: Option<&str>, content: &[MessagePart]) -> String {
+    text.map(str::to_owned).unwrap_or_else(|| {
         content
             .iter()
             .filter_map(|part| match part {
@@ -44,26 +85,37 @@ fn message(language: UiLanguage, text: Option<&str>, content: &[MessagePart]) ->
                 _ => None,
             })
             .collect::<String>()
-    });
-    for part in content {
+    })
+}
+
+pub(crate) fn message(
+    language: UiLanguage,
+    text: Option<&str>,
+    content: &[MessagePart],
+    format: ContextFormat,
+) -> String {
+    let mut result = message_text(text, content);
+    for (index, part) in content.iter().enumerate() {
         if let MessagePart::Attachment { name, path } = part {
-            attachment(language, &mut result, name, path);
+            attachment(language, &mut result, index, name, path, format);
         }
         if let MessagePart::Context { context } = part {
-            if !result.is_empty() {
-                result.push_str("\n\n");
-            }
-            result.push_str(&crate::composer::context::display_text(context));
+            append_context(&mut result, context, format);
         }
     }
     result
 }
 pub fn item_body(language: UiLanguage, item: &Item) -> ItemBody {
     let text = match item.body() {
-        WireBody::UserMessage { text, content } => {
-            Some(message(language, text.as_deref(), content))
-        }
-        WireBody::AssistantText { text, .. } => Some(text.clone()),
+        WireBody::UserMessage { text, content } => Some(message(
+            language,
+            text.as_deref(),
+            content,
+            ContextFormat::Readable,
+        )),
+        WireBody::AssistantText { text, .. }
+        | WireBody::SystemNotice { message: text }
+        | WireBody::Plan { text } => Some(text.clone()),
         WireBody::Reasoning { .. } => Some(language.text("詳細を表示").into()),
         WireBody::ImageGeneration { .. } => (item.status == ItemStatus::Failed)
             .then(|| language.text("画像を生成できませんでした").into()),
@@ -123,20 +175,25 @@ pub fn item_body(language: UiLanguage, item: &Item) -> ItemBody {
     }
 }
 pub fn draft_body(language: UiLanguage, draft: &Draft) -> ItemBody {
+    draft_with_contexts(language, draft, ContextFormat::Readable)
+}
+
+pub(crate) fn draft_with_contexts(
+    language: UiLanguage,
+    draft: &Draft,
+    format: ContextFormat,
+) -> ItemBody {
     let mut text = draft.text.clone();
     let mut images = Vec::new();
-    for file in &draft.attachments {
+    for (index, file) in draft.attachments.iter().enumerate() {
         if file.is_image {
             images.push(file.path.clone());
         } else {
-            attachment(language, &mut text, &file.name, &file.path);
+            attachment(language, &mut text, index, &file.name, &file.path, format);
         }
     }
     for context in &draft.contexts {
-        if !text.is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&crate::composer::context::display_text(context));
+        append_context(&mut text, context, format);
     }
     ItemBody {
         text: Some(text),
@@ -189,7 +246,9 @@ pub fn file_change_details(
 /// Format large output only for expansion.
 pub fn expanded_body(language: UiLanguage, item: &Item) -> String {
     match item.body() {
-        WireBody::UserMessage { text, content } => message(language, text.as_deref(), content),
+        WireBody::UserMessage { text, content } => {
+            message(language, text.as_deref(), content, ContextFormat::Readable)
+        }
         WireBody::AssistantText { text, .. } => text.clone(),
         WireBody::Plan { text } => text.clone(),
         WireBody::Reasoning { content, summary } => reasoning_parts(content, summary)
@@ -261,6 +320,28 @@ fn reasoning_trace(item: &Item) -> Option<String> {
 /// A reasoning trace on one line, as T3 Code's collapsed Thinking row: its
 /// Markdown read as plain text with each run of whitespace one space.
 pub(super) fn reasoning_preview(item: &Item) -> Option<String> {
+    markdown_preview(reasoning_trace(item)?)
+}
+
+/// T3's liveThoughtLine selects the initial bold heading, otherwise the first
+/// sentence. Reuse the already projected plain trace unless a heading wins.
+pub(super) fn reasoning_live_preview(item: &Item, plain: &str) -> Option<String> {
+    use std::sync::LazyLock;
+    static HEADING: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"^\s*\*\*([^*\r\n]+)\*\*[ \t]*\r?(?:\n|$)").unwrap());
+    static SENTENCE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r#"[.?!][\"'”’)]?\s"#).unwrap());
+    let trace = reasoning_trace(item)?;
+    if let Some(heading) = HEADING.captures(&trace) {
+        return markdown_preview(heading[1].to_owned());
+    }
+    let line = SENTENCE
+        .find(plain)
+        .map_or(plain, |end| plain[..end.end()].trim_end());
+    (!line.is_empty()).then(|| line.to_owned())
+}
+
+fn markdown_preview(markdown: String) -> Option<String> {
     fn append(blocks: &[super::markdown::MarkdownBlock], text: &mut String) {
         use super::markdown::MarkdownBlock;
         for block in blocks {
@@ -292,10 +373,7 @@ pub(super) fn reasoning_preview(item: &Item) -> Option<String> {
         }
     }
     let mut text = String::new();
-    append(
-        &super::markdown::markdown_blocks(reasoning_trace(item)?),
-        &mut text,
-    );
+    append(&super::markdown::markdown_blocks(markdown), &mut text);
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     (!line.is_empty()).then_some(line)
 }
@@ -314,10 +392,15 @@ pub(super) fn detail_blocks(
         )
     };
     match item.body() {
-        WireBody::UserMessage { text, content } => {
-            markdown_blocks(message(language, text.as_deref(), content))
-        }
-        WireBody::AssistantText { text, .. } => markdown_blocks(text.clone()),
+        WireBody::UserMessage { text, content } => markdown_blocks(message(
+            language,
+            text.as_deref(),
+            content,
+            ContextFormat::Readable,
+        )),
+        WireBody::AssistantText { text, .. }
+        | WireBody::SystemNotice { message: text }
+        | WireBody::Plan { text } => markdown_blocks(text.clone()),
         WireBody::Reasoning { .. } => reasoning_trace(item)
             .map(markdown_blocks)
             .unwrap_or_default(),
@@ -377,7 +460,6 @@ pub(super) fn detail_blocks(
             }
             blocks
         }
-        WireBody::Plan { text } => markdown_blocks(text.clone()),
         WireBody::ToolCall {
             arguments,
             result,
@@ -387,21 +469,13 @@ pub(super) fn detail_blocks(
         } => {
             let mut blocks = Vec::new();
             if !arguments.is_null() {
-                blocks.push(code(
-                    &serde_json::to_string_pretty(arguments).expect("arguments serialize"),
-                    Some("json"),
-                    "入力",
-                ));
+                blocks.extend(tool_output::value_block(language, arguments, "入力"));
             }
             if let Some(result) = result {
                 blocks.extend(tool_output::result_blocks(language, result));
             }
             if let Some(error) = error {
-                blocks.push(code(
-                    &serde_json::to_string_pretty(error).expect("error serializes"),
-                    Some("json"),
-                    "エラー",
-                ));
+                blocks.extend(tool_output::value_block(language, error, "エラー"));
             }
             for content in content {
                 match content {

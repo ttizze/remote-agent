@@ -96,6 +96,7 @@ pub(crate) fn suggestions(focus: impl Fn() + Copy + 'static) -> impl IntoElement
                                             key,
                                             highlighted.get_untracked(),
                                             listed.len(),
+                                            agent_core::composer::CompletionBoundary::Stop,
                                         ) {
                                             Some(CompletionKey::Highlight(index)) => {
                                                 highlighted.set(index)

@@ -99,10 +99,7 @@ pub(crate) fn controls(
         })
     });
     let open_picker = move || open(connection, None, "");
-    let enabled = move || {
-        connection.settings.with(|p| p.connected())
-            && !connection.composer.with(|c| c.controls.sending)
-    };
+    let enabled = move || connection.composer.with(|c| c.can_choose_model());
     let quick = computed(move || connection.settings.with(|p| p.quick_controls()));
     let fast_button = move || {
         use crate::ui::{self, Icon};
@@ -312,10 +309,7 @@ fn act(connection: Connection, picker: Signal<Option<Picker>>, action: &str, val
                 });
             }
         }
-        "provider"
-            if publication
-                .with_untracked(|p| p.settings.connected() && !p.composer.controls.sending) =>
-        {
+        "provider" if publication.with_untracked(|p| p.composer.can_choose_model()) => {
             if let Ok(provider) = serde_json::from_value::<ProviderKind>(json!(value)) {
                 picker.update(|picker| {
                     if let Some(picker) = picker {
@@ -884,7 +878,7 @@ fn picker_data(p: &Presentation, picker: &Picker) -> Value {
     });
     json!({
         "id": picker.id, "provider": picker.provider, "query": picker.query,
-        "disabled": !settings.connected() || p.composer.controls.sending,
+        "disabled": !p.composer.can_choose_model(),
         "providers": settings.connection_setup().agents.iter().map(|agent| json!({"id": agent.provider, "title": agent.name})).collect::<Vec<_>>(),
         "models": settings.models_matching(picker.provider, picker.query.clone()).iter().map(|model| json!({"id": model.id, "title": model.display_name})).collect::<Vec<_>>(),
         "selectedModel": settings.current_model().map(|model| model.id),
@@ -933,7 +927,7 @@ fn picker_intent(p: &Presentation, picker: &Picker, action: &str, value: &str) -
             Intent::DismissError { id }
         });
     }
-    if !p.settings.connected() || p.composer.controls.sending {
+    if !p.composer.can_choose_model() {
         return None;
     }
     let thread_id = picker.draft.clone();

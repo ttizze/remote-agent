@@ -3,6 +3,7 @@ import Foundation
 
 struct DraftIdentity: Hashable {
     let profile: String?
+    let storage: String
     let key: DraftKey
 }
 

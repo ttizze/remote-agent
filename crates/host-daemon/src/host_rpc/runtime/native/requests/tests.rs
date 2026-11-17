@@ -52,6 +52,7 @@ fn skip_is_delivered_and_choices_use_native_ids_only_after_label_validation() {
                 id: "opaque-native-choice".into(),
                 label: "First".into(),
                 description: String::new(),
+                preview: None,
             }],
         }],
     });

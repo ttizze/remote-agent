@@ -11,6 +11,7 @@
 pub mod agents;
 pub mod appearance;
 pub mod background_work;
+pub mod citations;
 pub mod connection_list;
 pub mod connections;
 pub mod diff;
@@ -21,11 +22,14 @@ pub mod files;
 pub mod fresh_context;
 pub mod host_management;
 pub mod media;
+pub mod message_attachment;
+pub mod message_context;
 pub mod model_settings;
 pub mod onboarding;
 pub mod permissions;
 pub mod project_clone;
 pub mod project_menu;
+pub mod queue;
 pub mod settings;
 pub mod sidebar;
 pub mod snapshot;
@@ -41,10 +45,12 @@ pub mod body;
 pub mod composer;
 pub mod context;
 pub mod conversation;
+pub mod conversation_details;
 pub mod list;
 pub mod markdown;
 pub mod task_activity;
 pub mod terminals;
+pub mod thread_error;
 pub mod thread_status;
 pub mod web_links;
 pub mod workspace;
@@ -62,6 +68,7 @@ fn task_title<'a>(
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum GroupKind {
     Hidden,
+    Notice,
     User,
     Assistant,
     Command,
@@ -87,6 +94,7 @@ impl<'a> From<&'a Item> for ItemMetadata<'a> {
             id: &item.id,
             client_id: item.client_input_id.as_deref(),
             kind: match item.body() {
+                ItemBody::SystemNotice { .. } => GroupKind::Notice,
                 // A notification starts a turn as a user message does.
                 ItemBody::UserMessage { .. } | ItemBody::Notification { .. } => GroupKind::User,
                 ItemBody::AssistantText { .. } => GroupKind::Assistant,
@@ -117,6 +125,7 @@ impl<'a> From<&'a Item> for ItemMetadata<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
     Hidden,
+    Notice,
     User,
     Activity,
     Response,
@@ -135,6 +144,7 @@ impl Segment {
     fn role(&self, index: usize, item: ItemMetadata<'_>) -> Role {
         match item.kind {
             GroupKind::Hidden => Role::Hidden,
+            GroupKind::Notice => Role::Notice,
             GroupKind::User => Role::User,
             GroupKind::Image => Role::Response,
             GroupKind::Assistant if self.answer.is_none_or(|answer| answer == index) => {
@@ -203,9 +213,13 @@ fn project_items<'a>(
         }
         first = false;
         if start == exchange_end {
-            exchange_end = (start + 1..count)
-                .find(|&index| item(index).kind == GroupKind::User)
-                .unwrap_or(count);
+            exchange_end = if start < count && item(start).kind == GroupKind::Notice {
+                start + 1
+            } else {
+                (start + 1..count)
+                    .find(|&index| matches!(item(index).kind, GroupKind::User | GroupKind::Notice))
+                    .unwrap_or(count)
+            };
             exchange_has_answer = completed
                 && (start..exchange_end).any(|index| {
                     let value = item(index);
@@ -472,8 +486,19 @@ pub fn item_presentation(
 ) -> ItemPresentation {
     let (kind, title, collapsible) = match item.body() {
         ItemBody::UserMessage { .. } => ("user", Some("You".into()), false),
-        ItemBody::AssistantText { phase, .. } => (
-            if *phase == AssistantPhase::Commentary {
+        ItemBody::Plan { .. } => (
+            "agent",
+            Some(language.text("work.plan.proposed").into()),
+            false,
+        ),
+        ItemBody::AssistantText { .. } => (
+            if matches!(
+                item.body(),
+                ItemBody::AssistantText {
+                    phase: AssistantPhase::Commentary,
+                    ..
+                }
+            ) {
                 "commentary"
             } else {
                 "agent"
@@ -491,6 +516,7 @@ pub fn item_presentation(
         ),
         // T3 Code's "Thought"; the live row reads "Thinking" (`work_row_label`).
         ItemBody::Reasoning { .. } => ("reasoning", Some(language.text("思考").into()), true),
+        ItemBody::SystemNotice { message } => ("systemNotice", Some(message.clone()), false),
         ItemBody::CommandExecution { command, .. } => {
             ("command", Some(compact_title(command)), true)
         }
@@ -539,7 +565,6 @@ fn tool_title(language: UiLanguage, body: &ItemBody) -> String {
             })
             .into(),
         ItemBody::Hook { .. } => language.text("追加指示").into(),
-        ItemBody::Plan { .. } => language.text("計画を更新しました").into(),
         ItemBody::ToolCall {
             kind: ToolKind::Mcp,
             tool,

@@ -54,7 +54,10 @@ impl Same for PaneStates {
 impl Snapshot {
     pub(crate) fn invalidate_pane(&mut self, id: &str) {
         if let Some(pane) = self.panes.get_mut(id) {
-            Arc::make_mut(pane).epoch += 1;
+            let pane = Arc::make_mut(pane);
+            pane.epoch += 1;
+            pane.citation = None;
+            pane.composer_paths = None;
             Arc::make_mut(&mut self.operations).retain(|key, _| key.pane() != Some(id));
         }
     }
@@ -112,6 +115,109 @@ impl Snapshot {
             .0
             .values()
             .any(|pane| pane.navigation.thread_id.as_ref() == Some(id))
+    }
+}
+
+#[cfg(test)]
+mod citation_tests {
+    use super::*;
+    use agent_protocol::context::{AssistantCitation, CitationSource, TextRange};
+
+    fn citation() -> AssistantCitation {
+        AssistantCitation {
+            source: CitationSource {
+                host: "host".into(),
+                storage_scope: "scope".into(),
+                session: crate::session::SessionRef::new(
+                    agent_protocol::session::ProviderKind::Codex,
+                    "source".into(),
+                )
+                .unwrap(),
+                turn_id: "turn".into(),
+                item_id: "answer".into(),
+            },
+            range: TextRange { start: 0, end: 5 },
+            text: "quote".into(),
+            prefix: String::new(),
+            suffix: String::new(),
+            comment: String::new(),
+        }
+    }
+
+    #[test]
+    fn opening_and_dismissing_citations_respects_the_current_navigation_epoch() {
+        let mut before = Snapshot::default();
+        before.connection.storage_scope = "scope".into();
+        let quote = citation();
+        let (first, _) = reduce(
+            &before,
+            "",
+            Event::Intent(Box::new(Intent::OpenCitation {
+                citation: quote.clone(),
+            })),
+        );
+        assert_eq!(
+            first.panes.primary().navigation.thread_id.as_ref(),
+            Some(&quote.source.session)
+        );
+        assert_eq!(first.panes.primary().citation.as_ref(), Some(&quote));
+        let old = first.panes.primary().epoch;
+        let (second, _) = reduce(
+            &first,
+            "",
+            Event::Intent(Box::new(Intent::OpenCitation {
+                citation: quote.clone(),
+            })),
+        );
+        assert!(second.panes.primary().epoch > old);
+        let current = second.panes.primary().epoch;
+        let (late, _) = reduce(
+            &second,
+            "",
+            Event::Intent(Box::new(Intent::DismissCitation { epoch: old })),
+        );
+        assert_eq!(late.panes.primary().citation.as_ref(), Some(&quote));
+        let (dismissed, _) = reduce(
+            &late,
+            "",
+            Event::Intent(Box::new(Intent::DismissCitation { epoch: current })),
+        );
+        assert!(dismissed.panes.primary().citation.is_none());
+        let (navigated, _) = reduce(
+            &second,
+            "",
+            Event::Intent(Box::new(Intent::NewChat { cwd: String::new() })),
+        );
+        assert!(navigated.panes.primary().citation.is_none());
+        assert!(
+            first.panes.primary().citation.is_some(),
+            "old snapshots remain immutable"
+        );
+    }
+
+    #[test]
+    fn a_citation_cannot_navigate_another_storage_namespace_or_use_an_invalid_range() {
+        let mut before = Snapshot::default();
+        before.connection.storage_scope = "different-account".into();
+        let (ignored, effects) = reduce(
+            &before,
+            "",
+            Event::Intent(Box::new(Intent::OpenCitation {
+                citation: citation(),
+            })),
+        );
+        assert_eq!(ignored.panes, before.panes);
+        assert!(effects.is_empty());
+        before.connection.storage_scope = "scope".into();
+        let mut invalid = citation();
+        invalid.range.end = 4;
+        let (ignored, effects) = reduce(
+            &before,
+            "",
+            Event::Intent(Box::new(Intent::OpenCitation { citation: invalid })),
+        );
+        assert_eq!(ignored.panes, before.panes);
+        assert!(effects.is_empty());
     }
 }
 

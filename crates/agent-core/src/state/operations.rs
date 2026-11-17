@@ -4,7 +4,6 @@ use crate::{
     store::{Execution, Outcome},
 };
 use agent_protocol::operations as rpc;
-use rpc::Input;
 
 macro_rules! no_input {
     () => {
@@ -44,6 +43,12 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    OpenCitation {
+        citation: agent_protocol::context::AssistantCitation,
+    },
+    DismissCitation {
+        epoch: u64,
+    },
     ReadAttempt {
         thread_id: crate::session::SessionRef,
         attempt: uuid::Uuid,
@@ -118,8 +123,11 @@ pub enum Intent {
     ReadAccountLogin(ReadAccountLogin),
     CancelAccountLogin(CancelAccountLogin),
     ForkSession(ForkSession),
+    RenameSession(RenameSession),
     RewindSession(RewindSession),
     StartTerminal(StartTerminal),
+    EnsureTerminal(StartTerminal),
+    RunTerminalScript(RunTerminalScript),
     StartAccountTerminal(StartAccountTerminal),
     DetachTerminal(DetachTerminal),
     KillTerminal(KillTerminal),
@@ -265,7 +273,19 @@ pub enum Intent {
         text: String,
         cursor: u32,
     },
+    /// Read-only intake from the caret-owning editor. Stale text never edits a
+    /// draft or starts a search for a different current prompt.
+    QueryComposerPaths {
+        thread_id: DraftKey,
+        text: String,
+        cursor: u32,
+    },
     AppendTranscript {
+        thread_id: DraftKey,
+        text: String,
+    },
+    AppendFileMentions {
+        storage_scope: String,
         thread_id: DraftKey,
         text: String,
     },
@@ -273,6 +293,11 @@ pub enum Intent {
         thread_id: DraftKey,
         text: String,
         invocation: agent_protocol::composer::Invocation,
+    },
+    InsertComposerPath {
+        expected_text: String,
+        cursor: u32,
+        selection: crate::composer::completions::PathSelection,
     },
     SetDraftText {
         thread_id: DraftKey,
@@ -295,9 +320,12 @@ pub enum Intent {
         thread_id: DraftKey,
         service_tier: String,
     },
-    /// `alternate` does the opposite of the follow-up behavior for this message
-    /// (T3 Code's Mod+Enter or Ctrl/⌘-click while a turn runs). While a queued
-    /// message is edited, the composer's text replaces it instead.
+    /// Save the input parts owned by this exact queued-editor occurrence.
+    SaveQueuedEdit {
+        draft_key: DraftKey,
+    },
+    /// `alternate` does the opposite of the follow-up behavior for new input
+    /// (T3 Code's Mod+Enter or Ctrl/⌘-click while a turn runs).
     Submit {
         thread_id: Option<crate::session::SessionRef>,
         client_user_message_id: agent_protocol::ids::ClientInputId,
@@ -338,6 +366,7 @@ impl Intent {
             | Self::SelectWorkspace { thread_id, .. }
             | Self::EditComposer { thread_id, .. }
             | Self::AppendTranscript { thread_id, .. }
+            | Self::AppendFileMentions { thread_id, .. }
             | Self::InsertInvocation { thread_id, .. }
             | Self::SetDraftText { thread_id, .. }
             | Self::QuoteSelection { thread_id, .. }
@@ -397,6 +426,9 @@ pub enum OperationKey {
         turn: agent_protocol::ids::TurnId,
     },
     Rewind {
+        session: crate::session::SessionRef,
+    },
+    Rename {
         session: crate::session::SessionRef,
     },
     Item {
@@ -633,6 +665,8 @@ mod editors;
 pub use editors::*;
 mod composer;
 pub use composer::*;
+mod composer_paths;
+pub(crate) use composer_paths::{insert_composer_path, query_composer_paths};
 mod codex_cli;
 pub use codex_cli::*;
 mod providers;
@@ -657,6 +691,7 @@ pub use lists::*;
 mod models;
 pub use models::*;
 mod sessions;
+pub(crate) use sessions::command;
 pub use sessions::*;
 mod project_import;
 pub use project_import::*;

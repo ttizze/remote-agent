@@ -1,5 +1,6 @@
 //! The selected conversation's agent fleet, independent of conversation navigation.
 use super::task_title;
+mod timing;
 use crate::localization::UiLanguage;
 use crate::{
     models::{Item, ItemBody, ItemStatus, SessionStatus, TurnStatus},
@@ -7,6 +8,7 @@ use crate::{
     state::Snapshot,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+pub use timing::{subagent_elapsed, subagent_group};
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Clone, PartialEq)]
@@ -21,19 +23,97 @@ pub struct AgentSummary {
     pub depth: u32,
 }
 
+/// A provider-owned child is read-only. Its reported execution selection is
+/// independent of the parent's or the user's unsent composer draft.
+pub struct ProviderSubagentPresentation {
+    pub provider: Option<ProviderKind>,
+    pub parent: Option<SessionRef>,
+    pub model: String,
+    pub effort: Option<String>,
+    status: Option<TurnStatus>,
+    started_at_ms: Option<f64>,
+    completed_at_ms: Option<f64>,
+}
+
+impl ProviderSubagentPresentation {
+    /// Without `now_seconds`, this is the stable screen-reader announcement.
+    /// The visible clock uses only the latest provider-owned turn's timing.
+    pub fn label(&self, language: UiLanguage, now_seconds: Option<f64>) -> String {
+        let label = language.text(match self.status {
+            Some(TurnStatus::Running) => "subagent.working",
+            Some(TurnStatus::Completed) => "subagent.completed",
+            Some(TurnStatus::Failed) => "失敗",
+            Some(TurnStatus::Interrupted) => "subagent.interrupted",
+            Some(TurnStatus::Unknown) | None => "subagent.starting",
+        });
+        if !matches!(
+            self.status,
+            Some(TurnStatus::Running | TurnStatus::Completed)
+        ) {
+            return label.into();
+        }
+        let timing = now_seconds
+            .zip(self.started_at_ms)
+            .and_then(|(now, start)| {
+                let end = if self.status == Some(TurnStatus::Running) {
+                    now * 1000.0
+                } else {
+                    self.completed_at_ms?
+                };
+                let elapsed = end - start;
+                elapsed
+                    .is_finite()
+                    .then_some((elapsed.max(0.0) / 1000.0).floor().max(1.0) as u64)
+            });
+        let Some(seconds) = timing else {
+            return label.into();
+        };
+        let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+        let elapsed = [
+            (hours, "duration.hours", hours > 0),
+            (minutes, "duration.minutes", minutes > 0),
+            (seconds, "duration.seconds", seconds > 0 || minutes > 0),
+        ]
+        .into_iter()
+        .filter(|(_, _, visible)| *visible)
+        .map(|(value, key, _)| {
+            crate::localization::localized_ui_format(language, key.into(), vec![value.to_string()])
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+        if self.status == Some(TurnStatus::Completed) {
+            crate::localization::localized_ui_format(
+                language,
+                "subagent.completed.duration".into(),
+                vec![elapsed],
+            )
+        } else {
+            format!("{label} {elapsed}")
+        }
+    }
+}
+
 type AgentEntries = BTreeMap<String, (SessionRef, Option<SessionRef>, AgentSummary)>;
 
 /// A child conversation named by a provider's subagent activity. A provider
 /// without a conversation identity cannot offer navigation to that child.
 #[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SubagentPresentation {
     pub target: Option<SessionRef>,
     pub name: String,
     pub message: String,
     pub status: TurnStatus,
+    pub result: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 impl SubagentPresentation {
+    pub fn provider(&self, active: Option<ProviderKind>) -> Option<ProviderKind> {
+        active.or_else(|| self.target.as_ref().and_then(|target| target.provider))
+    }
+
     pub fn status(&self, child: Option<&crate::models::Thread>) -> TurnStatus {
         child
             .and_then(|child| child.turns.as_ref()?.last())
@@ -43,53 +123,119 @@ impl SubagentPresentation {
     }
 
     pub fn name(&self, child: Option<&crate::models::Thread>) -> String {
-        child
-            .and_then(|child| child.name.clone())
+        use std::sync::LazyLock;
+        static PREFIX: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"(?i)^Subagent:\s*").unwrap());
+        static PATH: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"^/root/(?:[^/]+/)*([^/]+)/?$").unwrap());
+        let name = child
+            .and_then(|child| child.name.as_deref())
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| self.name.clone())
+            .unwrap_or(&self.name);
+        let name = PREFIX.replace(name, "");
+        let Some(path) = PATH.captures(&name) else {
+            return name.into_owned();
+        };
+        let label = path[1].replace('_', " ");
+        let label = label
+            .split_whitespace()
+            .map(|word| {
+                let mut chars = word.chars();
+                chars
+                    .next()
+                    .unwrap()
+                    .to_uppercase()
+                    .chain(chars)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if label.is_empty() {
+            name.into_owned()
+        } else {
+            label
+        }
+    }
+
+    /// T3's lifecycle row prefers progress while active, and the result once
+    /// settled. A generic provider termination message is not useful detail.
+    pub fn detail(&self, status: TurnStatus) -> Option<String> {
+        use std::sync::LazyLock;
+        static GENERIC_END: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"(?i)^Child task ended with status\b").unwrap());
+        static LINKS: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
+        static BULLETS: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"(?m)^[ \t]*[-*][ \t]+").unwrap());
+        let raw = preferred_detail(status, &self.message, self.result.as_deref())?;
+        if GENERIC_END.is_match(raw) {
+            return None;
+        }
+        let text = LINKS.replace_all(raw, "$1").replace('`', "");
+        let text = BULLETS
+            .replace_all(&text, "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// The hover card keeps authored punctuation and caps its preview at 280
+    /// UTF-16 units, matching the source without splitting a Unicode scalar.
+    pub fn preview(&self, status: TurnStatus) -> Option<String> {
+        let raw = preferred_detail(status, &self.message, self.result.as_deref())?;
+        let chars = raw
+            .split_whitespace()
+            .enumerate()
+            .flat_map(|(index, word)| (index > 0).then_some(' ').into_iter().chain(word.chars()));
+        let mut preview = String::new();
+        let mut units = 0;
+        for ch in chars {
+            units += ch.len_utf16();
+            if units > 280 {
+                return Some(format!("{}…", preview.trim_end()));
+            }
+            preview.push(ch);
+        }
+        Some(preview)
     }
 }
 
-/// Elapsed wall time of the child's own work. A partial history cannot give its
-/// original start, and unknown timings stay unknown.
-pub fn subagent_elapsed(
-    language: UiLanguage,
-    child: Option<&crate::models::Thread>,
-    now_seconds: f64,
-) -> Option<String> {
-    let child = child?;
-    if child.history_has_more == Some(true) {
-        return None;
+fn preferred_detail<'a>(
+    status: TurnStatus,
+    progress: &'a str,
+    result: Option<&'a str>,
+) -> Option<&'a str> {
+    let progress = Some(progress.trim()).filter(|s| !s.is_empty());
+    let result = result.map(str::trim).filter(|s| !s.is_empty());
+    if matches!(
+        status,
+        TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+    ) {
+        result.or(progress)
+    } else {
+        progress.or(result)
     }
-    let turns = child.turns.as_ref()?;
-    let starts = |turn: &crate::models::Turn| {
-        turn.started_at_ms
-            .map(|ms| ms as f64)
-            .or_else(|| turn.started_at.map(|seconds| seconds * 1000.0))
-            .filter(|ms| ms.is_finite())
-    };
-    let start = turns
-        .iter()
-        .filter_map(|turn| starts(turn))
-        .min_by(f64::total_cmp);
-    let end = turns
-        .iter()
-        .filter_map(|turn| {
-            if turn.status == TurnStatus::Running {
-                return Some(now_seconds * 1000.0);
-            }
-            turn.completed_at_ms
-                .map(|ms| ms as f64)
-                .or_else(|| Some(starts(turn)? + turn.duration_ms? as f64))
-        })
-        .filter(|ms| ms.is_finite())
-        .max_by(f64::total_cmp);
-    let elapsed = match (start, end) {
-        (Some(start), Some(end)) => (end - start).max(0.0) as u64,
-        _ if turns.len() == 1 => turns[0].duration_ms?,
-        _ => return None,
-    };
-    Some(super::elapsed_text(language, elapsed))
+}
+
+/// A reported model starts a selection; an effort-only report updates that
+/// selection. Wait/status records with neither field preserve it.
+pub(super) fn subagent_selection<'a>(
+    previous_model: Option<&'a str>,
+    previous_effort: Option<&'a str>,
+    model: Option<&'a str>,
+    effort: Option<&'a str>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let model = model.map(str::trim).filter(|model| !model.is_empty());
+    let effort = effort.map(str::trim).filter(|effort| !effort.is_empty());
+    (
+        model.or(previous_model),
+        if model.is_some() {
+            effort
+        } else {
+            effort.or(previous_effort)
+        },
+    )
 }
 
 pub(super) fn subagent_rows(language: UiLanguage, item: &Item) -> Vec<SubagentPresentation> {
@@ -97,6 +243,9 @@ pub(super) fn subagent_rows(language: UiLanguage, item: &Item) -> Vec<SubagentPr
         receivers,
         states,
         prompt,
+        result,
+        model,
+        effort,
         ..
     } = item.body()
     else {
@@ -108,6 +257,7 @@ pub(super) fn subagent_rows(language: UiLanguage, item: &Item) -> Vec<SubagentPr
         .collect();
     let mut seen = HashSet::new();
     targets.retain(|target| seen.insert((*target).clone()));
+    let (model, effort) = subagent_selection(None, None, model.as_deref(), effort.as_deref());
     let row = |target: Option<&SessionRef>| {
         let state = states.iter().find(|state| Some(&state.session) == target);
         SubagentPresentation {
@@ -132,6 +282,12 @@ pub(super) fn subagent_rows(language: UiLanguage, item: &Item) -> Vec<SubagentPr
                         _ => TurnStatus::Unknown,
                     }
                 }),
+            result: result
+                .as_ref()
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
         }
     };
     if targets.is_empty() {
@@ -145,6 +301,126 @@ pub(super) fn subagent_rows(language: UiLanguage, item: &Item) -> Vec<SubagentPr
 }
 
 impl Snapshot {
+    /// A view's shared elapsed clock runs only for work in that conversation
+    /// or its cached direct children, independent of connection availability.
+    pub fn conversation_clock_active(&self, session: &SessionRef) -> bool {
+        let active = |thread: &crate::models::Thread| {
+            thread.active_turn_id().is_some()
+                || thread.workspace_setup.as_ref().is_some_and(|setup| {
+                    setup.phase == agent_protocol::workspace::SetupPhase::Running
+                })
+        };
+        self.thread_metadata(session).is_some_and(active)
+            || self
+                .sessions
+                .conversations
+                .values()
+                .any(|child| child.parent_id.as_ref() == Some(session) && active(child))
+    }
+
+    pub fn provider_subagent(&self, session: &SessionRef) -> Option<ProviderSubagentPresentation> {
+        let thread = self.thread_metadata(session)?;
+        if thread.can_accept_direct_input != Some(false) {
+            return None;
+        }
+        let provider = thread.active_provider.or(session.provider);
+        // Later wait/progress items may not repeat the spawn's model or effort.
+        // Read only this child's mentions in its own parent's transcript.
+        let (model, effort) = thread
+            .parent_id
+            .as_ref()
+            .and_then(|parent| self.sessions.conversations.get(parent))
+            .into_iter()
+            .flat_map(|parent| parent.turns.iter().flatten())
+            .flat_map(|turn| turn.items.iter().flatten())
+            .filter_map(|item| match item.body() {
+                ItemBody::Subagent {
+                    receivers,
+                    states,
+                    model,
+                    effort,
+                    ..
+                } if receivers.contains(session)
+                    || states.iter().any(|state| &state.session == session) =>
+                {
+                    Some((model.as_deref(), effort.as_deref()))
+                }
+                _ => None,
+            })
+            .fold(
+                (None, None),
+                |(previous_model, previous_effort), (model, effort)| {
+                    subagent_selection(previous_model, previous_effort, model, effort)
+                },
+            );
+        let catalog = self.catalog.models.iter().find(|entry| {
+            Some(entry.model.provider) == provider && Some(entry.model.id.as_str()) == model
+        });
+        let effort = effort
+            .filter(|_| {
+                catalog
+                    .and_then(|model| model.settings.as_ref())
+                    .is_some_and(|settings| !settings.supported_reasoning_efforts.is_empty())
+            })
+            .map(|effort| {
+                super::model_settings::reasoning_effort_label(self.catalog.ui_language, effort)
+            });
+        let turn = thread.turns.as_ref().and_then(|turns| turns.last());
+        Some(ProviderSubagentPresentation {
+            provider,
+            parent: thread.parent_id.clone(),
+            model: catalog
+                .map(|model| model.display_name.as_str())
+                .or(model)
+                .unwrap_or_default()
+                .into(),
+            effort,
+            status: turn.map(|turn| turn.status),
+            started_at_ms: turn.and_then(|turn| {
+                turn.started_at_ms
+                    .map(|ms| ms as f64)
+                    .or_else(|| turn.started_at.map(|seconds| seconds * 1000.0))
+            }),
+            completed_at_ms: turn.and_then(|turn| turn.completed_at_ms.map(|ms| ms as f64)),
+        })
+    }
+
+    /// Approval banners belong to the selected thread's direct children. Keep
+    /// the child's request identity so responding never targets the parent.
+    pub fn child_approvals(
+        &self,
+        parent: &SessionRef,
+    ) -> Vec<(SessionRef, String, super::conversation::Request)> {
+        let mut approvals = Vec::new();
+        for (session, thread) in self.sessions.conversations.iter() {
+            if thread.parent_id.as_ref() != Some(parent) {
+                continue;
+            }
+            let title = thread
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .or(thread.preview.as_deref())
+                .unwrap_or(session.id.as_str());
+            for request in thread.requests.values() {
+                if request.body.is_approval() {
+                    approvals.push((
+                        session.clone(),
+                        title.to_owned(),
+                        super::conversation::request(self.catalog.ui_language, request),
+                    ));
+                }
+            }
+        }
+        approvals.sort_by(|left, right| {
+            left.0
+                .to_string()
+                .cmp(&right.0.to_string())
+                .then_with(|| left.2.id.cmp(&right.2.id))
+        });
+        approvals
+    }
+
     pub fn agent_panel(&self, pane: &crate::state::PaneState) -> Vec<AgentSummary> {
         let Some(root) = pane.navigation.thread_id.as_ref() else {
             return Vec::new();
@@ -521,6 +797,503 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn subagent_provider_uses_live_driver_then_the_qualified_child_address() {
+        let mut agent = SubagentPresentation {
+            target: Some(SessionRef::new(ProviderKind::Claude, "child".into()).unwrap()),
+            name: String::new(),
+            message: String::new(),
+            status: TurnStatus::Unknown,
+            result: None,
+            model: None,
+            effort: None,
+        };
+        assert_eq!(agent.provider(None), Some(ProviderKind::Claude));
+        assert_eq!(
+            agent.provider(Some(ProviderKind::Codex)),
+            Some(ProviderKind::Codex)
+        );
+        agent.target = None;
+        assert_eq!(agent.provider(None), None);
+        assert_eq!(
+            agent.provider(Some(ProviderKind::DeepSeek)),
+            Some(ProviderKind::DeepSeek)
+        );
+    }
+
+    #[test]
+    fn provider_child_elapsed_uses_whole_seconds_and_keeps_its_announcement_stable() {
+        let mut agent = ProviderSubagentPresentation {
+            provider: None,
+            parent: None,
+            model: String::new(),
+            effort: None,
+            status: Some(TurnStatus::Running),
+            started_at_ms: Some(10_000.0),
+            completed_at_ms: None,
+        };
+        for (now, expected) in [
+            (9.0, "Working 1s"),
+            (10.0, "Working 1s"),
+            (12.9, "Working 2s"),
+            (70.0, "Working 1m 0s"),
+            (3610.0, "Working 1h"),
+        ] {
+            assert_eq!(agent.label(UiLanguage::English, Some(now)), expected);
+            assert_eq!(agent.label(UiLanguage::English, None), "Working");
+        }
+        assert_eq!(agent.label(UiLanguage::English, Some(f64::NAN)), "Working");
+        agent.status = Some(TurnStatus::Completed);
+        agent.completed_at_ms = Some(12_900.0);
+        assert_eq!(
+            agent.label(UiLanguage::English, Some(100.0)),
+            "Completed in 2s"
+        );
+        assert_eq!(
+            agent.label(UiLanguage::English, Some(200.0)),
+            "Completed in 2s"
+        );
+        assert_eq!(agent.label(UiLanguage::English, None), "Completed");
+        agent.completed_at_ms = None;
+        assert_eq!(agent.label(UiLanguage::English, Some(200.0)), "Completed");
+        for (status, label) in [
+            (TurnStatus::Failed, "Failed"),
+            (TurnStatus::Interrupted, "Interrupted"),
+            (TurnStatus::Unknown, "Starting"),
+        ] {
+            agent.status = Some(status);
+            assert_eq!(agent.label(UiLanguage::English, Some(200.0)), label);
+        }
+        agent.status = Some(TurnStatus::Running);
+        agent.started_at_ms = Some(f64::INFINITY);
+        assert_eq!(agent.label(UiLanguage::English, Some(200.0)), "Working");
+        agent.started_at_ms = Some(-f64::MAX);
+        assert_eq!(
+            agent.label(UiLanguage::English, Some(f64::MAX / 1000.0)),
+            "Working"
+        );
+        agent.started_at_ms = None;
+        assert_eq!(agent.label(UiLanguage::English, Some(200.0)), "Working");
+        agent.status = None;
+        assert_eq!(agent.label(UiLanguage::English, Some(200.0)), "Starting");
+    }
+
+    #[test]
+    fn conversation_clock_follows_selected_work_and_direct_children_even_offline() {
+        let mut state = snapshot(serde_json::json!([
+            {"id":{"provider":"codex","id":"root"}},
+            {"id":{"provider":"codex","id":"child"}, "parentId":{"provider":"codex","id":"root"}, "turns":[{"id":"live","status":"running"}]},
+            {"id":{"provider":"codex","id":"other"}, "turns":[{"id":"other-live","status":"running"}]}
+        ]));
+        assert!(!state.connection.connected);
+        assert!(state.conversation_clock_active(&session("root")));
+        assert!(state.conversation_clock_active(&session("child")));
+        assert!(!state.conversation_clock_active(&session("missing")));
+        Arc::make_mut(
+            Arc::make_mut(&mut state.sessions.conversations)
+                .get_mut(&session("child"))
+                .unwrap(),
+        )
+        .turns = None;
+        assert!(
+            !state.conversation_clock_active(&session("root")),
+            "unrelated work must not tick this conversation"
+        );
+        assert!(state.conversation_clock_active(&session("other")));
+    }
+
+    #[test]
+    fn background_setup_ticks_only_its_conversation_and_parent_until_it_finishes() {
+        use agent_protocol::workspace::{SetupPhase, WorkspaceSetup};
+        let mut state = snapshot(serde_json::json!([
+            {"id":{"provider":"codex","id":"root"}},
+            {"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"root"}},
+            {"id":{"provider":"codex","id":"other"}}
+        ]));
+        for (phase, expected) in [
+            (SetupPhase::Running, true),
+            (SetupPhase::Done, false),
+            (SetupPhase::Failed, false),
+            (SetupPhase::Cancelled, false),
+        ] {
+            let child = Arc::make_mut(
+                Arc::make_mut(&mut state.sessions.conversations)
+                    .get_mut(&session("child"))
+                    .unwrap(),
+            );
+            let mut setup = WorkspaceSetup::new(None, 1000);
+            setup.phase = phase;
+            child.workspace_setup = Some(setup);
+            assert_eq!(state.conversation_clock_active(&session("root")), expected);
+            assert_eq!(state.conversation_clock_active(&session("child")), expected);
+            assert!(!state.conversation_clock_active(&session("other")));
+        }
+    }
+
+    #[test]
+    fn subagent_elapsed_formats_minutes_and_hours_as_the_source_agent_clock() {
+        for (ms, expected) in [
+            (59_999, "59s"),
+            (60_000, "1m 00s"),
+            (61_000, "1m 01s"),
+            (3_599_999, "59m 59s"),
+            (3_600_000, "1h 00m"),
+            (3_661_999, "1h 01m"),
+        ] {
+            let child = Thread {
+                turns: Some(vec![Arc::new(Turn {
+                    duration_ms: Some(ms),
+                    ..Default::default()
+                })]),
+                ..Default::default()
+            };
+            assert_eq!(
+                subagent_elapsed(UiLanguage::English, Some(&child), 99.0).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn provider_children_state_only_mentions_do_not_match_another_child() {
+        let mut state = snapshot(serde_json::json!([
+            {"id":{"provider":"codex","id":"root"}},
+            {"id":{"provider":"codex","id":"child"}, "parentId":{"provider":"codex","id":"root"},
+                "canAcceptDirectInput":false}
+        ]));
+        for (target, expected_model) in [("child", "review-model"), ("other", "")] {
+            put_items(
+                &mut state,
+                session("root"),
+                vec![item(
+                    "state-only",
+                    ItemStatus::Completed,
+                    "wait",
+                    vec![],
+                    vec![crate::models::SubagentState {
+                        session: session(target),
+                        status: TurnStatus::Completed,
+                        native_status: None,
+                        message: None,
+                    }],
+                )],
+            );
+            assert_eq!(
+                state.provider_subagent(&session("child")).unwrap().model,
+                expected_model
+            );
+        }
+    }
+
+    #[test]
+    fn provider_children_use_their_reported_selection_and_preserve_missing_metadata() {
+        use serde_json::json;
+        let child = session("child");
+        let mut state = snapshot(json!([
+            {"id":{"provider":"codex","id":"root"}},
+            {"id":{"provider":"codex","id":"child"}, "parentId":{"provider":"codex","id":"root"},
+                "canAcceptDirectInput":false, "turns":[{"id":"run","status":"running"}]}
+        ]));
+        state.catalog.ui_language = UiLanguage::English;
+        let reported = |id: &str, target: SessionRef, model: Option<&str>, effort: Option<&str>| {
+            Arc::new(Item::new(
+                id.into(),
+                ItemStatus::Completed,
+                ItemBody::Subagent {
+                    tool: "task".into(),
+                    prompt: None,
+                    model: model.map(str::to_owned),
+                    effort: effort.map(str::to_owned),
+                    sender: None,
+                    receivers: vec![target],
+                    states: vec![],
+                    agent_id: None,
+                    result: None,
+                },
+            ))
+        };
+        let catalog: Arc<Vec<crate::models::Model>> = Arc::new(serde_json::from_value(json!([
+            {"id":"review-model","model":{"provider":"codex","id":"review-model"}, "displayName":"Review Model",
+                "settings":{"defaultReasoningEffort":"high", "supportedReasoningEfforts":[{"reasoningEffort":"high"}]}},
+            {"id":"other-model","model":{"provider":"codex","id":"other-model"}, "displayName":"Other Model",
+                "settings":{"defaultReasoningEffort":"high", "supportedReasoningEfforts":[{"reasoningEffort":"high"}]}}
+        ])).unwrap());
+        state.catalog.models = catalog.clone();
+        let spawn = reported(
+            "spawn",
+            child.clone(),
+            Some(" review-model "),
+            Some(" high "),
+        );
+        put_items(
+            &mut state,
+            session("root"),
+            vec![
+                spawn.clone(),
+                reported("wait", child.clone(), None, None),
+                reported("unrelated", session("unrelated"), Some("other-model"), None),
+            ],
+        );
+        let shown = state.provider_subagent(&child).unwrap();
+        assert_eq!(shown.parent, Some(session("root")));
+        assert_eq!(shown.model, "Review Model");
+        assert_eq!(shown.effort.as_deref(), Some("High"));
+        assert_eq!(shown.label(UiLanguage::English, None), "Working");
+        put_items(
+            &mut state,
+            session("root"),
+            vec![
+                spawn.clone(),
+                reported("effort-update", child.clone(), None, Some("low")),
+            ],
+        );
+        assert_eq!(
+            state.provider_subagent(&child).unwrap().effort.as_deref(),
+            Some("Low")
+        );
+        state.catalog.models = Arc::new(vec![]);
+        let unknown = state.provider_subagent(&child).unwrap();
+        assert_eq!(unknown.model, "review-model");
+        assert!(unknown.effort.is_none());
+        state.catalog.models = catalog;
+        put_items(
+            &mut state,
+            session("root"),
+            vec![
+                spawn,
+                reported("new-task", child.clone(), Some("other-model"), None),
+            ],
+        );
+        let next = state.provider_subagent(&child).unwrap();
+        assert_eq!(next.model, "Other Model");
+        assert!(
+            next.effort.is_none(),
+            "a new selection must not inherit the previous task's effort"
+        );
+        for (status, label) in [
+            (TurnStatus::Completed, "Completed"),
+            (TurnStatus::Failed, "Failed"),
+            (TurnStatus::Interrupted, "Interrupted"),
+            (TurnStatus::Unknown, "Starting"),
+        ] {
+            let thread = Arc::make_mut(
+                Arc::make_mut(&mut state.sessions.conversations)
+                    .get_mut(&child)
+                    .unwrap(),
+            );
+            Arc::make_mut(&mut thread.turns.as_mut().unwrap()[0]).status = status;
+            assert_eq!(
+                state
+                    .provider_subagent(&child)
+                    .unwrap()
+                    .label(UiLanguage::English, None),
+                label
+            );
+        }
+        for direct_input in [None, Some(true)] {
+            Arc::make_mut(
+                Arc::make_mut(&mut state.sessions.conversations)
+                    .get_mut(&child)
+                    .unwrap(),
+            )
+            .can_accept_direct_input = direct_input;
+            assert!(state.provider_subagent(&child).is_none());
+        }
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut state.sessions.conversations)
+                .get_mut(&child)
+                .unwrap(),
+        );
+        thread.can_accept_direct_input = Some(false);
+        thread.parent_id = None;
+        thread.turns = None;
+        let unknown = state.provider_subagent(&child).unwrap();
+        assert!(unknown.parent.is_none());
+        assert!(unknown.model.is_empty());
+        assert!(unknown.effort.is_none());
+        assert_eq!(unknown.label(UiLanguage::English, None), "Starting");
+    }
+
+    #[test]
+    fn subagent_names_and_hover_previews_follow_source_formatting_and_unicode_bounds() {
+        let mut agent = SubagentPresentation {
+            target: None,
+            name: "Subagent: fallback".into(),
+            message: "- Reading `auth.rs`\n [API](https://example.test/api)".into(),
+            status: TurnStatus::Running,
+            result: None,
+            model: None,
+            effort: None,
+        };
+        assert_eq!(agent.name(None), "fallback");
+        for (name, expected) in [
+            ("Subagent: /root/task/api_review/", "Api Review"),
+            ("subagent: Custom title", "Custom title"),
+            ("/root/task/日本語_review", "日本語 Review"),
+            ("/root/task/__", "/root/task/__"),
+            ("/root//task", "/root//task"),
+            ("/workspace/api_review", "/workspace/api_review"),
+            ("  ", "fallback"),
+        ] {
+            let child = Thread {
+                name: Some(name.into()),
+                ..Default::default()
+            };
+            assert_eq!(agent.name(Some(&child)), expected);
+        }
+        assert_eq!(
+            agent.preview(TurnStatus::Running).as_deref(),
+            Some("- Reading `auth.rs` [API](https://example.test/api)")
+        );
+        for (text, expected) in [
+            ("a".repeat(280), "a".repeat(280)),
+            (
+                format!("{}😀tail", "a".repeat(279)),
+                format!("{}…", "a".repeat(279)),
+            ),
+            (
+                format!("{}😀tail", "a".repeat(278)),
+                format!("{}😀…", "a".repeat(278)),
+            ),
+            (" x \n".repeat(100), vec!["x"; 100].join(" ")),
+        ] {
+            agent.message = text;
+            assert_eq!(
+                agent.preview(TurnStatus::Running).as_deref(),
+                Some(expected.as_str())
+            );
+        }
+        agent.message.clear();
+        assert!(agent.preview(TurnStatus::Completed).is_none());
+    }
+
+    #[test]
+    fn subagent_detail_prefers_progress_while_active_and_results_once_settled() {
+        let mut agent = SubagentPresentation {
+            target: None,
+            name: "Review".into(),
+            message: "- Reading `auth.rs`\n * [API](https://example.test/api)".into(),
+            status: TurnStatus::Running,
+            result: Some("  Result\n ready  ".into()),
+            model: None,
+            effort: None,
+        };
+        for status in [TurnStatus::Running, TurnStatus::Unknown] {
+            assert_eq!(agent.detail(status).as_deref(), Some("Reading auth.rs API"));
+        }
+        for status in [
+            TurnStatus::Completed,
+            TurnStatus::Failed,
+            TurnStatus::Interrupted,
+        ] {
+            assert_eq!(agent.detail(status).as_deref(), Some("Result ready"));
+        }
+        agent.message = "\n ".into();
+        assert_eq!(
+            agent.detail(TurnStatus::Running).as_deref(),
+            Some("Result ready")
+        );
+        agent.result = Some("Child task ended with status failed".into());
+        agent.message = "Useful progress".into();
+        assert!(agent.detail(TurnStatus::Failed).is_none());
+        agent.result = Some("  ".into());
+        assert_eq!(
+            agent.detail(TurnStatus::Completed).as_deref(),
+            Some("Useful progress")
+        );
+        agent.message = "child TASK ended with STATUS completed".into();
+        assert!(agent.detail(TurnStatus::Unknown).is_none());
+        agent.message = "Child task ended with statuscheck".into();
+        assert_eq!(
+            agent.detail(TurnStatus::Running).as_deref(),
+            Some("Child task ended with statuscheck")
+        );
+        agent.message = "- ` `".into();
+        assert!(agent.detail(TurnStatus::Running).is_none());
+    }
+
+    #[test]
+    fn child_approvals_exclude_other_threads_and_keep_delivery_and_order() {
+        use agent_protocol::{
+            requests::{ApprovalKind, Request, RequestBody, RequestTarget},
+            session::RequestDelivery,
+        };
+        let session = |id: &str| SessionRef::new(ProviderKind::Codex, id.into()).unwrap();
+        let parent = session("parent");
+        let mut snapshot = Snapshot::default();
+        let request = |id: &str, body, delivery| {
+            Arc::new(Request {
+                id: id.into(),
+                target: RequestTarget::Session,
+                delivery,
+                body,
+            })
+        };
+        let body = || RequestBody::Approval {
+            kind: ApprovalKind::Command,
+            description: "Run tests".into(),
+            details: "cargo test".into(),
+            choices: vec![],
+        };
+        let requests = [
+            request("z", body(), RequestDelivery::Awaiting),
+            request("a", body(), RequestDelivery::Unknown),
+            request(
+                "m",
+                RequestBody::Permission {
+                    description: "Read directory".into(),
+                    details: "/repo".into(),
+                    choices: vec![],
+                },
+                RequestDelivery::Awaiting,
+            ),
+            request(
+                "question",
+                RequestBody::Question { questions: vec![] },
+                RequestDelivery::Awaiting,
+            ),
+        ]
+        .into_iter()
+        .map(|request| (request.id.clone(), request))
+        .collect();
+        let child = Thread {
+            parent_id: Some(parent.clone()),
+            name: Some("  ".into()),
+            preview: Some("Review".into()),
+            requests,
+            ..Default::default()
+        };
+        Arc::make_mut(&mut snapshot.sessions.conversations)
+            .insert(session("child"), Arc::new(child.clone()));
+        Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+            parent.clone(),
+            Arc::new(Thread {
+                parent_id: None,
+                ..child.clone()
+            }),
+        );
+        Arc::make_mut(&mut snapshot.sessions.conversations).insert(
+            session("other"),
+            Arc::new(Thread {
+                parent_id: Some(session("unrelated")),
+                ..child
+            }),
+        );
+        let approvals = snapshot.child_approvals(&parent);
+        assert_eq!(approvals.len(), 3);
+        assert!(
+            approvals
+                .iter()
+                .all(|(id, title, _)| *id == session("child") && title == "Review")
+        );
+        assert_eq!(approvals[0].2.id.as_str(), "a");
+        assert!(!approvals[0].2.can_respond);
+        assert_eq!(approvals[1].2.id.as_str(), "m");
+        assert!(approvals[1].2.can_respond);
+        assert_eq!(approvals[2].2.id.as_str(), "z");
+        assert!(approvals[2].2.can_respond);
+    }
+
+    #[test]
     fn elapsed_uses_child_wall_time_and_freezes_when_the_child_finishes() {
         let mut child = Thread {
             turns: Some(vec![
@@ -611,6 +1384,9 @@ mod tests {
             name: "Review".into(),
             message: String::new(),
             status: TurnStatus::Completed,
+            result: None,
+            model: None,
+            effort: None,
         };
         assert_eq!(
             agent.status(Some(&child(Turn {

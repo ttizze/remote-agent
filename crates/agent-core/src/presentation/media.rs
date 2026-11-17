@@ -117,10 +117,55 @@ impl ImageZoom {
     }
 }
 
+/// Native viewer controls consume the same bounds, percentage and step choices as desktop.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ImageZoomPresentation {
+    pub scale: f32,
+    pub minimum_scale: f32,
+    pub maximum_scale: f32,
+    pub label: String,
+    pub zoom_in: Option<f32>,
+    pub zoom_out: Option<f32>,
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn image_zoom_presentation(scale: f32) -> ImageZoomPresentation {
+    let zoom = ImageZoom::new(scale);
+    ImageZoomPresentation {
+        scale: zoom.scale(),
+        minimum_scale: ImageZoom::MIN,
+        maximum_scale: ImageZoom::MAX,
+        label: zoom.label(),
+        zoom_in: zoom.zoomed_in().map(ImageZoom::scale),
+        zoom_out: zoom.zoomed_out().map(ImageZoom::scale),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn native_zoom_controls_share_limits_steps_and_percentage() {
+        let minimum = image_zoom_presentation(0.0);
+        assert_eq!(minimum.scale, 0.25);
+        assert_eq!(minimum.minimum_scale, 0.25);
+        assert_eq!(minimum.maximum_scale, 4.0);
+        assert_eq!(minimum.label, "25%");
+        assert_eq!(minimum.zoom_out, None);
+        assert_eq!(minimum.zoom_in, Some(0.5));
+        let between = image_zoom_presentation(1.26);
+        assert_eq!(between.label, "126%");
+        assert_eq!(between.zoom_out, Some(1.25));
+        assert_eq!(between.zoom_in, Some(1.5));
+        let maximum = image_zoom_presentation(10.0);
+        assert_eq!(maximum.label, "400%");
+        assert_eq!(maximum.zoom_in, None);
+        assert_eq!(maximum.zoom_out, Some(3.75));
+        assert_eq!(image_zoom_presentation(f32::NAN).label, "100%");
+    }
 
     #[test]
     fn steps_by_a_quarter_between_a_quarter_and_four_times() {

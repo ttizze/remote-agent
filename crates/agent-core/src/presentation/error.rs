@@ -83,7 +83,7 @@ fn operation_notice(key: &OperationKey) -> Option<(ErrorScope, &'static str)> {
         ),
         Feedback { .. } => return None,
         ProjectClone { id: None } => return None,
-        ProjectClone { id: Some(_) } => (Settings, "リポジトリの取得操作に失敗しました"),
+        ProjectClone { id: Some(_) } => (Projects, "リポジトリの取得操作に失敗しました"),
         InputRecovery { .. } => (Application, "入力を復元できませんでした"),
         History { .. }
         | CommandOutput { .. }
@@ -134,6 +134,12 @@ fn operation_notice(key: &OperationKey) -> Option<(ErrorScope, &'static str)> {
                 draft_key: session.into(),
             },
             "会話を巻き戻せませんでした",
+        ),
+        Rename { session } => (
+            Conversation {
+                draft_key: session.into(),
+            },
+            "会話名を変更できませんでした",
         ),
         Agents { session } => (
             Conversation {
@@ -291,14 +297,18 @@ impl Snapshot {
                 });
             }
         }
-        notices.sort_by_key(|notice| {
-            std::cmp::Reverse(match &notice.id {
-                ErrorId::Operation { generation, .. } => *generation,
-                ErrorId::Application { .. } => 0,
-            })
-        });
-        notices
+        ordered_notices(notices)
     }
+}
+
+pub(super) fn ordered_notices(mut notices: Vec<ErrorNotice>) -> Vec<ErrorNotice> {
+    notices.sort_by_key(|notice| {
+        std::cmp::Reverse(match &notice.id {
+            ErrorId::Operation { generation, .. } => *generation,
+            ErrorId::Application { .. } => 0,
+        })
+    });
+    notices
 }
 
 const FAILED: &str = "エラーが発生しました。";
@@ -1045,7 +1055,7 @@ mod notice_tests {
         let (next, effects) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::DismissError {
+            Event::from(Intent::DismissError {
                 id: local[0].id.clone(),
             }),
         );
@@ -1055,7 +1065,7 @@ mod notice_tests {
         let (next, _) = reduce(
             &next,
             "",
-            Event::Intent(Intent::DismissError {
+            Event::from(Intent::DismissError {
                 id: global[0].id.clone(),
             }),
         );
@@ -1156,7 +1166,7 @@ mod notice_tests {
         let (next, effects) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::ListFiles(ListFiles {
+            Event::from(Intent::ListFiles(ListFiles {
                 path: "relative".into(),
             })),
         );
@@ -1302,7 +1312,7 @@ mod notice_tests {
         let (unchanged, effects) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::RecoverError {
+            Event::from(Intent::RecoverError {
                 id: notice.id.clone(),
             }),
         );
@@ -1319,7 +1329,7 @@ mod notice_tests {
         let (next, effects) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::RecoverError { id: notice.id }),
+            Event::from(Intent::RecoverError { id: notice.id }),
         );
         assert_eq!(effects.len(), 1);
         assert_eq!(
@@ -1359,7 +1369,7 @@ mod notice_tests {
         let (next, _) = reduce(
             &newer,
             "",
-            Event::Intent(Intent::DismissError { id: notice.id }),
+            Event::from(Intent::DismissError { id: notice.id }),
         );
         assert_eq!(next.panes.primary().error, newer.panes.primary().error);
         let (next, _) = reduce(&next, "", Event::Connected);
@@ -1427,7 +1437,7 @@ mod notice_tests {
         let (next, _) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/other".into(),
             }),
         );
@@ -1454,7 +1464,7 @@ mod notice_tests {
         let (next, _) = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::DismissError {
+            Event::from(Intent::DismissError {
                 id: ErrorId::Operation {
                     key: key.clone(),
                     generation: 1,
@@ -1483,7 +1493,7 @@ mod notice_tests {
                 phase: if running { OperationPhase::Running } else { OperationPhase::Failed { message: message.clone() } },
             },
             );
-            let (next, _) = reduce(&snapshot, "", Event::Intent(Intent::DismissError { id: dismissed.id }));
+            let (next, _) = reduce(&snapshot, "", Event::from(Intent::DismissError { id: dismissed.id }));
             prop_assert_eq!(next.operations.get(&key), snapshot.operations.get(&key));
             prop_assert_eq!(next.error_notices("", conversation(&other)), snapshot.error_notices("", conversation(&other)));
         }

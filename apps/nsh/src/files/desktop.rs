@@ -117,6 +117,7 @@ impl Pointer {
         let Some(pointer) = pointer.filter(|_| open) else {
             return;
         };
+        let scope = crate::file_actions::input_scope(connection);
         spawn(async move {
             let Some(composer) = connection.composer_box.measure().await else {
                 return;
@@ -125,7 +126,7 @@ impl Pointer {
             if (start.x.0..start.x.0 + size.width.0).contains(&pointer.x.0)
                 && (start.y.0..start.y.0 + size.height.0).contains(&pointer.y.0)
             {
-                crate::file_actions::add_mentions(connection, &mentions);
+                crate::file_actions::add_mentions(connection, &scope, &mentions);
             }
         });
     }

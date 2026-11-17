@@ -619,11 +619,22 @@ impl ForkSession {
 pub struct RewindSession {
     pub thread_id: crate::session::SessionRef,
     pub turn_id: crate::ids::TurnId,
+    /// Client namespace captured when the action was offered, before a dialog
+    /// or queued dispatch. Core validates it before issuing the Host command.
+    pub storage_scope: String,
 }
 
 impl RewindSession {
-    pub fn new(thread_id: crate::session::SessionRef, turn_id: crate::ids::TurnId) -> Self {
-        Self { thread_id, turn_id }
+    pub fn new(
+        thread_id: crate::session::SessionRef,
+        turn_id: crate::ids::TurnId,
+        storage_scope: String,
+    ) -> Self {
+        Self {
+            thread_id,
+            turn_id,
+            storage_scope,
+        }
     }
 }
 
@@ -745,11 +756,6 @@ pub struct ChangeQueue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum QueueChange {
-    /// Replaces waiting input; it keeps its place in the queue.
-    Edit {
-        client_user_message_id: crate::ids::ClientInputId,
-        input: Vec<Input>,
-    },
     Remove {
         client_user_message_id: crate::ids::ClientInputId,
     },

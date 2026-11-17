@@ -1,6 +1,20 @@
 use super::*;
 use crate::session::{ProviderKind, SessionRef};
 
+#[test]
+fn recalled_prompt_preserves_live_text_and_uses_the_sources_empty_string_boundary() {
+    for (current, restored, expected) in [
+        ("", "", ""),
+        ("", "old", "old"),
+        ("live", "", "live"),
+        ("live ", "old", "live \n\nold"),
+        (" ", "old", " \n\nold"),
+        ("日本語", "🧪", "日本語\n\n🧪"),
+    ] {
+        assert_eq!(recalled_prompt(current, restored), expected);
+    }
+}
+
 #[rstest::rstest]
 fn history_projection_failure_keeps_the_page_retryable(
     #[values(None, Some("oldest"))] next_cursor: Option<&str>,
@@ -63,9 +77,9 @@ fn history_projection_failure_keeps_the_page_retryable(
     let (_, effects) = super::super::super::reduce(
         &snapshot,
         "",
-        Event::Intent(Intent::ReadOlder {
+        Event::Intent(Box::new(Intent::ReadOlder {
             thread_id: id.clone(),
-        }),
+        })),
     );
     assert_eq!(
         effects.len(),
@@ -807,7 +821,8 @@ fn a_paged_rewind_restores_only_the_selected_conversations_original_input() {
     assert_eq!(
         RewindSession {
             thread_id: id.clone(),
-            turn_id: "old-run".into()
+            turn_id: "old-run".into(),
+            storage_scope: state.connection.storage_scope.clone()
         }
         .capture(&state, "")
         .unwrap()
@@ -838,6 +853,7 @@ fn a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences() {
         }),
     );
     let capture = RewindCapture {
+        draft_key: session.clone().into(),
         scope: state.connection.storage_scope.clone(),
         epoch: state.connection.epoch,
         original: Some(Recalled {
@@ -847,9 +863,13 @@ fn a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences() {
             fresh_context: false,
         }),
     };
-    RewindSession::new(session.clone(), "cut".into())
-        .complete(&mut state, "", (capture, 1), false)
-        .unwrap();
+    RewindSession::new(
+        session.clone(),
+        "cut".into(),
+        state.connection.storage_scope.clone(),
+    )
+    .complete(&mut state, "", (capture, 1), false)
+    .unwrap();
     assert_eq!(
         state.input.drafts[&session.clone().into()].attachments,
         vec![file.clone(), file.clone(), file.clone()]
@@ -857,7 +877,7 @@ fn a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences() {
     let (after, _) = crate::state::reduce(
         &state,
         "",
-        crate::state::Event::Intent(crate::state::Intent::RemoveAttachment {
+        crate::state::Event::from(crate::state::Intent::RemoveAttachment {
             draft_key: session.clone().into(),
             index: 1,
         }),
@@ -909,6 +929,7 @@ fn rewind_never_recalls_an_omitted_or_stale_input_preview() {
     let operation = RewindSession {
         thread_id: id,
         turn_id: "large-run".into(),
+        storage_scope: state.connection.storage_scope.clone(),
     };
     assert!(
         operation.capture(&state, "").is_err(),
@@ -932,5 +953,24 @@ fn rewind_never_recalls_an_omitted_or_stale_input_preview() {
             .text,
         text,
         "rewind must recall the complete original input"
+    );
+}
+
+#[test]
+fn deferred_system_notices_request_their_complete_body_without_refetching_complete_notices() {
+    let session = SessionRef::new(None, "notice-owner".into()).unwrap();
+    let turn = "turn".into();
+    let mut item = Item::new(
+        "notice".into(),
+        crate::models::ItemStatus::Completed,
+        crate::models::ItemBody::SystemNotice {
+            message: "History omitted".into(),
+        },
+    );
+    assert!(item_detail(&session, &turn, &item).is_none());
+    item.defer();
+    assert!(
+        item_detail(&session, &turn, &item).is_some(),
+        "an omitted notice body still has to be hydrated"
     );
 }

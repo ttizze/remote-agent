@@ -492,6 +492,10 @@ fn questions(
                 id: choice_id,
                 label,
                 description: string(option, "description"),
+                preview: option
+                    .get("preview")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
             });
         }
         questions.push(Question {

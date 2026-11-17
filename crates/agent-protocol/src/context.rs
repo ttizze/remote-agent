@@ -43,7 +43,9 @@ pub struct AssistantCitation {
     pub comment: String,
 }
 
-fn byte_offset(text: &str, units: u32) -> Option<usize> {
+/// Convert a native UTF-16 text boundary to a UTF-8 byte offset. Reject a
+/// boundary inside a surrogate pair or beyond the text.
+pub fn byte_offset(text: &str, units: u32) -> Option<usize> {
     let mut offset = 0u32;
     for (byte, character) in text.char_indices() {
         if offset == units {

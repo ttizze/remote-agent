@@ -22,6 +22,7 @@ pub struct FeedbackNotice {
     pub storage_scope: String,
     pub session: SessionRef,
     pub phase: FeedbackPhase,
+    pub message: String,
     pub feedback_id: Option<String>,
     pub error: Option<String>,
     pub can_dismiss: bool,
@@ -67,6 +68,16 @@ impl Snapshot {
             storage_scope: self.connection.storage_scope.clone(),
             session,
             phase,
+            message: self
+                .catalog
+                .ui_language
+                .text(match phase {
+                    FeedbackPhase::Uploading => "フィードバックを送信中…",
+                    FeedbackPhase::Sent => "フィードバックを送信しました",
+                    FeedbackPhase::Failed => "フィードバックを送信できませんでした",
+                    FeedbackPhase::Unknown => "フィードバックの送信結果を確認できませんでした",
+                })
+                .into(),
             feedback_id: submission
                 .receipt
                 .as_ref()

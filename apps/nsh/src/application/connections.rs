@@ -627,7 +627,7 @@ mod tests {
         let (next, _) = agent_core::state::reduce(
             &previous.snapshot,
             "",
-            Event::Intent(Intent::SetDraftText {
+            Event::from(Intent::SetDraftText {
                 thread_id: previous.context.navigation().draft_key,
                 text: "typed".into(),
             }),

@@ -51,7 +51,7 @@ mod tests {
         let first = draft("welcome");
         let second = draft("new-chat");
         use crate::state::{Event, Intent, reduce};
-        let apply = |snapshot: &Snapshot, intent| reduce(snapshot, "", Event::Intent(intent)).0;
+        let apply = |snapshot: &Snapshot, intent| reduce(snapshot, "", Event::from(intent)).0;
         snapshot = apply(
             &snapshot,
             Intent::SetDraft {
@@ -149,6 +149,8 @@ pub struct PersistedState {
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
     drafts: Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
+    #[serde(default, with = "entries", skip_serializing_if = "BTreeMap::is_empty")]
+    queued_edits: Arc<BTreeMap<crate::session::SessionRef, crate::state::follow_up::QueuedEdit>>,
     #[serde(default)]
     stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
     new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
@@ -165,6 +167,7 @@ impl Same for PersistedState {
             && self.storage_scope == other.storage_scope
             && self.archived_scopes.same(&other.archived_scopes)
             && self.drafts.same(&other.drafts)
+            && self.queued_edits.same(&other.queued_edits)
             && self.stashes.same(&other.stashes)
             && self.new_drafts.same(&other.new_drafts)
             && self.pending_submissions.same(&other.pending_submissions)
@@ -182,6 +185,7 @@ impl PersistedState {
             storage_scope: snapshot.connection.storage_scope.clone(),
             archived_scopes: snapshot.lists.archived_scopes.clone(),
             drafts: snapshot.input.drafts.clone(),
+            queued_edits: snapshot.input.queued_edits.clone(),
             stashes: snapshot.input.stashes.clone(),
             new_drafts: snapshot.input.new_drafts.clone(),
             pending_submissions: snapshot.sessions.pending_submissions.clone(),
@@ -218,6 +222,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         input: crate::state::Input {
             input_recoveries: saved.input_recoveries,
             drafts: saved.drafts,
+            queued_edits: saved.queued_edits,
             stashes: saved.stashes,
             new_drafts: saved.new_drafts,
             ..Default::default()

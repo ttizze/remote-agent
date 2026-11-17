@@ -117,7 +117,7 @@ mod tests {
         let (mut snapshot, _) = crate::state::reduce(
             &Snapshot::default(),
             "",
-            crate::state::Event::Intent(Intent::NewChat {
+            crate::state::Event::from(Intent::NewChat {
                 cwd: "/repo".into(),
             }),
         );

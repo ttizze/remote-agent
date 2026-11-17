@@ -327,7 +327,7 @@ fn selected_folder_preserves_explicit_scope_without_losing_the_execution_directo
                 let (next, _) = reduce(
                     snapshot,
                     "",
-                    Event::Intent(agent_core::state::Intent::NewChat { cwd: cwd.into() }),
+                    Event::from(agent_core::state::Intent::NewChat { cwd: cwd.into() }),
                 );
                 assert_eq!(next.selected_directory(next.panes.primary()), cwd);
             }
@@ -348,7 +348,7 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
         let (pending, _) = reduce(
             &previous,
             "",
-            Event::Intent(Intent::Submit {
+            Event::from(Intent::Submit {
                 thread_id: Some(SessionRef {
                     provider: Some(ProviderKind::Codex),
                     id: "thread".into(),
@@ -396,7 +396,7 @@ fn submission_acknowledgement_waits_for_canonical_rows_without_guessing_a_turn()
     let (mut pending, _) = reduce(
         &previous,
         "",
-        Event::Intent(Intent::Submit {
+        Event::from(Intent::Submit {
             thread_id: Some(SessionRef {
                 provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
@@ -492,7 +492,7 @@ fn model_settings_corpus() {
             reduce(
                 &previous,
                 "",
-                Event::Intent(Intent::SelectModel {
+                Event::from(Intent::SelectModel {
                     thread_id: SessionRef {
                         provider: Some(ProviderKind::Codex),
                         id: "thread".into(),
@@ -691,7 +691,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
                 current = reduce(
                     &current,
                     "",
-                    Event::Intent(Intent::NewChat {
+                    Event::from(Intent::NewChat {
                         cwd: "/fixture".into(),
                     }),
                 )
@@ -715,7 +715,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
         let (edited, _) = reduce(
             &current,
             "",
-            Event::Intent(Intent::SetDraftText {
+            Event::from(Intent::SetDraftText {
                 thread_id: current.panes.primary().navigation.draft_key.clone(),
                 text: "keep".into(),
             }),
@@ -723,7 +723,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
         let (returned, _) = reduce(
             &edited,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/fixture".into(),
             }),
         );
@@ -812,7 +812,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
                 reduce(
                     &previous,
                     "",
-                    Event::Intent(Intent::NewChat { cwd: cwd.into() }),
+                    Event::from(Intent::NewChat { cwd: cwd.into() }),
                 )
                 .0
             };
@@ -897,7 +897,7 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
         )),
         ..Default::default()
     };
-    let (listed, effects) = reduce(&previous, "", Event::Intent(Intent::ShowThreadList));
+    let (listed, effects) = reduce(&previous, "", Event::from(Intent::ShowThreadList));
     assert!(listed.panes.primary().navigation.thread_id.is_none());
     assert_eq!(
         listed.panes.primary().epoch,
@@ -930,7 +930,7 @@ fn serialized_events_preserve_operation_inputs_and_replay_state() {
     let initial = reduce(
         &Snapshot::default(),
         "",
-        Event::Intent(op::Intent::NewChat {
+        Event::from(op::Intent::NewChat {
             cwd: "/fixture".into(),
         }),
     )
@@ -938,15 +938,15 @@ fn serialized_events_preserve_operation_inputs_and_replay_state() {
     let key = initial.panes.primary().navigation.draft_key.clone();
     let events = vec![
         Event::Connected,
-        Event::Intent(op::Intent::SetDraftText {
+        Event::from(op::Intent::SetDraftText {
             thread_id: key.clone(),
             text: "再生する下書き".into(),
         }),
-        Event::Intent(op::Intent::ReadFile(op::ReadFile {
+        Event::from(op::Intent::ReadFile(op::ReadFile {
             path: "/fixture/file".into(),
             discard_draft: true,
         })),
-        Event::Intent(op::Intent::Respond(op::Respond {
+        Event::from(op::Intent::Respond(op::Respond {
             request_id: "request".into(),
             answer: agent_protocol::requests::Answer::Approval {
                 choice_id: "fixture-choice".into(),
@@ -974,7 +974,7 @@ fn durable_upload_and_pairing_results_survive_navigation() {
     let mut snapshot = reduce(
         &Snapshot::default(),
         "",
-        Event::Intent(agent_core::state::Intent::NewChat { cwd: "/new".into() }),
+        Event::from(agent_core::state::Intent::NewChat { cwd: "/new".into() }),
     )
     .0;
     op::UploadAttachment {
@@ -1108,7 +1108,7 @@ async fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_n
         state = reduce(
             &state,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/fresh".into(),
             }),
         )
@@ -1130,7 +1130,7 @@ async fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_n
         state = reduce(
             &state,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/explicit".into(),
             }),
         )
@@ -1162,7 +1162,7 @@ async fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_n
         state = reduce(
             &state,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/fresh".into(),
             }),
         )
@@ -1232,7 +1232,7 @@ fn terminal_disconnect_keeps_resumption_and_host_switch_drops_old_handles() {
     let (starting, _) = reduce(
         &snapshot,
         "",
-        Event::Intent(Intent::StartAccountTerminal(op::StartAccountTerminal {
+        Event::from(Intent::StartAccountTerminal(op::StartAccountTerminal {
             handle: "test".into(),
             provider: ProviderKind::Claude,
             id: "claude:account".into(),
@@ -1296,7 +1296,7 @@ fn project_registration_navigates_only_while_current() {
     let (pending, _) = reduce(
         &previous,
         "",
-        Event::Intent(Intent::AddProject(operation.clone())),
+        Event::from(Intent::AddProject(operation.clone())),
     );
     assert_eq!(
         pending.panes.primary().navigation,
@@ -1317,7 +1317,7 @@ fn project_registration_navigates_only_while_current() {
     let (mut elsewhere, _) = reduce(
         &pending,
         "",
-        Event::Intent(Intent::NewChat {
+        Event::from(Intent::NewChat {
             cwd: "/elsewhere".into(),
         }),
     );
@@ -1355,7 +1355,7 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
     let (mut snapshot, _) = reduce(
         &snapshot,
         "",
-        Event::Intent(Intent::Submit {
+        Event::from(Intent::Submit {
             thread_id: Some(SessionRef {
                 provider: Some(ProviderKind::Codex),
                 id: "thread".into(),
@@ -1490,7 +1490,7 @@ fn unknown_submission_waits_for_host_confirmation_before_restoration_or_discard(
             client_user_message_id: "306afbe0-7249-5f3d-afe0-f9d56e1de6d8".into(),
         },
     ] {
-        let (next, effects) = reduce(&snapshot, "", Event::Intent(intent));
+        let (next, effects) = reduce(&snapshot, "", Event::from(intent));
         assert_eq!(
             effects.len(),
             1,
@@ -1543,7 +1543,7 @@ fn unresolved_submission_actions_ignore_known_delivery_states() {
             client_user_message_id: "192867ea-8fe3-5a20-bf00-78605e31a020".into(),
         },
     ] {
-        let (next, effects) = reduce(&snapshot, "", Event::Intent(intent));
+        let (next, effects) = reduce(&snapshot, "", Event::from(intent));
         assert!(effects.is_empty());
         assert_eq!(next, snapshot);
     }
@@ -1555,7 +1555,7 @@ fn file_navigation_rejects_empty_and_relative_paths_before_rpc() {
         let (snapshot, effects) = reduce(
             &Snapshot::default(),
             "",
-            Event::Intent(agent_core::state::Intent::ListFiles(op::ListFiles {
+            Event::from(agent_core::state::Intent::ListFiles(op::ListFiles {
                 path: path.into(),
             })),
         );
@@ -1581,7 +1581,7 @@ fn file_navigation_rejects_empty_and_relative_paths_before_rpc() {
         let (snapshot, effects) = reduce(
             &Snapshot::default(),
             "",
-            Event::Intent(agent_core::state::Intent::ListFiles(op::ListFiles {
+            Event::from(agent_core::state::Intent::ListFiles(op::ListFiles {
                 path: path.into(),
             })),
         );
@@ -1618,7 +1618,7 @@ fn editing_a_file_shares_other_drafts_and_preserves_previous_snapshots() {
     let (edited, effects) = reduce(
         &original,
         "",
-        Event::Intent(op::Intent::SetFileDraft {
+        Event::from(op::Intent::SetFileDraft {
             path: "/edited".into(),
             text: "after".into(),
         }),
@@ -1654,7 +1654,7 @@ fn empty_directory_chat_keeps_its_draft_separate_from_the_list() {
     let (opened, _) = reduce(
         &previous,
         "",
-        Event::Intent(op::Intent::NewChat { cwd: String::new() }),
+        Event::from(op::Intent::NewChat { cwd: String::new() }),
     );
     let key = opened.panes.primary().navigation.draft_key.clone();
     assert_ne!(
@@ -1664,16 +1664,16 @@ fn empty_directory_chat_keeps_its_draft_separate_from_the_list() {
     let (edited, _) = reduce(
         &opened,
         "",
-        Event::Intent(op::Intent::SetDraftText {
+        Event::from(op::Intent::SetDraftText {
             thread_id: key.clone(),
             text: "keep".into(),
         }),
     );
-    let (listed, _) = reduce(&edited, "", Event::Intent(op::Intent::ShowThreadList));
+    let (listed, _) = reduce(&edited, "", Event::from(op::Intent::ShowThreadList));
     let (reopened, _) = reduce(
         &listed,
         "",
-        Event::Intent(op::Intent::NewChat { cwd: String::new() }),
+        Event::from(op::Intent::NewChat { cwd: String::new() }),
     );
     assert_eq!(reopened.panes.primary().navigation.draft_key, key);
     assert_eq!(reopened.input.drafts[&key].text, "keep");

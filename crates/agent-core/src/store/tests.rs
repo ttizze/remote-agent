@@ -94,7 +94,7 @@ fn shared_operation_failures_remain_visible_after_navigation() {
         let (snapshot, _) = crate::state::reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/another".into(),
             }),
         );
@@ -943,11 +943,11 @@ async fn older_dispatched_list_cannot_replace_newer_published_work() {
     // out of order after newer work has already been published.
     let older = apply(
         &publications,
-        Event::Intent(Intent::ListSessions(Default::default())),
+        Event::from(Intent::ListSessions(Default::default())),
     );
     let newer = apply(
         &publications,
-        Event::Intent(Intent::ListSessions(Default::default())),
+        Event::from(Intent::ListSessions(Default::default())),
     );
     let mut receipts = Vec::new();
     for effects in [newer, older] {
@@ -1010,7 +1010,7 @@ async fn a_full_command_queue_keeps_the_draft_and_all_submission_state() {
     let mut initial = reduce(
         &Snapshot::default(),
         "",
-        Event::Intent(Intent::NewChat {
+        Event::from(Intent::NewChat {
             cwd: "/project".into(),
         }),
     )

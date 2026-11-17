@@ -154,6 +154,7 @@ struct Target {
     host: String,
     pane: Option<u64>,
     draft: DraftKey,
+    input: DraftKey,
     storage: String,
     cwd: String,
     home: Option<String>,
@@ -234,13 +235,18 @@ pub(crate) fn file_paths(blocks: &[MarkdownBlock]) -> Vec<String> {
 pub(crate) fn target(connection: Connection) -> Memo<String> {
     computed(move || {
         let scope = connection.scope.get();
-        let (cwd, provider) = connection
-            .composer
-            .with(|c| (c.controls.navigation.cwd.clone(), c.controls.provider));
+        let (cwd, provider, input) = connection.composer.with(|c| {
+            (
+                c.controls.navigation.cwd.clone(),
+                c.controls.provider,
+                c.controls.navigation.draft_key.clone(),
+            )
+        });
         serde_json::to_string(&Target {
             host: scope.host,
             storage: scope.storage,
             draft: scope.draft,
+            input,
             pane: connection.pane,
             cwd,
             home: connection.context.with(|c| c.home()),
@@ -269,14 +275,14 @@ pub(crate) fn action(surroundings: Surroundings, data: &Value) {
                 && connection.pane == target.pane
                 && connection
                     .publication
-                    .with_untracked(|p| p.composer.controls.navigation.draft_key == target.draft);
+                    .with_untracked(|p| p.composer.controls.navigation.draft_key == target.input);
             connection.client.with(|client| {
                 client.dispatch(
                     &target.host,
                     target.pane,
                     Intent::QuoteSelection {
                         storage_scope: target.storage,
-                        thread_id: target.draft,
+                        thread_id: target.input,
                         text: text.into(),
                     },
                 )
@@ -323,7 +329,11 @@ impl Target {
             link,
             cwd: self.cwd,
             home: self.home,
-            host: self.host,
+            scope: PanelScope {
+                host: self.host,
+                storage: self.storage,
+                draft: self.input,
+            },
         }
     }
 }

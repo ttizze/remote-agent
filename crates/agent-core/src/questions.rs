@@ -127,7 +127,11 @@ pub(crate) fn act(
     let RequestBody::Question { questions } = &request.body else {
         return None;
     };
-    if request.delivery != RequestDelivery::Awaiting {
+    if request.delivery != RequestDelivery::Awaiting
+        || snapshot.operation_running(crate::state::operations::OperationKey::Request {
+            id: request_id.clone(),
+        })
+    {
         return None;
     }
     let saved = snapshot
@@ -203,6 +207,8 @@ pub struct QuestionPrompt {
     pub can_respond: bool,
     pub can_go_back: bool,
     pub action: String,
+    /// T3's compact visible label and the full accessible action are distinct.
+    pub accessibility_action: String,
     pub can_advance: bool,
 }
 
@@ -227,6 +233,9 @@ impl Snapshot {
         let answer = draft.answers.get(&question.id).cloned().unwrap_or_default();
         let can_respond = request.delivery == RequestDelivery::Awaiting;
         let last = index + 1 == questions.len();
+        let submitting = self.operation_running(crate::state::operations::OperationKey::Request {
+            id: request.id.clone(),
+        });
         let presented =
             crate::presentation::conversation::request(self.catalog.ui_language, request);
         Some(QuestionPrompt {
@@ -238,10 +247,12 @@ impl Snapshot {
             placeholder: self
                 .catalog
                 .ui_language
-                .text(if question.allow_free_text {
-                    "回答を入力（空欄なら選んだ選択肢で回答）"
-                } else {
+                .text(if !question.allow_free_text {
                     "上の選択肢から選んでください"
+                } else if question.choices.is_empty() {
+                    "question.answer.placeholder"
+                } else {
+                    "回答を入力（空欄なら選んだ選択肢で回答）"
                 })
                 .into(),
             can_respond,
@@ -249,10 +260,25 @@ impl Snapshot {
             action: self
                 .catalog
                 .ui_language
-                .text(if last {
+                .text(if submitting {
+                    "question.submitting"
+                } else if last {
                     "回答を送信"
                 } else {
                     "次の質問"
+                })
+                .into(),
+            accessibility_action: self
+                .catalog
+                .ui_language
+                .text(if submitting {
+                    "question.submitting"
+                } else if !last {
+                    "question.next.accessibility"
+                } else if index > 0 {
+                    "question.submit-all.accessibility"
+                } else {
+                    "question.submit.accessibility"
                 })
                 .into(),
             can_advance: can_respond
@@ -288,6 +314,7 @@ mod tests {
                     id: format!("{id}/{choice}"),
                     label: choice.into(),
                     description: String::new(),
+                    preview: None,
                 })
                 .into(),
         }
@@ -389,6 +416,100 @@ mod tests {
             assert_eq!(chosen.input.drafts[&session().into()].text, expected);
             assert_eq!(chosen.question_prompt(session()).unwrap().text, "");
         }
+    }
+
+    #[test]
+    fn placeholders_distinguish_text_only_options_and_forbidden_free_text() {
+        for (has_choices, free_text, expected) in [
+            (false, true, "Type your answer"),
+            (
+                true,
+                true,
+                "Enter your answer (leave blank to answer with the chosen option)",
+            ),
+            (true, false, "Choose an option above"),
+            (false, false, "Choose an option above"),
+        ] {
+            let mut question = question("prompt", false, free_text);
+            if !has_choices {
+                question.choices.clear();
+            }
+            let mut snapshot = snapshot(vec![question], RequestDelivery::Awaiting, "");
+            snapshot.catalog.ui_language = crate::localization::UiLanguage::English;
+            assert_eq!(
+                snapshot.question_prompt(session()).unwrap().placeholder,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn question_actions_keep_visible_labels_and_full_accessible_names() {
+        use crate::{
+            localization::UiLanguage,
+            state::operations::{OperationKey, OperationPhase, OperationState},
+        };
+        let mut snapshot = snapshot(
+            vec![question("one", true, true), question("two", true, true)],
+            RequestDelivery::Awaiting,
+            "",
+        );
+        snapshot.catalog.ui_language = UiLanguage::English;
+        let prompt = snapshot.question_prompt(session()).unwrap();
+        assert_eq!(
+            (prompt.action.as_str(), prompt.accessibility_action.as_str()),
+            ("Next", "Next question")
+        );
+        act_on(
+            &mut snapshot,
+            QuestionAction::Edit {
+                text: "first answer".into(),
+            },
+        );
+        act_on(&mut snapshot, QuestionAction::Advance);
+        let prompt = snapshot.question_prompt(session()).unwrap();
+        assert_eq!(
+            (prompt.action.as_str(), prompt.accessibility_action.as_str()),
+            ("Submit", "Submit answers")
+        );
+        Arc::make_mut(&mut snapshot.operations).insert(
+            OperationKey::Request {
+                id: "request".into(),
+            },
+            OperationState {
+                generation: 1,
+                phase: OperationPhase::Running,
+            },
+        );
+        let prompt = snapshot.question_prompt(session()).unwrap();
+        assert_eq!(
+            (prompt.action.as_str(), prompt.accessibility_action.as_str()),
+            ("Submitting...", "Submitting...")
+        );
+        snapshot.operations = Default::default();
+        act_on(&mut snapshot, QuestionAction::Back);
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.sessions.conversations)
+                .get_mut(&session())
+                .unwrap(),
+        );
+        let request = Arc::make_mut(
+            thread
+                .requests
+                .get_mut(&RequestId::from("request"))
+                .unwrap(),
+        );
+        let RequestBody::Question { questions } = &mut request.body else {
+            unreachable!()
+        };
+        questions.truncate(1);
+        assert_eq!(
+            snapshot
+                .question_prompt(session())
+                .unwrap()
+                .accessibility_action,
+            "Submit answer"
+        );
     }
 
     #[test]

@@ -233,6 +233,16 @@ impl AgentStore {
 }
 
 impl AgentStore {
+    /// Rust UI callers carry the displayed scope to the Store's admission lock.
+    pub fn dispatch_scoped(
+        &self,
+        scope: crate::store::DispatchScope,
+        intent: Intent,
+    ) -> Result<Arc<Receipt>, AgentError> {
+        let receipt = self.store.dispatch_scoped("", scope, intent);
+        Ok(Receipt::new(async move { receipt.await.map_err(error) }))
+    }
+
     pub(crate) fn set_connection_active(&self, active: bool) {
         self.connection_active.send_replace(active);
     }
@@ -374,9 +384,7 @@ impl AgentStore {
     /// Enqueue synchronously; native task scheduling cannot reorder UI intents.
     pub fn dispatch(&self, intent: Intent) -> Result<Arc<Receipt>, AgentError> {
         let receipt = self.store.dispatch(intent);
-        Ok(Arc::new(Receipt {
-            result: Mutex::new(Some(Box::pin(async move { receipt.await.map_err(error) }))),
-        }))
+        Ok(Receipt::new(async move { receipt.await.map_err(error) }))
     }
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {
@@ -394,6 +402,15 @@ type Completion = Pin<Box<dyn Future<Output = Result<Outcome, AgentError>> + Sen
 #[derive(uniffi::Object)]
 pub struct Receipt {
     pub(crate) result: Mutex<Option<Completion>>,
+}
+impl Receipt {
+    pub(crate) fn new(
+        result: impl Future<Output = Result<Outcome, AgentError>> + Send + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            result: Mutex::new(Some(Box::pin(result))),
+        })
+    }
 }
 #[uniffi::export(async_runtime = "tokio")]
 impl Receipt {

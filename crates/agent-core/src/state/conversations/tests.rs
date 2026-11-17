@@ -256,7 +256,7 @@ fn unsubmitted_project_drafts_keep_their_address_across_navigation_and_restorati
         crate::state::reduce(
             snapshot,
             "",
-            crate::state::Event::Intent(op::Intent::NewChat { cwd: cwd.into() }),
+            crate::state::Event::from(op::Intent::NewChat { cwd: cwd.into() }),
         )
         .0
     };
@@ -616,7 +616,7 @@ fn new_chat_after_admitting_the_first_input_allocates_an_independent_draft() {
     let first = reduce(
         &Snapshot::default(),
         "",
-        Event::Intent(Intent::NewChat {
+        Event::from(Intent::NewChat {
             cwd: "/project".into(),
         }),
     )
@@ -648,7 +648,7 @@ fn new_chat_after_admitting_the_first_input_allocates_an_independent_draft() {
     let next = reduce(
         &submitted,
         "",
-        Event::Intent(Intent::NewChat {
+        Event::from(Intent::NewChat {
             cwd: "/project".into(),
         }),
     )
@@ -665,7 +665,7 @@ fn a_rejected_first_message_returns_to_its_folder_and_merges_a_newer_draft() {
         let first = reduce(
             &Snapshot::default(),
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/project".into(),
             }),
         )
@@ -696,7 +696,7 @@ fn a_rejected_first_message_returns_to_its_folder_and_merges_a_newer_draft() {
             pending = reduce(
                 &pending,
                 "",
-                Event::Intent(Intent::NewChat {
+                Event::from(Intent::NewChat {
                     cwd: "/project".into(),
                 }),
             )
@@ -714,7 +714,7 @@ fn a_rejected_first_message_returns_to_its_folder_and_merges_a_newer_draft() {
         let elsewhere = reduce(
             &failed,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/else".into(),
             }),
         )
@@ -724,7 +724,7 @@ fn a_rejected_first_message_returns_to_its_folder_and_merges_a_newer_draft() {
         let returned = reduce(
             &saved,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/project".into(),
             }),
         )
@@ -768,7 +768,7 @@ fn a_rejected_welcome_send_restores_reachable_user_work_and_newer_typing() {
         first = reduce(
             &first,
             "",
-            Event::Intent(Intent::SetDraft {
+            Event::from(Intent::SetDraft {
                 thread_id: placeholder,
                 draft: (*draft).clone(),
             }),
@@ -798,26 +798,26 @@ fn a_rejected_welcome_send_restores_reachable_user_work_and_newer_typing() {
                 }),
             );
         }
-        let pending = reduce(&pending, "", Event::Intent(Intent::ShowThreadList)).0;
+        let pending = reduce(&pending, "", Event::from(Intent::ShowThreadList)).0;
         assert!(pending.panes.primary().navigation.draft_key.is_empty());
         let failed = reduce(&pending, "", Event::SubmissionFailed(input)).0;
         assert_eq!(failed.panes.primary().navigation.draft_key, key);
         let elsewhere = reduce(
             &failed,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/else".into(),
             }),
         )
         .0;
         let restored =
             crate::persistence::decode(&crate::persistence::encode(&elsewhere).unwrap()).unwrap();
-        let returned = reduce(&restored, "", Event::Intent(Intent::ShowThreadList)).0;
+        let returned = reduce(&restored, "", Event::from(Intent::ShowThreadList)).0;
         assert_eq!(returned.panes.primary().navigation.draft_key, key);
         let mut returned = returned;
         let pane = Arc::make_mut(returned.panes.get_mut("").unwrap());
         Arc::make_mut(&mut pane.workspace).review_cwd = Some("/temporary-review".into());
-        let returned = reduce(&returned, "", Event::Intent(Intent::ShowThreadList)).0;
+        let returned = reduce(&returned, "", Event::from(Intent::ShowThreadList)).0;
         assert!(returned.panes.primary().workspace.review_cwd.is_none());
         assert_eq!(returned.panes.primary().navigation.draft_key, key);
         let recovered = &returned.input.drafts[&key];

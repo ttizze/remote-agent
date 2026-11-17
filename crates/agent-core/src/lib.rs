@@ -19,6 +19,7 @@ pub mod questions;
 pub mod recording;
 pub mod state;
 pub mod store;
+mod text;
 pub mod updates;
 
 #[cfg(feature = "bindings")]

@@ -156,7 +156,8 @@ impl Snapshot {
         model: Option<&ModelRef>,
     ) -> Option<ProviderKind> {
         model.map(|model| model.provider).or_else(|| match key {
-            crate::state::DraftKey::Session { session } => self
+            crate::state::DraftKey::Session { session }
+            | crate::state::DraftKey::Queued { session, .. } => self
                 .thread_metadata(session)
                 .and_then(|thread| thread.active_provider)
                 .or(session.provider),
@@ -611,7 +612,7 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let (next, _) = reduce(&snapshot, "", Event::Intent(Intent::NewChat { cwd: "/project".into() }));
+            let (next, _) = reduce(&snapshot, "", Event::from(Intent::NewChat { cwd: "/project".into() }));
             let key = next.panes.primary().navigation.draft_key.clone();
             proptest::prop_assert_eq!(next.model_provider_for_draft(key.clone()), Some(provider));
             proptest::prop_assert_eq!(next.input.drafts[&key].model.as_ref().unwrap().provider, provider);
@@ -641,7 +642,7 @@ mod tests {
             let (snapshot, _) = reduce(
                 &snapshot,
                 "",
-                Event::Intent(Intent::NewChat {
+                Event::from(Intent::NewChat {
                     cwd: "/project".into(),
                 }),
             );
@@ -649,7 +650,7 @@ mod tests {
             let (snapshot, _) = reduce(
                 &snapshot,
                 "",
-                Event::Intent(Intent::SetDraftText {
+                Event::from(Intent::SetDraftText {
                     thread_id: key.clone(),
                     text: "keep this input".into(),
                 }),
@@ -659,7 +660,7 @@ mod tests {
             let (next, effects) = reduce(
                 &snapshot,
                 "",
-                Event::Intent(Intent::Submit {
+                Event::from(Intent::Submit {
                     thread_id: None,
                     client_user_message_id: "input".into(),
                     alternate: false,

@@ -1,5 +1,5 @@
 //! The work a conversation waits on after its agent answered, as T3 Code's
-//! composer strip names it:
+//! background status names it:
 //! https://github.com/pingdotgg/t3code/blob/dac8b11ddc25bd5da62a367fdb6c3de777ae2986/packages/client-runtime/src/state/threadExecution.ts#L290
 use crate::localization::UiLanguage;
 use agent_protocol::execution::{
@@ -26,8 +26,10 @@ pub struct BackgroundWorkItem {
 }
 
 impl BackgroundWork {
-    pub fn new(tasks: &[BackgroundTask]) -> Option<Self> {
-        if tasks.is_empty() {
+    pub fn new(tasks: &[BackgroundTask], foreground_working: bool) -> Option<Self> {
+        // T3 useThreadLifecycle shows pending background tasks only while the
+        // foreground is idle. A new foreground turn owns its own stop control.
+        if foreground_working || tasks.is_empty() {
             return None;
         }
         let mut items: Vec<_> = tasks
@@ -334,6 +336,7 @@ mod tests {
                     description: description.map(str::to_owned),
                 })
                 .collect::<Vec<_>>(),
+            false,
         )
         .unwrap()
     }
@@ -408,7 +411,18 @@ mod tests {
 
     #[test]
     fn nothing_running_presents_no_work() {
-        assert_eq!(BackgroundWork::new(&[]), None);
+        assert_eq!(BackgroundWork::new(&[], false), None);
+    }
+
+    #[test]
+    fn background_status_does_not_replace_a_foreground_turns_status() {
+        let tasks = [BackgroundTask {
+            id: "server".into(),
+            kind: Command,
+            description: Some("npm run dev".into()),
+        }];
+        assert!(BackgroundWork::new(&tasks, false).is_some());
+        assert_eq!(BackgroundWork::new(&tasks, true), None);
     }
 
     #[test]
@@ -468,18 +482,21 @@ mod tests {
             work.description(Japanese).as_deref(),
             Some("Explore、Review、npm run dev、モニター")
         );
-        let commands = super::BackgroundWork::new(&[
-            BackgroundTask {
-                id: "a".into(),
-                kind: Command,
-                description: None,
-            },
-            BackgroundTask {
-                id: "b".into(),
-                kind: Command,
-                description: None,
-            },
-        ])
+        let commands = super::BackgroundWork::new(
+            &[
+                BackgroundTask {
+                    id: "a".into(),
+                    kind: Command,
+                    description: None,
+                },
+                BackgroundTask {
+                    id: "b".into(),
+                    kind: Command,
+                    description: None,
+                },
+            ],
+            false,
+        )
         .unwrap();
         assert!(
             !commands.waiting,

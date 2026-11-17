@@ -19,8 +19,9 @@ struct ConversationPresentation: Sendable {
     static func project(_ rendered: RenderedConversation, scope: PanelScope,
                         expansion: [String: String], previous: Self?) -> Self {
         let projection = ConversationRows.project(
-            source: rendered, scope: scope, expansion: expansion,
-            policy: ConversationRowPolicy(requests: false, progress: .hidden), previous: previous?.projection
+            style: TimelineStyle(terminalWork: .settled, plans: .card, groupSubagents: false, backgroundFooter: false),
+            source: rendered, scope: scope, queue: nil, expansion: expansion,
+            previous: previous?.projection
         )
         if let previous, projection.unchanged(other: previous.projection) {
             return previous

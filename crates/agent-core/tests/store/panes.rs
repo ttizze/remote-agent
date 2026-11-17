@@ -627,6 +627,11 @@ async fn changing_host_storage_keeps_secondary_new_chat_drafts_separate() {
     );
     for pane in &panes {
         let view = changed.panes.get(pane.id()).unwrap();
+        assert_ne!(
+            view.epoch,
+            before.panes.get(pane.id()).unwrap().epoch,
+            "changing Host storage invalidates the pane's outstanding callbacks"
+        );
         let expected = pane
             .snapshot()
             .unwrap()
@@ -644,7 +649,7 @@ async fn changing_host_storage_keeps_secondary_new_chat_drafts_separate() {
         let navigated = agent_core::state::reduce(
             &changed,
             pane.id(),
-            agent_core::state::Event::Intent(Intent::NewChat {
+            agent_core::state::Event::from(Intent::NewChat {
                 cwd: "/same".into(),
             }),
         )

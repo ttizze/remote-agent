@@ -1,6 +1,5 @@
 use super::*;
 use agent_protocol::{
-    composer::{Invocation, InvocationKind},
     conversation::{Command, records},
     ids::ClientInputId,
     session::{PreparationStatus, SessionRef},
@@ -136,7 +135,7 @@ impl Operation for ResolveSavedInput {
                 let (provider, input, fresh_context) = self
                     .unresolved(snapshot)
                     .map_err(|error| error.to_string())?;
-                let draft = recover_draft(input, provider, fresh_context)?;
+                let draft = crate::composer::input::from_body(input, provider, fresh_context)?;
                 Arc::make_mut(&mut snapshot.input.input_recoveries).insert(
                     self.input.clone(),
                     Arc::new(InputRecovery {
@@ -331,78 +330,6 @@ impl Operation for ResolveLocalInput {
             }
         }
     }
-}
-
-fn recover_draft(
-    body: &agent_protocol::orchestration::TurnItemBody,
-    provider: crate::session::ProviderKind,
-    fresh_context: bool,
-) -> Result<Draft, String> {
-    use agent_protocol::{items::MessagePart, orchestration::TurnItemBody};
-    let TurnItemBody::UserMessage {
-        text,
-        attachments,
-        context,
-        ..
-    } = body
-    else {
-        return Err("input is not a user message".into());
-    };
-    let mut draft = Draft {
-        text: text.clone(),
-        fresh_context,
-        ..Default::default()
-    };
-    for (attachment, part) in attachments
-        .iter()
-        .zip(crate::orchestration::attachment_parts(attachments)?)
-    {
-        let name = attachment["name"]
-            .as_str()
-            .ok_or("attachment name is missing")?
-            .to_owned();
-        match part {
-            MessagePart::Image { source } => draft.attachments.push(Attachment {
-                name,
-                path: source,
-                is_image: true,
-            }),
-            MessagePart::Attachment { path, .. } => draft.attachments.push(Attachment {
-                name,
-                path,
-                is_image: false,
-            }),
-            _ => unreachable!("attachments contain image or file references"),
-        }
-    }
-    for part in crate::orchestration::context_parts(context.as_ref()) {
-        match part {
-            MessagePart::Invocation { name, path } => draft.invocations.push(Invocation {
-                provider,
-                kind: InvocationKind::Skill,
-                name,
-                path,
-            }),
-            MessagePart::Attachment { name, path }
-                if agent_protocol::composer::is_plugin_path(&path) =>
-            {
-                draft.invocations.push(Invocation {
-                    provider,
-                    kind: InvocationKind::Plugin,
-                    name,
-                    path,
-                })
-            }
-            MessagePart::Attachment { name, path } => draft.attachments.push(Attachment {
-                name,
-                path,
-                is_image: false,
-            }),
-            MessagePart::Context { context } => draft.contexts.push(*context),
-            _ => unreachable!("context records are mentions, skills or contexts"),
-        }
-    }
-    Ok(draft)
 }
 
 #[cfg(test)]
@@ -649,7 +576,7 @@ mod tests {
                 client_user_message_id: input.clone(),
             }
         };
-        let (_, effects) = super::super::super::super::reduce(&snapshot, "", Event::Intent(intent));
+        let (_, effects) = super::super::super::super::reduce(&snapshot, "", Event::from(intent));
         assert_eq!(
             effects.len(),
             1,

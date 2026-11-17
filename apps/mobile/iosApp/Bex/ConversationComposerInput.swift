@@ -6,8 +6,11 @@ struct ComposerMessageField: View {
     @FocusState.Binding var composerFocused: Bool
 
     var body: some View {
+        let inputKey = model.inputDraftKey
+        let inputScope = model.snapshot.panelScope(host: model.host, draft: inputKey)
         BufferedTextInput(value: Binding(get: { model.draft }, set: {
-            model.perform(.editComposer(threadId: model.coreDraftKey, text: $0, cursor: UInt32($0.utf8.count)))
+            guard model.snapshot.panelScope(host: model.host, draft: model.inputDraftKey) == inputScope else { return }
+            model.perform(.editComposer(threadId: inputKey, text: $0, cursor: UInt32($0.utf8.count)))
         })) { input in
             VStack(alignment: .leading, spacing: 8) {
                 let suggestions = model.composer.composerSuggestions(
@@ -28,7 +31,7 @@ struct ComposerMessageField: View {
                                     ) {
                                         input.wrappedValue = inserted.text
                                         model.perform(.insertInvocation(
-                                            threadId: model.coreDraftKey,
+                                            threadId: inputKey,
                                             text: inserted.text,
                                             invocation: candidate.invocation
                                         ))
@@ -126,8 +129,9 @@ struct ComposerStopButton: View {
 }
 
 extension ConversationModel {
-    func interrupt(_ turnId: String) {
-        guard let threadId = selectedThreadId else { return }
+    func interrupt(_ turnId: String, scope: PanelScope) {
+        guard snapshot.panelScope(host: host, draft: coreDraftKey) == scope,
+              composer.canInterrupt(turn: turnId), let threadId = selectedThreadId else { return }
         perform(.interrupt(Interrupt(threadId: threadId, turnId: turnId)))
     }
 }

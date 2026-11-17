@@ -13,6 +13,13 @@ use std::{
 
 pub const STASH_LIMIT: usize = 20;
 
+pub(crate) fn has_content(draft: &Draft) -> bool {
+    !draft.text.trim().is_empty()
+        || !draft.attachments.is_empty()
+        || !draft.invocations.is_empty()
+        || !draft.contexts.is_empty()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct StashedPrompt {
@@ -64,11 +71,7 @@ pub(crate) fn change(
             }))
         }
         StashAction::Save { id, created_at_ms } => {
-            if draft.text.trim().is_empty()
-                && draft.attachments.is_empty()
-                && draft.invocations.is_empty()
-                && draft.contexts.is_empty()
-            {
+            if !has_content(draft) {
                 return Ok(None);
             }
             if busy {
@@ -541,7 +544,7 @@ mod tests {
         let (mut state, _) = reduce(
             &Snapshot::default(),
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/project".into(),
             }),
         );
@@ -549,7 +552,7 @@ mod tests {
         let key = state.panes.primary().navigation.draft_key.clone();
         Arc::make_mut(&mut state.input.drafts).insert(key.clone(), Arc::new(content()));
         let intent = |scope: &str, action| {
-            Event::Intent(Intent::Stash {
+            Event::from(Intent::Stash {
                 storage_scope: scope.into(),
                 thread_id: key.clone(),
                 action,
@@ -595,7 +598,7 @@ mod tests {
         let (mut initial, _) = reduce(
             &Snapshot::default(),
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/project".into(),
             }),
         );

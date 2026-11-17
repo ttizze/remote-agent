@@ -6,6 +6,6 @@ import dev.remoteagent.core.Terminals
 
 internal class ConversationActions(
     val perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    val toggleActivity: (String) -> Unit,
+    val toggleDisclosure: (String) -> Unit,
     val terminals: Terminals,
 )

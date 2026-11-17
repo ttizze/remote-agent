@@ -941,7 +941,7 @@ mod tests {
         snapshot = agent_core::state::reduce(
             &snapshot,
             "",
-            agent_core::state::Event::Intent(Intent::NewChat { cwd: "/new".into() }),
+            agent_core::state::Event::from(Intent::NewChat { cwd: "/new".into() }),
         )
         .0;
         let after = snapshot.panel_scope(
@@ -982,7 +982,7 @@ mod tests {
             snapshot = agent_core::state::reduce(
                 &snapshot,
                 "",
-                agent_core::state::Event::Intent(Intent::SetDraft {
+                agent_core::state::Event::from(Intent::SetDraft {
                     thread_id: before.draft.clone(),
                     draft: agent_core::state::Draft {
                         text: "welcome".into(),
@@ -1016,8 +1016,7 @@ mod tests {
                 Intent::NewChat { cwd: String::new() }
             };
             snapshot =
-                agent_core::state::reduce(&snapshot, "", agent_core::state::Event::Intent(intent))
-                    .0;
+                agent_core::state::reduce(&snapshot, "", agent_core::state::Event::from(intent)).0;
             let after = snapshot.panel_scope(
                 host.clone(),
                 snapshot.panes.primary().navigation.draft_key.clone(),
@@ -1033,7 +1032,7 @@ mod tests {
                 snapshot = agent_core::state::reduce(
                     &snapshot,
                     "",
-                    agent_core::state::Event::Intent(Intent::ShowThreadList),
+                    agent_core::state::Event::from(Intent::ShowThreadList),
                 )
                 .0;
                 state.receive(Update::Presentation {
@@ -1270,7 +1269,7 @@ mod tests {
         snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/repo".into(),
             }),
         )
@@ -1306,7 +1305,7 @@ mod tests {
         snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/repo".into(),
             }),
         )
@@ -1341,7 +1340,7 @@ mod tests {
         snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::SetProjectHidden {
+            Event::from(Intent::SetProjectHidden {
                 project_id: "repo".into(),
                 hidden: true,
             }),
@@ -1351,7 +1350,7 @@ mod tests {
         snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/other".into(),
             }),
         )
@@ -1365,7 +1364,7 @@ mod tests {
         snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::SetProjectHidden {
+            Event::from(Intent::SetProjectHidden {
                 project_id: "repo".into(),
                 hidden: false,
             }),
@@ -1386,7 +1385,7 @@ mod tests {
         snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/repo".into(),
             }),
         )
@@ -1400,7 +1399,7 @@ mod tests {
         snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/other".into(),
             }),
         )
@@ -1418,7 +1417,7 @@ mod tests {
         snapshot = reduce(
             &snapshot,
             "",
-            Event::Intent(Intent::NewChat {
+            Event::from(Intent::NewChat {
                 cwd: "/outside".into(),
             }),
         )
@@ -1478,13 +1477,13 @@ mod tests {
         let a = reduce(
             &base,
             "",
-            Event::Intent(Intent::ReadThread(op::ReadThread::open(target.clone()))),
+            Event::from(Intent::ReadThread(op::ReadThread::open(target.clone()))),
         )
         .0;
         let b = reduce(
             &base,
             "",
-            Event::Intent(Intent::ReadThread(op::ReadThread::open(old))),
+            Event::from(Intent::ReadThread(op::ReadThread::open(old))),
         )
         .0;
         let publish = |host: &str, snapshot: &Snapshot| {
@@ -1516,7 +1515,7 @@ mod tests {
         let opened = reduce(
             &b,
             "",
-            Event::Intent(Intent::ReadThread(op::ReadThread::open(target.clone()))),
+            Event::from(Intent::ReadThread(op::ReadThread::open(target.clone()))),
         )
         .0;
         assert_eq!(

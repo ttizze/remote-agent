@@ -43,7 +43,7 @@ struct ConversationWorkspacePicker: View {
     }
 
     private func select(_ workspace: WorkspaceStrategy) {
-        model.perform(.selectWorkspace(threadId: model.coreDraftKey, workspace: workspace))
+        model.perform(.selectWorkspace(threadId: model.inputDraftKey, workspace: workspace))
     }
 }
 

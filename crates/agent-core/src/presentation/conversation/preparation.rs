@@ -171,6 +171,48 @@ mod tests {
         },
     };
 
+    #[test]
+    fn stage_elapsed_omits_pending_skipped_and_missing_starts_and_freezes_at_its_end() {
+        for state in ["pending", "skipped"] {
+            assert_eq!(
+                preparation_step_elapsed(
+                    UiLanguage::English,
+                    state.into(),
+                    Some(1000),
+                    Some(4000),
+                    9000
+                ),
+                None
+            );
+        }
+        for state in ["running", "done", "failed", "warning"] {
+            assert_eq!(
+                preparation_step_elapsed(UiLanguage::English, state.into(), None, None, 9000),
+                None
+            );
+            assert_eq!(
+                preparation_step_elapsed(
+                    UiLanguage::English,
+                    state.into(),
+                    Some(1000),
+                    Some(4000),
+                    9000
+                ),
+                Some("3.0s".into())
+            );
+        }
+        assert_eq!(
+            preparation_step_elapsed(
+                UiLanguage::English,
+                "running".into(),
+                Some(1000),
+                None,
+                1999
+            ),
+            Some(String::new())
+        );
+    }
+
     fn thread() -> models::Thread {
         let id = SessionRef::new(ProviderKind::Codex, "admitted".into()).unwrap();
         models::Thread {

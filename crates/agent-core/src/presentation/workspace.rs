@@ -5,7 +5,9 @@ use crate::{
 
 /// Shared availability for controls that operate on the selected workspace.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkspaceActions {
+    pub branch: String,
     pub controls: WorkspaceControls,
     pub can_change: bool,
     pub can_push: bool,
@@ -29,6 +31,9 @@ pub fn workspace_actions(snapshot: &Snapshot, pane_id: &str) -> WorkspaceActions
         .filter(|_| pane.workspace.review_cwd.as_ref() == Some(&pane.navigation.cwd));
     let controls = review.map(|r| r.controls.clone()).unwrap_or_default();
     WorkspaceActions {
+        branch: review
+            .map(|review| review.branch.clone())
+            .unwrap_or_default(),
         can_change: ready && review.is_some(),
         can_push: ready && controls.can_push && !controls.remotes.is_empty(),
         controls,

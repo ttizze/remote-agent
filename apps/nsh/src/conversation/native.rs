@@ -1,6 +1,7 @@
 //! Native transcript contract: native viewports own scrolling, reuse and text selection.
 use super::*;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 mod document;
 pub(crate) use document::TaskPresses;
@@ -104,7 +105,7 @@ pub(super) fn project_row(
     let mut body = if matches!(row.shape, Shape::Plan) {
         row.note.to_string()
     } else if let Some(agent) = &row.agent {
-        agent.message.clone()
+        agent.detail(agent.status).unwrap_or_default()
     } else {
         row.body.to_string()
     };
@@ -159,9 +160,7 @@ pub(super) fn project_row(
         if let Some(details) = &error.details {
             parts.push(crate::rich_text::plain(details.clone(), Some(0xaaaaaa)));
         }
-    } else if let Some(agent) = &row.agent {
-        parts = vec![crate::rich_text::plain(agent.message.clone(), None)];
-    } else if row.notification.is_some() {
+    } else if row.agent.is_some() || row.notification.is_some() {
         parts = vec![crate::rich_text::plain(body.clone(), None)];
     }
     let focus = row.progress.is_some()
@@ -482,7 +481,6 @@ pub(super) fn view(timeline: Timeline) -> impl IntoElement {
         scope.get();
         timeline.following.set(true);
         timeline.expanded.set(HashMap::new());
-        timeline.groups.set(HashSet::new());
         timeline.inset.set(timeline.covered.get_untracked());
         opened.set(HashSet::new());
         agents.with(HashSet::clear);
@@ -821,25 +819,10 @@ fn handle_row(
                 );
             }
         }
-        "fold" => {
-            if let Some(activity) = row.activity {
-                let opening = !matches!(row.shape, Shape::Fold { open: true });
-                timeline.set_activity(activity, opening);
+        "fold" | "group" => {
+            if let Some(load) = timeline.toggle_group(row.id) {
+                connection.dispatch(load);
             }
-        }
-        "group" => {
-            if matches!(row.shape, Shape::Group { open: false })
-                && let Some(attempt) = row
-                    .id
-                    .strip_prefix("attempt:")
-                    .and_then(|id| id.parse().ok())
-                && let Some(thread_id) = connection
-                    .context
-                    .with_untracked(|p| p.navigation().thread_id)
-            {
-                connection.dispatch(Intent::ReadAttempt { thread_id, attempt });
-            }
-            timeline.toggle_group(row.id);
         }
         "item" => {
             if let Some(item) = row.detail {
@@ -1150,6 +1133,7 @@ fn operation_display(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn native_messages_keep_their_structured_context_and_original_item_identity() {
@@ -1225,6 +1209,9 @@ mod tests {
             target: None,
             name: row.body.to_string(),
             message: "Checking the tests".into(),
+            model: None,
+            effort: None,
+            result: None,
             status: TurnStatus::Running,
         });
         let shown = project_row(&row, false, "parent", "", None, true, None);
@@ -1232,6 +1219,13 @@ mod tests {
         assert_eq!(shown["buttons"][0]["title"], "Review the change");
         assert_eq!(shown["buttons"][0]["enabled"], false);
         assert_eq!(shown["agentStatus"], "running");
+        let agent = row.agent.as_mut().unwrap();
+        agent.status = TurnStatus::Completed;
+        agent.result = Some("- Reviewed `auth.rs`".into());
+        let finished = project_row(&row, false, "parent", "", None, true, None);
+        assert!(finished["parts"].to_string().contains("Reviewed auth.rs"));
+        assert!(!finished["parts"].to_string().contains("Checking the tests"));
+
         let agent = row.agent.as_mut().unwrap();
         agent.target = Some(
             agent_protocol::session::SessionRef::new(

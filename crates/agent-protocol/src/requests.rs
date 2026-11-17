@@ -99,6 +99,7 @@ pub struct QuestionChoice {
     pub id: String,
     pub label: String,
     pub description: String,
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,6 +211,10 @@ pub enum ToolContent {
 }
 
 impl RequestBody {
+    pub fn is_approval(&self) -> bool {
+        matches!(self, Self::Approval { .. } | Self::Permission { .. })
+    }
+
     pub fn choices(&self) -> &[Choice] {
         match self {
             Self::Approval { choices, .. } | Self::Permission { choices, .. } => choices,
@@ -429,6 +434,7 @@ mod tests {
                     id: choice.into(),
                     label: choice.into(),
                     description: String::new(),
+                    preview: None,
                 })
                 .into(),
         };
@@ -495,6 +501,7 @@ mod tests {
                     id: "choice".into(),
                     label: "Continue".into(),
                     description: String::new(),
+                    preview: None,
                 }],
             }],
         };

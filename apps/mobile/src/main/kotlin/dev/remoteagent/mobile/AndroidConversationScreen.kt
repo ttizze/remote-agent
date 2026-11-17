@@ -52,8 +52,6 @@ import dev.remoteagent.core.ConversationRows
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Interrupt
 import dev.remoteagent.core.Outcome
-import dev.remoteagent.core.ReadItem
-import dev.remoteagent.core.Respond
 import dev.remoteagent.core.VisibleConversationRow
 import dev.remoteagent.core.notificationText
 import java.util.UUID
@@ -66,6 +64,7 @@ internal fun ThreadDetailScreen(
     actions: ConversationActions,
     modifier: Modifier = Modifier,
     scrollToTopRequest: Int = 0,
+    dockedRequests: List<dev.remoteagent.core.Request> = emptyList(),
     composer: @Composable (() -> Unit) -> Unit,
 ) {
     val perform = actions.perform
@@ -103,15 +102,11 @@ internal fun ThreadDetailScreen(
                 }
                 val renderRow: @Composable (VisibleConversationRow) -> Unit = { projected ->
                     val row = remember(projected) { projected.data() }
-                    ConversationContent(
-                        row,
-                        context,
-                        perform,
-                        openSetupTerminal = { setupTerminal = it },
-                        activityHeader = { activity ->
-                            ActivityHeader(activity, projected.expanded()) { actions.toggleActivity(projected.id()) }
-                        },
-                    )
+                    TimelineContent(projected, { actions.toggleDisclosure(projected.id()) }) {
+                        ConversationContent(row, context, perform, { setupTerminal = it }) { activity ->
+                            ActivityHeader(activity, projected.expanded()) { actions.toggleDisclosure(projected.id()) }
+                        }
+                    }
                 }
                 conversationRows(turns, renderRow)
                 pendingInputs(queued, context.navigation().cwd, perform, recoveryExpanded) { recoveryExpanded = it }
@@ -119,6 +114,7 @@ internal fun ThreadDetailScreen(
             }
             LatestMessageButton(listState) { following = true }
         }
+        dockedRequests.forEach { request -> RequestCard(request, context, perform) }
         composer { following = true }
     }
     setupTerminal?.let { terminal ->
@@ -174,34 +170,16 @@ private fun ConversationContent(
     val timestampMs = row.timestampMs
     when (val content = row.content) {
         is ConversationRowContent.Preparation -> PreparationCard(content.preparation, perform, openSetupTerminal)
-        is ConversationRowContent.ProviderHandoff ->
-            Text(
-                content.text,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        is ConversationRowContent.Notification ->
-            Text(
-                notificationText(content.reports, language),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        is ConversationRowContent.ProviderHandoff -> ConversationStatusText(content.text)
+        is ConversationRowContent.Notification -> ConversationStatusText(notificationText(content.reports, language))
         is ConversationRowContent.User -> ThreadMessageCard(content.item, true, cwd, perform, timestampMs)
         is ConversationRowContent.Response -> ConversationResponse(content, context, perform, timestampMs)
-        is ConversationRowContent.Activity -> {
-            val item = content.item.presentation()
-            val read = threadId?.let { ReadItem(it, content.turnId, item.nativeId ?: item.id) }
-            ThreadActivityCard(content.item, cwd, perform, read, read?.let { context.itemDetail(it) })
-        }
+        is ConversationRowContent.Activity -> ThreadActivityCard(content.item, context, content.turnId, perform)
         is ConversationRowContent.ActivityHeader -> activityHeader(content.activity)
-        is ConversationRowContent.PendingRequest ->
-            RequestCard(content.request) { answer, complete ->
-                perform(Intent.Respond(Respond(content.request.id, answer))) {
-                    complete(it.exceptionOrNull()?.displayMessage())
-                }
-            }
+        is ConversationRowContent.PendingRequest -> RequestCard(content.request, context, perform)
         is ConversationRowContent.Error -> TurnErrorCard(content.error)
         is ConversationRowContent.InProgress -> TurnStopButton(threadId, content.turnId, perform)
+        else -> ConversationFooter(content)
     }
 }
 
@@ -292,7 +270,7 @@ internal fun ThreadComposer(
                     FilledIconButton(
                         onClick = {
                             onSend()
-                            perform(Intent.Submit(navigation.threadId, UUID.randomUUID().toString(), false)) {}
+                            perform(composer.submitIntent(UUID.randomUUID().toString(), false)) {}
                         },
                         enabled =
                             composer.canSend(draft.text.isNotBlank() || draft.attachments.isNotEmpty()) && !uploading,

@@ -14,16 +14,30 @@ use std::{
 mod follow;
 pub use follow::{ScrollPosition, away_from_end, follows_end};
 mod activity;
+mod announcement;
+pub use announcement::{
+    ConversationAnnouncementPhase, ConversationAnnouncementState, conversation_announcement,
+};
 pub mod attempts;
 mod images;
+mod layout;
+mod proposed_plan;
 pub mod rows;
+pub use layout::ConversationWorkGroupRange;
 mod timeline;
 pub use activity::ActivityDecoration;
-pub use timeline::{TurnRow, plan_export, turn_rows};
+pub use proposed_plan::{PlanDisplay, plan_display, plan_export, plan_write_enabled};
+pub use timeline::{PlanPresentation, SubagentMember, TimelineStyle, TurnRow, WorkDisclosure};
+use timeline::{turn_message_search_rows, turn_rows};
 mod work;
-pub use work::{LiveActivity, WorkRowLabel};
+use work::LiveActivity;
+pub use work::{WorkRowLabel, item_detail_key};
 mod row_binding;
 pub use row_binding::retained_row_index;
+#[cfg(test)]
+mod approval_tests;
+#[cfg(test)]
+mod progress_contract_tests;
 
 impl Snapshot {
     /// Display pending input before a new conversation has a server ID.
@@ -64,6 +78,7 @@ pub struct RenderedConversation {
 }
 
 pub struct RenderedTurn {
+    supports_fork: bool,
     language: UiLanguage,
     pub source: Arc<models::Turn>,
     // Native turn IDs may repeat; the occurrence also belongs to this cache entry.
@@ -83,6 +98,8 @@ pub struct ConversationRow {
     pub steer: bool,
     /// A user message that waited in the queue and then started its turn.
     pub queued: bool,
+    /// The initiating user input starts a new provider session in this conversation.
+    pub fresh_context: bool,
     /// The turn "Edit from here" returns to just before: set on the message
     /// that opened a settled turn whose provider can continue from an earlier point.
     pub edit_turn_id: Option<agent_protocol::ids::TurnId>,
@@ -109,6 +126,17 @@ fn turn_key(turn: &str, occurrence: usize) -> String {
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ConversationRowContent {
+    Queue {
+        queue: Arc<super::queue::QueuePresentation>,
+    },
+    /// Current work belongs to the scrollable end of the conversation, rather
+    /// than the input. The existing background owner supplies all of its copy.
+    Background {
+        title: String,
+        description: Option<String>,
+        waiting: bool,
+        turn_id: Option<agent_protocol::ids::TurnId>,
+    },
     Preparation {
         preparation: Box<PreparationPresentation>,
     },
@@ -200,6 +228,23 @@ pub fn preparation_elapsed(language: UiLanguage, start: u64, end: Option<u64>, n
         super::duration_text(language, ms)
     }
 }
+
+/// Pending and skipped stages have no elapsed clock. Other stages retain the
+/// distinction between an absent start and a duration below the display unit.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn preparation_step_elapsed(
+    language: UiLanguage,
+    state: String,
+    start: Option<u64>,
+    end: Option<u64>,
+    now: u64,
+) -> Option<String> {
+    if matches!(state.as_str(), "pending" | "skipped") {
+        None
+    } else {
+        start.map(|start| preparation_elapsed(language, start, end, now))
+    }
+}
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ActivityPresentation {
@@ -209,91 +254,34 @@ pub struct ActivityPresentation {
     pub activity_can_collapse: bool,
     pub is_in_progress: bool,
 }
-/// A strip on T3 Code's timeline minimap.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MinimapMarker {
-    /// The timeline row of the user message it jumps to.
-    pub row: usize,
-    /// Whether its message is among the rows in view, which lights the strip.
-    pub in_view: bool,
-    /// Where it sits from the rail's top.
-    pub top: f32,
+mod user_message;
+pub use user_message::*;
+
+/// A settled response with no body says so; an unfinished body stays empty.
+fn assistant_response_text(text: &str, streaming: bool) -> &str {
+    if text.is_empty() && !streaming {
+        "(empty response)"
+    } else {
+        text
+    }
 }
 
-/// The rail's spacing between strips, as T3 Code's.
-const MINIMAP_STRIP_SPACING: f32 = 8.;
-
-/// T3 Code's `shouldCollapseUserMessage`: a sent message folds past eight
-/// lines or 600 characters of what it reads as, its links by their labels.
-pub fn should_collapse_user_message(text: &str) -> bool {
-    let visible = link_labels(text);
-    !visible.trim().is_empty()
-        && (visible.encode_utf16().count() > 600 || visible.split('\n').count() > 8)
-}
-
-/// Sent images stand on their own when the message has no words or file labels.
-pub fn shows_user_message_bubble(text: &str, has_images: bool) -> bool {
-    !has_images || !text.trim().is_empty()
-}
+mod minimap;
+pub use minimap::*;
 
 mod search;
-pub use search::{TextMatch, find_matches};
+pub use search::{
+    TextMatch, adjacent_match_index, find_matches, format_find_count, step_find_index,
+};
 
-/// `text` with each Markdown link `[label](target)` as its label.
-fn link_labels(text: &str) -> String {
-    let mut visible = String::new();
-    let mut rest = text;
-    while let Some(open) = rest.find('[') {
-        let (before, candidate) = rest.split_at(open);
-        visible.push_str(before);
-        let link = candidate[1..].split_once("](").and_then(|(label, after)| {
-            let (_, tail) = after.split_once(')')?;
-            (!label.is_empty() && !label.contains(']')).then_some((label, tail))
-        });
-        match link {
-            Some((label, tail)) => {
-                visible.push_str(label);
-                rest = tail;
-            }
-            None => {
-                visible.push('[');
-                rest = &candidate[1..];
-            }
-        }
+/// Navigation stops at the first/last exchange and waits for a known viewport.
+pub fn minimap_adjacent_index(count: u32, current: Option<u32>, next: bool) -> Option<u32> {
+    let current = current.filter(|index| *index < count)?;
+    if next {
+        current.checked_add(1).filter(|index| *index < count)
+    } else {
+        current.checked_sub(1)
     }
-    visible + rest
-}
-
-/// How tall T3 Code's rail is for `count` strips: 8 points apart, at most
-/// `max_height` (the window's height less 18rem).
-pub fn minimap_rail_height(count: usize, max_height: f32) -> f32 {
-    (count.saturating_sub(1) as f32 * MINIMAP_STRIP_SPACING)
-        .max(1.)
-        .min(max_height.max(1.))
-}
-
-/// As T3 Code's minimap: a strip for each user message once there are two,
-/// spread evenly over the rail, each lit while its message is in `viewable`
-/// (the first and last rows in view).
-pub fn minimap_markers(
-    user_rows: &[usize],
-    viewable: Option<(usize, usize)>,
-    max_height: f32,
-) -> Vec<MinimapMarker> {
-    if user_rows.len() < 2 {
-        return Vec::new();
-    }
-    let height = minimap_rail_height(user_rows.len(), max_height);
-    let last = (user_rows.len() - 1) as f32;
-    user_rows
-        .iter()
-        .enumerate()
-        .map(|(index, &row)| MinimapMarker {
-            row,
-            in_view: viewable.is_some_and(|(first, last)| (first..=last).contains(&row)),
-            top: index as f32 / last * height,
-        })
-        .collect()
 }
 
 /// A message's time of day as T3 Code shows it in each language: `2:17 AM`,
@@ -311,6 +299,7 @@ fn time_of_day(language: UiLanguage, hour: u32, minute: u32) -> String {
 
 /// A date on the viewer's calendar.
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct CalendarDay {
     pub year: i32,
     pub month: u32,
@@ -320,6 +309,7 @@ pub struct CalendarDay {
 /// When a message was sent, as T3 Code's `formatDayAwareTimestamp`: the time
 /// today, "yesterday" the day before, and the date before that, its year only
 /// when it is not this one.
+#[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn day_aware_time(
     language: UiLanguage,
     hour: u32,
@@ -369,37 +359,6 @@ pub fn details_card_inline(canvas_width: f32, canvas_height: f32) -> bool {
         && canvas_height - DETAILS_CARD_GAP * 2. >= 160.
 }
 
-/// The side gutter T3 Code's minimap needs to stay shown.
-const MINIMAP_PERSISTENT_GUTTER: f32 = 48.;
-
-/// As T3 Code's: the minimap stays shown while the chat canvas (`canvas_width`:
-/// the conversation's whole width with its side panel, which T3 Code floats
-/// over its canvas) leaves 48 points beside a centred lane `lane_width` wide.
-/// Over narrower gutters it shows while the pointer is on it.
-pub fn minimap_persistent(canvas_width: f32, lane_width: f32) -> bool {
-    (canvas_width - lane_width.min(canvas_width)) / 2. >= MINIMAP_PERSISTENT_GUTTER
-}
-
-/// Where the strips start from the minimap's leading edge.
-pub const MINIMAP_STRIP_INSET: f32 = 12.;
-
-/// How wide the strips' pointer area is: T3 Code's 40 points at most, and,
-/// so that it never covers message text, no further than the lane, which
-/// starts `gutter` points from the minimap's edge.
-pub fn minimap_hit_width(gutter: f32) -> f32 {
-    (gutter.floor() - MINIMAP_STRIP_INSET).clamp(0., 40.)
-}
-
-/// A strip's length: T3 Code's 24 point strip, scaled toward the hovered one.
-pub fn minimap_marker_width(distance_from_hover: Option<usize>) -> f32 {
-    24. * match distance_from_hover {
-        Some(0) => 1.,
-        Some(1) => 0.667,
-        Some(2) => 0.417,
-        _ => 0.333,
-    }
-}
-
 /// Work starts collapsed. A manual choice belongs to the current status;
 /// a transition closes it again, including after deferred-detail hydration.
 pub fn activity_is_expanded(status: &str, expanded_status: Option<String>) -> bool {
@@ -441,13 +400,12 @@ impl RenderedConversation {
     }
 }
 
-/// A running turn's working row, as T3 Code's "Working for …": the time so
-/// far and, when asked for, the current work. Clients that show a live row
-/// ([`RenderedTurn::live_activity`]) read what it is doing there instead.
+/// The running turn's elapsed time and phase. Tool descriptions belong to
+/// the live work row; only compaction changes or animates the working header.
 #[derive(Clone, PartialEq)]
 pub struct WorkProgress {
     started_at: Option<f64>,
-    action: Option<String>,
+    compacting: bool,
 }
 
 impl WorkProgress {
@@ -456,43 +414,44 @@ impl WorkProgress {
         let elapsed = self.started_at.map(|started| {
             super::elapsed_text(language, ((now_seconds - started).max(0.) * 1000.) as u64)
         });
-        match (
-            elapsed,
-            self.action.as_deref().filter(|action| !action.is_empty()),
-        ) {
-            (Some(elapsed), Some(action)) => localized_ui_format(
+        match elapsed {
+            Some(elapsed) => localized_ui_format(
                 language,
-                "work.progress.action.duration".into(),
-                vec![elapsed, action.into()],
+                if self.compacting {
+                    "work.compaction.progress.duration"
+                } else {
+                    "work.progress.duration"
+                }
+                .into(),
+                vec![elapsed],
             ),
-            (Some(elapsed), None) => {
-                localized_ui_format(language, "work.progress.duration".into(), vec![elapsed])
-            }
-            (None, Some(action)) => {
-                localized_ui_format(language, "作業中 · {0}".into(), vec![action.into()])
-            }
-            (None, None) => language.text("作業中…").into(),
+            None => language
+                .text(if self.compacting {
+                    "work.compaction.progress"
+                } else {
+                    "作業中…"
+                })
+                .into(),
         }
+    }
+
+    pub fn is_compacting(&self) -> bool {
+        self.compacting
     }
 }
 
 impl RenderedTurn {
-    pub fn work_progress(&self, include_action: bool) -> WorkProgress {
-        let action = if include_action {
-            self.rows.iter().rev().find_map(|row| match &row.content {
-                ConversationRowContent::Activity { item, .. } => item.data.title.as_deref(),
-                _ => None,
-            })
-        } else {
-            None
-        };
+    pub fn work_progress(&self) -> WorkProgress {
         WorkProgress {
             started_at: self.source.started_at.or_else(|| {
                 self.source
                     .started_at_ms
                     .map(|milliseconds| milliseconds as f64 / 1000.)
             }),
-            action: action.map(str::to_owned),
+            compacting: self.source.items.iter().flatten().any(|item| {
+                item.status == models::ItemStatus::Running
+                    && matches!(item.body(), models::ItemBody::Compaction { .. })
+            }),
         }
     }
     fn items(&self) -> impl Iterator<Item = &Arc<RenderedItem>> {
@@ -527,6 +486,20 @@ pub struct RenderedItem {
     pub data: ItemPresentation,
     delivery_unknown: bool,
 }
+
+/// Specialized clients render typed context references. Classic text/export
+/// consumers retain `data.body`, whose readable fallback includes the details.
+#[derive(serde::Serialize)]
+pub struct UserMessageBody {
+    pub text: String,
+    pub images: Vec<String>,
+    pub contexts: Vec<super::message_context::ContextPresentation>,
+    pub attachments: Vec<super::message_attachment::MessageAttachment>,
+    pub attachments_only: Option<super::message_attachment::AttachmentKind>,
+}
+#[cfg(test)]
+#[path = "conversation/context_body_tests.rs"]
+mod context_body_tests;
 // Prepared bodies are immutable render resources. Reusing their identity avoids
 // comparing or preparing long Markdown bodies again in each native surface.
 impl PartialEq for RenderedItem {
@@ -534,13 +507,147 @@ impl PartialEq for RenderedItem {
         std::ptr::eq(self, other)
     }
 }
+impl RenderedItem {
+    pub fn user_message_body(
+        &self,
+        metadata: &super::files::FileMetadataCache,
+    ) -> Option<UserMessageBody> {
+        let present = |index, name: &str, path: &str| {
+            let entry = metadata.get(path).and_then(|entry| entry.metadata.as_ref());
+            super::message_attachment::attachment(
+                index,
+                name,
+                path,
+                entry.and_then(|entry| entry.byte_length),
+                entry.and_then(|entry| entry.mime_type.as_deref()),
+            )
+        };
+        let language = self.language.unwrap_or_default();
+        let (text, original, images, attachments) = match &self.source {
+            ItemSource::Native(item) => {
+                let models::ItemBody::UserMessage { text, content } = item.body() else {
+                    return None;
+                };
+                let original = body::message_text(text.as_deref(), content);
+                let text = body::message(
+                    language,
+                    text.as_deref(),
+                    content,
+                    body::ContextFormat::References,
+                );
+                let images: Vec<_> = content
+                    .iter()
+                    .filter_map(|part| match part {
+                        models::MessagePart::Image { source } => Some(source.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let attachments: Vec<_> = content
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, part)| match part {
+                        models::MessagePart::Attachment { name, path } => {
+                            Some(present(index, name, path))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                (text, original, images, attachments)
+            }
+            ItemSource::Pending(_, pending) => {
+                let text = body::draft_with_contexts(
+                    language,
+                    &pending.draft,
+                    body::ContextFormat::References,
+                )
+                .text
+                .unwrap_or_default();
+                let images = pending
+                    .draft
+                    .attachments
+                    .iter()
+                    .filter(|file| file.is_image)
+                    .map(|file| file.path.clone())
+                    .collect();
+                let attachments = pending
+                    .draft
+                    .attachments
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, file)| !file.is_image)
+                    .map(|(index, file)| present(index, &file.name, &file.path))
+                    .collect();
+                (text, pending.draft.text.clone(), images, attachments)
+            }
+        };
+        if self.data.contexts.is_empty() && attachments.is_empty() {
+            return None;
+        }
+        let attachments_only = super::message_attachment::attachments_only_kind(
+            self.data.author.as_deref(),
+            &original,
+            !images.is_empty(),
+            !self.data.contexts.is_empty(),
+            &attachments,
+        );
+        let text = if attachments_only.is_some() {
+            crate::text::trim(&text).to_owned()
+        } else {
+            text
+        };
+        Some(UserMessageBody {
+            text,
+            images,
+            contexts: super::message_context::context_chips(self.data.contexts.clone()),
+            attachments,
+            attachments_only,
+        })
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        matches!(&self.source, ItemSource::Native(item) if item.status == models::ItemStatus::Running)
+    }
+
+    pub fn response_text(&self) -> Option<&str> {
+        let text = self.data.body.as_deref()?;
+        Some(
+            if matches!(self.data.kind.as_str(), "agent" | "commentary") {
+                assistant_response_text(text, self.is_streaming())
+            } else {
+                text
+            },
+        )
+    }
+}
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl RenderedItem {
+    /// Native chips render structured contexts separately; copy/export retain the complete body.
+    pub fn message_body(&self) -> Option<String> {
+        if self.data.contexts.is_empty() {
+            return self.data.body.clone();
+        }
+        let language = self.language.unwrap_or_default();
+        match &self.source {
+            ItemSource::Native(item) => match item.body() {
+                models::ItemBody::UserMessage { text, content } => Some(body::message(
+                    language,
+                    text.as_deref(),
+                    content,
+                    body::ContextFormat::Separate,
+                )),
+                _ => self.data.body.clone(),
+            },
+            ItemSource::Pending(_, pending) => {
+                body::draft_with_contexts(language, &pending.draft, body::ContextFormat::Separate)
+                    .text
+            }
+        }
+    }
+
     pub fn collapses_user_text(&self) -> bool {
         self.data.kind == "user"
             && self
-                .data
-                .body
+                .message_body()
                 .as_deref()
                 .is_some_and(should_collapse_user_message)
     }
@@ -578,18 +685,22 @@ impl RenderedItem {
         language: UiLanguage,
         item: &Arc<models::Item>,
         provider: Option<crate::session::ProviderKind>,
-        deferred: bool,
+        turn_status: models::TurnStatus,
         preparation: Option<&agent_protocol::session::PreparationStatus>,
         timestamp_ms: Option<u64>,
         previous: Option<&Arc<Self>>,
     ) -> Arc<Self> {
+        let deferred = item.is_deferred();
+        let empty_response = !deferred
+            && matches!(item.body(), models::ItemBody::AssistantText { text, .. } if text.is_empty())
+            && work::item_is_settled(item.status, turn_status);
         let delivery_unknown =
             preparation == Some(&agent_protocol::session::PreparationStatus::Unknown);
         let native_id = preparation.is_none().then(|| item.id.clone());
         // Plain messages have no translated copy, so retain their native Markdown
         // caches across a language change. Activity details and attachments do.
         let localized = match item.body() {
-            models::ItemBody::AssistantText { .. } => false,
+            models::ItemBody::AssistantText { .. } | models::ItemBody::Plan { .. } => false,
             models::ItemBody::UserMessage { content, .. } => content
                 .iter()
                 .any(|part| matches!(part, models::MessagePart::Attachment { .. })),
@@ -600,6 +711,7 @@ impl RenderedItem {
             && previous.language == localized
             && previous.data.native_id == native_id
             && previous.data.deferred == deferred
+            && previous.data.empty_response == empty_response
             && previous.delivery_unknown == delivery_unknown
             && previous.data.timestamp_ms == timestamp_ms
         {
@@ -630,6 +742,7 @@ impl RenderedItem {
                 image_sources: body.images,
                 contexts: body.contexts,
                 image_placeholder,
+                empty_response,
                 deferred,
                 preview: body::reasoning_preview(item),
             },
@@ -668,6 +781,7 @@ impl RenderedItem {
                 image_sources: body.images,
                 contexts: body.contexts,
                 image_placeholder: false,
+                empty_response: false,
                 deferred: false,
                 preview: None,
             },
@@ -785,7 +899,7 @@ pub fn project_conversation(
                 language,
                 &item,
                 source.active_provider,
-                false,
+                models::TurnStatus::Unknown,
                 Some(&preparation.status),
                 pending_submissions
                     .get(id)
@@ -919,6 +1033,7 @@ pub fn project_conversation(
             timestamp_ms: None,
             steer: false,
             queued: false,
+            fresh_context: false,
             edit_turn_id: None,
             content: ConversationRowContent::PendingRequest {
                 request: Box::new(request(language, source)),
@@ -931,6 +1046,7 @@ pub fn project_conversation(
             timestamp_ms: Some(setup.started_at_ms),
             steer: false,
             queued: false,
+            fresh_context: false,
             edit_turn_id: None,
             content: ConversationRowContent::Preparation {
                 preparation: Box::new(preparation::project(language, &source, setup)),
@@ -957,9 +1073,29 @@ pub fn project_conversation(
             timestamp_ms: None,
             steer: false,
             queued: false,
+            fresh_context: false,
             edit_turn_id: None,
             content: ConversationRowContent::Preparation {
                 preparation: Box::new(preparation_presentation(language, preparation)),
+            },
+        });
+    }
+    if let Some(work) = super::background_work::BackgroundWork::new(
+        &source.background,
+        crate::state::follow_up::working(&source),
+    ) {
+        session_rows.push(ConversationRow {
+            id: "background-work".into(),
+            timestamp_ms: None,
+            steer: false,
+            queued: false,
+            fresh_context: false,
+            edit_turn_id: None,
+            content: ConversationRowContent::Background {
+                title: work.title(language),
+                description: work.description(language),
+                waiting: work.waiting,
+                turn_id: source.active_turn_id(),
             },
         });
     }
@@ -1064,6 +1200,108 @@ fn preparation_presentation(
 #[cfg(test)]
 mod source_tests {
     use super::*;
+
+    #[test]
+    fn empty_response_display_waits_for_settlement_and_keeps_the_actual_body_empty() {
+        let item = Arc::new(models::Item::new(
+            "answer".into(),
+            models::ItemStatus::Unknown,
+            models::ItemBody::AssistantText {
+                text: String::new(),
+                phase: Default::default(),
+            },
+        ));
+        let source = Arc::new(models::Thread {
+            turns: Some(vec![Arc::new(models::Turn {
+                id: "turn".into(),
+                status: models::TurnStatus::Running,
+                items: Some(vec![item]),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        let render = |source, previous| {
+            project_conversation(
+                UiLanguage::English,
+                &Default::default(),
+                &Default::default(),
+                source,
+                &previous,
+            )
+        };
+        let first = render(source.clone(), None);
+        let before = first.turns[0].items().next().unwrap();
+        assert!(
+            !before.data.empty_response,
+            "A streaming empty body must remain blank"
+        );
+        let mut settled = source.as_ref().clone();
+        Arc::make_mut(&mut settled.turns.as_mut().unwrap()[0]).status =
+            models::TurnStatus::Completed;
+        let second = render(Arc::new(settled), Some(first.clone()));
+        let after = second.turns[0].items().next().unwrap();
+        assert!(
+            after.data.empty_response,
+            "Settlement must invalidate the cached display decision"
+        );
+        assert_eq!(
+            after.message_body().as_deref(),
+            Some(""),
+            "The placeholder is not provider text to copy or cite"
+        );
+        assert!(!before.data.empty_response);
+        let mut source = source.as_ref().clone();
+        let turn = Arc::make_mut(&mut source.turns.as_mut().unwrap()[0]);
+        Arc::make_mut(&mut turn.items.as_mut().unwrap()[0]).status = models::ItemStatus::Completed;
+        assert!(
+            render(Arc::new(source), None).turns[0]
+                .items()
+                .next()
+                .unwrap()
+                .data
+                .empty_response
+        );
+        let mut deferred = models::Item::new(
+            "deferred".into(),
+            models::ItemStatus::Completed,
+            models::ItemBody::AssistantText {
+                text: String::new(),
+                phase: Default::default(),
+            },
+        );
+        deferred.defer();
+        let deferred = RenderedItem::native(
+            UiLanguage::English,
+            &Arc::new(deferred),
+            None,
+            models::TurnStatus::Completed,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !deferred.data.empty_response,
+            "Unloaded content is not an empty answer"
+        );
+        let text = Arc::new(models::Item::new(
+            "text".into(),
+            models::ItemStatus::Completed,
+            models::ItemBody::AssistantText {
+                text: "Answer".into(),
+                phase: Default::default(),
+            },
+        ));
+        let text = RenderedItem::native(
+            UiLanguage::English,
+            &text,
+            None,
+            models::TurnStatus::Completed,
+            None,
+            None,
+            None,
+        );
+        assert!(!text.data.empty_response);
+    }
 
     #[test]
     fn user_file_sources_are_deduplicated_and_reused_when_other_content_changes() {
@@ -1515,7 +1753,7 @@ fn render_turn(
             language,
             item,
             provider,
-            item.is_deferred(),
+            source.status,
             None,
             None,
             cached.get(&(None, Arc::as_ptr(item).cast())).copied(),
@@ -1541,6 +1779,7 @@ fn render_turn(
     let steering = std::cell::Cell::new(false);
     let queued_shown = std::cell::Cell::new(false);
     let edit_shown = std::cell::Cell::new(false);
+    let fresh_context_shown = std::cell::Cell::new(false);
     let mut rows = Vec::new();
     let mut occurrences = HashMap::new();
     let mut push = |mut content: ConversationRowContent| {
@@ -1555,6 +1794,8 @@ fn render_turn(
             Error { .. } => format!("history-error:{}", source.id),
             InProgress { turn_id } => format!("in-progress:{turn_id}"),
             Preparation { .. } => "preparation".into(),
+            Background { .. } => "background-work".into(),
+            Queue { .. } => "queued-messages".into(),
         };
         let occurrence = occurrences.entry(id.clone()).or_insert(0usize);
         let id = conversation_row_id(source.id.as_str(), turn_occurrence, &id, *occurrence);
@@ -1589,6 +1830,7 @@ fn render_turn(
         let steer = user && steering.get();
         // The message that started a turn after waiting in the queue.
         let queued = user && !steer && source.queued && !queued_shown.replace(true);
+        let fresh_context = user && source.fresh_context && !fresh_context_shown.replace(true);
         let edit_turn_id = (user
             && !steer
             && supports_rewind
@@ -1601,6 +1843,7 @@ fn render_turn(
             timestamp_ms,
             steer,
             queued,
+            fresh_context,
             edit_turn_id,
         });
     };
@@ -1621,14 +1864,20 @@ fn render_turn(
             .rfind(|&index| metadata(index).kind == super::GroupKind::Assistant)
     });
     for segment in &segments {
-        // A later segment of a turn starts with a message sent while it worked.
-        steering.set(segment.start > 0);
+        // An earlier input or wake message makes the next input a steer.
+        // Informational notices do not create such a preceding message.
         let group = |role| {
             (segment.start..segment.end)
                 .filter(move |&index| segment.role(index, metadata(index)) == role)
                 .map(&render)
         };
         let in_progress = segment.last && source.status == models::TurnStatus::Running;
+        for item in group(Role::Notice) {
+            push(Activity {
+                item,
+                turn_id: source.id.clone(),
+            });
+        }
         for item in group(Role::User) {
             if let ItemSource::Native(native) = &item.source
                 && let models::ItemBody::Notification { reports } = native.body()
@@ -1645,6 +1894,7 @@ fn render_turn(
             } else {
                 push(User { item });
             }
+            steering.set(true);
         }
         if let Some(summary) = &segment.label {
             push(ActivityHeader {
@@ -1700,6 +1950,7 @@ fn render_turn(
         }
     }
     Arc::new(RenderedTurn {
+        supports_fork,
         language,
         source,
         occurrence: turn_occurrence,
@@ -1707,6 +1958,18 @@ fn render_turn(
         requests,
         rows: images::without_repeated_images(rows),
     })
+}
+
+fn request_delivery_label(
+    delivery: agent_protocol::session::RequestDelivery,
+) -> Option<&'static str> {
+    use agent_protocol::session::RequestDelivery;
+    match delivery {
+        RequestDelivery::Awaiting => None,
+        RequestDelivery::Sending => Some("回答を送信中"),
+        RequestDelivery::Sent => Some("回答を送信しました"),
+        RequestDelivery::Unknown => Some("回答の配送結果が不明です"),
+    }
 }
 
 pub fn request(language: UiLanguage, source: &WireRequest) -> Request {
@@ -1755,14 +2018,15 @@ pub fn request(language: UiLanguage, source: &WireRequest) -> Request {
         ),
     };
     Request {
+        approval: inline_approval(
+            language,
+            source.delivery,
+            &source.body,
+            language.text(title),
+        ),
         id: source.id.clone(),
         title: language
-            .text(match source.delivery {
-                crate::session::RequestDelivery::Awaiting => title,
-                crate::session::RequestDelivery::Sending => "回答を送信中",
-                crate::session::RequestDelivery::Sent => "回答を送信しました",
-                crate::session::RequestDelivery::Unknown => "回答の配送結果が不明です",
-            })
+            .text(request_delivery_label(source.delivery).unwrap_or(title))
             .into(),
         body,
         details,
@@ -1780,21 +2044,8 @@ pub enum ActionTone {
     Danger,
 }
 
-/// A one-time grant leads the native choice buttons; denial is destructive
-/// and broader grants remain secondary.
-#[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn choice_tone(effect: agent_protocol::requests::ChoiceEffect) -> ActionTone {
-    use agent_protocol::requests::ChoiceEffect;
-    match effect {
-        ChoiceEffect::Allow => ActionTone::Primary,
-        ChoiceEffect::Deny => ActionTone::Danger,
-        ChoiceEffect::AllowLasting => ActionTone::Secondary,
-    }
-}
-
 impl Request {
-    /// The one line T3 Code shows under an approval's label: the provider's
-    /// reason, else what it would run, else the label itself.
+    /// The input request's body, then its details, then its label as a fallback.
     pub fn summary(&self) -> &str {
         [&self.body, &self.details, &self.title]
             .into_iter()
@@ -1805,6 +2056,7 @@ impl Request {
 
 /// A decision an approval offers, labelled in the UI language.
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ApprovalAction {
     pub choice_id: String,
     pub label: String,
@@ -1814,6 +2066,7 @@ pub struct ApprovalAction {
 /// and approving once (filled) as buttons, every other decision (a lasting
 /// grant, a rule) in a menu after them, in the provider's order.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ApprovalActions {
     pub decline: Option<ApprovalAction>,
     pub approve: Option<ApprovalAction>,
@@ -1844,14 +2097,124 @@ pub fn approval_actions(
     }
 }
 
-/// The composer answers one question and one other request at a time, as in
-/// T3 Code; later ones follow once these resolve.
+/// Approvals are actions on timeline work; questions and other input use the composer.
+struct ApprovalInput<'a> {
+    kind: &'static str,
+    detail: &'a str,
+    reason: &'a str,
+    choices: &'a [agent_protocol::requests::Choice],
+    permission: bool,
+}
+
+fn approval_input(body: &agent_protocol::requests::RequestBody) -> Option<ApprovalInput<'_>> {
+    use agent_protocol::requests::{ApprovalKind, RequestBody};
+    let (kind, detail, reason, choices, permission) = match body {
+        RequestBody::Approval {
+            kind,
+            details,
+            description,
+            choices,
+        } => (
+            match kind {
+                ApprovalKind::Command => "command",
+                ApprovalKind::FileChange => "fileChange",
+                ApprovalKind::Tool => "toolCall",
+            },
+            details,
+            description,
+            choices,
+            false,
+        ),
+        RequestBody::Permission {
+            details,
+            description,
+            choices,
+        } => ("toolCall", details, description, choices, true),
+        _ => return None,
+    };
+    Some(ApprovalInput {
+        kind,
+        detail,
+        reason,
+        choices,
+        permission,
+    })
+}
+
+#[derive(Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct InlineApproval {
+    pub kind: String,
+    pub detail: String,
+    pub details: String,
+    pub status: String,
+    pub notes: Vec<String>,
+    pub actions: ApprovalActions,
+}
+
+fn inline_approval(
+    language: UiLanguage,
+    delivery: agent_protocol::session::RequestDelivery,
+    body: &agent_protocol::requests::RequestBody,
+    title: &str,
+) -> Option<InlineApproval> {
+    let input = approval_input(body)?;
+    let detail = [input.reason, input.detail, title]
+        .into_iter()
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or("");
+    Some(InlineApproval {
+        kind: input.kind.into(),
+        detail: detail.into(),
+        details: if input.detail == detail {
+            String::new()
+        } else {
+            input.detail.into()
+        },
+        status: language
+            .text(request_delivery_label(delivery).unwrap_or("承認待ち"))
+            .into(),
+        notes: input
+            .choices
+            .iter()
+            .map(|choice| &choice.description)
+            .filter(|note| !note.trim().is_empty())
+            .fold(Vec::new(), |mut notes, note| {
+                if !notes.contains(note) {
+                    notes.push(note.clone());
+                }
+                notes
+            }),
+        actions: approval_actions(language, input.choices),
+    })
+}
+
+/// Resolve only an offered approval decision. Both native clients route the same answer.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn request_choice_answer(
+    body: agent_protocol::requests::RequestBody,
+    choice_id: String,
+) -> Option<agent_protocol::requests::Answer> {
+    use agent_protocol::requests::Answer;
+    let input = approval_input(&body)?;
+    if !input.choices.iter().any(|choice| choice.id == choice_id) {
+        return None;
+    }
+    Some(if input.permission {
+        Answer::Permission { choice_id }
+    } else {
+        Answer::Approval { choice_id }
+    })
+}
+
+/// The composer answers one question and one non-approval input request at a time.
 pub(crate) fn docked_request(thread: &models::Thread, question: bool) -> Option<&WireRequest> {
     thread.requests.values().map(Arc::as_ref).find(|request| {
         matches!(
             request.body,
             agent_protocol::requests::RequestBody::Question { .. }
         ) == question
+            && (question || approval_input(&request.body).is_none())
     })
 }
 
@@ -2007,6 +2370,7 @@ pub struct ItemPresentation {
     pub image_sources: Vec<String>,
     pub contexts: Vec<agent_protocol::context::MessageContext>,
     pub image_placeholder: bool,
+    pub empty_response: bool,
     pub deferred: bool,
     pub kind: String,
     pub title: Option<String>,
@@ -2017,6 +2381,7 @@ pub struct ItemPresentation {
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Request {
+    pub approval: Option<InlineApproval>,
     pub id: agent_protocol::ids::RequestId,
     pub title: String,
     pub body: String,
@@ -2026,45 +2391,160 @@ pub struct Request {
 }
 
 #[cfg(test)]
-mod message_text_tests {
-    use super::should_collapse_user_message as collapses;
-
-    #[test]
-    fn images_without_words_have_no_bubble_and_captions_and_file_labels_keep_theirs() {
-        for text in ["", " \n\t", "\u{3000}"] {
-            assert!(!super::shows_user_message_bubble(text, true));
-            assert!(super::shows_user_message_bubble(text, false));
-        }
-        for text in ["a", " 日本語\n", "添付: hello.txt (/hello.txt)"] {
-            assert!(super::shows_user_message_bubble(text, true));
-            assert!(super::shows_user_message_bubble(text, false));
-        }
-    }
-
-    #[test]
-    fn a_message_folds_past_eight_lines_or_600_characters() {
-        assert!(!collapses(&["a"; 8].join("\n")));
-        assert!(collapses(&["a"; 9].join("\n")));
-        assert!(!collapses(&"あ".repeat(600)));
-        assert!(collapses(&"あ".repeat(601)));
-        assert!(!collapses("   \n  "));
-    }
-
-    #[test]
-    fn links_count_as_their_labels() {
-        let long_target = format!("[file.rs](/{})", "a".repeat(700));
-        assert!(!collapses(&long_target));
-        let brackets = format!("[not a link] {}", "a".repeat(601));
-        assert!(collapses(&brackets));
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{Draft, Snapshot};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn only_settled_missing_assistant_bodies_show_the_empty_response_copy() {
+        for (text, streaming, expected) in [
+            ("", true, ""),
+            ("", false, "(empty response)"),
+            (" ", false, " "),
+            ("Answer 日本語", true, "Answer 日本語"),
+            ("Answer 日本語", false, "Answer 日本語"),
+        ] {
+            assert_eq!(assistant_response_text(text, streaming), expected);
+        }
+    }
+
+    #[test]
+    fn rendered_response_placeholder_does_not_change_copy_text_or_empty_user_messages() {
+        use models::{AssistantPhase, Item, ItemBody, ItemStatus};
+        for status in [
+            ItemStatus::Running,
+            ItemStatus::Completed,
+            ItemStatus::Failed,
+            ItemStatus::Interrupted,
+            ItemStatus::Unknown,
+        ] {
+            for (body, expected) in [
+                (
+                    ItemBody::AssistantText {
+                        text: String::new(),
+                        phase: AssistantPhase::Final,
+                    },
+                    if status == ItemStatus::Running {
+                        ""
+                    } else {
+                        "(empty response)"
+                    },
+                ),
+                (
+                    ItemBody::UserMessage {
+                        text: Some(String::new()),
+                        content: vec![],
+                    },
+                    "",
+                ),
+                (
+                    ItemBody::AssistantText {
+                        text: "**Answer** 日本語".into(),
+                        phase: AssistantPhase::Commentary,
+                    },
+                    "**Answer** 日本語",
+                ),
+            ] {
+                let source = Arc::new(Item::new("response".into(), status, body));
+                let item = RenderedItem::native(
+                    UiLanguage::English,
+                    &source,
+                    Some(crate::session::ProviderKind::Codex),
+                    crate::models::TurnStatus::Completed,
+                    None,
+                    None,
+                    None,
+                );
+                assert_eq!(item.is_streaming(), status == ItemStatus::Running);
+                assert_eq!(item.response_text(), Some(expected));
+                if expected == "(empty response)" {
+                    assert_eq!(item.data.body.as_deref(), Some(""));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn context_only_messages_render_chips_without_a_second_plain_text_body() {
+        let context = agent_protocol::context::MessageContext {
+            id: "build".into(),
+            label: "Build".into(),
+            content: agent_protocol::context::ContextContent::Terminal {
+                terminal_id: "terminal".into(),
+                terminal_label: "Build".into(),
+                line_start: 1,
+                line_end: 1,
+                text: "literal **output**".into(),
+            },
+        };
+        for text in [None, Some("explain")] {
+            let item = Arc::new(models::Item::new(
+                "user".into(),
+                models::ItemStatus::Completed,
+                models::ItemBody::UserMessage {
+                    text: text.map(str::to_owned),
+                    content: vec![models::MessagePart::Context {
+                        context: Box::new(context.clone()),
+                    }],
+                },
+            ));
+            let shown = RenderedItem::native(
+                UiLanguage::English,
+                &item,
+                None,
+                models::TurnStatus::Completed,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                shown.message_body().as_deref(),
+                Some(text.unwrap_or_default())
+            );
+            assert_eq!(
+                shown.data.contexts.as_slice(),
+                std::slice::from_ref(&context)
+            );
+            assert!(
+                shown
+                    .data
+                    .body
+                    .as_deref()
+                    .unwrap()
+                    .contains("literal **output**")
+            );
+            assert!(!shown.collapses_user_text());
+        }
+        let pending = Arc::new(PendingSubmission {
+            new_draft_slot: None,
+            cursor: None,
+            sequence: 0,
+            submitted_at_ms: None,
+            draft_key: Default::default(),
+            draft: Arc::new(Draft {
+                text: "explain".into(),
+                contexts: vec![context],
+                ..Default::default()
+            }),
+            turn_id: None,
+            after_item_id: None,
+            accepted: false,
+            delivery_unknown: false,
+            queued: false,
+        });
+        let shown = RenderedItem::pending(UiLanguage::English, "pending", &pending, None);
+        assert_eq!(shown.message_body().as_deref(), Some("explain"));
+        assert!(
+            shown
+                .data
+                .body
+                .as_deref()
+                .unwrap()
+                .contains("literal **output**")
+        );
+    }
 
     proptest::proptest! {
         #[test]
@@ -2583,27 +3063,18 @@ mod tests {
     }
 
     #[test]
-    fn progress_formats_time_without_retranslating_the_action() {
+    fn progress_formats_elapsed_time_in_the_ui_language() {
         let progress = WorkProgress {
             started_at: Some(100.),
-            action: Some("設定\n{0}".into()),
+            compacting: false,
         };
-        assert_eq!(
-            progress.label(UiLanguage::Japanese, 108.),
-            "8秒 作業中 · 設定\n{0}"
-        );
-        assert_eq!(
-            progress.label(UiLanguage::English, 108.),
-            "Working for 8s · 設定\n{0}"
-        );
-        let progress = WorkProgress {
+        assert_eq!(progress.label(UiLanguage::Japanese, 108.), "8秒 作業中…");
+        assert_eq!(progress.label(UiLanguage::English, 108.), "Working for 8s");
+        let unknown_start = WorkProgress {
             started_at: None,
-            action: progress.action,
+            compacting: false,
         };
-        assert_eq!(
-            progress.label(UiLanguage::English, 108.),
-            "Working · 設定\n{0}"
-        );
+        assert_eq!(unknown_start.label(UiLanguage::English, 108.), "Working…");
     }
 
     fn fixture() -> Snapshot {
@@ -2796,6 +3267,41 @@ mod tests {
     }
 
     #[test]
+    fn fresh_context_marks_only_the_initiating_user_message_on_running_and_settled_turns() {
+        let user = |id: &str| {
+            json!({"id": id, "status": "completed", "clientInputId": id,
+            "body": {"inline": {"body": {"userMessage": {"text": id, "content": []}}}}})
+        };
+        let answer = json!({"id": "answer", "status": "completed", "body": {"inline": {"body": {
+            "assistantText": {"text": "answer", "phase": "final"}}}}});
+        for status in ["running", "completed"] {
+            for fresh in [false, true] {
+                let thread =
+                    serde_json::from_value(json!({"id": {"provider": "codex", "id": "thread"},
+                    "turns": [{"id": "turn", "status": status, "freshContext": fresh,
+                        "items": [user("opened"), answer.clone(), user("steered")]}]}))
+                    .unwrap();
+                let rendered = project_conversation(
+                    UiLanguage::Japanese,
+                    &Default::default(),
+                    &Default::default(),
+                    Arc::new(thread),
+                    &None,
+                );
+                let marks: Vec<_> = rendered.turns[0]
+                    .rows
+                    .iter()
+                    .filter_map(|row| {
+                        matches!(row.content, ConversationRowContent::User { .. })
+                            .then_some(row.fresh_context)
+                    })
+                    .collect();
+                assert_eq!(marks, [fresh, false]);
+            }
+        }
+    }
+
+    #[test]
     fn only_the_message_opening_a_settled_forkable_turn_can_be_edited_from() {
         let user = |id: &str| {
             json!({"id":id,"status":"completed","clientInputId":id,
@@ -2833,18 +3339,6 @@ mod tests {
                 .map(|row| row.edit_turn_id.as_ref().map(|id| id.as_str()))
                 .collect();
             assert_eq!(edits, expected);
-        }
-    }
-
-    #[test]
-    fn native_request_choices_emphasize_one_time_grants_and_denials() {
-        use agent_protocol::requests::ChoiceEffect;
-        for (effect, expected) in [
-            (ChoiceEffect::Allow, ActionTone::Primary),
-            (ChoiceEffect::Deny, ActionTone::Danger),
-            (ChoiceEffect::AllowLasting, ActionTone::Secondary),
-        ] {
-            assert_eq!(choice_tone(effect), expected);
         }
     }
 
@@ -2896,8 +3390,9 @@ mod tests {
     }
 
     #[test]
-    fn an_approval_summarises_its_reason_else_what_it_runs_else_its_label() {
+    fn input_summary_uses_its_body_then_details_then_label() {
         let request = |body: &str, details: &str| Request {
+            approval: None,
             id: "1".into(),
             title: "Command approval".into(),
             body: body.into(),
@@ -3646,7 +4141,7 @@ mod tests {
                 snapshot = reduce(
                     &snapshot,
                     "",
-                    Event::Intent(Intent::Submit {
+                    Event::from(Intent::Submit {
                         thread_id: Some(agent_protocol::session::SessionRef {
                             provider: Some(agent_protocol::session::ProviderKind::Codex),
                             id: "thread".into(),
@@ -3741,7 +4236,7 @@ mod tests {
             snapshot = reduce(
                 &snapshot,
                 "",
-                Event::Intent(Intent::Submit {
+                Event::from(Intent::Submit {
                     thread_id: Some(agent_protocol::session::SessionRef {
                         provider: Some(agent_protocol::session::ProviderKind::Codex),
                         id: "thread".into(),
@@ -4214,6 +4709,50 @@ mod minimap_tests {
     use super::*;
 
     #[test]
+    fn previews_use_the_last_assistant_message_in_each_exchange_without_borrowing_another_answer() {
+        use MinimapRow::{Assistant, Other, User};
+        let rows = [
+            Assistant, Other, User, Assistant, Other, Assistant, User, Other, User, Assistant,
+            Assistant, Other, User,
+        ];
+        for (user, answer) in [
+            (2, Some(5)),
+            (6, None),
+            (8, Some(10)),
+            (12, None),
+            (0, None),
+            (usize::MAX, None),
+        ] {
+            assert_eq!(minimap_answer_row(user, rows), answer);
+        }
+    }
+
+    #[test]
+    fn navigation_uses_the_first_visible_prompt_or_the_preceding_exchange_and_never_wraps() {
+        let current = |range| {
+            minimap_markers(&[2, 8, 14], range, 100.)
+                .iter()
+                .position(|marker| marker.current)
+        };
+        assert_eq!(current(Some((0, 1))), None);
+        assert_eq!(current(Some((2, 9))), Some(0));
+        assert_eq!(current(Some((3, 7))), Some(0));
+        assert_eq!(current(Some((3, 8))), Some(1));
+        assert_eq!(current(Some((9, 13))), Some(1));
+        assert_eq!(current(Some((15, 20))), Some(2));
+        assert_eq!(current(None), None);
+        assert_eq!(minimap_adjacent_index(3, Some(0), false), None);
+        assert_eq!(minimap_adjacent_index(3, Some(0), true), Some(1));
+        assert_eq!(minimap_adjacent_index(3, Some(1), false), Some(0));
+        assert_eq!(minimap_adjacent_index(3, Some(1), true), Some(2));
+        assert_eq!(minimap_adjacent_index(3, Some(2), true), None);
+        assert_eq!(minimap_adjacent_index(3, Some(2), false), Some(1));
+        assert_eq!(minimap_adjacent_index(3, None, true), None);
+        assert_eq!(minimap_adjacent_index(0, Some(0), true), None);
+        assert_eq!(minimap_adjacent_index(3, Some(3), false), None);
+    }
+
+    #[test]
     fn every_message_has_a_strip_lit_while_it_is_in_view() {
         let markers = minimap_markers(&[0, 4, 9], Some((3, 6)), 500.);
         assert_eq!(markers.iter().map(|m| m.row).collect::<Vec<_>>(), [0, 4, 9]);
@@ -4340,7 +4879,7 @@ mod minimap_tests {
 mod progress_tests {
     use super::*;
     #[test]
-    fn elapsed_work_uses_provider_time_and_describes_the_current_tool() {
+    fn elapsed_work_uses_provider_time_and_clamps_clock_skew() {
         for value in [
             serde_json::json!({"id":"t","startedAt":100.5}),
             serde_json::json!({"id":"t","startedAtMs":100500}),
@@ -4348,6 +4887,7 @@ mod progress_tests {
         ] {
             let source = Arc::new(serde_json::from_value(value).unwrap());
             let turn = RenderedTurn {
+                supports_fork: false,
                 language: UiLanguage::Japanese,
                 source,
                 occurrence: 0,
@@ -4355,38 +4895,19 @@ mod progress_tests {
                 requests: vec![],
                 rows: vec![],
             };
-            let mut progress = turn.work_progress(false);
-            progress.action = Some("cargo test".into());
+            let progress = turn.work_progress();
+            assert_eq!(progress.label(UiLanguage::Japanese, 108.5), "8秒 作業中…");
+            assert_eq!(progress.label(UiLanguage::Japanese, 110.5), "10秒 作業中…");
+            assert_eq!(progress.label(UiLanguage::Japanese, 99.), "0秒 作業中…");
             assert_eq!(
-                progress.label(UiLanguage::Japanese, 108.5),
-                "8秒 作業中 · cargo test"
-            );
-            assert_eq!(
-                turn.work_progress(false).label(UiLanguage::Japanese, 110.5),
-                "10秒 作業中…"
-            );
-            assert_eq!(
-                turn.work_progress(false).label(UiLanguage::Japanese, 99.),
-                "0秒 作業中…"
-            );
-            // The time so far reads in the fold's units, as T3 Code's working row.
-            assert_eq!(
-                turn.work_progress(false).label(UiLanguage::Japanese, 285.5),
+                progress.label(UiLanguage::Japanese, 285.5),
                 "3分 5秒 作業中…"
             );
         }
         assert_eq!(
             WorkProgress {
                 started_at: None,
-                action: None
-            }
-            .label(UiLanguage::Japanese, 100.),
-            "作業中…"
-        );
-        assert_eq!(
-            WorkProgress {
-                started_at: None,
-                action: Some(String::new())
+                compacting: false
             }
             .label(UiLanguage::Japanese, 100.),
             "作業中…"
@@ -4394,36 +4915,64 @@ mod progress_tests {
     }
 
     #[test]
-    fn progress_retains_only_the_latest_action_and_start_time() {
+    fn compaction_phase_uses_active_items_including_deferred_summaries() {
+        for delivery in ["inline", "deferred"] {
+            for (status, compacting) in
+                [("running", true), ("completed", false), ("unknown", false)]
+            {
+                let body = if delivery == "inline" {
+                    serde_json::json!({"inline":{"body":{"compaction":{}}}})
+                } else {
+                    serde_json::json!({"deferred":{"summary":{"compaction":{}}}})
+                };
+                let source = Arc::new(
+                    serde_json::from_value(serde_json::json!({
+                        "id":{"provider":"codex", "id":"fixture"},
+                        "turns":[{"id":"turn", "status":"running", "startedAt":100.5,
+                                  "items":[{"id":"compact", "status":status, "body":body}]}]
+                    }))
+                    .unwrap(),
+                );
+                let conversation = project_conversation(
+                    UiLanguage::Japanese,
+                    &"draft".into(),
+                    &Default::default(),
+                    source,
+                    &None,
+                );
+                let progress = conversation.turns[0].work_progress();
+                assert_eq!(progress.is_compacting(), compacting);
+                assert_eq!(
+                    progress.label(UiLanguage::Japanese, 108.5),
+                    if compacting {
+                        "8秒 圧縮中…"
+                    } else {
+                        "8秒 作業中…"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn progress_keeps_phase_and_start_time_without_retaining_the_conversation() {
         let source = Arc::new(serde_json::from_value(serde_json::json!({
             "id":{"provider":"codex", "id":"fixture"},
-            "turns":[{"id":"turn", "status":"running", "startedAt":100.5, "items":[
-                {"id":"first", "body":{"inline":{"body":{"commandExecution":{"command":"first", "output":"", "exitCode":0}}}}},
-                {"id":"second", "status":"running", "body":{"inline":{"body":{"webSearch":{"query":"latest action"}}}}}
-            ]}]
+            "turns":[{"id":"turn", "status":"running", "startedAt":100.5,
+                      "items":[{"id":"compact", "status":"running", "body":{"inline":{"body":{"compaction":{}}}}}]}]
         })).unwrap());
         let conversation = project_conversation(
             UiLanguage::Japanese,
-            &Snapshot::default().panes.primary().navigation.draft_key,
-            &Snapshot::default().sessions.pending_submissions,
+            &"draft".into(),
+            &Default::default(),
             source,
             &None,
         );
-        let turn = &conversation.turns[0];
-        assert_eq!(
-            turn.work_progress(true).label(UiLanguage::Japanese, 108.5),
-            "8秒 作業中 · Webを検索: latest action"
-        );
-        assert_eq!(
-            turn.work_progress(false).label(UiLanguage::Japanese, 108.5),
-            "8秒 作業中…"
-        );
-        let progress = turn.work_progress(true);
+        let turn = Arc::downgrade(&conversation.turns[0]);
+        let progress = conversation.turns[0].work_progress();
         drop(conversation);
-        assert_eq!(
-            progress.label(UiLanguage::Japanese, 110.5),
-            "10秒 作業中 · Webを検索: latest action"
-        );
+        assert!(turn.upgrade().is_none());
+        assert_eq!(progress.label(UiLanguage::Japanese, 110.5), "10秒 圧縮中…");
     }
 }
 
@@ -4738,6 +5287,105 @@ mod history_notice_tests {
         assert_eq!(
             history_notice(UiLanguage::Japanese, &thread),
             Some(format!("{heading}\nread issue"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod system_notice_tests {
+    use super::*;
+    use crate::models::{Item, ItemBody, ItemStatus, Thread, Turn, TurnStatus};
+
+    #[test]
+    fn notices_stay_in_order_outside_work_and_do_not_make_the_first_input_a_steer() {
+        let item = |id: &str, body| Arc::new(Item::new(id.into(), ItemStatus::Completed, body));
+        let thread = Arc::new(Thread {
+            turns: Some(vec![Arc::new(Turn {
+                id: "notice-turn".into(),
+                status: TurnStatus::Completed,
+                items: Some(vec![
+                    item(
+                        "before",
+                        ItemBody::SystemNotice {
+                            message: "Earlier history omitted".into(),
+                        },
+                    ),
+                    item(
+                        "user",
+                        ItemBody::UserMessage {
+                            text: Some("First real question".into()),
+                            content: vec![],
+                        },
+                    ),
+                    item(
+                        "middle",
+                        ItemBody::SystemNotice {
+                            message: "Provider information".into(),
+                        },
+                    ),
+                    item(
+                        "assistant",
+                        ItemBody::AssistantText {
+                            text: "Answer".into(),
+                            phase: models::AssistantPhase::Final,
+                        },
+                    ),
+                    item(
+                        "after",
+                        ItemBody::SystemNotice {
+                            message: "Later information".into(),
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        let view = project_conversation(
+            UiLanguage::English,
+            &Default::default(),
+            &Default::default(),
+            thread,
+            &None,
+        );
+        let rows = turn_rows(
+            crate::presentation::conversation::TimelineStyle::T3,
+            &view.turns[0],
+            &Default::default(),
+            &Default::default(),
+        );
+        let visible: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                TurnRow::Divider { label, .. } => Some(label.as_str()),
+                TurnRow::Row(ConversationRow {
+                    content: ConversationRowContent::User { item },
+                    steer,
+                    ..
+                }) => {
+                    assert!(!steer, "a preceding notice is not a preceding user input");
+                    item.data.body.as_deref()
+                }
+                TurnRow::Row(ConversationRow {
+                    content: ConversationRowContent::Response { item, .. },
+                    ..
+                }) => item.data.body.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            visible,
+            [
+                "Earlier history omitted",
+                "First real question",
+                "Provider information",
+                "Answer",
+                "Later information"
+            ]
+        );
+        assert!(
+            !rows.iter().any(|row| matches!(row, TurnRow::Fold { .. })),
+            "notices do not create empty work disclosures"
         );
     }
 }

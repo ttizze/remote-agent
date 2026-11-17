@@ -138,7 +138,7 @@ async fn first_host_results_persist_the_complete_list_cursor_for_offline_local_p
     let (expanded, effects) = reduce(
         &restored,
         "",
-        Event::Intent(Intent::ExpandThreadList { project_id: None }),
+        Event::from(Intent::ExpandThreadList { project_id: None }),
     );
     assert!(effects.is_empty());
     assert_eq!(expanded.lists.threads.as_ref().unwrap().data.len(), 15);
@@ -194,7 +194,7 @@ async fn cached_project_disclosure_keeps_its_choice_but_restarts_at_five_rows() 
     let (expanded, effects) = reduce(
         &restored,
         "",
-        Event::Intent(Intent::ExpandThreadList {
+        Event::from(Intent::ExpandThreadList {
             project_id: Some("project".into()),
         }),
     );

@@ -44,7 +44,11 @@ struct ThreadScreen: View {
                 }),
                 presenting: editRequest,
                 actions: { request in
-                    Button("巻き戻す", role: .destructive) { model.rewind(thread: request.thread, through: request.turn) }
+                    Button("巻き戻す", role: .destructive) { model.rewind(
+                        thread: request.thread,
+                        through: request.turn,
+                        scope: request.scope
+                    ) }
                     Button("キャンセル", role: .cancel) { editRequest = nil }
                 },
                 message: { _ in

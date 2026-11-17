@@ -1,5 +1,6 @@
 //! A composer's own inputs and controls, independent of transcript deltas.
 use super::model_settings::ModelQuickControls;
+use super::queue::{QueuePresentation, QueuedMessage};
 use crate::{
     models::{Model, ModelRef},
     session::ProviderKind,
@@ -17,6 +18,8 @@ pub const RESUME_PROMPT: &str = "Continue where you left off.";
 pub mod footer;
 mod workspace;
 pub use workspace::WorkspaceSelection;
+#[cfg(test)]
+mod queue_controls_tests;
 #[cfg(test)]
 mod tests;
 
@@ -40,6 +43,8 @@ fn resumable(thread: &crate::models::Thread) -> bool {
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerControls {
+    pub triage_available: bool,
+    pub project_clone: Option<super::project_clone::ProjectCloneView>,
     pub fresh_context_available: bool,
     pub feedback_available: bool,
     pub feedback: Option<super::feedback::FeedbackNotice>,
@@ -69,7 +74,7 @@ pub struct ComposerControls {
 }
 
 /// What sending does while a turn runs and the messages waiting behind it, as
-/// T3 Code's composer and the queue above it.
+/// The composer's follow-up shortcuts and the shared Host queue.
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FollowUpControls {
@@ -79,36 +84,27 @@ pub struct FollowUpControls {
     /// What a plain send does, and what the alternate does, as the provider allows.
     pub default_action: FollowUp,
     pub alternate_action: FollowUp,
-    pub queue: Vec<QueuedMessage>,
-    /// A stop or failure holds the queue until it is resumed.
-    pub held: bool,
-    /// The latest turn stopped short, so an empty send picks it up again.
-    pub resumable: bool,
-    /// Waiting messages can steer the running turn instead.
-    pub can_steer: bool,
-    /// The waiting message the composer edits; sending saves it.
-    pub editing: Option<ClientInputId>,
-    /// A queue change is on its way to the Host.
-    pub busy: bool,
+    pub queue: Arc<QueuePresentation>,
 }
 
-#[derive(Clone, PartialEq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct QueuedMessage {
-    pub id: ClientInputId,
-    pub fresh_context: bool,
-    pub text: String,
-    /// Images and files sent with it.
-    pub attachments: u32,
-    /// Sent, and not yet in the Host's queue.
-    pub pending: bool,
-    pub contexts: Vec<agent_protocol::context::MessageContext>,
+/// T3's queue flattens context references to their labels instead of rendering chips.
+fn queued_preview<'a>(
+    text: &'a str,
+    contexts: impl IntoIterator<Item = &'a agent_protocol::context::MessageContext>,
+) -> String {
+    std::iter::once(text)
+        .chain(contexts.into_iter().map(|context| context.label.as_str()))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn follow_up_controls(
     snapshot: &Snapshot,
     thread: Option<&crate::models::Thread>,
     fresh_context: bool,
+    edit_blocked: bool,
 ) -> FollowUpControls {
     let preferences = snapshot.input.composer_preferences;
     let action = |alternate| {
@@ -128,34 +124,35 @@ fn follow_up_controls(
             active: false,
             default_action: preferences.follow_up,
             alternate_action: follow_up::requested(preferences.follow_up, true),
-            queue: Vec::new(),
-            held: false,
-            resumable: false,
-            can_steer: false,
-            editing: None,
-            busy: false,
+            queue: QueuePresentation::empty(snapshot.catalog.ui_language),
         };
     };
     let session = thread.id.as_ref();
-    let waiting = thread.queue.inputs.iter().map(|input| QueuedMessage {
-        id: input.client_user_message_id.clone(),
-        fresh_context: input.fresh_context,
-        text: follow_up::queued_text(input),
-        attachments: input
-            .input
-            .iter()
-            .filter(|part| {
-                !matches!(
-                    part,
-                    agent_protocol::operations::Input::Text { .. }
-                        | agent_protocol::operations::Input::Context { .. }
-                )
-            })
-            .count() as u32,
-        pending: false,
-        contexts: agent_protocol::operations::Input::contexts(&input.input)
-            .cloned()
-            .collect(),
+    let busy = session.is_some_and(|session| {
+        snapshot.operation_running(OperationKey::Queue {
+            session: session.clone(),
+        })
+    });
+    let waiting = thread.queue.inputs.iter().map(|input| {
+        let text = follow_up::queued_text(input);
+        let contexts = agent_protocol::operations::Input::contexts(&input.input);
+        QueuedMessage {
+            id: input.client_user_message_id.clone(),
+            fresh_context: input.fresh_context,
+            text: queued_preview(&text, contexts),
+            attachments: input
+                .input
+                .iter()
+                .filter(|part| {
+                    !matches!(
+                        part,
+                        agent_protocol::operations::Input::Text { .. }
+                            | agent_protocol::operations::Input::Context { .. }
+                    )
+                })
+                .count() as u32,
+            pending: false,
+        }
     });
     let key = session.map(crate::state::DraftKey::from);
     let mut sending: Vec<_> = snapshot
@@ -180,30 +177,34 @@ fn follow_up_controls(
             || (!thread.queue.held && !thread.queue.inputs.is_empty()),
         default_action: action(false),
         alternate_action: action(true),
-        queue: waiting
-            .chain(sending.into_iter().map(|(id, pending)| QueuedMessage {
-                id: id.clone(),
-                fresh_context: pending.draft.fresh_context,
-                text: pending.draft.text.clone(),
-                attachments: pending.draft.attachments.len() as u32,
-                pending: true,
-                contexts: pending.draft.contexts.clone(),
-            }))
-            .collect(),
-        held: thread.queue.held,
-        resumable: resumable(thread),
-        can_steer: thread.steerable || thread.skips_compaction,
-        editing: session.and_then(|session| {
-            snapshot
-                .input
-                .queued_edits
-                .get(session)
-                .map(|edit| edit.client_user_message_id.clone())
-        }),
-        busy: session.is_some_and(|session| {
-            snapshot.operation_running(OperationKey::Queue {
-                session: session.clone(),
-            })
+        queue: Arc::new(QueuePresentation {
+            messages: waiting
+                .chain(sending.into_iter().map(|(id, pending)| QueuedMessage {
+                    id: id.clone(),
+                    fresh_context: pending.draft.fresh_context,
+                    text: queued_preview(&pending.draft.text, &pending.draft.contexts),
+                    attachments: pending.draft.attachments.len() as u32,
+                    pending: true,
+                }))
+                .collect(),
+            held: thread.queue.held,
+            resumable: resumable(thread),
+            can_steer: thread.steerable || thread.skips_compaction,
+            editing: session.and_then(|session| {
+                snapshot
+                    .input
+                    .queued_edits
+                    .get(session)
+                    .map(|edit| edit.client_user_message_id.clone())
+            }),
+            busy,
+            language: snapshot.catalog.ui_language,
+            session: session.cloned(),
+            skips_compaction: thread.skips_compaction,
+            edit_blocked,
+            can_change: snapshot.connection.connected
+                && crate::session::direct_input_unavailable_reason(thread.can_accept_direct_input)
+                    .is_none(),
         }),
     }
 }
@@ -215,6 +216,7 @@ pub struct ComposerPresentation {
     pub controls: ComposerControls,
     models: Arc<Vec<Model>>,
     catalog: Option<Arc<agent_protocol::composer::ComposerCatalog>>,
+    paths: Option<Arc<crate::composer::completions::PathSearch>>,
     stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
 }
 
@@ -225,6 +227,7 @@ impl ComposerPresentation {
             && self.controls == other.controls
             && self.models.same(&other.models)
             && self.catalog.same(&other.catalog)
+            && self.paths.same(&other.paths)
             && self.stashes.same(&other.stashes)
     }
     pub(crate) fn project(
@@ -233,7 +236,10 @@ impl ComposerPresentation {
         previous: Option<&Arc<Self>>,
     ) -> Arc<Self> {
         static EMPTY: OnceLock<Arc<Draft>> = OnceLock::new();
-        let key = &pane.navigation.draft_key;
+        let mut navigation = pane.navigation.as_ref().clone();
+        navigation.draft_key =
+            snapshot.composer_key(navigation.thread_id.as_ref(), &navigation.draft_key);
+        let key = &navigation.draft_key;
         let draft = snapshot
             .input
             .drafts
@@ -246,12 +252,17 @@ impl ComposerPresentation {
         let provider = snapshot.model_provider_for_draft(key.clone());
         let question = session.and_then(|id| snapshot.question_prompt(id.clone()));
         let controls = ComposerControls {
+            triage_available: snapshot.connection.connected
+                && !snapshot.operation_running(OperationKey::Triage),
+            project_clone: snapshot.project_clone_views().into_iter().find(|entry| {
+                entry.state.request.destination == pane.navigation.cwd && entry.blocks_send
+            }),
             fresh_context_available: session
-                .is_some_and(|id| snapshot.fresh_context_available(id.clone())),
+                .is_some_and(|id| snapshot.can_set_fresh_context(id, !draft.fresh_context)),
             feedback_available: session.is_some_and(|id| snapshot.feedback_available(id.clone())),
             feedback: session.and_then(|id| snapshot.feedback_notice(id.clone())),
             workspace: workspace::project(snapshot, pane, &draft),
-            navigation: pane.navigation.as_ref().clone(),
+            navigation: navigation.clone(),
             connected: snapshot.connection.connected,
             loaded: session.is_none() || thread.is_some(),
             provider,
@@ -277,18 +288,31 @@ impl ComposerPresentation {
                     })
                 }),
             running_turn,
-            background: thread
-                .and_then(|thread| super::background_work::BackgroundWork::new(&thread.background)),
+            background: thread.and_then(|thread| {
+                super::background_work::BackgroundWork::new(
+                    &thread.background,
+                    follow_up::working(thread),
+                )
+            }),
             unavailable: session
                 .and_then(|id| snapshot.input_unavailable_reason(id.clone(), provider))
-                .or_else(|| snapshot.project_clone_block_reason(&pane.navigation.cwd)),
+                .or_else(|| {
+                    snapshot
+                        .project_clone_block_reason(&pane.navigation.cwd)
+                        .map(|reason| snapshot.catalog.ui_language.text(&reason).to_owned())
+                }),
             question_phase: question.as_ref().and_then(|question| {
                 snapshot.operation_phase(OperationKey::Request {
                     id: question.request_id.clone(),
                 })
             }),
+            follow_up: follow_up_controls(
+                snapshot,
+                thread.map(AsRef::as_ref),
+                draft.fresh_context,
+                question.is_some(),
+            ),
             question,
-            follow_up: follow_up_controls(snapshot, thread.map(AsRef::as_ref), draft.fresh_context),
         };
         let catalog = snapshot
             .catalog
@@ -301,6 +325,7 @@ impl ComposerPresentation {
             controls,
             models: snapshot.catalog.models.clone(),
             catalog,
+            paths: pane.composer_paths.clone(),
             stashes: snapshot.input.stashes.clone(),
         };
         if let Some(previous) = previous
@@ -309,6 +334,21 @@ impl ComposerPresentation {
             return previous.clone();
         }
         Arc::new(next)
+    }
+
+    pub fn completion_source(&self) -> crate::composer::completions::CompletionSource {
+        crate::composer::completions::CompletionSource {
+            connected: self.controls.connected,
+            catalog: self.completion_catalog(),
+            draft: self.controls.navigation.draft_key.clone(),
+            root: crate::composer::completions::path_root(
+                &self.controls.navigation.cwd,
+                self.controls.navigation.thread_id.is_some(),
+                self.draft.workspace.as_ref(),
+            )
+            .into(),
+            paths: self.paths.clone(),
+        }
     }
 }
 
@@ -382,6 +422,19 @@ impl Snapshot {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl ComposerPresentation {
+    /// Transfers, dictation and queue editing own draft content until they finish.
+    /// Native recording or marked text is supplied by the input owner.
+    pub fn can_restore_stash(&self, native_input_busy: bool) -> bool {
+        !native_input_busy
+            && !self.controls.transferring
+            && !self.controls.transcribing
+            && self.controls.follow_up.queue.editing.is_none()
+    }
+    pub fn can_stash(&self, native_input_busy: bool) -> bool {
+        self.can_restore_stash(native_input_busy)
+            && self.stashes.len() < crate::composer::stash::STASH_LIMIT
+            && crate::composer::stash::has_content(&self.draft)
+    }
     pub fn stashed_prompts(&self) -> Vec<crate::composer::stash::StashedPrompt> {
         self.stashes.as_ref().clone()
     }
@@ -397,16 +450,43 @@ impl ComposerPresentation {
     pub fn current_model(&self) -> Option<Model> {
         super::model_settings::current_model(&self.models, self.draft.model.as_ref()).cloned()
     }
-    pub fn can_interrupt(&self) -> bool {
+    pub fn can_choose_model(&self) -> bool {
         self.controls.connected
-            && self.controls.running_turn.is_some()
+            && !self.controls.sending
+            && self
+                .controls
+                .navigation
+                .draft_key
+                .owns_submission_settings()
+    }
+    /// Answered background work has its own stop in the conversation footer.
+    pub fn primary_stop_turn(&self) -> Option<agent_protocol::ids::TurnId> {
+        self.controls
+            .background
+            .is_none()
+            .then(|| self.controls.running_turn.clone())
+            .flatten()
+    }
+    pub fn can_interrupt(&self, turn: Option<agent_protocol::ids::TurnId>) -> bool {
+        self.controls.connected
+            && turn.is_some()
+            && self.controls.running_turn == turn
             && self.controls.interrupt_phase != Some(OperationPhase::Running)
     }
-    /// Whether the docked question's action answers now: it can, the Host is
-    /// reached, and its last answer is not still being delivered.
+    pub fn can_answer_question(&self) -> bool {
+        super::context::request_answer_enabled(
+            self.controls.connected,
+            self.controls
+                .question
+                .as_ref()
+                .is_some_and(|question| question.can_respond),
+            self.controls.question_phase.clone(),
+            false,
+        )
+    }
+    /// Editing, choosing and advancing share the same response-delivery boundary.
     pub fn can_advance_question(&self) -> bool {
-        self.controls.connected
-            && self.controls.question_phase != Some(OperationPhase::Running)
+        self.can_answer_question()
             && self
                 .controls
                 .question
@@ -418,12 +498,13 @@ impl ComposerPresentation {
         text: String,
         cursor: u32,
     ) -> Option<crate::composer::ComposerSuggestions> {
-        crate::composer::suggestions(
+        self.completion_catalog().suggestions(&text, cursor)
+    }
+    pub fn completion_catalog(&self) -> crate::composer::CompletionCatalog {
+        crate::composer::completion_catalog(
             self.language,
             self.catalog.as_deref(),
             self.controls.provider,
-            text,
-            cursor,
         )
     }
     pub fn unchanged(&self, other: Arc<Self>) -> bool {
@@ -434,6 +515,8 @@ impl ComposerPresentation {
     pub fn can_send(&self, has_content: bool) -> bool {
         (has_content || !self.draft.contexts.is_empty())
             && self.accepts_input()
+            && !(self.controls.follow_up.queue.editing.is_some()
+                && self.controls.follow_up.queue.busy)
             && self.controls.provider.is_some()
             && self.controls.unavailable.is_none()
     }
@@ -454,9 +537,33 @@ impl ComposerPresentation {
             && self.draft.text.trim().is_empty()
             && self.draft.attachments.is_empty()
             && self.draft.contexts.is_empty()
-            && follow_up.editing.is_none()
-            && !follow_up.busy
-            && (follow_up.resumable || follow_up.held && !follow_up.queue.is_empty())
+            && follow_up.queue.editing.is_none()
+            && !follow_up.queue.busy
+            && (follow_up.queue.resumable
+                || follow_up.queue.held && !follow_up.queue.messages.is_empty())
+    }
+
+    /// Capture the current input owner. A queued-save callback can never turn
+    /// into a normal send when its editor is cancelled or the queue advances.
+    pub fn submit_intent(
+        &self,
+        client_user_message_id: ClientInputId,
+        alternate: bool,
+    ) -> crate::state::Intent {
+        if matches!(
+            self.controls.navigation.draft_key,
+            crate::state::DraftKey::Queued { .. }
+        ) {
+            crate::state::Intent::SaveQueuedEdit {
+                draft_key: self.controls.navigation.draft_key.clone(),
+            }
+        } else {
+            crate::state::Intent::Submit {
+                thread_id: self.controls.navigation.thread_id.clone(),
+                client_user_message_id,
+                alternate,
+            }
+        }
     }
 
     /// The owner dispatches these in order. Held input resumes in its original
@@ -470,7 +577,8 @@ impl ComposerPresentation {
             return Vec::new();
         }
         let thread_id = self.controls.navigation.thread_id.clone().unwrap();
-        if self.controls.follow_up.held && !self.controls.follow_up.queue.is_empty() {
+        if self.controls.follow_up.queue.held && !self.controls.follow_up.queue.messages.is_empty()
+        {
             return vec![Intent::Queue {
                 thread_id,
                 action: QueueAction::Resume,
@@ -547,6 +655,73 @@ mod availability_tests {
         assert!(ready.can_send(true));
         assert!(!ready.can_send(false));
         assert!(ready.can_dictate() && ready.can_attach());
+    }
+
+    #[test]
+    fn stash_controls_preserve_content_owned_by_transfers_recording_and_queue_edits() {
+        let empty = presentation(|_| ());
+        assert!(!empty.can_stash(false));
+        assert!(empty.can_restore_stash(false));
+        let ready = presentation(|snapshot| {
+            let key = snapshot.panes.primary().navigation.draft_key.clone();
+            Arc::make_mut(
+                Arc::make_mut(&mut snapshot.input.drafts)
+                    .get_mut(&key)
+                    .unwrap(),
+            )
+            .text = "keep this prompt".into();
+        });
+        assert!(ready.can_stash(false));
+        assert!(!ready.can_stash(true));
+        assert!(!ready.can_restore_stash(true));
+        for key in [
+            OperationKey::Attachment {
+                draft_key: DraftKey::default(),
+            },
+            OperationKey::Dictation {
+                draft_key: DraftKey::default(),
+            },
+        ] {
+            let blocked = presentation(|snapshot| running(snapshot, key));
+            assert!(!blocked.can_restore_stash(false));
+        }
+        let mut editing = Arc::try_unwrap(ready).ok().unwrap();
+        Arc::make_mut(&mut editing.controls.follow_up.queue).editing = Some("queued".into());
+        assert!(!editing.can_stash(false));
+        assert!(!editing.can_restore_stash(false));
+        Arc::make_mut(&mut editing.controls.follow_up.queue).editing = None;
+        let mut full = editing;
+        full.stashes = Arc::new(
+            (0..crate::composer::stash::STASH_LIMIT)
+                .map(|index| crate::composer::stash::StashedPrompt {
+                    id: index.to_string(),
+                    created_at_ms: 0,
+                    text: "saved".into(),
+                    attachments: vec![],
+                    invocations: vec![],
+                    contexts: vec![],
+                })
+                .collect(),
+        );
+        assert!(!full.can_stash(false));
+        assert!(full.can_restore_stash(false));
+        Arc::make_mut(&mut full.stashes).pop();
+        assert!(full.can_stash(false));
+    }
+
+    #[test]
+    fn triage_requires_a_connection_and_no_preparation_in_flight() {
+        assert!(presentation(|_| ()).controls.triage_available);
+        assert!(
+            !presentation(|snapshot| snapshot.connection.connected = false)
+                .controls
+                .triage_available
+        );
+        assert!(
+            !presentation(|snapshot| running(snapshot, OperationKey::Triage))
+                .controls
+                .triage_available
+        );
     }
 
     #[test]

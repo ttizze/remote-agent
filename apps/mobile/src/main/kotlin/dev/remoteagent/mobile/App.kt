@@ -26,7 +26,6 @@ import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.ClientBuild
 import dev.remoteagent.core.ClientSession
 import dev.remoteagent.core.ClientSessions
-import dev.remoteagent.core.ConversationRowPolicy
 import dev.remoteagent.core.ConversationRows
 import dev.remoteagent.core.DevicePreferences
 import dev.remoteagent.core.ErrorScope
@@ -35,7 +34,6 @@ import dev.remoteagent.core.OperationKey
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.PanelScope
 import dev.remoteagent.core.Presentation
-import dev.remoteagent.core.ProgressRows
 import dev.remoteagent.core.RenderedConversation
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.ThreadList
@@ -485,20 +483,27 @@ internal class AndroidAppModel(private val context: Context, private val prefere
     private fun projectConversation(rendered: RenderedConversation?, scope: PanelScope) {
         val next = rendered?.let {
             ConversationRows.project(
+                dev.remoteagent.core.TimelineStyle(
+                    dev.remoteagent.core.WorkDisclosure.SETTLED,
+                    dev.remoteagent.core.PlanPresentation.CARD,
+                    false,
+                    false,
+                ),
                 it,
                 scope,
+                null,
                 activityExpansion,
-                ConversationRowPolicy(requests = true, progress = ProgressRows.ALWAYS),
                 conversation,
             )
         }
         if (next == null || conversation?.let(next::unchanged) != true) conversation = next
     }
 
-    fun toggleActivity(id: String) {
+    fun toggleDisclosure(id: String) {
         val current = conversation ?: return
-        val change = current.toggleActivity(id, activityExpansion) ?: return
-        activityExpansion = change
+        val change = current.toggleDisclosure(id, activityExpansion) ?: return
+        activityExpansion = change.expansion
+        change.load?.let { perform(it) }
         projectConversation(current.source(), current.scope())
     }
 
@@ -709,9 +714,11 @@ private fun androidx.compose.foundation.layout.ColumnScope.ConversationPane(mode
         ThreadDetailScreen(
             model.conversationContext,
             model.conversation,
-            ConversationActions(model::perform, model::toggleActivity, model.terminals),
+            ConversationActions(model::perform, model::toggleDisclosure, model.terminals),
             Modifier.weight(1f),
             scrollToTopRequest = scrollToTopRequest,
+            dockedRequests =
+                model.conversationContext.navigation().threadId?.let { model.snapshot.dockedRequests(it) }.orEmpty(),
         ) { onSend ->
             ThreadComposer(
                 model.composer,

@@ -2,14 +2,13 @@ use crate::l10n::{tr, tr_format};
 use crate::{Connection, shared::Shared};
 use agent_core::{
     presentation::conversation::{
-        ActivityPresentation, ConversationRowContent, LANE_WIDTH, RenderedConversation,
-        RenderedItem, RenderedTurn, TurnErrorPresentation, TurnRow, WorkProgress, lane_padding,
-        turn_rows,
+        ActivityPresentation, ConversationRowContent, LANE_WIDTH, RenderedItem, TimelineStyle,
+        TurnErrorPresentation, TurnRow, WorkProgress, lane_padding, rows::ConversationRows,
     },
     state::{Intent, operations as op},
 };
 use nsh_core::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[cfg(test)]
 mod copy_tests;
@@ -85,16 +84,6 @@ enum Shape {
     Interrupted,
 }
 
-impl Shape {
-    /// One of T3 Code's work log rows, which run on without space between.
-    fn work_log(self) -> bool {
-        matches!(
-            self,
-            Self::Group { .. } | Self::Work { .. } | Self::Live | Self::Error
-        )
-    }
-}
-
 #[derive(Clone, PartialEq)]
 struct Row {
     preparation: Option<Box<agent_core::presentation::conversation::PreparationPresentation>>,
@@ -168,95 +157,29 @@ impl Row {
     }
 }
 
-fn project(
-    conversation: &RenderedConversation,
-    expanded: &HashMap<String, String>,
-    groups: &HashSet<String>,
-) -> Vec<Row> {
-    let mut rows: Vec<Row> = Vec::new();
-    for turn in &conversation.turns {
-        let key = turn.key();
-        for row in turn_rows(turn, expanded, groups) {
-            rows.extend(turn_row(row, &key, turn));
-        }
-    }
-    let native_end = rows.len();
-    rows.extend(conversation.queued.iter().filter_map(|item| {
-        source_row(agent_core::presentation::conversation::ConversationRow {
-            id: item.data.id.clone(),
-            content: ConversationRowContent::User { item: item.clone() },
-            timestamp_ms: item.data.timestamp_ms,
-            steer: false,
-            queued: false,
-            edit_turn_id: None,
-        })
-    }));
-    rows.extend(
-        conversation
-            .session_rows
-            .iter()
-            .cloned()
-            .filter_map(source_row),
-    );
-    agent_core::presentation::conversation::rows::position_workspace_setup(
-        &mut rows,
-        native_end,
-        |row| row.kind == Kind::User,
-        |row| row.preparation.is_some(),
-    );
-    let mut previous_steer = false;
-    let mut in_group = false;
-    for row in &mut rows {
-        let steer = row.steer;
-        row.steer = steer && !previous_steer;
-        previous_steer = steer;
-        // An open group's tools sit in it.
-        if let Shape::Work { member } = &mut row.shape {
-            *member = in_group;
-        }
-        in_group = matches!(
-            row.shape,
-            Shape::Group { open: true } | Shape::Work { member: true }
-        );
-    }
-    let shapes: Vec<_> = rows.iter().map(|row| row.shape).collect();
-    for (index, row) in rows.iter_mut().enumerate() {
-        row.gap = gap(
-            row.kind,
-            row.shape,
-            row.actions,
-            shapes.get(index + 1).copied(),
-        );
-    }
-    rows
-}
-
-/// The space below a row, as T3 Code's timeline rows keep: a message's
-/// `pb-4` (`pb-2` without its actions), the work headers' `pb-1.5`, and
-/// none between work log rows, which run on as one list.
-fn gap(kind: Kind, shape: Shape, actions: bool, next: Option<Shape>) -> f32 {
-    let continues = next.is_some_and(Shape::work_log);
-    match shape {
-        Shape::Fold { .. } | Shape::Working => 6.0,
-        Shape::Group { open: true } => 0.0,
-        Shape::Work { member: true } if next == Some(Shape::Work { member: true }) => 0.0,
-        Shape::Work { member: true } if !continues => 4.0,
-        shape if shape.work_log() => {
-            if continues {
-                0.0
-            } else {
-                8.0
+fn project(projection: &ConversationRows) -> Vec<Row> {
+    projection
+        .rows
+        .iter()
+        .zip(projection.gaps())
+        .zip(projection.work_members())
+        .filter_map(|((source, gap), member)| {
+            let mut row = match source.timeline() {
+                Some(row) => turn_row(row, &source.id(), source.progress.clone()),
+                None => source_row(source.data()),
+            }?;
+            row.id = source.id();
+            if let Shape::Work { member: inside } = &mut row.shape {
+                *inside = member;
             }
-        }
-        Shape::Commentary | Shape::Interrupted => 8.0,
-        Shape::Subagent => 0.0,
-        Shape::Message if kind == Kind::Response && !actions => 8.0,
-        _ => 16.0,
-    }
+            row.gap = gap;
+            Some(row)
+        })
+        .collect()
 }
 
 /// A row of a turn on T3 Code's timeline.
-fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
+fn turn_row(row: TurnRow, key: &str, progress: Option<WorkProgress>) -> Option<Row> {
     use crate::activity::{Item, Status};
     let activity_item =
         |row: &agent_core::presentation::conversation::ConversationRow, live, label| {
@@ -289,7 +212,7 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
         }
         TurnRow::Working => {
             let mut row = Row::new(format!("working:{key}"), Kind::Activity, Shape::Working, "");
-            row.progress = Some(turn.work_progress(false));
+            row.progress = progress;
             row
         }
         TurnRow::Commentary(item) => {
@@ -307,6 +230,7 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             summary,
             kind,
             open,
+            ..
         } => {
             let mut row = Row::new(id, Kind::Activity, Shape::Group { open }, summary);
             row.group_kind = kind;
@@ -322,7 +246,7 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             shown.detail = activity_item(&row, false, label);
             shown
         }
-        TurnRow::Live { row, label } => {
+        TurnRow::Live { row, label, .. } => {
             let mut shown = Row::new(row.id.clone(), Kind::Activity, Shape::Live, label.clone());
             shown.detail = activity_item(&row, true, label);
             shown
@@ -333,8 +257,13 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             row.body = label.into();
             row
         }
-        TurnRow::Requested { label, approval } => {
-            let mut row = status("requested", Status::Requested { approval });
+        TurnRow::Requested { label, request } => {
+            let mut row = status(
+                "requested",
+                Status::Requested {
+                    approval: request.approval.is_some(),
+                },
+            );
             row.body = label.into();
             row
         }
@@ -347,12 +276,19 @@ fn turn_row(row: TurnRow, key: &str, turn: &RenderedTurn) -> Option<Row> {
             shown.images.clear();
             shown
         }
+        TurnRow::Subagents {
+            id, label, open, ..
+        } => {
+            let mut row = Row::new(id, Kind::Activity, Shape::Group { open }, label);
+            row.group_kind = "subagent".into();
+            row
+        }
         TurnRow::Plan { id, title, text } => {
             let mut row = Row::new(format!("plan:{id}"), Kind::Activity, Shape::Plan, title);
             row.note = text.into();
             row
         }
-        TurnRow::Subagent { id, agent } => {
+        TurnRow::Subagent { id, agent, .. } => {
             let mut row = Row::new(
                 format!("subagent:{id}"),
                 Kind::Activity,
@@ -425,7 +361,9 @@ fn source_row(row: agent_core::presentation::conversation::ConversationRow) -> O
         }
         ConversationRowContent::ActivityHeader { .. }
         | ConversationRowContent::InProgress { .. }
-        | ConversationRowContent::PendingRequest { .. } => return None,
+        | ConversationRowContent::PendingRequest { .. }
+        | ConversationRowContent::Queue { .. }
+        | ConversationRowContent::Background { .. } => return None,
     };
     let mut shown = Row::new(row.id, kind, shape, body);
     (shown.steer, shown.queued) = (row.steer, row.queued);
@@ -493,8 +431,7 @@ pub(crate) struct Timeline {
     following: Signal<bool>,
     list: ElementRef,
     expanded: Signal<HashMap<String, String>>,
-    /// The work groups opened.
-    groups: Signal<HashSet<String>>,
+    frame: Memo<Option<Shared<ConversationRows>>>,
     rows: Memo<Shared<Vec<Row>>>,
     /// The first and last rows in view.
     viewable: Signal<Option<(usize, usize)>>,
@@ -510,22 +447,14 @@ pub(crate) struct Timeline {
 }
 
 impl Timeline {
-    fn set_activity(self, activity: ActivityPresentation, opening: bool) {
-        self.expanded.update(|all| {
-            if opening {
-                all.insert(activity.id.clone(), activity.status);
-            } else {
-                all.remove(&activity.id);
-            }
-        });
-    }
-
-    fn toggle_group(self, id: String) {
-        self.groups.update(|all| {
-            if !all.remove(&id) {
-                all.insert(id);
-            }
-        });
+    fn toggle_group(self, id: String) -> Option<Intent> {
+        let change = self.frame.with_untracked(|frame| {
+            frame
+                .as_ref()
+                .and_then(|frame| frame.toggle_disclosure(id, self.expanded.get_untracked()))
+        })?;
+        self.expanded.set(change.expansion);
+        change.load
     }
 
     /// The loaded messages' texts, each with its row's place in the list.
@@ -551,26 +480,33 @@ impl Timeline {
     pub(crate) fn new(following: Signal<bool>) -> Self {
         let connection = use_context::<Connection>().unwrap();
         let expanded = signal(HashMap::<String, String>::new());
-        let groups = signal(HashSet::<String>::new());
-        // Shared, so that a row reads it cheaply through `try_get`.
+        let frame = computed(move || {
+            connection.conversation.with(|conversation| {
+                conversation.as_ref().map(|conversation| {
+                    Shared(ConversationRows::project(
+                        TimelineStyle::T3,
+                        conversation.0.clone(),
+                        connection.scope.get(),
+                        None,
+                        expanded.get(),
+                        None,
+                    ))
+                })
+            })
+        });
         let rows = computed(move || {
-            let projected = connection.conversation.with(|conversation| {
-                conversation
+            Shared(std::sync::Arc::new(frame.with(|frame| {
+                frame
                     .as_ref()
-                    .map(|conversation| {
-                        expanded.with(|expanded| {
-                            groups.with(|groups| project(conversation, expanded, groups))
-                        })
-                    })
+                    .map(|frame| project(frame))
                     .unwrap_or_default()
-            });
-            Shared(std::sync::Arc::new(projected))
+            })))
         });
         Self {
             following,
             list: element_ref(),
             expanded,
-            groups,
+            frame,
             rows,
             viewable: signal(None),
             width: signal(0.0),
@@ -645,13 +581,17 @@ fn minimap(timeline: Timeline, canvas: impl Fn() -> f32 + Copy + 'static) -> Vie
                 .get(row)
                 .map(|r| r.body.to_string())
                 .unwrap_or_default();
-            let answer = rows
-                .iter()
-                .skip(row + 1)
-                .take_while(|r| r.kind != Kind::User)
-                .filter(|r| r.kind == Kind::Response)
-                .last()
-                .map(|r| r.body.to_string());
+            use agent_core::presentation::conversation::{MinimapRow, minimap_answer_row};
+            let answer = minimap_answer_row(
+                row,
+                rows.iter().map(|row| match row.kind {
+                    Kind::User => MinimapRow::User,
+                    Kind::Response => MinimapRow::Assistant,
+                    Kind::Activity => MinimapRow::Other,
+                }),
+            )
+            .and_then(|index| rows.get(index))
+            .map(|row| row.body.to_string());
             (user, answer)
         })
     };
@@ -793,6 +733,9 @@ fn edit_from_here(connection: Connection, turn: agent_protocol::ids::TurnId) {
     else {
         return;
     };
+    let storage_scope = connection
+        .publication
+        .with_untracked(|p| p.snapshot.connection.storage_scope.clone());
     spawn(async move {
         let confirmed = nsh_base::alert_dialog()
             .title(tr("ここから編集しますか？"))
@@ -806,7 +749,9 @@ fn edit_from_here(connection: Connection, turn: agent_protocol::ids::TurnId) {
             .is_ok_and(|answer| answer.action.as_deref() == Some("rewind"));
         if confirmed {
             connection.dispatch(Intent::RewindSession(op::RewindSession::new(
-                thread_id, turn,
+                thread_id,
+                turn,
+                storage_scope,
             )));
             connection.composer_ref.focus();
         }

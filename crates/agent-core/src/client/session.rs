@@ -10,7 +10,7 @@ use super::{AgentError, error};
 use crate::{
     diagnostics::ConnectionPhase,
     state::{Intent, Snapshot},
-    store::Outcome,
+    store::{DispatchScope, Outcome},
 };
 use agent_protocol::models::Invitation;
 use futures_util::FutureExt;
@@ -29,7 +29,11 @@ pub trait ClientPlatform: Send + Sync {
     fn conversation_directory(&self) -> Result<Option<String>, AgentError>;
 }
 
-type Pending = (Intent, oneshot::Sender<Result<Outcome, AgentError>>);
+struct Pending {
+    intent: Intent,
+    scope: Option<DispatchScope>,
+    complete: oneshot::Sender<Result<Outcome, AgentError>>,
+}
 
 /// Native apps supply build metadata without recompiling the shared library.
 #[derive(Clone, uniffi::Record)]
@@ -153,33 +157,7 @@ impl ClientSession {
 
     /// The queue and ready transition share one lock, preserving input order.
     pub fn dispatch(&self, intent: Intent) -> Result<Arc<Receipt>, AgentError> {
-        let (complete, result) = oneshot::channel();
-        let completion = async move { result.await.map_err(error)? }.boxed().shared();
-        let ready = {
-            let mut phase = self.phase.lock().unwrap();
-            let ready = match &mut *phase {
-                Phase::Loading(pending) => {
-                    pending.push((intent, complete));
-                    None
-                }
-                Phase::Ready { store, runtime, .. } => {
-                    Some((store.clone(), runtime.clone(), intent, complete))
-                }
-                Phase::Failed(reason) => return Err(reason.clone()),
-            };
-            let mut operations = self.operations.lock().unwrap();
-            operations.retain(|operation| operation.peek().is_none());
-            operations.push(completion.clone());
-            ready
-        };
-        // Publication may synchronously resume native observers that read this
-        // session or flush accepted work. Track it first, then release the locks.
-        if let Some((store, runtime, intent, complete)) = ready {
-            Self::dispatch_to(&store, &runtime, intent, complete);
-        }
-        Ok(Arc::new(Receipt {
-            result: Mutex::new(Some(Box::pin(completion))),
-        }))
+        self.dispatch_targeted(intent, None)
     }
 
     pub async fn resume(self: Arc<Self>, ticket: String) -> Result<bool, AgentError> {
@@ -263,6 +241,51 @@ impl ClientSession {
 }
 
 impl ClientSession {
+    pub fn dispatch_scoped(
+        &self,
+        scope: DispatchScope,
+        intent: Intent,
+    ) -> Result<Arc<Receipt>, AgentError> {
+        self.dispatch_targeted(intent, Some(scope))
+    }
+
+    fn dispatch_targeted(
+        &self,
+        intent: Intent,
+        scope: Option<DispatchScope>,
+    ) -> Result<Arc<Receipt>, AgentError> {
+        let (complete, result) = oneshot::channel();
+        let command = Pending {
+            intent,
+            scope,
+            complete,
+        };
+        let completion = async move { result.await.map_err(error)? }.boxed().shared();
+        let ready = {
+            let mut phase = self.phase.lock().unwrap();
+            let ready = match &mut *phase {
+                Phase::Loading(pending) => {
+                    pending.push(command);
+                    None
+                }
+                Phase::Ready { store, runtime, .. } => {
+                    Some((store.clone(), runtime.clone(), command))
+                }
+                Phase::Failed(reason) => return Err(reason.clone()),
+            };
+            let mut operations = self.operations.lock().unwrap();
+            operations.retain(|operation| operation.peek().is_none());
+            operations.push(completion.clone());
+            ready
+        };
+        // Both admission forms preserve queued input order and flush tracking.
+        // Release the locks before publication can wake reentrant observers.
+        if let Some((store, runtime, command)) = ready {
+            Self::dispatch_to(&store, &runtime, command);
+        }
+        Ok(Receipt::new(completion))
+    }
+
     fn pending_snapshot(&self) -> Arc<Snapshot> {
         let language = self.persistence.device.language();
         if language == self.empty.catalog.ui_language {
@@ -378,8 +401,8 @@ impl ClientSession {
         if self.recent_chats {
             let _ = store.dispatch(Intent::ShowRecentChats);
         }
-        for (intent, complete) in pending.drain(..) {
-            Self::dispatch_to(&store, &runtime, intent, complete);
+        for command in pending.drain(..) {
+            Self::dispatch_to(&store, &runtime, command);
         }
         *phase = Phase::Ready {
             store,
@@ -389,19 +412,17 @@ impl ClientSession {
         Ok(())
     }
 
-    fn dispatch_to(
-        store: &AgentStore,
-        runtime: &tokio::runtime::Handle,
-        intent: Intent,
-        complete: oneshot::Sender<Result<Outcome, AgentError>>,
-    ) {
-        let receipt = store.dispatch(intent);
+    fn dispatch_to(store: &AgentStore, runtime: &tokio::runtime::Handle, command: Pending) {
+        let receipt = match command.scope {
+            Some(scope) => store.dispatch_scoped(scope, command.intent),
+            None => store.dispatch(command.intent),
+        };
         runtime.spawn(async move {
             let result = match receipt {
                 Ok(receipt) => receipt.wait().await,
                 Err(reason) => Err(reason),
             };
-            let _ = complete.send(result);
+            let _ = command.complete.send(result);
         });
     }
 
@@ -412,8 +433,8 @@ impl ClientSession {
         );
         match previous {
             Phase::Loading(pending) => {
-                for (_, complete) in pending {
-                    let _ = complete.send(Err(reason.clone()));
+                for command in pending {
+                    let _ = command.complete.send(Err(reason.clone()));
                 }
                 Phase::Failed(reason)
             }
@@ -445,6 +466,66 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn loading_preserves_scoped_admission_and_receipt_order_until_the_actual_store_exists() {
+        let storage = Arc::new(Storage::default());
+        let mut snapshot = Snapshot::default();
+        snapshot.connection.storage_scope = "persisted-storage".into();
+        let draft = crate::state::DraftKey::from("picker-origin");
+        Arc::make_mut(&mut snapshot.input.drafts).insert(
+            draft.clone(),
+            Arc::new(crate::state::Draft {
+                text: "Before".into(),
+                ..Default::default()
+            }),
+        );
+        *storage.bytes.lock().unwrap() = crate::persistence::encode(&snapshot).unwrap();
+        let session = open(storage);
+        assert!(
+            session.store().is_none(),
+            "exercise the loading queue, not a ready-store shortcut"
+        );
+        let old = session
+            .dispatch_scoped(
+                DispatchScope {
+                    storage: "retired-storage".into(),
+                    draft: None,
+                },
+                Intent::SetDraftText {
+                    thread_id: draft.clone(),
+                    text: "Wrong namespace".into(),
+                },
+            )
+            .unwrap();
+        let valid = session
+            .dispatch_scoped(
+                DispatchScope {
+                    storage: "persisted-storage".into(),
+                    draft: None,
+                },
+                Intent::SetDraftText {
+                    thread_id: draft.clone(),
+                    text: "Valid queued input".into(),
+                },
+            )
+            .unwrap();
+        // Host lifecycle remains available before its persisted namespace is known.
+        let disable = session
+            .dispatch(Intent::SetConnectionEnabled { enabled: false })
+            .unwrap();
+        session.clone().ready().await.unwrap();
+        assert!(old.wait().await.is_err());
+        valid.wait().await.unwrap();
+        disable.wait().await.unwrap();
+        session.clone().flush().await.unwrap();
+        assert_eq!(
+            session.snapshot().input.drafts[&draft].text,
+            "Valid queued input"
+        );
+        assert!(!session.snapshot().connection_enabled());
+        session.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn a_borrowing_manager_leaves_the_owners_session_open_when_it_ends() {

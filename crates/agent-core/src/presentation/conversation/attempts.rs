@@ -1,4 +1,5 @@
 //! Fold superseded work while preserving user input, complete replies and resources.
+use super::RenderedConversation;
 use agent_protocol::models::AttemptState;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7,6 +8,12 @@ pub struct AttemptFold {
     pub by_steer: bool,
     pub items: Vec<agent_protocol::ids::ItemId>,
     pub deferred: Vec<agent_protocol::ids::ItemId>,
+}
+
+impl AttemptFold {
+    pub fn group_id(&self) -> String {
+        format!("attempt:{}", self.id)
+    }
 }
 
 fn foldable(body: &crate::models::ItemBody) -> bool {
@@ -76,6 +83,19 @@ pub fn attempt_folds(turn: &crate::models::Turn) -> Vec<AttemptFold> {
         .collect()
 }
 
+/// Opening a group loads only deferred work still belonging to its superseded attempt.
+pub fn group_load(
+    thread: &crate::models::Thread,
+    attempt: Option<uuid::Uuid>,
+) -> Option<crate::state::Intent> {
+    let attempt = attempt?;
+    let read = deferred_attempt_reads(thread, attempt).into_iter().next()?;
+    Some(crate::state::Intent::ReadAttempt {
+        thread_id: read.thread_id,
+        attempt,
+    })
+}
+
 pub fn deferred_attempt_reads(
     thread: &crate::models::Thread,
     id: uuid::Uuid,
@@ -103,6 +123,13 @@ pub fn deferred_attempt_reads(
                 })
         })
         .collect()
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl RenderedConversation {
+    pub fn attempt_reads(&self, attempt: uuid::Uuid) -> Vec<agent_protocol::operations::ReadItem> {
+        deferred_attempt_reads(&self.source, attempt)
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +197,11 @@ mod tests {
         assert_eq!(reads[0].thread_id, session);
         assert_eq!(reads[0].turn_id.as_str(), "turn");
         assert_eq!(reads[0].item_id.as_str(), "command");
+        assert!(
+            matches!(group_load(&thread, Some(id)), Some(crate::state::Intent::ReadAttempt { thread_id, attempt }) if thread_id == thread.id.clone().unwrap() && attempt == id)
+        );
+        assert!(group_load(&thread, None).is_none());
+        assert!(group_load(&thread, Some(uuid::Uuid::from_u128(2))).is_none());
         assert!(deferred_attempt_reads(&thread, uuid::Uuid::new_v4()).is_empty());
         let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[0]);
         let mut answer = Item::new(
@@ -186,5 +218,6 @@ mod tests {
             attempt_folds(turn).is_empty(),
             "complete replies keep their entire attempt visible"
         );
+        assert!(group_load(&thread, Some(id)).is_none());
     }
 }

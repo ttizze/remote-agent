@@ -24,7 +24,7 @@ pub(crate) fn strip() -> impl IntoElement {
     let stopping =
         move || composer.with(|c| c.controls.interrupt_phase == Some(op::OperationPhase::Running));
     let stop = move || {
-        if composer.with_untracked(|c| c.can_interrupt())
+        if composer.with_untracked(|c| c.can_interrupt(c.controls.running_turn.clone()))
             && let Some((thread_id, turn_id)) = composer.with_untracked(|c| {
                 c.controls
                     .navigation
@@ -88,7 +88,9 @@ pub(crate) fn strip() -> impl IntoElement {
                         },
                         stop,
                     )
-                    .enabled(move || composer.with(|c| c.can_interrupt())),
+                    .enabled(move || {
+                        composer.with(|c| c.can_interrupt(c.controls.running_turn.clone()))
+                    }),
                 )
         },
     )

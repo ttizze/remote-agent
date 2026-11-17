@@ -3,6 +3,54 @@ use crate::localization::{UiLanguage, localized_ui_format};
 use crate::state::{Terminal, TerminalPhase, TerminalView};
 use std::{collections::BTreeMap, sync::Arc};
 
+/// ChatTerminalDrawers keeps ten recently visited open drawers hidden, in
+/// visit order. The active native frame also contains the conversation slot,
+/// so it exists even before that conversation opens a terminal.
+pub fn mounted_terminal_scopes(
+    previous: &[crate::panels::PanelScope],
+    open: &[crate::panels::PanelScope],
+    active: &crate::panels::PanelScope,
+) -> Vec<crate::panels::PanelScope> {
+    let mut next: Vec<_> = previous
+        .iter()
+        .filter(|scope| *scope != active && open.contains(scope))
+        .cloned()
+        .collect();
+    next.drain(..next.len().saturating_sub(10));
+    next.push(active.clone());
+    next
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalCloseConfirmation {
+    pub title: String,
+    pub description: String,
+    pub cancel_label: String,
+    pub confirm_label: String,
+}
+
+/// terminalCloseConfirm's single-resource prompt. The UI captures the
+/// resource separately, so the answer cannot resolve against a later tab.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn terminal_close_confirmation(
+    language: UiLanguage,
+    label: String,
+) -> TerminalCloseConfirmation {
+    TerminalCloseConfirmation {
+        title: localized_ui_format(
+            language,
+            "ターミナル「{0}」を閉じますか？".into(),
+            vec![label],
+        ),
+        description: language
+            .text("実行中のプロセスを停止し、このターミナルの履歴を消去します。")
+            .into(),
+        cancel_label: language.text("キャンセル").into(),
+        confirm_label: language.text("閉じる").into(),
+    }
+}
+
 /// Native views can briefly report a zero grid while being laid out.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn terminal_grid(cols: i32, rows: i32) -> Option<agent_protocol::operations::TerminalSize> {
@@ -48,7 +96,7 @@ pub fn terminal_status(language: UiLanguage, phase: &TerminalPhase) -> String {
     }
 }
 
-pub(crate) fn view(language: UiLanguage, terminal: &Terminal) -> TerminalView {
+pub fn view(language: UiLanguage, terminal: &Terminal) -> TerminalView {
     TerminalView {
         status: match terminal.phase {
             TerminalPhase::Starting | TerminalPhase::Running => None,
@@ -68,6 +116,74 @@ pub(crate) fn view(language: UiLanguage, terminal: &Terminal) -> TerminalView {
 mod tests {
     use super::*;
     use crate::state::{Snapshot, TerminalOutput};
+
+    #[test]
+    fn mounted_drawers_keep_ten_recent_visits_and_move_a_revisited_scope_to_the_end() {
+        let scope = |index| crate::panels::PanelScope {
+            host: "host".into(),
+            storage: "account".into(),
+            draft: format!("conversation-{index}").into(),
+        };
+        let open: Vec<_> = (0..=12).map(scope).collect();
+        let previous: Vec<_> = (0..=10).map(scope).collect();
+        let mounted = mounted_terminal_scopes(&previous, &open, &scope(11));
+        assert_eq!(mounted, (1..=11).map(scope).collect::<Vec<_>>());
+        let revisited = mounted_terminal_scopes(&mounted, &open, &scope(1));
+        assert_eq!(
+            revisited,
+            (2..=11).chain([1]).map(scope).collect::<Vec<_>>()
+        );
+        let next = mounted_terminal_scopes(&revisited, &open, &scope(12));
+        assert_eq!(next, (3..=11).chain([1, 12]).map(scope).collect::<Vec<_>>());
+        assert_eq!(next.len(), 11, "ten hidden drawers plus the active frame");
+    }
+
+    #[test]
+    fn mounted_drawers_discard_closed_scopes_and_do_not_mount_unvisited_ones() {
+        let scope = |draft: &str| crate::panels::PanelScope {
+            host: "host".into(),
+            storage: "account".into(),
+            draft: draft.into(),
+        };
+        let previous = vec![scope("closed"), scope("open")];
+        let open = vec![scope("open"), scope("never-visited")];
+        assert_eq!(
+            mounted_terminal_scopes(&previous, &open, &scope("current")),
+            [scope("open"), scope("current")],
+        );
+        let replacement = crate::panels::PanelScope {
+            storage: "another-account".into(),
+            ..scope("open")
+        };
+        assert_eq!(
+            mounted_terminal_scopes(&previous, std::slice::from_ref(&replacement), &replacement),
+            [replacement],
+            "a matching draft name in another storage is a different resource owner",
+        );
+    }
+
+    #[test]
+    fn terminal_close_confirmation_names_the_resource_and_localizes_its_actions() {
+        let prompt = terminal_close_confirmation(UiLanguage::English, "Terminal 2".into());
+        assert_eq!(prompt.title, "Close terminal \"Terminal 2\"?");
+        assert_eq!(
+            prompt.description,
+            "This stops the running process and clears its history."
+        );
+        assert_eq!(
+            (prompt.cancel_label.as_str(), prompt.confirm_label.as_str()),
+            ("Cancel", "Close")
+        );
+        let japanese = terminal_close_confirmation(UiLanguage::Japanese, "build".into());
+        assert_eq!(japanese.title, "ターミナル「build」を閉じますか？");
+        assert_eq!(
+            (
+                japanese.cancel_label.as_str(),
+                japanese.confirm_label.as_str()
+            ),
+            ("キャンセル", "閉じる")
+        );
+    }
 
     #[test]
     fn native_grids_ignore_unlaid_out_views_and_fit_host_limits() {

@@ -96,11 +96,15 @@ private val voiceDraftKeySaver =
         save = { key ->
             when (key) {
                 is DraftKey.Local -> listOf("local", key.key)
-                is DraftKey.Session -> listOf(key.session.provider?.name ?: "bex", key.session.id)
+                is DraftKey.Session -> listOf("session", key.session.provider?.name ?: "bex", key.session.id)
+                is DraftKey.Queued -> listOf("queued", key.session.provider?.name ?: "bex", key.session.id, key.edit)
             }
         },
         restore = { parts ->
             if (parts[0] == "local") DraftKey.Local(parts[1])
-            else DraftKey.Session(SessionRef(if (parts[0] == "bex") null else ProviderKind.valueOf(parts[0]), parts[1]))
+            else {
+                val session = SessionRef(if (parts[1] == "bex") null else ProviderKind.valueOf(parts[1]), parts[2])
+                if (parts[0] == "queued") DraftKey.Queued(session, parts.last()) else DraftKey.Session(session)
+            }
         },
     )

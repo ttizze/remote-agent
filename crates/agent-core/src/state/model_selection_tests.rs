@@ -297,7 +297,7 @@ fn welcome_draft(snapshot: Snapshot) -> (Snapshot, DraftKey) {
     let snapshot = crate::state::reduce(
         &snapshot,
         "",
-        crate::state::Event::Intent(Intent::SetDraft {
+        crate::state::Event::from(Intent::SetDraft {
             thread_id: DraftKey::default(),
             draft: Draft::default(),
         }),

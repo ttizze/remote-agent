@@ -503,7 +503,7 @@ async fn a_failed_stash_save_keeps_a_recoverable_prompt_and_a_retry_saves_the_wh
     let (stashed, _) = reduce(
         &snapshot,
         "",
-        Event::Intent(Intent::Stash {
+        Event::from(Intent::Stash {
             storage_scope: snapshot.connection.storage_scope.clone(),
             thread_id: DraftKey::from("draft"),
             action: StashAction::Save {

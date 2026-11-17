@@ -25,7 +25,7 @@ struct ModelSettingsScreen: View {
     }
 
     private var disabled: Bool {
-        !model.isConnected || model.sending
+        !model.composer.canChooseModel()
     }
 
     private var selectedAccount: Account? {

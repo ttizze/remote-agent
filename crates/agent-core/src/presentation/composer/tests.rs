@@ -174,6 +174,7 @@ fn active_draft_operations_block_submission_until_completion_or_retry() {
 
 #[test]
 fn answers_cannot_be_advanced_twice_while_the_response_is_in_flight() {
+    use crate::presentation::queue::QueueControl;
     use agent_protocol::{
         requests::{Question, Request, RequestBody, RequestTarget},
         session::RequestDelivery,
@@ -204,7 +205,32 @@ fn answers_cannot_be_advanced_twice_while_the_response_is_in_flight() {
             },
         }),
     );
+    Arc::make_mut(
+        Arc::make_mut(&mut snapshot.sessions.conversations)
+            .get_mut(&session())
+            .unwrap(),
+    )
+    .queue
+    .inputs = vec![queued_message("waiting")];
+    assert!(
+        presentation(&snapshot)
+            .controls
+            .follow_up
+            .queue
+            .action("waiting".into(), QueueControl::Edit)
+            .is_none(),
+        "T3's open question owns the composer while queued messages remain removable"
+    );
+    assert!(
+        presentation(&snapshot)
+            .controls
+            .follow_up
+            .queue
+            .action("waiting".into(), QueueControl::Remove)
+            .is_some()
+    );
     assert!(!presentation(&snapshot).can_advance_question());
+    assert!(presentation(&snapshot).can_answer_question());
     crate::questions::act(
         &mut snapshot,
         "question".into(),
@@ -224,6 +250,16 @@ fn answers_cannot_be_advanced_twice_while_the_response_is_in_flight() {
         },
     );
     assert!(!presentation(&snapshot).can_advance_question());
+    assert!(!presentation(&snapshot).can_answer_question());
+    let original = snapshot.input.question_drafts.clone();
+    crate::questions::act(
+        &mut snapshot,
+        "question".into(),
+        crate::questions::QuestionAction::Edit {
+            text: "a late edit during delivery".into(),
+        },
+    );
+    assert_eq!(snapshot.input.question_drafts, original);
     Arc::make_mut(&mut snapshot.operations)
         .get_mut(&key)
         .unwrap()
@@ -231,15 +267,34 @@ fn answers_cannot_be_advanced_twice_while_the_response_is_in_flight() {
         message: "retry".into(),
     };
     assert!(presentation(&snapshot).can_advance_question());
+    assert!(presentation(&snapshot).can_answer_question());
     snapshot.connection.connected = false;
+    assert!(!presentation(&snapshot).can_answer_question());
     assert!(!presentation(&snapshot).can_advance_question());
+    assert!(!presentation(&snapshot).can_answer_question());
     assert!(!presentation(&Snapshot::default()).can_advance_question());
+    snapshot.connection.connected = true;
+    Arc::make_mut(
+        Arc::make_mut(&mut snapshot.sessions.conversations)
+            .get_mut(&session())
+            .unwrap(),
+    )
+    .requests
+    .clear();
+    assert!(
+        presentation(&snapshot)
+            .controls
+            .follow_up
+            .queue
+            .action("waiting".into(), QueueControl::Edit)
+            .is_some()
+    );
 }
 
 #[test]
 fn stopping_retries_failure_and_does_not_depend_on_message_input_availability() {
     let mut snapshot = snapshot();
-    assert!(!presentation(&snapshot).can_interrupt());
+    assert!(!presentation(&snapshot).can_interrupt(Some("turn".into())));
     let thread = Arc::make_mut(
         Arc::make_mut(&mut snapshot.sessions.conversations)
             .get_mut(&session())
@@ -251,7 +306,13 @@ fn stopping_retries_failure_and_does_not_depend_on_message_input_availability() 
         status: TurnStatus::Running,
         ..Default::default()
     })]);
-    assert!(presentation(&snapshot).can_interrupt());
+    assert!(presentation(&snapshot).can_interrupt(Some("turn".into())));
+    assert_eq!(
+        presentation(&snapshot).primary_stop_turn(),
+        Some("turn".into())
+    );
+    assert!(!presentation(&snapshot).can_interrupt(None));
+    assert!(!presentation(&snapshot).can_interrupt(Some("stale-turn".into())));
     assert!(!presentation(&snapshot).can_send(true));
     let key = OperationKey::Interrupt {
         session: session(),
@@ -264,16 +325,16 @@ fn stopping_retries_failure_and_does_not_depend_on_message_input_availability() 
             phase: OperationPhase::Running,
         },
     );
-    assert!(!presentation(&snapshot).can_interrupt());
+    assert!(!presentation(&snapshot).can_interrupt(Some("turn".into())));
     Arc::make_mut(&mut snapshot.operations)
         .get_mut(&key)
         .unwrap()
         .phase = OperationPhase::Failed {
         message: "retry".into(),
     };
-    assert!(presentation(&snapshot).can_interrupt());
+    assert!(presentation(&snapshot).can_interrupt(Some("turn".into())));
     snapshot.connection.connected = false;
-    assert!(!presentation(&snapshot).can_interrupt());
+    assert!(!presentation(&snapshot).can_interrupt(Some("turn".into())));
 }
 
 #[test]
@@ -329,9 +390,8 @@ fn the_review_summary_needs_a_conversation_with_changes() {
     );
 }
 
-#[test]
-fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
-    let queued = |id: &str| agent_protocol::operations::Submission {
+fn queued_message(id: &str) -> agent_protocol::operations::Submission {
+    agent_protocol::operations::Submission {
         fresh_context: false,
         thread_id: session(),
         client_user_message_id: id.into(),
@@ -342,7 +402,62 @@ fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
         effort: None,
         service_tier: None,
         follow_up: FollowUp::Queue,
-    };
+    }
+}
+
+#[test]
+fn queue_controls_follow_connection_and_direct_input_permissions_and_recover() {
+    use crate::presentation::queue::QueueControl;
+    for (connected, direct, enabled) in [
+        (true, None, true),
+        (true, Some(true), true),
+        (true, Some(false), false),
+        (false, Some(true), false),
+    ] {
+        let mut snapshot = snapshot();
+        snapshot.connection.connected = connected;
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.sessions.conversations)
+                .get_mut(&session())
+                .unwrap(),
+        );
+        thread.can_accept_direct_input = direct;
+        thread.queue.inputs = vec![queued_message("first"), queued_message("second")];
+        let queue = presentation(&snapshot).controls.follow_up.queue.clone();
+        assert_eq!(
+            queue.action("first".into(), QueueControl::Edit).is_some(),
+            enabled
+        );
+        assert_eq!(
+            queue.action("first".into(), QueueControl::Remove).is_some(),
+            enabled
+        );
+        assert_eq!(
+            queue
+                .drop_on("second".into(), "first".into(), false)
+                .is_some(),
+            enabled
+        );
+        snapshot.connection.connected = true;
+        Arc::make_mut(
+            Arc::make_mut(&mut snapshot.sessions.conversations)
+                .get_mut(&session())
+                .unwrap(),
+        )
+        .can_accept_direct_input = Some(true);
+        assert!(
+            presentation(&snapshot)
+                .controls
+                .follow_up
+                .queue
+                .action("first".into(), QueueControl::Edit)
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
     for (running, steer, held, active, default, alternate) in [
         (true, true, false, true, FollowUp::Queue, FollowUp::Steer),
         // A provider that cannot steer queues both ways.
@@ -372,7 +487,7 @@ fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
                     ..Default::default()
                 })]),
                 queue: agent_protocol::operations::InputQueue {
-                    inputs: vec![queued("waiting")],
+                    inputs: vec![queued_message("waiting")],
                     held,
                 },
                 ..Default::default()
@@ -382,7 +497,7 @@ fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
         let (snapshot, _) = crate::state::reduce(
             &snapshot,
             "",
-            crate::state::Event::Intent(crate::state::Intent::Submit {
+            crate::state::Event::from(crate::state::Intent::Submit {
                 thread_id: Some(session()),
                 client_user_message_id: "sending".into(),
                 alternate: false,
@@ -392,11 +507,12 @@ fn follow_up_controls_name_the_send_and_list_the_queue_the_host_holds() {
         assert_eq!(controls.active, active, "running {running}, held {held}");
         assert_eq!(controls.default_action, default);
         assert_eq!(controls.alternate_action, alternate);
-        assert_eq!(controls.held, held);
-        assert_eq!(controls.can_steer, running && steer);
+        assert_eq!(controls.queue.held, held);
+        assert_eq!(controls.queue.can_steer, running && steer);
         // The Host's queue first, then a send it has not acknowledged yet.
         let rows: Vec<_> = controls
             .queue
+            .messages
             .iter()
             .map(|row| (row.id.as_str(), row.text.as_str(), row.pending))
             .collect();
@@ -442,12 +558,52 @@ fn an_answered_turn_offers_its_background_work_and_stop_while_the_composer_sends
     let work = composer.controls.background.as_ref().unwrap();
     assert!(work.waiting);
     assert_eq!(
+        composer.primary_stop_turn(),
+        None,
+        "background work owns the stop in the footer"
+    );
+    assert_eq!(
         work.title(crate::localization::UiLanguage::English),
         "Waiting on monitor Watch the build"
     );
-    assert!(composer.can_interrupt(), "Stop ends the work");
+    assert!(
+        composer.can_interrupt(Some("turn".into())),
+        "Stop ends the work"
+    );
     assert_eq!(composer.controls.running_turn, Some("turn".into()));
     assert!(composer.can_send(true), "a message can follow the work");
+    for status in [
+        agent_protocol::session::PreparationStatus::Preparing,
+        agent_protocol::session::PreparationStatus::Sending,
+    ] {
+        Arc::make_mut(
+            Arc::make_mut(&mut snapshot.sessions.conversations)
+                .get_mut(&session())
+                .unwrap(),
+        )
+        .preparations = vec![agent_protocol::session::SessionPreparation {
+            submission: agent_protocol::operations::Submission {
+                thread_id: session(),
+                client_user_message_id: "next".into(),
+                input: Vec::new(),
+                model: None,
+                effort: None,
+                service_tier: None,
+                follow_up: Default::default(),
+                fresh_context: false,
+            },
+            status: status.clone(),
+            stage: agent_protocol::session::PreparationStage::Workspace,
+        }];
+        let composer = presentation(&snapshot);
+        assert_eq!(composer.controls.background, None, "foreground {status:?}");
+        assert_eq!(composer.primary_stop_turn(), Some("next".into()));
+        assert!(
+            !composer.can_interrupt(Some("turn".into())),
+            "the old footer cannot stop the new turn"
+        );
+        assert!(composer.can_interrupt(Some("next".into())));
+    }
 }
 
 #[test]
@@ -507,7 +663,11 @@ fn steering_uses_host_admission_instead_of_the_displayed_running_status() {
             }),
         );
         let controls = &presentation(&snapshot).controls.follow_up;
-        assert_eq!(controls.can_steer, allowed || skips_compaction, "{name}");
+        assert_eq!(
+            controls.queue.can_steer,
+            allowed || skips_compaction,
+            "{name}"
+        );
         assert_eq!(
             controls.default_action,
             if allowed {
@@ -518,4 +678,226 @@ fn steering_uses_host_admission_instead_of_the_displayed_running_status() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn queued_contexts_and_adjacent_moves_preserve_host_order_and_pending_content() {
+    use crate::state::follow_up::QueueAction;
+    use crate::state::{Draft, Event, Intent, reduce};
+    use agent_protocol::{
+        context::{ContextContent, MessageContext},
+        operations::Input,
+    };
+    let context = MessageContext {
+        id: "file".into(),
+        label: "src/lib.rs".into(),
+        content: ContextContent::File {
+            path: "/project/src/lib.rs".into(),
+        },
+    };
+    use crate::presentation::queue::QueueControl::{MoveDown, MoveUp};
+    let mut state = snapshot();
+    let thread = Arc::make_mut(
+        Arc::make_mut(&mut state.sessions.conversations)
+            .get_mut(&session())
+            .unwrap(),
+    );
+    thread.turns = Some(vec![Arc::new(Turn {
+        id: "turn".into(),
+        status: TurnStatus::Running,
+        ..Default::default()
+    })]);
+    let mut context_only = queued_message("b");
+    context_only.fresh_context = true;
+    context_only.input = vec![Input::Context {
+        context: Box::new(context.clone()),
+    }];
+    let mut mixed = queued_message("c");
+    mixed.input.push(Input::Context {
+        context: Box::new(context.clone()),
+    });
+    thread.queue.inputs = vec![queued_message("a"), context_only, mixed];
+    let (state, _) = reduce(
+        &state,
+        "",
+        Event::from(Intent::SetDraft {
+            thread_id: session().into(),
+            draft: Draft {
+                fresh_context: true,
+                contexts: vec![context.clone()],
+                ..Default::default()
+            },
+        }),
+    );
+    let (state, _) = reduce(
+        &state,
+        "",
+        Event::from(Intent::Submit {
+            thread_id: Some(session()),
+            client_user_message_id: "pending".into(),
+            alternate: false,
+        }),
+    );
+    let controls = presentation(&state).controls.follow_up.clone();
+    assert_eq!(
+        controls
+            .queue
+            .messages
+            .iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c", "pending"]
+    );
+    assert_eq!(
+        controls
+            .queue
+            .messages
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>(),
+        ["a text", "src/lib.rs", "c text\nsrc/lib.rs", "src/lib.rs"]
+    );
+    assert_eq!(
+        crate::state::follow_up::queued_text(
+            &state.sessions.conversations[&session()].queue.inputs[2]
+        ),
+        "c text"
+    );
+    assert_eq!(
+        agent_protocol::operations::Input::contexts(
+            &state.sessions.conversations[&session()].queue.inputs[2].input
+        )
+        .cloned()
+        .collect::<Vec<_>>(),
+        vec![context.clone()]
+    );
+    let pending =
+        &state.sessions.pending_submissions[&agent_protocol::ids::ClientInputId::from("pending")];
+    assert!(pending.draft.text.is_empty());
+    assert_eq!(pending.draft.contexts, vec![context.clone()]);
+    let movement =
+        |queue: &crate::presentation::queue::QueuePresentation, id: &str, control| match queue
+            .action(id.into(), control)
+        {
+            Some(Intent::Queue { thread_id, action }) => {
+                assert_eq!(thread_id, session());
+                Some(action)
+            }
+            None => None,
+            _ => panic!("a queue control must target its queue owner"),
+        };
+    let moved = |id: &str, before: Option<&str>| {
+        Some(QueueAction::Move {
+            client_user_message_id: id.into(),
+            before: before.map(Into::into),
+        })
+    };
+    assert_eq!(movement(&controls.queue, "a", MoveUp), None);
+    assert_eq!(
+        movement(&controls.queue, "a", MoveDown),
+        moved("a", Some("c"))
+    );
+    assert_eq!(
+        movement(&controls.queue, "b", MoveUp),
+        moved("b", Some("a"))
+    );
+    assert_eq!(movement(&controls.queue, "b", MoveDown), moved("b", None));
+    assert_eq!(
+        movement(&controls.queue, "c", MoveUp),
+        moved("c", Some("b"))
+    );
+    assert_eq!(movement(&controls.queue, "c", MoveDown), None);
+    for row in [&controls.queue.messages[1], &controls.queue.messages[3]] {
+        assert_eq!(row.text, "src/lib.rs");
+        assert_eq!(row.attachments, 0);
+        assert!(row.fresh_context);
+    }
+    assert!(controls.queue.messages[3].pending);
+    assert_eq!(
+        (
+            movement(&controls.queue, "pending", MoveUp),
+            movement(&controls.queue, "pending", MoveDown)
+        ),
+        (None, None)
+    );
+    let (editing, _) = reduce(
+        &state,
+        "",
+        Event::from(Intent::Queue {
+            thread_id: session(),
+            action: QueueAction::Edit {
+                client_user_message_id: "c".into(),
+            },
+        }),
+    );
+    assert_eq!(presentation(&editing).draft.text, "c text");
+    assert_eq!(
+        editing.input.drafts[&session().into()],
+        state.input.drafts[&session().into()]
+    );
+    assert_eq!(
+        editing.sessions.conversations[&session()].queue.inputs[2].input,
+        state.sessions.conversations[&session()].queue.inputs[2].input
+    );
+    let mut changing = state;
+    Arc::make_mut(&mut changing.operations).insert(
+        OperationKey::Queue { session: session() },
+        OperationState {
+            generation: 1,
+            phase: OperationPhase::Running,
+        },
+    );
+    let busy = presentation(&changing).controls.follow_up.queue.clone();
+    assert!(
+        busy.messages
+            .iter()
+            .all(|row| busy.action(row.id.clone(), MoveUp).is_none()
+                && busy.action(row.id.clone(), MoveDown).is_none())
+    );
+    Arc::make_mut(&mut changing.operations).insert(
+        OperationKey::Queue { session: session() },
+        OperationState {
+            generation: 1,
+            phase: OperationPhase::Failed {
+                message: "queue change failed".into(),
+            },
+        },
+    );
+    let restored = presentation(&changing).controls.follow_up.clone();
+    assert_eq!(
+        movement(&restored.queue, "b", MoveUp),
+        moved("b", Some("a"))
+    );
+    assert_eq!(restored.queue.messages[1].text, "src/lib.rs");
+}
+
+#[test]
+fn plain_queue_previews_keep_text_and_context_labels_without_markdown_or_payload_details() {
+    use agent_protocol::context::{ContextContent, MessageContext};
+    let contexts = vec![
+        MessageContext {
+            id: "source".into(),
+            label: " [source] <selection> ".into(),
+            content: ContextContent::File {
+                path: "/private/source.rs".into(),
+            },
+        },
+        MessageContext {
+            id: "second".into(),
+            label: "second label".into(),
+            content: ContextContent::File {
+                path: "/private/second.rs".into(),
+            },
+        },
+    ];
+    let text = "  question\n  continuation  ";
+    assert_eq!(
+        queued_preview(text, &contexts),
+        "question\n  continuation\n[source] <selection>\nsecond label"
+    );
+    assert_eq!(
+        queued_preview(" \n ", &contexts),
+        "[source] <selection>\nsecond label"
+    );
+    assert_eq!(queued_preview(" \n ", &[]), "");
 }

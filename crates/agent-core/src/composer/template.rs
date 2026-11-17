@@ -73,7 +73,7 @@ mod tests {
         });
         Arc::make_mut(&mut snapshot.input.drafts).insert(key.clone(), draft.clone());
         let intent = |scope: &str| {
-            Event::Intent(Intent::UseArtifactTemplate {
+            Event::from(Intent::UseArtifactTemplate {
                 storage_scope: scope.into(),
                 thread_id: key.clone(),
                 template: template(ArtifactTemplateKind::Document),

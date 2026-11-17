@@ -64,12 +64,30 @@ impl Pane {
         &self,
         intent: Intent,
     ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
+        self.dispatch_targeted(intent, None)
+    }
+
+    pub fn dispatch_scoped(
+        &self,
+        scope: DispatchScope,
+        intent: Intent,
+    ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
+        self.dispatch_targeted(intent, Some(scope))
+    }
+
+    fn dispatch_targeted(
+        &self,
+        intent: Intent,
+        scope: Option<DispatchScope>,
+    ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
         if self.stop.is_cancelled() {
             futures_util::future::Either::Left(std::future::ready(Err(
                 PeerError::ConnectionClosed("pane is closed".into()),
             )))
         } else {
-            futures_util::future::Either::Right(self.store.dispatch_pane(&self.id, intent))
+            futures_util::future::Either::Right(
+                self.store.dispatch_targeted(&self.id, intent, scope),
+            )
         }
     }
 

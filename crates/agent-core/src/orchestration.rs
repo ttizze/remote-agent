@@ -9,7 +9,7 @@ pub mod shell;
 mod view;
 pub(crate) use view::fork_point;
 pub use view::project;
-pub(crate) use view::{attachment_parts, attachments, context_parts};
+pub(crate) use view::{attachment_parts, attachments, context_input, context_parts};
 
 /// T3 queries running item details under one `live` revision and settled
 /// details under updatedAt. Query results never change the thread projection.

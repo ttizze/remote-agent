@@ -36,7 +36,7 @@ impl SnapShotCapture {
         super::context::change(
             current,
             super::context::ContextAction::Add {
-                context: Box::new(context),
+                contexts: vec![context],
             },
         )
     }
@@ -96,7 +96,7 @@ mod tests {
         let (removed, _) = reduce(
             &state,
             "",
-            Event::Intent(Intent::RemoveAttachment {
+            Event::from(Intent::RemoveAttachment {
                 draft_key: key.clone(),
                 index: 0,
             }),
@@ -178,7 +178,7 @@ mod tests {
         let (removed, _) = reduce(
             &restored,
             "",
-            Event::Intent(Intent::RemoveAttachment {
+            Event::from(Intent::RemoveAttachment {
                 draft_key: key.clone(),
                 index: 0,
             }),

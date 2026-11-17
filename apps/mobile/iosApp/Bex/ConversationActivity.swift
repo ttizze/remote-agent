@@ -15,38 +15,17 @@ struct ConversationPlanRequest: Identifiable {
 struct ConversationEditRequest {
     let thread: SessionRef
     let turn: String
+    let scope: PanelScope
 }
 
 struct ThreadDecoratedActivity: View {
     let values: [ActivityDecoration]
-    let blocks: [ConversationMarkdownContent.Part]
-    let media: ConversationMediaAccess
-    let selection: ConversationSelectionActions
-    let canSave: Bool
     let open: (SessionRef) -> Void
-    let plan: (ConversationPlanRequest.Destination, String, String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(values.indices, id: \.self) { index in
                 switch values[index] {
-                case let .plan(title, markdown, filename):
-                    ConversationPlan(title: title, badge: String(localized: "計画")) {
-                        ConversationMarkdown(blocks: blocks, media: media, selection: selection)
-                    } actions: {
-                        Menu {
-                            Button { UIPasteboard.general.string = markdown } label: {
-                                Label("クリップボードにコピー", systemImage: "doc.on.doc")
-                            }
-                            Button { plan(.export, filename, markdown) } label: {
-                                Label("Markdownとして保存…", systemImage: "square.and.arrow.down")
-                            }
-                            Button { plan(.workspace, filename, markdown) } label: {
-                                Label("ワークスペースに保存…", systemImage: "folder")
-                            }.disabled(!canSave)
-                        } label: { Image(systemName: "ellipsis") }
-                            .accessibilityLabel("計画のメニュー")
-                    }
                 case let .subagent(id, target, name, message, status, elapsed):
                     ConversationSubagent(name: name, status: status, elapsed: elapsed, enabled: target != nil) {
                         if let target {

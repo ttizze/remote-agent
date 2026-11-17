@@ -27,6 +27,7 @@ struct ThreadMessageRow: View, Equatable {
     let media: ConversationMediaAccess
     let selection: ConversationSelectionActions
     var showActions = false
+    var actionsOnly = false
     var timestampMs: UInt64?
     var fork: (() -> Void)?
     var forking = false
@@ -37,7 +38,7 @@ struct ThreadMessageRow: View, Equatable {
     var editingEnabled = true
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.row == rhs.row && lhs.item === rhs.item
+        lhs.row == rhs.row && lhs.item === rhs.item && lhs.actionsOnly == rhs.actionsOnly
             && lhs.media.host == rhs.media.host && lhs.media.cwd == rhs.media.cwd && lhs.media.draft == rhs.media
             .draft
             && lhs.forking == rhs.forking && lhs.forkError == rhs.forkError
@@ -67,6 +68,14 @@ struct ThreadMessageRow: View, Equatable {
     }
 
     var body: some View {
+        if actionsOnly {
+            actions
+        } else {
+            message
+        }
+    }
+
+    private var message: some View {
         ConversationMessage(user: isUser, hasText: !(item.data.body ?? "").isEmpty,
                             hasImages: !item.data.imageSources.isEmpty,
                             collapsible: item.source.collapsesUserText(),

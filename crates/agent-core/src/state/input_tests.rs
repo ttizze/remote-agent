@@ -1,5 +1,108 @@
 use super::*;
 
+#[test]
+fn file_mentions_append_to_the_latest_target_without_changing_selection_or_settings() {
+    let target = DraftKey::from("original");
+    let selected = DraftKey::from("selected");
+    for (text, expected) in [
+        ("", "[main.rs](src/main.rs) "),
+        (
+            "Latest typed text",
+            "Latest typed text [main.rs](src/main.rs) ",
+        ),
+        (
+            "Latest typed text\n",
+            "Latest typed text\n[main.rs](src/main.rs) ",
+        ),
+    ] {
+        let mut snapshot = Snapshot::default();
+        snapshot.connection.storage_scope = "store".into();
+        set_draft_text(&mut snapshot, target.clone(), text.into());
+        set_draft_text(
+            &mut snapshot,
+            selected.clone(),
+            "Keep the other draft".into(),
+        );
+        Arc::make_mut(
+            Arc::make_mut(&mut snapshot.input.drafts)
+                .get_mut(&target)
+                .unwrap(),
+        )
+        .effort = Some("high".into());
+        Arc::make_mut(&mut Arc::make_mut(snapshot.panes.primary_mut()).navigation).draft_key =
+            selected.clone();
+        let (next, effects) = reduce(
+            &snapshot,
+            "",
+            Event::from(Intent::AppendFileMentions {
+                storage_scope: "store".into(),
+                thread_id: target.clone(),
+                text: "[main.rs](src/main.rs)".into(),
+            }),
+        );
+        assert_eq!(next.input.drafts[&target].text, expected);
+        assert_eq!(next.input.drafts[&target].effort.as_deref(), Some("high"));
+        assert_eq!(next.input.drafts[&selected].text, "Keep the other draft");
+        assert_eq!(next.panes.primary().navigation.draft_key, selected);
+        assert_eq!(snapshot.input.drafts[&target].text, text);
+        assert!(effects.is_empty());
+    }
+}
+
+#[rstest::rstest]
+#[case("old-store", false)]
+#[case("store", true)]
+fn file_mentions_reject_old_storage_and_retired_queued_editors(
+    #[case] scope: &str,
+    #[case] retired: bool,
+) {
+    let mut snapshot = Snapshot::default();
+    snapshot.connection.storage_scope = "store".into();
+    let target = DraftKey::from("original");
+    set_draft_text(&mut snapshot, target.clone(), "Keep this text".into());
+    let key = if retired {
+        DraftKey::Queued {
+            session: crate::session::SessionRef::new(
+                crate::session::ProviderKind::Codex,
+                "old".into(),
+            )
+            .unwrap(),
+            edit: uuid::Uuid::nil(),
+        }
+    } else {
+        target
+    };
+    let (next, effects) = reduce(
+        &snapshot,
+        "",
+        Event::from(Intent::AppendFileMentions {
+            storage_scope: scope.into(),
+            thread_id: key,
+            text: "[main.rs](src/main.rs)".into(),
+        }),
+    );
+    assert_eq!(next.input.drafts, snapshot.input.drafts);
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn an_empty_file_drop_cannot_allocate_a_welcome_draft() {
+    let snapshot = Snapshot::default();
+    let key = snapshot.panes.primary().navigation.draft_key.clone();
+    let (next, effects) = reduce(
+        &snapshot,
+        "",
+        Event::from(Intent::AppendFileMentions {
+            storage_scope: snapshot.connection.storage_scope.clone(),
+            thread_id: key.clone(),
+            text: String::new(),
+        }),
+    );
+    assert_eq!(next.panes.primary().navigation.draft_key, key);
+    assert!(next.input.drafts.is_empty());
+    assert!(effects.is_empty());
+}
+
 fn context_record(id: &str) -> agent_protocol::context::MessageContext {
     agent_protocol::context::MessageContext {
         id: id.into(),
@@ -26,11 +129,11 @@ fn context_edits_keep_draft_settings_and_reject_old_host_updates() {
     };
     Arc::make_mut(&mut previous.input.drafts).insert(key.clone(), Arc::new(original.clone()));
     let action = |scope: &str| {
-        Event::Intent(Intent::ChangeContext {
+        Event::from(Intent::ChangeContext {
             storage_scope: scope.into(),
             thread_id: key.clone(),
             action: crate::composer::context::ContextAction::Add {
-                context: Box::new(context_record("output")),
+                contexts: vec![context_record("output"), context_record("second")],
             },
         })
     };
@@ -43,7 +146,10 @@ fn context_edits_keep_draft_settings_and_reject_old_host_updates() {
     assert!(!key.is_empty());
     assert_eq!(next.input.drafts[&key].text, original.text);
     assert_eq!(next.input.drafts[&key].effort, original.effort);
-    assert_eq!(next.input.drafts[&key].contexts, [context_record("output")]);
+    assert_eq!(
+        next.input.drafts[&key].contexts,
+        [context_record("output"), context_record("second")]
+    );
     let stored = serde_json::to_vec(&next.input.drafts[&key]).unwrap();
     assert_eq!(
         serde_json::from_slice::<Draft>(&stored).unwrap(),
@@ -57,7 +163,7 @@ fn context_only_input_is_captured_and_failed_sends_restore_it_beside_new_input()
     let (mut previous, _) = reduce(
         &Snapshot::default(),
         "",
-        Event::Intent(Intent::NewChat {
+        Event::from(Intent::NewChat {
             cwd: "/repo".into(),
         }),
     );
@@ -147,7 +253,7 @@ fn transcript_appends_to_the_latest_target_without_changing_selection(
     let (next, effects) = reduce(
         &previous,
         "",
-        Event::Intent(Intent::AppendTranscript {
+        Event::from(Intent::AppendTranscript {
             thread_id: target.clone(),
             text: spoken.into(),
         }),
@@ -203,7 +309,7 @@ fn transcript_uses_the_utf8_end_when_refreshing_completions() {
     let (next, effects) = reduce(
         &snapshot,
         "",
-        Event::Intent(Intent::AppendTranscript {
+        Event::from(Intent::AppendTranscript {
             thread_id: key.clone(),
             text: "/".into(),
         }),
@@ -234,7 +340,7 @@ fn a_recovery_click_cannot_retry_a_replaced_operation() {
         },
     );
     let recover = |generation| {
-        Event::Intent(Intent::RecoverError {
+        Event::from(Intent::RecoverError {
             id: op::ErrorId::Operation {
                 key: op::OperationKey::Models {
                     provider: crate::session::ProviderKind::Codex,

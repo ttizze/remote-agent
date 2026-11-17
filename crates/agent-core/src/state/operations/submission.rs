@@ -45,6 +45,9 @@ impl Operation for Dictate {
         ))
     }
     fn apply(self, snapshot: &mut Snapshot, pane_id: &str, output: Self::Output) -> Vec<Effect> {
+        if !snapshot.accepts_draft_result(&self.draft_key) {
+            return Vec::new();
+        }
         if output.1.text.trim().is_empty() {
             return Vec::new();
         }
@@ -52,6 +55,19 @@ impl Operation for Dictate {
             return self.stale(snapshot, pane_id, output);
         }
         let (mut draft, output) = output;
+        if matches!(self.draft_key, DraftKey::Queued { .. }) {
+            let key = self.draft_key.clone();
+            // Transcription appends to the latest editor content, so text typed
+            // while recording/transcribing is not replaced by its old capture.
+            self.stale(snapshot, pane_id, (draft, output));
+            return super::super::follow_up::save_edit(
+                snapshot,
+                &key,
+                Some(&OperationKey::Dictation {
+                    draft_key: key.clone(),
+                }),
+            );
+        }
         let clear_draft = draft.clone();
         append_transcript(&mut Arc::make_mut(&mut draft).text, &output.text);
         let pane = snapshot.panes.get(pane_id);
@@ -82,7 +98,10 @@ impl Operation for Dictate {
         pane_id: &str,
         (_, output): Self::Output,
     ) -> Vec<Effect> {
-        if snapshot.panes.get(pane_id).is_none() || output.text.trim().is_empty() {
+        if !snapshot.accepts_draft_result(&self.draft_key)
+            || snapshot.panes.get(pane_id).is_none()
+            || output.text.trim().is_empty()
+        {
             return Vec::new();
         }
         let draft = Arc::make_mut(
@@ -192,12 +211,16 @@ impl Operation for StartSubmission {
                     self.client_user_message_id.clone(),
                     agent_protocol::conversation::InputContent {
                         fresh_context: self.draft.fresh_context,
-                        parts: submission_input(
+                        parts: crate::composer::input::to_input(
                             &self.draft.text,
                             &self.draft.attachments,
-                            &self.draft.invocations,
+                            crate::composer::input::selected_invocations(
+                                &self.draft.invocations,
+                                &self.draft.text,
+                                Some(self.provider),
+                                &[],
+                            ),
                             &self.draft.contexts,
-                            Some(self.provider),
                         ),
                         model: self.draft.model.clone(),
                         effort: self.draft.effort.clone(),
@@ -265,12 +288,16 @@ impl Operation for SendSubmission {
                     id: self.client_user_message_id.clone(),
                     content: agent_protocol::conversation::InputContent {
                         fresh_context: self.draft.fresh_context,
-                        parts: submission_input(
+                        parts: crate::composer::input::to_input(
                             &self.draft.text,
                             &self.draft.attachments,
-                            &self.draft.invocations,
+                            crate::composer::input::selected_invocations(
+                                &self.draft.invocations,
+                                &self.draft.text,
+                                provider,
+                                &[],
+                            ),
                             &self.draft.contexts,
-                            provider,
                         ),
                         model: self.draft.model.clone(),
                         effort: self.draft.effort.clone(),
@@ -304,41 +331,6 @@ impl Operation for SendSubmission {
     }
 }
 
-fn submission_input(
-    text: &str,
-    attachments: &[Attachment],
-    invocations: &[agent_protocol::composer::Invocation],
-    contexts: &[agent_protocol::context::MessageContext],
-    provider: Option<crate::session::ProviderKind>,
-) -> Vec<Input> {
-    let mut input = Vec::with_capacity(attachments.len() + usize::from(!text.is_empty()));
-    if !text.is_empty() {
-        input.push(Input::Text { text: text.into() });
-    }
-    input.extend(
-        invocations
-            .iter()
-            .filter(|item| Some(item.provider) == provider && item.is_in(text))
-            .map(agent_protocol::composer::Invocation::input),
-    );
-    input.extend(attachments.iter().map(|attachment| {
-        if attachment.is_image {
-            Input::LocalImage {
-                path: attachment.path.clone(),
-            }
-        } else {
-            Input::Mention {
-                path: attachment.path.clone(),
-                name: attachment.name.clone(),
-            }
-        }
-    }));
-    input.extend(contexts.iter().cloned().map(|context| Input::Context {
-        context: Box::new(context),
-    }));
-    input
-}
-
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadAttachment {
@@ -356,6 +348,9 @@ impl Operation for UploadAttachment {
     no_input!();
     type Output = String;
     fn prepare(&mut self, snapshot: &mut Snapshot, _pane_id: &str) -> Result<(), String> {
+        if !snapshot.accepts_draft_result(&self.draft_key) {
+            return Err("queued editor was closed".into());
+        }
         if let Some(capture) = &self.snapshot {
             let current = snapshot
                 .input
@@ -398,6 +393,9 @@ impl Operation for UploadAttachment {
         path: Self::Output,
         _current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
+        if !snapshot.accepts_draft_result(&self.draft_key) {
+            return Ok(Vec::new());
+        }
         // Navigation can retire the requesting pane; the upload still belongs
         // to its original draft. Validate both additions before publishing either.
         let contexts = if let Some(capture) = self.snapshot.take() {

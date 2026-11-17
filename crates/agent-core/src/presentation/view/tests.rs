@@ -578,7 +578,7 @@ fn another_panes_navigation_reuses_the_held_conversation_and_controls() {
     let (next, _) = crate::state::reduce(
         &state,
         "",
-        crate::state::Event::Intent(Intent::NewChat {
+        crate::state::Event::from(Intent::NewChat {
             cwd: "/other".into(),
         }),
     );

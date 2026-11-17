@@ -267,7 +267,7 @@ mod tests {
         }
     }
     fn dispatch(s: &Snapshot, intent: Intent) -> Snapshot {
-        let (next, effects) = reduce(s, "", Event::Intent(intent));
+        let (next, effects) = reduce(s, "", Event::from(intent));
         assert!(
             effects.is_empty(),
             "organization must not write to the provider or Host"

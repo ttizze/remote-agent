@@ -39,6 +39,16 @@ pub struct Draft {
     #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub model_settings_changed: bool,
 }
+impl Draft {
+    /// Queued edits submit content; refreshing model settings does not make an
+    /// untouched editor dirty or overwrite text typed during a request.
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.attachments == other.attachments
+            && self.invocations == other.invocations
+            && self.contexts == other.contexts
+    }
+}
 fn merge_recovered_draft(recovered: &Draft, current: &Draft) -> Draft {
     let mut draft = current.clone();
     draft.fresh_context |= recovered.fresh_context;
@@ -134,6 +144,11 @@ pub struct PaneState {
     pub output_items: Arc<BTreeSet<agent_protocol::ids::ItemId>>,
     #[serde(skip)]
     pub epoch: u64,
+    /// A transient source annotation belongs to this pane's navigation epoch.
+    #[serde(skip)]
+    pub citation: Option<agent_protocol::context::AssistantCitation>,
+    #[serde(skip)]
+    pub composer_paths: Option<Arc<crate::composer::completions::PathSearch>>,
     #[serde(skip)]
     pub error: Option<String>,
 }
@@ -157,8 +172,16 @@ impl WorkspaceLocation {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DraftKey {
-    Session { session: crate::session::SessionRef },
-    Local { key: String },
+    Session {
+        session: crate::session::SessionRef,
+    },
+    Queued {
+        session: crate::session::SessionRef,
+        edit: uuid::Uuid,
+    },
+    Local {
+        key: String,
+    },
 }
 impl Default for DraftKey {
     fn default() -> Self {
@@ -186,6 +209,11 @@ impl From<&crate::session::SessionRef> for DraftKey {
     }
 }
 impl DraftKey {
+    /// Queued editors change only input parts; the Host retains their submission settings.
+    pub(crate) fn owns_submission_settings(&self) -> bool {
+        !matches!(self, Self::Queued { .. })
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         matches!(self, Self::Local { key } if key.is_empty())
     }
@@ -768,6 +796,12 @@ pub struct ScopedData {
     pub input_recoveries: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<InputRecovery>>>,
     #[serde(with = "crate::persistence::entries")]
     pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+    #[serde(
+        default,
+        with = "crate::persistence::entries",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub queued_edits: Arc<BTreeMap<crate::session::SessionRef, follow_up::QueuedEdit>>,
     #[serde(default)]
     pub stashes: Arc<Vec<crate::composer::stash::StashedPrompt>>,
     pub new_drafts: Arc<BTreeMap<String, crate::session::SessionRef>>,
@@ -794,7 +828,7 @@ pub enum Event {
         handle: String,
         reason: String,
     },
-    Intent(Intent),
+    Intent(Box<Intent>),
     SubmissionFailed(agent_protocol::ids::ClientInputId),
     SubmissionUnknown(agent_protocol::ids::ClientInputId),
 
@@ -808,6 +842,11 @@ pub enum Event {
     },
     Connected,
     Disconnected,
+}
+impl From<Intent> for Event {
+    fn from(intent: Intent) -> Self {
+        Self::Intent(Box::new(intent))
+    }
 }
 pub use crate::store::Effect;
 
@@ -830,7 +869,7 @@ pub fn reduce(previous: &Snapshot, pane_id: &str, event: Event) -> (Snapshot, Ve
             subscription_id,
             update,
         } => outputs::received(previous, subscription_id, *update),
-        Event::Intent(intent) => reduce_intent(previous, pane_id, intent),
+        Event::Intent(intent) => reduce_intent(previous, pane_id, *intent),
         Event::Notification(message) => notification(previous, message),
         Event::ConversationRows {
             subscription_id,
@@ -872,7 +911,12 @@ pub fn reduce(previous: &Snapshot, pane_id: &str, event: Event) -> (Snapshot, Ve
         next.connection.connected,
         next.panes
             .get(pane_id)
-            .and_then(|pane| next.input.drafts.get(&pane.navigation.draft_key))
+            .and_then(|pane| {
+                next.input.drafts.get(&next.composer_key(
+                    pane.navigation.thread_id.as_ref(),
+                    &pane.navigation.draft_key,
+                ))
+            })
             .and_then(|draft| draft.model.as_ref()),
         &next.catalog.models,
         next.operations.keys(),
@@ -898,11 +942,24 @@ fn reduce_intent(
         return (next, Vec::new());
     };
     if matches!(&intent, Intent::QuoteSelection { storage_scope, .. }
+        | Intent::AppendFileMentions { storage_scope, .. }
         | Intent::Stash { storage_scope, .. }
         | Intent::ChangeContext { storage_scope, .. }
         | Intent::UseArtifactTemplate { storage_scope, .. }
         if storage_scope != &previous.connection.storage_scope)
     {
+        return (next, Vec::new());
+    }
+    if matches!(&intent, Intent::AppendFileMentions { text, .. } if text.is_empty()) {
+        return (next, Vec::new());
+    }
+    let target = match &mut intent {
+        Intent::SaveQueuedEdit { draft_key } | Intent::RemoveAttachment { draft_key, .. } => {
+            Some(draft_key)
+        }
+        _ => intent.editing_draft(),
+    };
+    if target.is_some_and(|key| !previous.accepts_draft_result(key)) {
         return (next, Vec::new());
     }
     if let Some(key) = intent.editing_draft()
@@ -924,8 +981,8 @@ fn reduce_intent(
         RegisterLiveActivity, UnregisterLiveActivity, ReadHostSoftware,
         ReadPermissionSettings, UpdatePermissionSettings,
         ManageCodexCli, ReadProviderSettings, SetProviderEnabled, ReadDshCredentials, UpdateDshCredential, ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
-        ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkSession, RewindSession,
-        StartTerminal, StartAccountTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
+        ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkSession, RewindSession, RenameSession,
+        StartTerminal, RunTerminalScript, StartAccountTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ResolveFile, ResolveFileReference, ReadFile,
         ReadFileOpenCapabilities, OpenInEditor,
         PullRequests,
@@ -940,6 +997,37 @@ fn reduce_intent(
         LoadHostName, LoadHostManagement, LoadModels, ReadModelSettings,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
+        Intent::OpenCitation { citation } => {
+            if citation.source.storage_scope != next.connection.storage_scope || citation.validate().is_err() {
+                return (next, Vec::new());
+            }
+            let already_open = next.panes.get(pane_id).is_some_and(|pane| pane.navigation.thread_id.as_ref() == Some(&citation.source.session))
+                && next.sessions.conversations.contains_key(&citation.source.session)
+                && next.sessions.subscriptions.contains_key(&citation.source.session);
+            let (mut opened, effects) = if already_open {
+                // Annotating this loaded conversation keeps its current history
+                // and in-flight hydration; source navigation needs no resubscribe.
+                next.invalidate_pane(pane_id);
+                (next, Vec::new())
+            } else {
+                prepare(next, pane_id, op::ReadThread::open(citation.source.session.clone()))
+            };
+            if let Some(pane) = opened.panes.get_mut(pane_id) {
+                Arc::make_mut(pane).citation = Some(citation);
+            }
+            return (opened, effects);
+        }
+        Intent::DismissCitation { epoch } => {
+            if let Some(pane) = next.panes.get_mut(pane_id) && pane.epoch == epoch {
+                Arc::make_mut(pane).citation = None;
+            }
+        }
+        Intent::EnsureTerminal(operation) => {
+            if op::terminal_is_attached(&next.terminals, &operation.handle, &operation.cwd, operation.command.as_deref()) {
+                return (next, Vec::new());
+            }
+            return prepare(next, pane_id, operation);
+        }
         Intent::ReadAttempt { thread_id, attempt } => {
             let effects = previous.sessions.conversations.get(&thread_id).into_iter()
                 .flat_map(|thread| crate::presentation::conversation::attempts::deferred_attempt_reads(thread, attempt))
@@ -958,7 +1046,7 @@ fn reduce_intent(
         Intent::SetFreshContext {storage_scope, session, enabled} => {
             let key: DraftKey = session.clone().into();
             if !storage_scope.is_empty() && storage_scope == previous.connection.storage_scope
-                && (if enabled { previous.fresh_context_available(session) } else { previous.input.drafts.contains_key(&key) }) {
+                && previous.can_set_fresh_context(&session, enabled) {
                 Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(key).or_default()).fresh_context = enabled;
             }
         }
@@ -1075,17 +1163,20 @@ fn reduce_intent(
                 }
             }
         }
+        Intent::SaveQueuedEdit {draft_key} => {
+            let effects=follow_up::save_edit(previous,&draft_key,None);
+            return (next,effects);
+        }
         Intent::Submit {
             thread_id,
             client_user_message_id,
             alternate,
         } => {
             let thread_id = thread_id.or_else(|| pane.navigation.thread_id.clone());
-            if let Some(effects) = thread_id
-                .as_ref()
-                .and_then(|id| follow_up::save_edit(&mut next, id))
-            {
-                return (next, effects);
+            // A normal-submit callback captured before a queued editor opened
+            // cannot send the hidden conversation draft while editing.
+            if thread_id.as_ref().is_some_and(|id| previous.input.queued_edits.contains_key(id)) {
+                return (next,Vec::new());
             }
             let draft_key = thread_id
                 .clone()
@@ -1297,7 +1388,7 @@ fn reduce_intent(
             let busy = previous.operation_running(op::OperationKey::Submission {draft_key:thread_id.clone()})
                 || previous.operation_running(op::OperationKey::Attachment {draft_key:thread_id.clone()})
                 || previous.operation_running(op::OperationKey::Dictation {draft_key:thread_id.clone()})
-                || matches!(&thread_id, DraftKey::Session {session} if previous.input.queued_edits.contains_key(session));
+                || matches!(&thread_id, DraftKey::Queued {..});
             match crate::composer::template::append(current, &template, busy) {
                 Ok(text) if text != current => Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default()).text = text,
                 Ok(_) => {},
@@ -1312,7 +1403,7 @@ fn reduce_intent(
             let draft = previous.input.drafts.get(&thread_id).map(AsRef::as_ref).unwrap_or(&empty);
             let busy = previous.operation_running(op::OperationKey::Attachment {draft_key:thread_id.clone()})
                 || previous.operation_running(op::OperationKey::Dictation {draft_key:thread_id.clone()})
-                || matches!(&thread_id, DraftKey::Session {session} if previous.input.queued_edits.contains_key(session));
+                || matches!(&thread_id, DraftKey::Queued {..});
             match crate::composer::stash::change(&previous.input.stashes,draft,busy,action) {
                 Ok(change) => next.input.apply_stash_change(thread_id, change),
                 Err(reason) => Arc::make_mut(next.panes.get_mut(pane_id).expect("admitted pane exists")).error = Some(reason.into()),
@@ -1339,14 +1430,14 @@ fn reduce_intent(
             }
         },
         Intent::EditComposer { thread_id, text, cursor } => {
-            let load_catalog = thread_id == pane.navigation.draft_key
+            let load_catalog = thread_id == previous.composer_key(pane.navigation.thread_id.as_ref(), &pane.navigation.draft_key)
                 && previous.connection.connected
-                && crate::composer::query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
+                && crate::composer::query(&text, cursor as usize).is_some_and(|query| {
                     crate::composer::should_refresh_catalog(
                         previous.catalog.composer_catalogs.get(&pane.navigation.cwd)
                             .filter(|catalog| catalog.cwd == pane.navigation.cwd)
                             .map(|catalog| catalog.loading),
-                        filter,
+                        query.filter,
                         previous.input.drafts.get(&thread_id).is_none_or(|draft| draft.text != text),
                     )
                 });
@@ -1356,14 +1447,31 @@ fn reduce_intent(
                 return prepare(next, pane_id, op::LoadComposerCatalog { cwd });
             }
         }
+        Intent::QueryComposerPaths { thread_id, text, cursor } => {
+            if previous.input.drafts.get(&thread_id).map_or("", |draft| &draft.text) == text {
+                let effects = op::query_composer_paths(&mut next, pane_id, &thread_id, &text, cursor);
+                return (next, effects);
+            }
+        }
+        Intent::InsertComposerPath { expected_text, cursor, selection } => {
+            op::insert_composer_path(&mut next, pane_id, expected_text, cursor, selection);
+        }
         Intent::InsertInvocation { thread_id, text, invocation } => {
+            let invocations=crate::composer::input::edited_invocations(
+                previous.input.drafts.get(&thread_id).map_or(&[][..],|draft|draft.invocations.as_slice()),
+                &text,previous.retained_invocations(&thread_id),Some(invocation),
+            );
             let draft = Arc::make_mut(Arc::make_mut(&mut next.input.drafts).entry(thread_id).or_default());
-            let token = invocation.token();
-            draft.invocations.retain(|item| item.token() != token && item.is_in(&text));
-            draft.invocations.push(invocation);
-            draft.text = text;
+            draft.invocations=invocations;
+            draft.text=text;
         }
         Intent::SetDraftText { thread_id, text } => set_draft_text(&mut next, thread_id, text),
+        Intent::AppendFileMentions { thread_id, text, .. } => {
+            let current = previous.input.drafts.get(&thread_id)
+                .map(|draft| draft.text.as_str()).unwrap_or_default();
+            set_draft_text(&mut next, thread_id,
+                crate::presentation::files::append_file_mentions(current, &text));
+        },
         Intent::QuoteSelection { thread_id, text, .. } => {
             let draft = previous.input.drafts.get(&thread_id)
                 .map(|draft| draft.text.as_str()).unwrap_or_default();
@@ -1384,6 +1492,9 @@ fn reduce_intent(
                 | Intent::SelectServiceTier { thread_id, .. } => thread_id,
                 _ => unreachable!(),
             };
+            if !thread_id.owns_submission_settings() {
+                return (next, Vec::new());
+            }
             let mut draft = previous
                 .input.drafts
                 .get(thread_id)
@@ -1451,12 +1562,22 @@ pub(crate) fn set_draft_text(snapshot: &mut Snapshot, thread_id: DraftKey, text:
     {
         return;
     }
+    let invocations = crate::composer::input::edited_invocations(
+        snapshot
+            .input
+            .drafts
+            .get(&thread_id)
+            .map_or(&[][..], |draft| draft.invocations.as_slice()),
+        &text,
+        snapshot.retained_invocations(&thread_id),
+        None,
+    );
     let draft = Arc::make_mut(
         Arc::make_mut(&mut snapshot.input.drafts)
             .entry(thread_id)
             .or_default(),
     );
-    draft.invocations.retain(|item| item.is_in(&text));
+    draft.invocations = invocations;
     draft.text = text;
 }
 
@@ -1466,6 +1587,9 @@ fn navigate(snapshot: &mut Snapshot, pane_id: &str, navigation: Navigation) {
         return;
     };
     let pane = Arc::make_mut(target);
+    if pane.navigation.draft_key != navigation.draft_key || pane.navigation.cwd != navigation.cwd {
+        pane.composer_paths = None;
+    }
     let previous_id = pane.navigation.thread_id.clone();
     if pane.navigation.draft_key != navigation.draft_key {
         Arc::make_mut(&mut snapshot.operations).retain(|key, _| {
@@ -1579,6 +1703,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 let archived = ScopedData {
                     input_recoveries: std::mem::take(&mut next.input.input_recoveries),
                     drafts: std::mem::take(&mut next.input.drafts),
+                    queued_edits: std::mem::take(&mut next.input.queued_edits),
                     stashes: std::mem::take(&mut next.input.stashes),
                     new_drafts: std::mem::take(&mut next.input.new_drafts),
                     pending_submissions: std::mem::take(&mut next.sessions.pending_submissions),
@@ -1592,6 +1717,7 @@ pub(crate) fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<
                 if let Some(saved) = Arc::make_mut(&mut next.lists.archived_scopes).remove(&scope) {
                     next.input.input_recoveries = saved.input_recoveries.clone();
                     next.input.drafts = saved.drafts.clone();
+                    next.input.queued_edits = saved.queued_edits.clone();
                     next.input.stashes = saved.stashes.clone();
                     next.input.new_drafts = saved.new_drafts.clone();
                     next.sessions.pending_submissions = saved.pending_submissions.clone();
@@ -1779,9 +1905,9 @@ impl Snapshot {
     /// Pending submissions are persisted only to recover dictation after a crash.
     fn reset_session(&mut self) {
         for pane in Arc::make_mut(&mut self.panes.0).values_mut() {
-            if pane.error.is_some() {
-                Arc::make_mut(pane).error = None;
-            }
+            let pane = Arc::make_mut(pane);
+            pane.error = None;
+            pane.composer_paths = None;
         }
 
         Arc::make_mut(&mut self.files.workspace)
@@ -2205,7 +2331,9 @@ fn submission(
         None => {
             let thread_id = match draft_key {
                 DraftKey::Session { session } => session,
-                DraftKey::Local { .. } => unreachable!("new conversation draft was validated"),
+                DraftKey::Local { .. } | DraftKey::Queued { .. } => {
+                    unreachable!("new conversation draft was validated")
+                }
             };
             next.input.retire_new_chat(&thread_id);
             Effect::execute(op::StartSubmission {
@@ -2468,7 +2596,7 @@ mod submission_tests {
     }
 }
 
-fn append_transcript(text: &mut String, transcript: &str) {
+pub(crate) fn append_transcript(text: &mut String, transcript: &str) {
     if transcript.is_empty() {
         return;
     }
@@ -2480,7 +2608,6 @@ fn append_transcript(text: &mut String, transcript: &str) {
 }
 
 fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::SessionRef) {
-    follow_up::reconcile_edit(snapshot, thread_id);
     let Some(projection) = snapshot.sessions.projections.get(thread_id) else {
         return;
     };
@@ -2584,7 +2711,7 @@ mod history_tests {
                 let (next, effects) = reduce(
                     &snapshot,
                     "",
-                    Event::Intent(Intent::ReadOlder {
+                    Event::from(Intent::ReadOlder {
                         thread_id: session.clone(),
                     }),
                 );

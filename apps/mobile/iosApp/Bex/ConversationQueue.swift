@@ -11,14 +11,14 @@ struct ConversationQueue: View {
     @State private var expanded = true
 
     var body: some View {
-        if let threadId, !followUp.queue.isEmpty {
+        if threadId != nil, followUp.queue.messageCount() > 0 {
             VStack(alignment: .leading, spacing: 6) {
                 Button { expanded.toggle() } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "tray.full")
                         Text("キューのメッセージ")
                         Spacer()
-                        Text(verbatim: "\(followUp.queue.count)")
+                        Text(verbatim: "\(followUp.queue.messageCount())")
                         Image(systemName: expanded ? "chevron.up" : "chevron.down")
                     }
                     .font(.footnote)
@@ -28,8 +28,8 @@ struct ConversationQueue: View {
                 .accessibilityLabel(LocalizedStringKey(expanded ? "キューのメッセージを折りたたむ" : "キューのメッセージを展開"))
                 .accessibilityIdentifier("queue.toggle")
                 if expanded {
-                    ForEach(followUp.queue, id: \.id) { message in
-                        row(message, threadId: threadId)
+                    ForEach(followUp.queue.messages(expanded: true), id: \.id) { message in
+                        row(message)
                     }
                 }
             }
@@ -39,9 +39,13 @@ struct ConversationQueue: View {
         }
     }
 
-    private func row(_ message: QueuedMessage, threadId: SessionRef) -> some View {
-        let act: (QueueAction) -> Void = { perform(.queue(threadId: threadId, action: $0)) }
-        let idle = !message.pending && !followUp.busy
+    private func row(_ message: QueuedMessage) -> some View {
+        let controls = followUp.queue.controls(id: message.id)
+        let act: (QueueControl) -> Void = { action in
+            if let intent = followUp.queue.action(id: message.id, control: action) {
+                perform(intent)
+            }
+        }
         return HStack(spacing: 12) {
             Text(verbatim: message.text)
                 .lineLimit(1)
@@ -53,29 +57,29 @@ struct ConversationQueue: View {
             }
             if message.pending {
                 ProgressView().accessibilityLabel("キューへ保存中")
-            } else if followUp.editing == message.id {
-                Button("キャンセル") { act(.cancelEdit) }
-            } else {
-                Button { act(.edit(clientUserMessageId: message.id)) } label: {
-                    Image(systemName: "pencil")
+            }
+            ForEach(controls, id: \.action) { control in
+                Button { act(control.action) } label: {
+                    Image(systemName: symbol(control.action))
                 }
-                .accessibilityLabel("コンポーザーで編集")
-                .disabled(!idle)
-                Button { act(.steer(clientUserMessageId: message.id)) } label: {
-                    Image(systemName: "arrow.turn.down.right")
-                }
-                .accessibilityLabel("追加の指示")
-                .disabled(!idle || !followUp.canSteer)
-                Button { act(.remove(clientUserMessageId: message.id)) } label: {
-                    Image(systemName: "xmark")
-                }
-                .accessibilityLabel("キューから削除")
-                .disabled(!idle)
+                .accessibilityLabel(control.title)
+                .disabled(!control.enabled)
             }
         }
         .font(.subheadline)
         .frame(minHeight: 32)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("queue.message")
+    }
+
+    private func symbol(_ control: QueueControl) -> String {
+        switch control {
+        case .edit: "pencil"
+        case .cancelEdit: "xmark.circle"
+        case .steer: "arrow.turn.down.right"
+        case .remove: "xmark"
+        case .moveUp: "arrow.up"
+        case .moveDown: "arrow.down"
+        }
     }
 }

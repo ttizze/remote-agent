@@ -313,7 +313,7 @@ mod tests {
             let moved = reduce(
                 &snapshot,
                 "",
-                Event::Intent(Intent::MoveChatToProject {
+                Event::from(Intent::MoveChatToProject {
                     thread_id: id.clone(),
                     project_id: "destination".into(),
                 }),
@@ -485,7 +485,7 @@ mod tests {
         let edited = crate::state::reduce(
             &snapshot,
             "",
-            crate::state::Event::Intent(crate::state::Intent::SetDraftText {
+            crate::state::Event::from(crate::state::Intent::SetDraftText {
                 thread_id: DraftKey::default(),
                 text: "welcome work".into(),
             }),
@@ -495,7 +495,7 @@ mod tests {
         let returned = crate::state::reduce(
             &edited,
             "",
-            crate::state::Event::Intent(crate::state::Intent::ShowThreadList),
+            crate::state::Event::from(crate::state::Intent::ShowThreadList),
         )
         .0;
         let restored =

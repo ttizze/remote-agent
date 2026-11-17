@@ -171,8 +171,8 @@ final class ConversationModel {
         var next: [String: [ActivityDecoration]] = [:]
         var load: [SessionRef] = []
         for row in conversation.rows {
-            guard case let .native(_, item?) = row.content else { continue }
-            let values = snapshot.activityDecorations(item: item.source, nowSeconds: now)
+            guard case let .native(projected, _) = row.content, let timeline = projected.timeline() else { continue }
+            let values = snapshot.timelineDecoration(row: timeline, nowSeconds: now).map { [$0] } ?? []
             if !values.isEmpty {
                 next[row.id] = values
             }
@@ -234,9 +234,12 @@ extension ConversationModel {
     func toggleActivity(_ id: String) {
         guard let conversation,
               conversation.scope == snapshot.panelScope(host: host, draft: coreDraftKey),
-              let change = conversation.projection.toggleActivity(id: id, expansion: activityExpansionOverrides)
+              let change = conversation.projection.toggleDisclosure(id: id, expansion: activityExpansionOverrides)
         else { return }
-        activityExpansionOverrides = change
+        activityExpansionOverrides = change.expansion
+        if let load = change.load {
+            perform(load)
+        }
         projectConversation(publication.conversation())
     }
 

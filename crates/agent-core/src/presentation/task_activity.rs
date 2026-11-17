@@ -49,7 +49,7 @@ mod tests {
         let (expanded, effects) = reduce(
             &state,
             "",
-            Event::Intent(Intent::ExpandThreadList { project_id: None }),
+            Event::from(Intent::ExpandThreadList { project_id: None }),
         );
         assert!(effects.is_empty());
         assert_eq!(expanded.thread_list().unwrap().threads.len(), 15);

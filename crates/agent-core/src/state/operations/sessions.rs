@@ -85,6 +85,7 @@ pub(crate) fn item_detail(
         && matches!(
             item.body(),
             crate::models::ItemBody::UserMessage { .. }
+                | crate::models::ItemBody::SystemNotice { .. }
                 | crate::models::ItemBody::AssistantText { .. }
                 | crate::models::ItemBody::Reasoning { .. }
                 | crate::models::ItemBody::ImageGeneration { .. }
@@ -442,7 +443,7 @@ pub(super) fn open_thread(
     review_workspace(snapshot, pane_id).into_iter().collect()
 }
 
-async fn command(
+pub(crate) async fn command(
     context: &mut Execution<'_>,
     session: &crate::session::SessionRef,
     command: agent_protocol::conversation::Command,
@@ -459,6 +460,58 @@ async fn command(
 }
 
 pub use agent_protocol::operations::ForkSession;
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameSession {
+    pub thread_id: crate::session::SessionRef,
+    pub name: String,
+}
+
+impl Operation for RenameSession {
+    fn navigation_bound(&self) -> bool {
+        false
+    }
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Rename {
+            session: self.thread_id.clone(),
+        })
+    }
+    type Input = Option<String>;
+    fn capture(&self, snapshot: &Snapshot, _pane: &str) -> Result<Self::Input, PeerError> {
+        use crate::presentation::list::{ThreadRename, thread_rename};
+        let original = snapshot
+            .thread_metadata(&self.thread_id)
+            .and_then(|thread| thread.name.as_deref())
+            .unwrap_or_default();
+        match thread_rename(original, &self.name) {
+            ThreadRename::Empty => Err(PeerError::InvalidMessage(
+                "Thread title cannot be empty".into(),
+            )),
+            ThreadRename::Unchanged => Ok(None),
+            ThreadRename::Name(name) if snapshot.connection.connected => Ok(Some(name)),
+            ThreadRename::Name(_) => Err(PeerError::InvalidMessage("Host is not connected".into())),
+        }
+    }
+    type Output = Option<u64>;
+    async fn run(
+        &self,
+        name: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        match name {
+            Some(name) => command(
+                context,
+                &self.thread_id,
+                agent_protocol::conversation::Command::Rename(name),
+            )
+            .await
+            .map(Some),
+            None => Ok(None),
+        }
+    }
+}
 
 impl Operation for ForkSession {
     fn key(&self) -> Option<OperationKey> {
@@ -613,9 +666,20 @@ fn sent_input(
 
 #[derive(Debug)]
 pub struct RewindCapture {
+    draft_key: DraftKey,
     scope: String,
     epoch: u64,
     original: Option<Recalled>,
+}
+
+// Recall follows the live prompt without trimming. Prompt stashes have
+// different whitespace and attachment deduplication requirements.
+fn recalled_prompt(current: &str, restored: &str) -> String {
+    match (current.is_empty(), restored.is_empty()) {
+        (_, true) => current.into(),
+        (true, false) => restored.into(),
+        (false, false) => format!("{current}\n\n{restored}"),
+    }
 }
 
 impl Operation for RewindSession {
@@ -627,6 +691,11 @@ impl Operation for RewindSession {
     type Input = RewindCapture;
     type Output = (Self::Input, u64);
     fn capture(&self, snapshot: &Snapshot, _: &str) -> Result<Self::Input, PeerError> {
+        if self.storage_scope != snapshot.connection.storage_scope {
+            return Err(PeerError::InvalidMessage(
+                "conversation storage changed".into(),
+            ));
+        }
         let original = snapshot
             .sessions
             .projections
@@ -642,6 +711,7 @@ impl Operation for RewindSession {
             .map_err(PeerError::InvalidMessage)?
             .flatten();
         Ok(RewindCapture {
+            draft_key: snapshot.composer_key(Some(&self.thread_id), &self.thread_id.clone().into()),
             scope: snapshot.connection.storage_scope.clone(),
             epoch: snapshot.connection.epoch,
             original,
@@ -671,17 +741,15 @@ impl Operation for RewindSession {
             return Ok(Vec::new());
         }
         let id = self.thread_id;
-        if let Some(recalled) = captured.original {
+        if snapshot.accepts_draft_result(&captured.draft_key)
+            && let Some(recalled) = captured.original
+        {
+            // The queued editor captured at admission owns this recall. Retiring
+            // it or selecting another editor cannot redirect the completion.
+            let queued = matches!(&captured.draft_key, DraftKey::Queued { .. });
             let drafts = Arc::make_mut(&mut snapshot.input.drafts);
-            let draft = Arc::make_mut(drafts.entry(id.clone().into()).or_default());
-            // T3 chatViewSend.ts reads the latest prompt after native success.
-            // Keep input typed while waiting and append the recalled message.
-            if !recalled.text.is_empty() {
-                if !draft.text.is_empty() {
-                    draft.text.push_str("\n\n");
-                }
-                draft.text.push_str(&recalled.text);
-            }
+            let draft = Arc::make_mut(drafts.entry(captured.draft_key).or_default());
+            draft.text = recalled_prompt(&draft.text, &recalled.text);
             draft.attachments.extend(recalled.attachments);
             for context in recalled.contexts {
                 if !draft
@@ -692,14 +760,18 @@ impl Operation for RewindSession {
                     draft.contexts.push(context);
                 }
             }
-            draft.fresh_context |= recalled.fresh_context;
+            // Queued edits change contents; their job options remain intact.
+            if !queued {
+                draft.fresh_context |= recalled.fresh_context;
+            }
         }
-        let effects = if current && !snapshot.sessions.subscriptions.contains_key(&id) {
-            vec![Effect::execute(ReadThread::open(id))]
-        } else {
-            Vec::new()
-        };
-        Ok(effects)
+        Ok(
+            if current && !snapshot.sessions.subscriptions.contains_key(&id) {
+                vec![Effect::execute(ReadThread::open(id))]
+            } else {
+                Vec::new()
+            },
+        )
     }
 }
 
@@ -855,13 +927,6 @@ impl Operation for ChangeQueue {
     ) -> Result<Self::Output, PeerError> {
         use agent_protocol::{conversation::Command, operations::QueueChange};
         let change = match &self.change {
-            QueueChange::Edit {
-                client_user_message_id,
-                input,
-            } => Command::EditInput {
-                id: client_user_message_id.clone(),
-                parts: input.clone(),
-            },
             QueueChange::Remove {
                 client_user_message_id,
             } => Command::RemoveInput(client_user_message_id.clone()),

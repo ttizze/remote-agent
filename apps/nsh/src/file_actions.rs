@@ -14,7 +14,7 @@ use agent_core::{
     presentation::{
         editors::preferred_editor,
         files::{
-            FileAction, FileMenuItem, FileMetadataCache, FilePrimaryAction, append_file_mentions,
+            FileAction, FileMenuItem, FileMetadataCache, FilePrimaryAction,
             desktop_file_chip_color, desktop_file_primary_action, desktop_metadata_icon,
             file_reference_menu, file_reference_tooltip,
         },
@@ -153,7 +153,7 @@ pub(crate) struct LinkTarget {
     pub link: String,
     pub cwd: String,
     pub home: Option<String>,
-    pub host: String,
+    pub scope: agent_core::panels::PanelScope,
 }
 
 /// A press on a link of a message: the desktop client's primary action for a file, which
@@ -169,18 +169,18 @@ pub(crate) fn press(connection: Connection, files: Browser, target: LinkTarget, 
             target.link,
             target.cwd,
             target.home,
-            target.host,
+            target.scope.host,
             connection.client.get(),
         );
     };
     let path = file_host_path(file.path, target.home.clone());
-    let local = target.host == "local";
+    let local = target.scope.host == "local";
     match desktop_file_primary_action(&path, &root, true, local, modifier) {
         FilePrimaryAction::Open => files.open(
             target.link,
             target.cwd,
             target.home,
-            target.host,
+            target.scope.host,
             connection.client.get(),
         ),
         FilePrimaryAction::Editor => run_reference(
@@ -209,16 +209,16 @@ pub(crate) fn choose(connection: Connection, files: Browser, target: LinkTarget,
 
 fn run_reference(connection: Connection, files: Browser, target: LinkTarget, action: FileAction) {
     let root = file_host_path(target.cwd.clone(), target.home.clone());
-    let host = target.host.clone();
+    let scope = target.scope.clone();
     files.resolve(
         target.link,
         target.cwd,
         target.home,
-        target.host,
+        target.scope.host,
         connection.client.get(),
         move |file| {
             let relative = file_workspace_relative_path(&file.path, &root);
-            act(connection, &host, &file, relative.as_deref(), "", action);
+            act(connection, &scope, &file, relative.as_deref(), "", action);
         },
     );
 }
@@ -227,6 +227,7 @@ fn run_reference(connection: Connection, files: Browser, target: LinkTarget, act
 /// it, and mention it in the chat.
 #[cfg(desktop)]
 pub(crate) fn tree_menu(connection: Connection, key: &FileTreeKey, path: &str) {
+    let scope = input_scope(connection);
     let host = connection.host.get_untracked();
     let (cwd, editors, reveal) = connection.publication.with_untracked(|p| {
         let capabilities = p.snapshot.files.file_open_capabilities.as_deref();
@@ -253,7 +254,7 @@ pub(crate) fn tree_menu(connection: Connection, key: &FileTreeKey, path: &str) {
     };
     crate::ui::popup(&menu(items), move |id: &str| {
         if let Some(action) = action(id) {
-            act(connection, &host, &file, Some(&relative), &mention, action);
+            act(connection, &scope, &file, Some(&relative), &mention, action);
         }
     });
 }
@@ -272,23 +273,33 @@ pub(crate) fn tree_mentions(connection: Connection, key: &FileTreeKey, paths: &[
 }
 
 /// Appends `mentions` to the visible draft and returns to the composer.
-pub(crate) fn add_mentions(connection: Connection, mentions: &str) {
-    let (draft, text) = connection.composer.with_untracked(|c| {
-        (
-            c.controls.navigation.draft_key.clone(),
-            append_file_mentions(&c.draft.text, mentions),
+pub(crate) fn input_scope(connection: Connection) -> agent_core::panels::PanelScope {
+    connection.publication.with_untracked(|p| {
+        p.snapshot.panel_scope(
+            connection.host.get_untracked(),
+            p.composer.controls.navigation.draft_key.clone(),
         )
+    })
+}
+
+pub(crate) fn add_mentions(
+    connection: Connection,
+    scope: &agent_core::panels::PanelScope,
+    mentions: &str,
+) {
+    connection.dispatch(Intent::AppendFileMentions {
+        storage_scope: scope.storage.clone(),
+        thread_id: scope.draft.clone(),
+        text: mentions.into(),
     });
-    connection.dispatch(Intent::SetDraftText {
-        thread_id: draft,
-        text,
-    });
-    connection.composer_ref.focus();
+    if input_scope(connection) == *scope {
+        connection.composer_ref.focus();
+    }
 }
 
 fn act(
     connection: Connection,
-    host: &str,
+    scope: &agent_core::panels::PanelScope,
     file: &Reference,
     relative: Option<&str>,
     mention: &str,
@@ -297,7 +308,7 @@ fn act(
     let open = |editor: EditorId, reveal: bool| {
         connection.client.with(|client| {
             client.dispatch(
-                host,
+                &scope.host,
                 None,
                 Intent::OpenInEditor(op::OpenInEditor {
                     path: file.path.clone(),
@@ -342,7 +353,7 @@ fn act(
         }
         FileAction::CopyFullPath => copy(&file.path),
         FileAction::CopyMention => set_clipboard(mention.to_owned()),
-        FileAction::AddToChat => add_mentions(connection, mention),
+        FileAction::AddToChat => add_mentions(connection, scope, mention),
     }
 }
 

@@ -53,6 +53,7 @@ internal fun ModelPickerButton(
             perform(Intent.RefreshModels) {}
         },
         modifier = modifier.testTag("model.settings"),
+        enabled = composer.canChooseModel(),
     ) {
         Text(
             listOfNotNull(
