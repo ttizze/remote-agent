@@ -968,6 +968,10 @@ fn review_card() -> impl IntoElement {
             .publication
             .with(|p| p.pane().composer_review(is_side_chat))
     });
+    let file_count = move || {
+        let files = review.with(|r| r.as_ref().map_or(0, |r| r.files));
+        tr_format("{0}件のファイル", [&files])
+    };
     let open = move || {
         let cwd = connection
             .composer
@@ -977,32 +981,36 @@ fn review_card() -> impl IntoElement {
     when(
         move || review.with(Option::is_some),
         move || {
-            nsh_base::button()
-                .accessibility_label(Some(SharedString::from(tr("変更を表示"))))
-                .self_center()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .h(px(32.0))
-                .px_3()
-                .rounded_full()
-                .glass_effect(GlassEffect::Regular)
-                .text_size(px(13.0))
-                .hover(|s| s.bg(colors::GHOST_HOVER))
-                .active(|s| s.bg(colors::SELECTED))
-                .on_press(open)
-                .child(
-                    text(move || {
-                        let files = review.with(|r| r.as_ref().map_or(0, |r| r.files));
-                        tr_format("{0}件のファイル", [&files])
+            view()
+                .role(AccessibilityRole::Group)
+                .accessibility_value(move || {
+                    Some(nsh_core::AccessibilityValue {
+                        text: Some(file_count().into()),
+                        ..Default::default()
                     })
-                    .text_color(colors::ACCENT),
+                })
+                .self_center()
+                .child(
+                    nsh_base::button()
+                        .accessibility_label(Some(SharedString::from(tr("変更を表示"))))
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .gap_3()
+                        .h(px(32.0))
+                        .px_3()
+                        .rounded_full()
+                        .glass_effect(GlassEffect::Regular)
+                        .text_size(px(13.0))
+                        .hover(|s| s.bg(colors::GHOST_HOVER))
+                        .active(|s| s.bg(colors::SELECTED))
+                        .on_press(open)
+                        .child(text(file_count).text_color(colors::ACCENT))
+                        .child(change_counts(
+                            move || review.with(|r| r.as_ref().map_or(0, |r| r.additions)),
+                            move || review.with(|r| r.as_ref().map_or(0, |r| r.deletions)),
+                        )),
                 )
-                .child(change_counts(
-                    move || review.with(|r| r.as_ref().map_or(0, |r| r.additions)),
-                    move || review.with(|r| r.as_ref().map_or(0, |r| r.deletions)),
-                ))
         },
     )
 }

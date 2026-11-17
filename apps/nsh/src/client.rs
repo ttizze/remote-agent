@@ -121,6 +121,22 @@ impl Client {
         let _ = self.updates.try_send(Update::Error(reason.to_string()));
     }
 
+    fn report_session_error(
+        &self,
+        host: String,
+        session: &Arc<ClientSession>,
+        reason: impl std::fmt::Display,
+    ) {
+        if !self.closing.is_cancelled()
+            && self
+                .sessions
+                .session(host)
+                .is_some_and(|current| Arc::ptr_eq(&current, session))
+        {
+            self.report(reason);
+        }
+    }
+
     async fn restore(self: &Arc<Self>) -> Result<(), AgentError> {
         let path = self.root.join("hosts.json");
         let bytes = tokio::task::spawn_blocking(move || storage::read(&path))
@@ -186,21 +202,16 @@ impl Client {
                 }
                 Err(reason) => {
                     // Removing or replacing this Host cancels restoration too.
-                    if owner
-                        .sessions
-                        .session(host.id)
-                        .is_some_and(|current| Arc::ptr_eq(&current, &session))
-                    {
-                        owner.report(reason);
-                    }
+                    owner.report_session_error(host.id, &session, reason);
                 }
             }
         });
     }
 
     async fn resume(&self, session: Arc<ClientSession>, host: Host) {
-        if let Some(failure) = self.reach(session, host).await {
-            self.report(failure);
+        let id = host.id.clone();
+        if let Some(failure) = self.reach(session.clone(), host).await {
+            self.report_session_error(id, &session, failure);
         }
     }
 
@@ -248,7 +259,7 @@ impl Client {
                 // A failure shows once, not again on each later attempt.
                 let failure = owner.reach(session.clone(), host.clone()).await;
                 if let Some(reason) = failure.as_ref().filter(|_| failure != last) {
-                    owner.report(reason);
+                    owner.report_session_error(host.id.clone(), &session, reason);
                 }
                 last = failure;
                 wait = (wait * 2).min(LONGEST);
@@ -845,10 +856,12 @@ mod tests {
             parked.recv_timeout(Duration::from_secs(5)).unwrap();
         }
         let remote = saved_host(directory.path());
-        runtime.block_on(async {
+        let retired = runtime.block_on(async {
             client.restore().await.unwrap();
             assert!(client.snapshot(&remote.id).is_some());
+            let session = client.sessions.session(remote.id.clone()).unwrap();
             client.remove_host(remote.id.clone()).await.unwrap();
+            session
         });
         for release in releases {
             let _ = release.send(());
@@ -856,6 +869,9 @@ mod tests {
         client.jobs.close();
         runtime.block_on(async {
             client.jobs.wait().await;
+            // A readiness callback can also have entered the resume path
+            // just before removal. Its cancelled connection must stay silent.
+            client.resume(retired, remote.clone()).await;
             let mut hosts = None;
             while let Ok(update) = incoming.try_recv() {
                 match update {
@@ -919,6 +935,38 @@ mod tests {
             };
             assert!(hosts.is_empty());
             assert!(client.snapshot(&remote.id).is_none());
+            client.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn a_current_hosts_resume_failure_is_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, client, incoming) = Client::new(directory.path().into(), None).unwrap();
+        runtime.block_on(async {
+            assert!(
+                matches!(incoming.recv().await.unwrap(), Update::Hosts(hosts) if hosts.is_empty())
+            );
+            let host = Host {
+                id: "unreachable-host".into(),
+                name: "Unreachable PC".into(),
+                ticket: "invalid-ticket".into(),
+                local_directory: None,
+            };
+            let storage = Arc::new(Storage {
+                root: directory.path().into(),
+                host: host.clone(),
+                handed: Default::default(),
+            });
+            let session = client
+                .sessions
+                .open(host.id.clone(), storage.clone(), storage);
+            session.clone().ready().await.unwrap();
+            client.resume(session, host).await;
+            assert!(
+                matches!(incoming.try_recv().unwrap(), Update::Error(reason) if !reason.is_empty())
+            );
+            assert!(incoming.try_recv().is_err());
             client.shutdown().await.unwrap();
         });
     }

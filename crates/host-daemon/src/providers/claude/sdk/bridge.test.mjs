@@ -149,11 +149,30 @@ test("SDK callbacks wait for Host answers and cancel when the SDK aborts", async
     requestId: "oversized", signal: new AbortController().signal,
   }), /size limit/);
   assert.ok(events.every((event) => event.requestId !== "oversized"));
+  output.push({ type: "assistant", message: { content: [{ type: "tool_use", id: "tool" }] } });
+  await new Promise((resolve) => setImmediate(resolve));
   const signal = new AbortController();
   const answer = options.canUseTool("Bash", { command: "test" }, { requestId: "request", toolUseID: "tool", signal: signal.signal });
   assert.deepEqual(events.at(-1), { type: "request", requestId: "request", request: { type: "tool", toolName: "Bash", input: { command: "test" }, toolUseId: "tool" } });
   input.push(JSON.stringify({ type: "answer", requestId: "request", response: { behavior: "allow", updatedInput: { command: "test" } } }));
   assert.deepEqual(await answer, { behavior: "allow", updatedInput: { command: "test" } });
+  const withdrawn = new AbortController();
+  const held = options.canUseTool("Bash", {}, {
+    requestId: "withdrawn", toolUseID: "late-tool", signal: withdrawn.signal,
+  });
+  withdrawn.abort();
+  await assert.rejects(held, /cancelled/);
+  output.push({ type: "assistant", message: { content: [{ type: "tool_use", id: "late-tool" }] } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(events.every((event) => event.type !== "request" || event.requestId !== "withdrawn"));
+  const child = options.canUseTool("Bash", {}, {
+    requestId: "child", toolUseID: "private-child-tool", agentID: "background-agent", signal: signal.signal,
+  });
+  assert.deepEqual(events.at(-1), { type: "request", requestId: "child", request: {
+    type: "tool", toolName: "Bash", input: {}, toolUseId: "private-child-tool",
+  } });
+  input.push(JSON.stringify({ type: "answer", requestId: "child", response: { behavior: "allow", updatedInput: {} } }));
+  assert.deepEqual(await child, { behavior: "allow", updatedInput: {} }, "no child assistant frame is required");
   const cancelled = options.onElicitation({ serverName: "server", message: "Name?" }, { requestId: "elicitation", signal: signal.signal });
   signal.abort();
   await assert.rejects(cancelled, /cancelled/);
@@ -164,6 +183,48 @@ test("SDK callbacks wait for Host answers and cancel when the SDK aborts", async
   assert.ok(events.some((event) => event.type === "message" && event.message.result === "still running"));
   input.close();
   await bridge;
+});
+
+test("a permission follows its tool block and the preceding result in either SDK callback order", { timeout: 5000 }, async () => {
+  for (const callbackFirst of [true, false]) {
+    const input = channel();
+    const output = channel();
+    const messages = output[Symbol.asyncIterator]();
+    const events = [];
+    let options;
+    let initialized;
+    const ready = new Promise((resolve) => { initialized = resolve; });
+    let delivered;
+    const toolDelivered = new Promise((resolve) => { delivered = resolve; });
+    input.push(JSON.stringify({ type: "initialize", program: "/fixture/claude", cwd: "/fixture" }));
+    const bridge = runBridge(input, (event) => {
+      events.push(event);
+      if (event.type === "message" && event.message.type === "assistant") delivered();
+      if (event.type === "request") input.push(JSON.stringify({
+        type: "answer", requestId: event.requestId, response: { behavior: "allow", updatedInput: {} },
+      }));
+    }, ({ options: configured }) => {
+      options = configured;
+      return {
+        async initializationResult() { initialized(); return {}; },
+        next: messages.next.bind(messages),
+        close() { output.close(); },
+      };
+    });
+    await ready;
+    const request = () => options.canUseTool("Bash", { command: "background report" }, {
+      requestId: "permission", toolUseID: "follow-up-tool", signal: new AbortController().signal,
+    });
+    const early = callbackFirst ? request() : undefined;
+    output.push({ type: "result", result: "I will report later" });
+    output.push({ type: "assistant", message: { content: [{ type: "tool_use", id: "follow-up-tool" }] } });
+    await toolDelivered;
+    assert.deepEqual(await (early ?? request()), { behavior: "allow", updatedInput: {} });
+    assert.deepEqual(events.filter((event) => event.type !== "ready").map((event) =>
+      event.type === "message" ? event.message.type : event.type), ["result", "assistant", "request"]);
+    input.close();
+    await bridge;
+  }
 });
 
 test("the production build includes its license and starts through a symlink outside the checkout", async () => {

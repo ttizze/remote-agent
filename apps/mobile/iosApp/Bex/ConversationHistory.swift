@@ -106,15 +106,18 @@ extension ThreadScreen {
     }
 
     @ViewBuilder
-    func conversationRow(_ row: ThreadConversationRow) -> some View {
+    func conversationRow(_ row: ThreadConversationRow, expanded: Set<String>) -> some View {
         switch row.content {
         case let .historyNotice(message): Text(verbatim: message).font(.caption).foregroundStyle(.secondary)
-        case let .native(row, item): nativeConversationRow(row, item: item)
+        case let .native(row, item): nativeConversationRow(row, item: item,
+                                                           expanded: item
+                                                               .map { expanded.contains($0.data.id) } ?? false)
         }
     }
 
     @ViewBuilder
-    func nativeConversationRow(_ projected: VisibleConversationRow, item: ConversationItem?) -> some View {
+    func nativeConversationRow(_ projected: VisibleConversationRow, item: ConversationItem?,
+                               expanded: Bool) -> some View {
         let row = projected.data()
         switch (row.content, item) {
         case let (.preparation(preparation), _):
@@ -148,7 +151,8 @@ extension ThreadScreen {
                 id: projected.id(),
                 expanded: projected.expanded()
             )
-        case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId, rowId: projected.id())
+        case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId, rowId: projected.id(),
+                                                                 expanded: expanded)
         case let (.error(error), _): ThreadErrorRow(error: error)
         case (.inProgress, _), (.pendingRequest, _), (_, nil): EmptyView()
         }
@@ -178,7 +182,7 @@ extension ThreadScreen {
     }
 
     @ViewBuilder
-    func activityItem(_ item: ConversationItem, turnId: String, rowId: String) -> some View {
+    func activityItem(_ item: ConversationItem, turnId: String, rowId: String, expanded: Bool) -> some View {
         let values = model.activityDecorations[rowId] ?? []
         let request = conversation?.id.map { ReadItem(
             threadId: $0,
@@ -207,7 +211,7 @@ extension ThreadScreen {
                 item: item,
                 media: mediaAccess,
                 selection: selectionActions,
-                isExpanded: expandedItemIds.contains(item.data.id),
+                isExpanded: expanded,
                 detail: request.map { model.conversationContext.itemDetail(item: $0) } ?? ItemDetail(
                     loading: false,
                     error: nil

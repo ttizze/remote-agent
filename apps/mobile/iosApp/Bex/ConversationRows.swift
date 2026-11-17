@@ -20,6 +20,7 @@ struct ThreadErrorRow: View {
 }
 
 struct ThreadMessageRow: View, Equatable {
+    @Environment(\.locale) private var locale
     let row: VisibleConversationRow
     let item: ConversationItem
     let isUser: Bool
@@ -69,15 +70,24 @@ struct ThreadMessageRow: View, Equatable {
         ConversationMessage(user: isUser, hasText: !(item.data.body ?? "").isEmpty,
                             hasImages: !item.data.imageSources.isEmpty,
                             collapsible: item.source.collapsesUserText(),
-                            expandTitle: String(localized: "全文を表示"), collapseTitle: String(localized: "折りたたむ"),
+                            expandTitle: localizedUiText(language: locale.appLanguage, source: "全文を表示"),
+                            collapseTitle: localizedUiText(language: locale.appLanguage, source: "折りたたむ"),
                             identifier: "item.\(item.data.id)") {
             if row.data().queued {
-                ConversationInputMarker(title: String(localized: "キューから送信"),
-                                        description: String(localized: "実行中の作業の後に送信しました"), steer: false)
+                ConversationInputMarker(title: localizedUiText(language: locale.appLanguage, source: "キューから送信"),
+                                        description: localizedUiText(
+                                            language: locale.appLanguage,
+                                            source: "実行中の作業の後に送信しました"
+                                        ),
+                                        steer: false)
             }
             if row.data().steer {
-                ConversationInputMarker(title: String(localized: "追加の指示"),
-                                        description: String(localized: "実行中の作業に追加で指示しました"), steer: true)
+                ConversationInputMarker(title: localizedUiText(language: locale.appLanguage, source: "追加の指示"),
+                                        description: localizedUiText(
+                                            language: locale.appLanguage,
+                                            source: "実行中の作業に追加で指示しました"
+                                        ),
+                                        steer: true)
             }
         } images: {
             images
@@ -138,8 +148,9 @@ struct ThreadMessageRow: View, Equatable {
                 .accessibilityIdentifier("response.fork." + item.data.id)
             }
             if !text.isEmpty {
-                ConversationCopyButton(title: String(localized: isUser ? "発言をコピー" : "回答をコピー"),
-                                       copiedTitle: String(localized: "コピーしました")) {
+                ConversationCopyButton(title: localizedUiText(language: locale.appLanguage,
+                                                              source: isUser ? "発言をコピー" : "回答をコピー"),
+                                       copiedTitle: localizedUiText(language: locale.appLanguage, source: "コピーしました")) {
                     UIPasteboard.general.string = text
                 }
             }

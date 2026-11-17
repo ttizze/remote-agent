@@ -30,6 +30,7 @@ const SUBCLASS: usize = 0x424559;
 const COPY_TIMER: usize = 1;
 static LIBRARY: OnceLock<Result<(), String>> = OnceLock::new();
 
+mod pictures;
 #[cfg(test)]
 mod tests;
 
@@ -545,6 +546,7 @@ impl Item {
             );
         }
         if !button && !context.rule && !context.icon_kind {
+            pictures::install(window);
             message(window, EM_EXLIMITTEXT, 0, i32::MAX as isize);
             message(
                 window,

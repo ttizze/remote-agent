@@ -196,6 +196,7 @@ fn project_items<'a>(
     let mut first = true;
     let mut exchange_end = 0;
     let mut exchange_has_answer = false;
+    let mut has_work_summary = false;
     std::iter::from_fn(move || {
         if !first && start == count {
             return None;
@@ -259,9 +260,9 @@ fn project_items<'a>(
         };
         segment.collapsible =
             (start..end).any(|index| segment.role(index, item(index)) == Role::Activity);
-        // As T3 Code: a turn that has ended folds its work under the whole turn's
-        // time, and the work after each steer under a row that continues it. A
-        // running turn names what its earlier segments did.
+        // A finished turn's first work fold carries its whole time and outcome;
+        // later work folds continue it. Opening commentary need not contain work.
+        // A running turn names what its earlier segments did.
         segment.label = if segment.collapsible {
             let activity = || {
                 activity_summary(
@@ -273,7 +274,7 @@ fn project_items<'a>(
             };
             Some(if turn.status == TurnStatus::Running {
                 activity()
-            } else if start == 0 {
+            } else if !has_work_summary {
                 // A turn that failed or was stopped says what its last work did.
                 if segment.last
                     && matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted)
@@ -294,6 +295,7 @@ fn project_items<'a>(
         } else {
             None
         };
+        has_work_summary |= segment.collapsible;
         start = end;
         Some(segment)
     })
@@ -788,6 +790,26 @@ mod presentation_tests {
             })
             .collect();
         assert_eq!(responses, ["a1", "a2", "answer"]);
+    }
+    #[test]
+    fn the_first_work_group_keeps_the_turn_outcome_after_an_opening_commentary() {
+        for (status, summary) in [
+            ("failed", "12秒 作業した後に失敗しました"),
+            ("interrupted", "12秒 作業した後に中断しました"),
+        ] {
+            let turn = turn!({"id":"turn","status":status,"durationMs":12000,"items":[
+                {"id":"intro","body":{"inline":{"body":{"assistantText":{"text":"Checking now","phase":"commentary"}}}}},
+                {"id":"first","body":{"inline":{"body":{"commandExecution":{"command":"inspect","output":"","exitCode":null}}}}},
+                {"id":"steer","body":{"inline":{"body":{"userMessage":{"text":"Also check tests","content":[]}}}}},
+                {"id":"second","body":{"inline":{"body":{"commandExecution":{"command":"test","output":"","exitCode":null}}}}}
+            ]});
+            let labels: Vec<_> = project(&turn)
+                .filter(|part| part.collapsible)
+                .map(|part| part.label.unwrap())
+                .collect();
+            assert_eq!(labels, [summary, "続けて作業しました"]);
+            assert_eq!(order(&turn), ["intro", "first", "steer", "second"]);
+        }
     }
     #[test]
     fn failures_and_interruptions_keep_partial_responses_and_status() {

@@ -28,8 +28,8 @@ extension LaunchUITests {
         let finalID = finalAnswer.identifier
         func showGeneratedImage(_ name: String) {
             let image = app.images.matching(NSPredicate(
-                format: "identifier BEGINSWITH %@",
-                "message.image.fixture-generated-\(name)-"
+                format: "identifier BEGINSWITH %@ AND identifier CONTAINS %@",
+                "message.image.", "fixture-generated-\(name)-"
             )).firstMatch
             for _ in 0 ..< 10 {
                 if image.exists, image.isHittable {
@@ -183,8 +183,8 @@ extension LaunchUITests {
         startSimulatorConversation(app, promptText: "[generated-images] [gallery] Open only the tapped image")
         XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 25))
         let image = app.images.matching(NSPredicate(
-            format: "identifier BEGINSWITH %@",
-            "message.image.fixture-generated-inline-"
+            format: "identifier BEGINSWITH %@ AND identifier CONTAINS %@",
+            "message.image.", "fixture-generated-inline-"
         )).firstMatch
         showConversationElement(image, in: app, upward: false)
         image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()

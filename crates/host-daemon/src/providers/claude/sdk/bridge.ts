@@ -87,14 +87,16 @@ export async function runBridge(lines: AsyncIterable<string>, emit: (event: Reco
     return;
   }
   if (config.type !== "initialize") throw new Error("Expected SDK initialization");
-  const requests = new Map<string, { resolve(value: unknown): void; reject(error: Error): void }>();
+  const requests = new Map<string, { resolve(value: unknown): void; reject(error: Error): void;
+    waitingFor?: string; publish(): void }>();
+  const announcedTools = new Set<string>();
   const messages: SDKUserMessage[] = [];
   let wake: (() => void) | undefined;
   let closing = false;
   let fail!: (reason: unknown) => void;
   const failed = new Promise<never>((_, reject) => { fail = reject; });
   function reportFailure(error: unknown) { if (!closing) fail(error); }
-  function request<T>(id: string, body: Record<string, unknown>, signal: AbortSignal): Promise<T> {
+  function request<T>(id: string, body: Record<string, unknown>, signal: AbortSignal, precedingTool?: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (Buffer.byteLength(JSON.stringify(body), "utf8") > 32 * 1024) {
         reject(new Error("Claude request exceeds its size limit"));
@@ -107,11 +109,14 @@ export async function runBridge(lines: AsyncIterable<string>, emit: (event: Reco
       };
       if (signal.aborted) return cancel();
       signal.addEventListener("abort", cancel, { once: true });
-      requests.set(id, {
-        resolve(value) { signal.removeEventListener("abort", cancel); resolve(value as T); },
-        reject(error) { signal.removeEventListener("abort", cancel); reject(error); },
-      });
-      emit({ type: "request", requestId: id, request: body });
+      const pending = {
+        resolve(value: unknown) { signal.removeEventListener("abort", cancel); resolve(value as T); },
+        reject(error: Error) { signal.removeEventListener("abort", cancel); reject(error); },
+        waitingFor: precedingTool && !announcedTools.delete(precedingTool) ? precedingTool : undefined,
+        publish() { emit({ type: "request", requestId: id, request: body }); },
+      };
+      requests.set(id, pending);
+      if (!pending.waitingFor) pending.publish();
     });
   }
   const thinking = thinkingOptions(thinkingEnabledSetting(config.cwd, process.env));
@@ -129,9 +134,11 @@ export async function runBridge(lines: AsyncIterable<string>, emit: (event: Reco
     spawnClaudeCodeProcess,
     ...(config.sessionId ? config.resume ? { resume: config.sessionId } : { sessionId: config.sessionId } : {}),
     ...(config.resumeSessionAt === undefined ? {} : { resumeSessionAt: config.resumeSessionAt }),
+    // Only root tools participate in the Host's turn ordering. Subagent
+    // permission must remain live even if its private transcript is not forwarded.
     canUseTool: (toolName, input, context) => request<PermissionResult>(context.requestId, {
       type: "tool", toolName, input, toolUseId: context.toolUseID,
-    }, context.signal),
+    }, context.signal, context.agentID ? undefined : context.toolUseID),
     onElicitation: (body, context) => request<ElicitationResult>(context.requestId, {
       type: "elicitation", serverName: body.serverName, message: body.message,
       mode: body.mode, url: body.url, requestedSchema: body.requestedSchema,
@@ -149,7 +156,21 @@ export async function runBridge(lines: AsyncIterable<string>, emit: (event: Reco
     const initialized = await q.initializationResult();
     emit({ type: "ready", initialized });
     // Query.return() closes the transport before returning the inner iterator.
-    for await (const message of { [Symbol.asyncIterator]: () => q }) emit({ type: "message", message });
+    for await (const message of { [Symbol.asyncIterator]: () => q }) {
+      emit({ type: "message", message });
+      // SDK callbacks run in its transport reader, ahead of the public iterator.
+      // Publish a permission only after its tool block and preceding result have
+      // reached the Host, so a background follow-up owns its own request.
+      if (message.type === "assistant") {
+        for (const block of message.message.content) {
+          if (block.type !== "tool_use") continue;
+          const pending = [...requests.values()].find((request) => request.waitingFor === block.id);
+          if (pending) { pending.waitingFor = undefined; pending.publish(); }
+          else announcedTools.add(block.id);
+        }
+      }
+      if (message.type === "result") announcedTools.clear();
+    }
     if (!closing) throw new Error("Claude SDK exited");
   })();
   reading.catch(reportFailure);

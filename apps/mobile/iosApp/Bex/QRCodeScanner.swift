@@ -59,6 +59,8 @@ struct QrScannerSheet: View {
     }
 
     @MainActor private static func cameraAccess() async -> CameraAccess {
+        // Unsupported devices cannot scan even with camera permission.
+        guard DataScannerViewController.isSupported else { return .unavailable }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .notDetermined:
             let granted = await AVCaptureDevice.requestAccess(for: .video)
@@ -75,7 +77,7 @@ struct QrScannerSheet: View {
     }
 
     @MainActor private static var scannerAccess: CameraAccess {
-        DataScannerViewController.isSupported && DataScannerViewController.isAvailable ? .ready : .unavailable
+        DataScannerViewController.isAvailable ? .ready : .unavailable
     }
 }
 

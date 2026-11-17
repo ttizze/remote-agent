@@ -10,7 +10,7 @@ extension LaunchUITests {
         expandSimulatorProject(app)
         let row = try simulatorTaskRow(app, native: id)
         XCTAssertTrue(row.waitUntilExists(timeout: 20)); row.tap()
-        XCTAssertTrue(fixtureItems(app, containing: "long-14-0").firstMatch.waitUntilExists(timeout: 20))
+        XCTAssertTrue(fixtureItems(app, containing: "long-latest-message").firstMatch.waitUntilExists(timeout: 20))
         let input = app.descendants(matching: .any)["task.message"]
         for cycle in 0 ..< 4 {
             if cycle.isMultiple(of: 2) {

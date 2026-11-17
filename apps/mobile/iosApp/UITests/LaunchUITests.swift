@@ -183,25 +183,6 @@ final class LaunchUITests: XCTestCase {
         confirm.tap()
     }
 
-    func simulatorTaskIdentifier(_ path: String, prefix: String = "tasks.row.") throws -> String {
-        struct Session: Decodable {
-            let provider: String?
-            let id: String
-        }
-
-        struct TaskIdentity: Decodable {
-            let threadId: Session
-        }
-
-        let response = try simulatorFixture(path, expectedStatus: 200, timeout: 15)
-        let session = try JSONDecoder().decode(TaskIdentity.self, from: response).threadId
-        return "\(prefix)\(session.provider ?? "bex"):\(session.id)"
-    }
-
-    func simulatorTaskRow(_ app: XCUIApplication, native: String) throws -> XCUIElement {
-        try app.descendants(matching: .any)[simulatorTaskIdentifier("session-identity/\(native)")]
-    }
-
     func startSimulatorConversation(_ app: XCUIApplication, promptText: String) {
         let projectCompose = app.buttons["tasks.new.project.simulator-project"]
         XCTAssertTrue(
@@ -346,5 +327,46 @@ extension LaunchUITests {
         }
         XCTAssertTrue(app.buttons["task.tools"].waitUntilExists(timeout: 5))
         XCTAssertTrue(app.textFields["task.message"].exists)
+    }
+}
+
+extension LaunchUITests {
+    func simulatorTaskIdentifier(_ path: String, prefix: String = "tasks.row.") throws -> String {
+        struct Session: Decodable {
+            let provider: String?
+            let id: String
+        }
+
+        struct TaskIdentity: Decodable {
+            let threadId: Session
+        }
+
+        let response = try simulatorFixture(path, expectedStatus: 200, timeout: 15)
+        let session = try JSONDecoder().decode(TaskIdentity.self, from: response).threadId
+        return "\(prefix)\(session.provider ?? "bex"):\(session.id)"
+    }
+
+    func simulatorTaskRow(_ app: XCUIApplication, native: String) throws -> XCUIElement {
+        try revealSimulatorTaskRow(app, identifier: simulatorTaskIdentifier("session-identity/\(native)"))
+    }
+
+    func revealSimulatorTaskRow(_ app: XCUIApplication, identifier: String) -> XCUIElement {
+        let row = app.descendants(matching: .any)[identifier]
+        let more = app.buttons["tasks.project.simulator-project.more"]
+        // Earlier tests keep their conversations on this Host. Reach an older
+        // fixture through the same explicit project pagination as a user.
+        while !row.exists, more.exists {
+            let rows = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row."))
+            let count = rows.count
+            more.tap()
+            let loaded = expectation(for: NSPredicate { _, _ in
+                row.exists || rows.count > count || !more.exists
+            }, evaluatedWith: app)
+            wait(for: [loaded], timeout: 10)
+            if rows.count <= count {
+                break
+            }
+        }
+        return row
     }
 }

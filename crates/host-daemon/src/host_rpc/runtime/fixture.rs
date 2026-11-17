@@ -4,7 +4,7 @@ use agent_protocol::orchestration as model;
 
 impl HostRpcService {
     pub async fn publish_fixture_history(&self, native: &SessionRef) -> Result<(), String> {
-        let storage = &self.inner.conversation.storage;
+        let storage = self.inner.conversation.storage.clone();
         if storage.native_owner(native)?.is_some() {
             return Ok(());
         }
@@ -40,15 +40,21 @@ impl HostRpcService {
         // These are a user's previously observed events; opening must not replace
         // them with a new static text import.
         thread.created_by = model::Actor::User;
-        let records = archive(
-            &thread,
-            &source,
-            native,
-            response.thread.turns.unwrap_or_default(),
-            &thread.updated_at,
-        )?;
-        storage.seed_native_records(&thread, &source, records)?;
-        Ok(())
+        let native = native.clone();
+        // Building and committing a large archive must not occupy a Tokio
+        // worker that also serves native RPC and the connected clients.
+        tokio::task::spawn_blocking(move || {
+            let records = archive(
+                &thread,
+                &source,
+                &native,
+                response.thread.turns.unwrap_or_default(),
+                &thread.updated_at,
+            )?;
+            storage.seed_native_records(&thread, &source, records)
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 }
 

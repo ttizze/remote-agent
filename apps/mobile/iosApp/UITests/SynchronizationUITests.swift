@@ -30,7 +30,7 @@ extension LaunchUITests {
         let identifier = try simulatorTaskIdentifier("background-task")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = app.buttons[identifier]
+        let row = revealSimulatorTaskRow(app, identifier: identifier)
         XCTAssertTrue(row.waitUntilExists(timeout: 15))
         try simulatorFixture("background-reply/\(identifier.dropFirst("tasks.row.".count))")
         try simulatorFixture("fail-next-history-read")
@@ -246,7 +246,8 @@ extension LaunchUITests {
             1
         )
         prefixedButton(app, prefix: "turn.interrupt.").tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "3秒 作業した後に中断しました")).firstMatch
+        // Approval and steering pause the real turn; core tests cover its elapsed-time formatting.
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "作業した後に中断しました")).firstMatch
             .waitUntilExists(timeout: 15))
         XCTAssertEqual(
             sentMessages.count,

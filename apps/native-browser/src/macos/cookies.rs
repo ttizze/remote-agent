@@ -54,7 +54,7 @@ fn native_chrome_cookie(
     }
 }
 
-pub async fn install(
+pub(super) async fn install(
     store: &objc2_web_kit::WKHTTPCookieStore,
     cookies: Vec<agent_protocol::browser_native::BrowserCookie>,
 ) -> Result<(), String> {

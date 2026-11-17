@@ -11,7 +11,9 @@ public struct ConversationInputMarker: View {
 
     public var body: some View {
         HStack(spacing: 4) {
-            if steer { Image(systemName: "arrow.turn.down.right") }
+            if steer {
+                Image(systemName: "arrow.turn.down.right")
+            }
             Text(verbatim: title)
         }
         .font(.caption).foregroundStyle(.secondary)
@@ -83,7 +85,11 @@ public struct ConversationMessage<Images: View, Content: View, Actions: View, No
                             .accessibilityIdentifier("conversation.user-bubble")
                     }.frame(maxWidth: .infinity, alignment: .trailing)
                 } else {
-                    content.padding(.horizontal, 4)
+                    #if os(macOS)
+                        content.padding(.horizontal, 4)
+                    #else
+                        content
+                    #endif
                 }
             }
             if user, collapsible {
@@ -428,7 +434,9 @@ public struct ConversationWork<Content: View>: View {
         VStack(alignment: .leading, spacing: 8) {
             Button { expanded.toggle() } label: {
                 HStack(spacing: 6) {
-                    if let symbol { Image(systemName: symbol).font(.system(size: 16)).frame(width: 24, height: 24) }
+                    if let symbol {
+                        Image(systemName: symbol).font(.system(size: 16)).frame(width: 24, height: 24)
+                    }
                     NativeShimmer(label: Text(verbatim: title).lineLimit(1), active: active)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")

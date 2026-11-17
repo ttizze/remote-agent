@@ -92,6 +92,8 @@ struct ThreadScreen: View {
 
     private var chatContent: some View {
         let history = model.history
+        // Hosted cells render later, outside this body's State observation.
+        let expanded = expandedItemIds
         return VStack(spacing: 0) {
             ErrorNotices(notices: model.conversationContext.notices(), perform: { model.perform($0) })
                 .padding(.horizontal)
@@ -147,7 +149,7 @@ struct ThreadScreen: View {
                         if row < 0, let session = thread.id, let history {
                             historyControl(history, session: session)
                         } else if rows.indices.contains(row) {
-                            conversationRow(rows[row])
+                            conversationRow(rows[row], expanded: expanded)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }

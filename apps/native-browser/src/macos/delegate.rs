@@ -49,7 +49,7 @@ impl Drop for Pending {
     }
 }
 
-pub struct Ivars {
+pub(super) struct Ivars {
     scope: String,
     id: String,
     effects: Rc<RefCell<Vec<Effect>>>,
@@ -62,7 +62,7 @@ define_class!(
     #[name = "BexBrowserUIDelegate"]
     #[thread_kind = MainThreadOnly]
     #[ivars = Ivars]
-    pub struct Delegate;
+    pub(super) struct Delegate;
     unsafe impl NSObjectProtocol for Delegate {}
     unsafe impl WKUIDelegate for Delegate {
         #[unsafe(method_id(webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:))]
@@ -184,7 +184,7 @@ impl Delegate {
         let _ = i.changed.try_send(Event::Changed);
         Some(web)
     }
-    pub fn install(
+    pub(super) fn install(
         raw: &wry::WebView,
         scope: String,
         id: String,
@@ -222,7 +222,10 @@ impl Delegate {
     }
     /// A modal pauses JavaScript, including acknowledgements of native input.
     /// Return control to the client so it can answer before awaiting more JS.
-    pub async fn until_dialog<T>(&self, work: impl std::future::Future<Output = T>) -> Option<T> {
+    pub(super) async fn until_dialog<T>(
+        &self,
+        work: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
         let opened = async {
             loop {
                 let notified = self.ivars().dialog_opened.notified();
@@ -240,7 +243,7 @@ impl Delegate {
             result = work => Some(result),
         }
     }
-    pub fn dialog(&self) -> Option<BrowserDialog> {
+    pub(super) fn dialog(&self) -> Option<BrowserDialog> {
         self.ivars()
             .dialog
             .borrow()
@@ -250,7 +253,7 @@ impl Delegate {
                 prompt: matches!(d.completion, Some(Completion::Prompt(_))),
             })
     }
-    pub fn respond(&self, accept: bool, text: &str) -> Result<(), String> {
+    pub(super) fn respond(&self, accept: bool, text: &str) -> Result<(), String> {
         let mut pending = self
             .ivars()
             .dialog

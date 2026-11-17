@@ -96,17 +96,23 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
     };
     if long_history {
         if viewport {
-            // Activity-only turns before the last leave the initial window shorter
-            // than the viewport, so the manual history control is initially visible.
-            for turn in &turns[5..14] {
-                let item_id = format!("{}-work", turn.borrow()["id"].as_str().unwrap());
-                turn.borrow_mut()["items"] = json!([{"id":item_id,
-                    "type":"commandExecution","command":"inspect","status":"completed","aggregatedOutput":"done"}]);
+            // The bounded item page starts inside collapsed work, leaving a
+            // short viewport with older pages available behind the manual control.
+            for turn in &turns[..14] {
+                let mut turn = turn.borrow_mut();
+                turn["items"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|item| item["type"] == "commandExecution");
             }
         }
         let mut last = turns.last().unwrap().borrow_mut();
         if viewport {
             last["status"] = "completed".into();
+            let items = last["items"].as_array_mut().unwrap();
+            let answer = items.pop().unwrap();
+            items.truncate(1);
+            items.push(answer);
         }
         if running {
             last["status"] = "inProgress".into();
@@ -308,11 +314,13 @@ mod tests {
                 "Latest interrupted conversation message is visible."
             );
             if kind == "viewport" {
-                assert!(history.turns[5..14].iter().all(|turn| {
+                assert!(history.turns[..14].iter().all(|turn| {
                     let turn = turn.borrow();
-                    turn["items"].as_array().unwrap().len() == 1
-                        && turn["items"][0]["type"] == "commandExecution"
+                    let items = turn["items"].as_array().unwrap();
+                    !items.is_empty() && items.iter().all(|item| item["type"] == "commandExecution")
                 }));
+                assert_eq!(last["items"].as_array().unwrap().len(), 2);
+                assert_eq!(last["items"][0]["type"], "userMessage");
             }
         }
         for kind in [Value::Null, json!("unknown")] {

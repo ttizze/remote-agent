@@ -7,6 +7,7 @@ extension LaunchUITests {
         refreshSimulatorTaskList(app)
         let project = app.descendants(matching: .any)["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitUntilExists(timeout: 10))
+        _ = try simulatorTaskRow(app, native: "merge-active")
         let running = try app.descendants(matching: .any)[simulatorTaskIdentifier(
             "session-identity/merge-active",
             prefix: "tasks.running."

@@ -24,6 +24,7 @@ fn system_rich_edit_keeps_document_positions_for_chips_unicode_and_tables() {
         )
     }
     .unwrap();
+    pictures::install(window);
     let chip: Value = serde_json::from_str(include_str!(
         "../../../../../apple/Tests/BexNshNativeTests/Fixtures/file-chip.json"
     ))

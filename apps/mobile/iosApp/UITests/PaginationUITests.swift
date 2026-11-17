@@ -15,7 +15,7 @@ extension LaunchUITests {
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitUntilExists(timeout: 30))
-        let latest = fixtureItems(app, containing: "long-14-0").firstMatch
+        let latest = fixtureItems(app, containing: "long-latest-message").firstMatch
         XCTAssertTrue(latest.waitUntilExists(timeout: 20))
         let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: latest)
         wait(for: [visible], timeout: 5)

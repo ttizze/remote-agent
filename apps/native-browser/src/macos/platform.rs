@@ -14,7 +14,7 @@ use objc2_web_kit::{WKContentWorld, WKSnapshotConfiguration};
 use serde_json::Value;
 use wry::WebViewExtMacOS;
 
-pub fn evaluate(
+pub(super) fn evaluate(
     view: &wry::WebView,
     expression: &str,
     isolated: bool,
@@ -58,7 +58,7 @@ pub fn evaluate(
     rx
 }
 
-pub fn snapshot(view: &wry::WebView, width: u32) -> Receiver<Result<Vec<u8>, String>> {
+pub(super) fn snapshot(view: &wry::WebView, width: u32) -> Receiver<Result<Vec<u8>, String>> {
     let (tx, rx) = bounded(1);
     let block = block2::RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
         // SAFETY: WebKit keeps the nullable image alive for this callback;
@@ -101,7 +101,7 @@ fn input_view(view: Retained<NSView>) -> Result<Retained<NSView>, String> {
         .ok_or_else(|| "ページの入力先を取得できません。".into())
 }
 
-pub fn insert(view: &wry::WebView, text: &str) -> Result<(), String> {
+pub(super) fn insert(view: &wry::WebView, text: &str) -> Result<(), String> {
     let input = input_view(view.webview().into_super().into_super())?;
     unsafe {
         let _: () = msg_send![&input, insertText: &*NSString::from_str(text), replacementRange: NSRange::new(usize::MAX, 0)];
@@ -164,7 +164,7 @@ impl Drop for ReleasePointer<'_> {
     }
 }
 
-pub async fn pointer(
+pub(super) async fn pointer(
     view: &wry::WebView,
     input: &super::input::InputAck,
     events: &[(f64, f64, NSEventType)],
@@ -193,7 +193,7 @@ pub async fn pointer(
     Ok(())
 }
 
-pub fn key(view: &wry::WebView, key: BrowserKey) -> Result<(), String> {
+pub(super) fn key(view: &wry::WebView, key: BrowserKey) -> Result<(), String> {
     let input = input_view(view.webview().into_super().into_super())?;
     if matches!(key, BrowserKey::SelectAll) {
         unsafe {
@@ -235,7 +235,7 @@ pub fn key(view: &wry::WebView, key: BrowserKey) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn receive<T>(rx: Receiver<Result<T, String>>) -> Result<T, String> {
+pub(super) async fn receive<T>(rx: Receiver<Result<T, String>>) -> Result<T, String> {
     rx.recv()
         .await
         .map_err(|_| "ブラウザの処理が中断されました。".to_string())?

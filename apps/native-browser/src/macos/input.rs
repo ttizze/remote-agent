@@ -14,7 +14,7 @@ use objc2_web_kit::{
 };
 use std::cell::{Cell, RefCell};
 
-pub struct Ivars {
+pub(super) struct Ivars {
     busy: Cell<bool>,
     down: RefCell<Option<Sender<()>>>,
 }
@@ -23,7 +23,7 @@ define_class!(
     #[name = "BexBrowserInputAck"]
     #[thread_kind=MainThreadOnly]
     #[ivars=Ivars]
-    pub struct InputAck;
+    pub(super) struct InputAck;
     unsafe impl NSObjectProtocol for InputAck {}
     unsafe impl WKScriptMessageHandler for InputAck {
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
@@ -43,7 +43,7 @@ define_class!(
     }
 );
 impl InputAck {
-    pub fn install(configuration: &WKWebViewConfiguration) -> Retained<Self> {
+    pub(super) fn install(configuration: &WKWebViewConfiguration) -> Retained<Self> {
         let mtm = MainThreadMarker::new().unwrap();
         let new = mtm.alloc::<Self>().set_ivars(Ivars {
             busy: Cell::new(false),
@@ -72,18 +72,18 @@ impl InputAck {
         }
         handler
     }
-    pub fn claim(&self) -> Result<(), String> {
+    pub(super) fn claim(&self) -> Result<(), String> {
         if self.ivars().busy.replace(true) {
             return Err("このタブの入力処理中です。画面を確認してください。".into());
         }
         Ok(())
     }
-    pub fn arm(&self) -> Receiver<()> {
+    pub(super) fn arm(&self) -> Receiver<()> {
         let (tx, rx) = async_channel::bounded(1);
         *self.ivars().down.borrow_mut() = Some(tx);
         rx
     }
-    pub fn release(&self) {
+    pub(super) fn release(&self) {
         self.ivars().down.borrow_mut().take();
         self.ivars().busy.set(false);
     }
