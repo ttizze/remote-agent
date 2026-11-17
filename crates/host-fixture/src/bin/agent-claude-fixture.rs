@@ -757,7 +757,9 @@ impl Fixture {
                 ) {
                     emit(
                         &self.session,
-                        json!({"type":"system","subtype":"task_started","task_id":self.task_id(),"task_type":"local_agent","description":"background work","session_id":self.session}),
+                        // The SDK owns agent completion. A Bash completion may
+                        // precede the foreground result and still need a report.
+                        json!({"type":"system","subtype":"task_started","task_id":self.task_id(),"task_type":if permission == PermissionScenario::BackgroundSettled { "local_bash" } else { "local_agent" },"description":"background work","session_id":self.session}),
                     );
                     let message = format!("background-{}", self.message_id());
                     emit(

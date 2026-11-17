@@ -4056,7 +4056,7 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
             thread_id: thread.clone(),
             client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
             input: vec![rpc::Input::Text {
-                text: "[delayed-input] wait for another client".into(),
+                text: "[delayed-input] [approval] wait for another client".into(),
             }],
             model: None,
             effort: None,
@@ -4116,8 +4116,8 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
             .await;
         assert_eq!(steered.id, first_turn.id, "steer joins the live turn");
         std::fs::write(directory.path().join("release-inputs"), "").unwrap();
-        events.input_turn(&input.client_user_message_id, true).await;
-        // Final-turn completion and the native steer echo use separate tasks.
+        // The transcript precedes delivery. Hold the turn at its approval until
+        // the native steer echo arrives, then let Codex complete it.
         while !events
             .view()
             .thread
@@ -4129,6 +4129,24 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
         {
             events.next().await;
         }
+        let request = next_request(&mut events).await;
+        conversations::command(
+            &second.peer,
+            &thread,
+            uuid::Uuid::new_v4(),
+            agent_protocol::conversation::Command::Answer {
+                id: serde_json::from_value(request["id"].clone()).unwrap(),
+                answer: agent_protocol::requests::Answer::Approval {
+                    choice_id: request["body"]["approval"]["choices"][0]["id"]
+                        .as_str()
+                        .unwrap()
+                        .into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        events.input_turn(&input.client_user_message_id, true).await;
 
         let reopened = conversations::Conversation::open(&second.peer, &thread)
             .await

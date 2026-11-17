@@ -2106,7 +2106,7 @@ async fn claude_follows_an_intermediate_result_in_a_new_turn_after_reconnect() {
     use agent_protocol::execution::TurnStatus;
 
     // As T3 Code, Claude's result settles its turn, and the follow-up Claude
-    // starts on its own while its subagent runs or after it ended is the next.
+    // starts on its own while its subagent runs or after a Bash task ended is the next.
     for (prompt, idle_before_result) in [("background", false), ("background-settled", true)] {
         let root = tempfile::tempdir().unwrap();
         if prompt == "background" {
