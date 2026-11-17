@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { setTimeout } from 'node:timers/promises';
 
@@ -15,14 +15,15 @@ async function until(predicate) {
   }
 }
 
-function fixture(t) {
+function fixture(t, env = process.env) {
+  const git = execFileSync('bash', ['-c', 'type -P git'], { env, encoding: 'utf8' }).trim();
+  assert.ok(isAbsolute(git), 'fixture Git must resolve to an absolute executable path');
   const root = mkdtempSync(join(tmpdir(), 'remote-run-'));
   const work = join(root, 'work');
   const bin = join(root, 'bin');
   const log = join(root, 'events');
   mkdirSync(work);
   mkdirSync(bin);
-  const git = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
   execFileSync(git, ['init', '--quiet'], { cwd: work });
   writeFileSync(join(work, '.gitignore'), 'target/\n');
   execFileSync(git, ['add', '.gitignore'], { cwd: work });
@@ -101,7 +102,7 @@ main().catch(error => { console.error(error); process.exitCode = 1; });
       const child = spawn('bash', ['scripts/remote-run.sh', ...options, 'builder', 'true'], {
         cwd: work,
         detached: true,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REMOTE_FIXTURE_ROOT: root, REMOTE_FIXTURE_TASK: name, REMOTE_FIXTURE_GIT: git, ...overrides },
+        env: { ...env, PATH: `${bin}:${env.PATH}`, REMOTE_FIXTURE_ROOT: root, REMOTE_FIXTURE_TASK: name, REMOTE_FIXTURE_GIT: git, ...overrides },
       });
       let stderr = '';
       child.stderr.setEncoding('utf8').on('data', data => { stderr += data; });
@@ -112,6 +113,15 @@ main().catch(error => { console.error(error); process.exitCode = 1; });
     },
   };
 }
+
+test('exported Git functions cannot redirect fixture commands back into the mock', async t => {
+  const env = { ...process.env, 'BASH_FUNC_git%%': '() { command git "$@";\n}' };
+  assert.equal(execFileSync('bash', ['-c', 'type -t git'], { env, encoding: 'utf8' }).trim(), 'function');
+  const build = fixture(t, env);
+  const task = build.start('inherited-git');
+  assert.equal(await task.done, 0, task.stderr());
+  assert.ok(existsSync(join(build.work, 'target/inherited-git')));
+});
 
 test('one worktree owns the snapshot and returned outputs until the download completes', async (t) => {
   const build = fixture(t);
