@@ -181,11 +181,13 @@ extension LaunchUITests {
     func testSimulatorOpensOnlyTheTappedImageAndSavesIt() throws {
         let app = try connectedSimulatorApp()
         startSimulatorConversation(app, promptText: "[generated-images] [gallery] Open only the tapped image")
-        XCTAssertTrue(fixtureItems(app, containing: "fixture-final-").firstMatch.waitUntilExists(timeout: 25))
-        let image = app.images.matching(NSPredicate(
-            format: "identifier BEGINSWITH %@ AND identifier CONTAINS %@",
-            "message.image.", "fixture-generated-inline-"
-        )).firstMatch
+        let answer = fixtureItems(app, containing: "fixture-final-").firstMatch
+        XCTAssertTrue(answer.waitUntilExists(timeout: 25))
+        // The fixture emits saved then inline generation. Core embeds both in
+        // the final answer and removes their duplicate standalone previews.
+        let image = answer.images.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "markdown.image."
+        )).element(boundBy: 1)
         showConversationElement(image, in: app, upward: false)
         image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         // QuickLook zooms only the tapped image; saving is available directly in its toolbar.

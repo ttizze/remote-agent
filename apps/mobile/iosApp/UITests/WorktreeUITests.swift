@@ -33,6 +33,7 @@ extension LaunchUITests {
         app.terminate()
         app.launch()
         expandSimulatorProject(app)
+        _ = try simulatorTaskRow(app, native: "merge-active")
         XCTAssertTrue(running.waitUntilExists(timeout: 10))
         XCTAssertFalse(changes.exists)
         try simulatorFixture("merge-worktree/new-work")

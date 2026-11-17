@@ -1,9 +1,10 @@
 use super::*;
 use std::mem::ManuallyDrop;
+use windows::Win32::UI::Controls::EM_REPLACESEL;
 use windows::core::{HRESULT, Result};
 
 pub(super) fn insert(window: HWND, image: &rich_document::InlineImage) -> Result<()> {
-    let range = CHARRANGE {
+    let mut range = CHARRANGE {
         cpMin: image.start as i32,
         cpMax: image.start as i32 + 1,
     };
@@ -19,6 +20,7 @@ pub(super) fn insert(window: HWND, image: &rich_document::InlineImage) -> Result
         ..Default::default()
     };
     let readonly = unsafe { GetWindowLongPtrW(window, GWL_STYLE) } & ES_READONLY as isize != 0;
+    let length = message(window, WM_GETTEXTLENGTH, 0, 0).0;
     // The UI is read-only. Allow this synchronous insertion, then restore its
     // edit lock before reporting either success or a decoding failure.
     message(window, EM_SETREADONLY, 0, 0);
@@ -28,14 +30,30 @@ pub(super) fn insert(window: HWND, image: &rich_document::InlineImage) -> Result
         0,
         (&range as *const CHARRANGE) as isize,
     );
-    let result = message(
-        window,
-        EM_INSERTIMAGE,
-        0,
-        (&parameters as *const RICHEDIT_IMAGE_PARAMETERS) as isize,
+    let result = HRESULT(
+        message(
+            window,
+            EM_INSERTIMAGE,
+            0,
+            (&parameters as *const RICHEDIT_IMAGE_PARAMETERS) as isize,
+        )
+        .0 as i32,
     );
+    if result.is_err() {
+        // Decoding can fail after RichEdit removes the selected placeholder.
+        // Restore that slot before later images and links use its UTF-16 position.
+        let remaining = (1 + message(window, WM_GETTEXTLENGTH, 0, 0).0 - length).max(0);
+        range.cpMax = range.cpMin + remaining as i32;
+        message(
+            window,
+            EM_EXSETSEL,
+            0,
+            (&range as *const CHARRANGE) as isize,
+        );
+        message(window, EM_REPLACESEL, 0, w!(" ").as_ptr() as isize);
+    }
     message(window, EM_SETREADONLY, usize::from(readonly), 0);
     // This packed Win32 structure does not release its owned stream.
     drop(ManuallyDrop::into_inner(parameters.pIStream));
-    HRESULT(result.0 as i32).ok()
+    result.ok()
 }

@@ -261,8 +261,11 @@ extension LaunchUITests {
         XCTAssertTrue(prefixedElement(app, prefix: "turn.activity.").exists)
         XCTAssertTrue(app.buttons["task.diff"].waitUntilExists(timeout: 10))
         captureScreen(app, named: "Reference conversation layout")
-        let activity = prefixedElement(app, prefix: "turn.activity.")
+        let activity = app.descendants(matching: .any)[prefixedElement(app, prefix: "turn.activity.").identifier]
         activity.tap()
+        let commands = app.buttons["1 件のコマンドを実行しました"]
+        XCTAssertTrue(commands.waitUntilExists(timeout: 5)); commands.tap()
+        XCTAssertTrue(activity.exists)
         XCTAssertTrue(fixtureItems(app, containing: "fixture-command-").firstMatch.waitUntilExists(timeout: 5))
         captureScreen(app, named: "Expanded work rows")
         let command = app.buttons.matching(NSPredicate(format: "label == %@", "./gradlew test")).firstMatch

@@ -98,7 +98,11 @@ final class KeyboardDismissingTap: UITapGestureRecognizer, UIGestureRecognizerDe
     }
 
     @objc private func dismissKeyboard() {
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        // Finish the tapped control's action before the keyboard changes its
+        // position. Otherwise a copy tap can land on the neighbouring edit action.
+        DispatchQueue.main.async {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
     }
 
     /// Without a keyboard, the first responder is selected message text, whose taps must keep their selection.

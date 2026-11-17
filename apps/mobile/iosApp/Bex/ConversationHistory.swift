@@ -227,6 +227,7 @@ extension ThreadScreen {
                 Text(verbatim: title)
             }.font(.caption).foregroundStyle(.secondary)
         }.buttonStyle(.plain)
+            .accessibilityIdentifier("turn.activity." + id)
     }
 
     private func requestPlan(_ destination: ConversationPlanRequest.Destination, filename: String, markdown: String) {
@@ -284,9 +285,15 @@ extension ThreadScreen {
         case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId, rowId: projected.id(),
                                                                  expanded: expanded)
         case let (.error(error), _): ThreadErrorRow(error: error)
-        // The mobile projection excludes these footers; the composer owns its queue.
-        case (.queue, _), (.background, _): EmptyView()
-        case (.inProgress, _), (.pendingRequest, _), (_, nil): EmptyView()
+        case let (.pendingRequest(request), _):
+            RequestPanel(
+                request: request,
+                busy: model.conversationContext.requestPhase(id: request.id) == .running,
+                error: model.conversationContext.requestError(id: request.id),
+                respond: { model.respond(request.id, $0) }
+            ).id(request.id)
+        // Mobile excludes background rows; its composer owns queue and stop controls.
+        case (.queue, _), (.background, _), (.inProgress, _), (_, nil): EmptyView()
         }
     }
 

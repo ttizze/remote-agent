@@ -314,17 +314,17 @@ internal class AndroidAppModel(private val context: Context, private val prefere
             store.shutdown()
             return
         }
-        val paired =
-            profiles.filterNot { it.id == id } + HostProfile(id, invitation.hostName, invitation.endpoint)
+        val paired = profiles.filterNot { it.id == id } + HostProfile(id, invitation.hostName, invitation.endpoint)
         repository.saveProfiles(paired)
         observations.remove(id)?.cancel()
         connections.remove(id)?.cancel()
         sessions.adopt(id, store)
         if (connectionSelection.hostId == id) session = null
-        if (!isActive) return
-        profiles = paired
-        pairingConnection = null
-        selectConnection(id)
+        if (isActive) {
+            profiles = paired
+            pairingConnection = null
+            selectConnection(id)
+        }
     }
 
     fun connect() {

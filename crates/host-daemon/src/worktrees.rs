@@ -921,6 +921,8 @@ mod tests {
         let root = directory.path();
         crate::git::text(root, &["init", "--quiet", "--initial-branch=main"]).unwrap();
         crate::git::text(root, &["config", "core.autocrlf", "false"]).unwrap();
+        // Cloned submodules do not inherit this repository's local Git config.
+        fs::write(root.join(".gitattributes"), "tracked.txt -text\n").unwrap();
         fs::write(root.join("tracked.txt"), "committed\n").unwrap();
         fs::write(root.join("config.txt"), "default\n").unwrap();
         fs::write(root.join(".gitignore"), ".env\nlocal/\n").unwrap();
