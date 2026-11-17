@@ -307,7 +307,10 @@ mod tests {
         let path = service.scan_projects().await.unwrap().projects[0]
             .path
             .clone();
-        let failed = service.import_projects(&[path.clone()]).await.unwrap();
+        let failed = service
+            .import_projects(std::slice::from_ref(&path))
+            .await
+            .unwrap();
         assert!(failed.imported.is_empty());
         assert!(failed.errors.contains_key(&path));
         assert!(
@@ -321,9 +324,12 @@ mod tests {
         );
         assert!(!service.scan_projects().await.unwrap().projects[0].registered);
         agent.unreadable.lock().unwrap().clear();
-        let imported = service.import_projects(&[path.clone()]).await.unwrap();
+        let imported = service
+            .import_projects(std::slice::from_ref(&path))
+            .await
+            .unwrap();
         assert!(imported.errors.is_empty(), "{imported:?}");
-        assert_eq!(imported.imported, [path.clone()]);
+        assert_eq!(imported.imported.as_slice(), std::slice::from_ref(&path));
         service.import_projects(&[path]).await.unwrap();
         assert_eq!(
             service.inner.conversation.storage.active_sources().unwrap(),
@@ -388,15 +394,18 @@ mod tests {
             assert!(!candidate.registered);
             assert_eq!(candidate.conversation_count, 2);
             let result = service
-                .import_projects(&[candidate.path.clone()])
+                .import_projects(std::slice::from_ref(&candidate.path))
                 .await
                 .unwrap();
             assert!(result.errors.is_empty(), "{result:?}");
-            assert_eq!(result.imported, [candidate.path.clone()]);
+            assert_eq!(
+                result.imported.as_slice(),
+                std::slice::from_ref(&candidate.path)
+            );
             let before = service.inner.conversation.storage.active_sources().unwrap();
             assert_eq!(before.len(), 2);
             service
-                .import_projects(&[candidate.path.clone()])
+                .import_projects(std::slice::from_ref(&candidate.path))
                 .await
                 .unwrap();
             assert_eq!(
