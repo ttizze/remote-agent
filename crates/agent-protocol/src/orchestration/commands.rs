@@ -190,6 +190,41 @@ pub fn admit(
     admission: Admission,
     context: Context<'_>,
 ) -> Result<Decision, String> {
+    let title = titles::initial(
+        state,
+        &input.message_id,
+        &input.text,
+        &input.attachments,
+        context,
+    );
+    let mut decision = admit_run(state, input, admission, context)?;
+    // Title metadata is admitted atomically with its first real message.
+    // Execution keeps its own Thread change (selection, workspace and binding).
+    if let Some((title, effect)) = title {
+        if let Some(Change::Thread(thread)) = decision
+            .changes
+            .iter_mut()
+            .find(|change| matches!(change, Change::Thread(_)))
+        {
+            thread.title = title;
+        } else {
+            decision.changes.push(Change::Thread(Thread {
+                title,
+                updated_at: context.now.into(),
+                ..state.thread.clone()
+            }));
+        }
+        decision.effects.push(effect);
+    }
+    Ok(decision)
+}
+
+fn admit_run(
+    state: &State,
+    input: Input,
+    admission: Admission,
+    context: Context<'_>,
+) -> Result<Decision, String> {
     if context.next_run_ordinal == 0 {
         return Err("run ordinal must be positive".into());
     }

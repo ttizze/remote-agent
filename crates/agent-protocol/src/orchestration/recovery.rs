@@ -518,7 +518,8 @@ pub fn provider_stopped(
                         .provider_threads
                         .get(provider_thread_id)
                         .is_some_and(|thread| thread.provider_instance_id == provider_instance_id),
-                    EffectRequest::CheckpointCapture { .. } => false,
+                    EffectRequest::CheckpointCapture { .. }
+                    | EffectRequest::ThreadTitleGenerate { .. } => false,
                 }
             })
             .map(|effect| Effect {

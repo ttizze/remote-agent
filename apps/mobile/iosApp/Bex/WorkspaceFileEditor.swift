@@ -134,6 +134,13 @@ private struct WorkspaceFilePreview: View {
     }
 }
 
+/// What a Markdown file's preview reaches of the conversation it was opened from.
+struct WorkspaceFilePreviewAccess {
+    let media: @MainActor (ConversationMediaPresentation, @escaping (WorkspaceDestination) -> Void)
+        -> ConversationMediaAccess
+    let addToChat: (String) -> Void
+}
+
 struct WorkspaceFileSheet: View {
     let files: AgentCore.Files
     let paneId: String
@@ -142,6 +149,9 @@ struct WorkspaceFileSheet: View {
     let entry: FileEntry
     let line: UInt32?
     let download: @MainActor (String) async throws -> URL
+    let previewAccess: WorkspaceFilePreviewAccess
+    /// Opens a file a previewed Markdown file links to, in place of this one.
+    let openFile: (String, UInt32?) -> Void
     let aiEdit: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var error: String?
@@ -150,8 +160,20 @@ struct WorkspaceFileSheet: View {
     @State private var initialized = false
     @State private var confirmReload = false
     @State private var selection: TextSelection?
+    /// The reader's choice of preview or source; until then T3 Code's mobile default.
+    @State private var previewChosen: Bool?
+    @State private var mediaPresentation = ConversationMediaPresentation()
     private var controls: FileEditorPresentation {
         files.fileEditor(path: entry.path)
+    }
+
+    private var offeredPreview: MobileFilePreview? {
+        mobileFilePreview(path: entry.path)
+    }
+
+    private var previewing: Bool {
+        guard let offeredPreview else { return false }
+        return previewChosen ?? mobileFilePreviewOpens(preview: offeredPreview, line: line)
     }
 
     var body: some View {
@@ -174,6 +196,10 @@ struct WorkspaceFileSheet: View {
                 }
                 if controls.truncated {
                     AppText("file.preview.truncated").font(.caption).padding(.horizontal)
+                }
+                if let offeredPreview, previewing {
+                    preview(offeredPreview)
+                } else if controls.truncated {
                     FileTextPreview(text: controls.text, line: line)
                 } else {
                     BufferedTextInput(value: $text) { TextEditor(text: $0, selection: $selection) }
@@ -211,7 +237,22 @@ struct WorkspaceFileSheet: View {
                     }.disabled(busy || !controls.canSave)
                         .accessibilityIdentifier("file.save")
                 }
+                if let offeredPreview {
+                    // T3 Code's mobile file menu: Preview (Table for a delimited file) and Source.
+                    ToolbarItem(placement: .primaryAction) {
+                        Button { previewChosen = !previewing } label: {
+                            if previewing {
+                                Label("ソース", systemImage: "doc.text")
+                            } else if offeredPreview == .table {
+                                Label("表", systemImage: "tablecells")
+                            } else {
+                                Label("プレビュー", systemImage: "eye")
+                            }
+                        }.accessibilityIdentifier("file.preview.toggle")
+                    }
+                }
             }
+            .modifier(ConversationMediaPresenter(presentation: mediaPresentation))
             .onChange(of: controls.loadedRevision) { moveToLine() }
             .onAppear {
                 if !initialized {
@@ -224,6 +265,29 @@ struct WorkspaceFileSheet: View {
                 }
             }
             .sheet(item: $sharedFile) { ShareSheet(file: $0) }
+        }
+    }
+
+    @ViewBuilder private func preview(_ offered: MobileFilePreview) -> some View {
+        switch offered {
+        case .table:
+            FileTablePreview(table: mobileFileTable(text: controls.text, path: entry.path))
+        case .markdown:
+            FileMarkdownPreview(
+                text: controls.text,
+                path: entry.path,
+                media: previewAccess.media(mediaPresentation) { destination in
+                    if let path = destination.filePath {
+                        openFile(path, destination.fileLine)
+                    }
+                },
+                addToChat: previewAccess.addToChat,
+                refresh: {
+                    await withCheckedContinuation { continuation in
+                        load(restoreDraft: true) { continuation.resume() }
+                    }
+                }
+            )
         }
     }
 
@@ -246,10 +310,11 @@ struct WorkspaceFileSheet: View {
         selection = TextSelection(range: start ..< start)
     }
 
-    private func load(restoreDraft: Bool) {
+    private func load(restoreDraft: Bool, completion: @escaping () -> Void = {}) {
         busy = true; error = nil
         perform(.readFile(ReadFile(path: entry.path, discardDraft: !restoreDraft))) { snapshot, result in
             busy = false
+            completion()
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
             }

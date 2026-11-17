@@ -180,6 +180,10 @@ type HistoryInjection = (String, Vec<Value>);
 /// acknowledgements. Assertions observe the Host boundary, not a reimplementation
 /// of its handoff/routing decisions.
 pub(in crate::host_rpc) struct NativeAgent {
+    pub(in crate::host_rpc) generated_title: Mutex<Option<String>>,
+    pub(in crate::host_rpc) title_prompts: Mutex<Vec<String>>,
+    pub(in crate::host_rpc) title_started: tokio::sync::Notify,
+    pub(in crate::host_rpc) title_gate: tokio::sync::Semaphore,
     provider: ProviderKind,
     pub(in crate::host_rpc) discovery_reads: Arc<AtomicUsize>,
     pub(in crate::host_rpc) body_reads: Arc<AtomicUsize>,
@@ -228,6 +232,10 @@ impl NativeAgent {
     pub(in crate::host_rpc) fn new(provider: ProviderKind) -> Arc<Self> {
         let (events, receiver) = mpsc::channel(32);
         Arc::new(Self {
+            generated_title: Default::default(),
+            title_prompts: Default::default(),
+            title_started: Default::default(),
+            title_gate: tokio::sync::Semaphore::new(1),
             provider,
             discovery_reads: Arc::default(),
             body_reads: Default::default(),
@@ -270,6 +278,10 @@ impl NativeAgent {
     pub(in crate::host_rpc) fn restarted(&self) -> Arc<Self> {
         let (events, receiver) = mpsc::channel(32);
         Arc::new(Self {
+            generated_title: Mutex::new(self.generated_title.lock().unwrap().clone()),
+            title_prompts: Default::default(),
+            title_started: Default::default(),
+            title_gate: tokio::sync::Semaphore::new(1),
             provider: self.provider,
             discovery_reads: self.discovery_reads.clone(),
             body_reads: self.body_reads.clone(),
@@ -345,6 +357,15 @@ impl Identity for NativeAgent {
 
 #[async_trait::async_trait]
 impl crate::providers::Configuration for NativeAgent {
+    async fn generate_title(&self, prompt: &str) -> Result<Option<String>, Failure> {
+        let title = self.generated_title.lock().unwrap().clone();
+        if title.is_some() {
+            self.title_prompts.lock().unwrap().push(prompt.into());
+            self.title_started.notify_one();
+            let _permit = self.title_gate.acquire().await.unwrap();
+        }
+        Ok(title)
+    }
     fn data_recipient(&self) -> &'static str {
         "fixture"
     }

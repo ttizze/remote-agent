@@ -35,6 +35,7 @@ mod state;
 pub mod wire;
 pub use state::{Change, State};
 mod commands;
+pub mod titles;
 pub use commands::{
     Admission, Context, Decision, Input, admit, edit_queued, hold_queue, move_queued,
     promote_queued, remove_input, user_item_id,
@@ -1230,6 +1231,11 @@ pub struct Effect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum EffectRequest {
+    #[serde(rename = "thread.title.generate")]
+    ThreadTitleGenerate {
+        message_id: String,
+        expected_title: String,
+    },
     #[serde(rename = "provider-runtime.continue")]
     ProviderRuntimeContinue { source_run_id: String },
     #[serde(rename = "provider-session.detach")]

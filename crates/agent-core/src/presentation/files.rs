@@ -19,8 +19,10 @@ pub use mobile::{
 pub use preview::{file_preview_mime_type, image_extension, is_image_file};
 mod rendered;
 pub use rendered::{
-    FileRendering, FileRenderingPreferences, FileTable, TABLE_ROW_HEADER_WIDTH,
-    file_markdown_blocks, file_rendered, file_rendering, mermaid_file_markdown,
+    FileRendering, FileRenderingPreferences, FileTable, MobileFilePreview, MobileFileTable,
+    TABLE_ROW_HEADER_WIDTH, file_markdown_blocks, file_markdown_task_checked, file_rendered,
+    file_rendering, mermaid_file_markdown, mobile_file_markdown_blocks, mobile_file_preview,
+    mobile_file_preview_opens, mobile_file_table,
 };
 
 #[cfg_attr(feature = "bindings", uniffi::export)]

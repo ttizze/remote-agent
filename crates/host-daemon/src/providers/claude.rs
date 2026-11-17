@@ -9,6 +9,8 @@ mod history;
 mod native;
 mod permissions;
 mod process;
+#[cfg(all(test, unix))]
+mod title_tests;
 mod usage;
 
 use anyhow::Context;
@@ -2325,6 +2327,57 @@ impl crate::providers::AnswerSource for RequestSource {
 
 #[async_trait::async_trait]
 impl crate::providers::Configuration for Claude {
+    async fn generate_title(&self, prompt: &str) -> Result<Option<String>, Failure> {
+        use super::text_generation;
+        let home = self
+            .accounts
+            .lock()
+            .await
+            .selected_home()
+            .map_err(|error| Failure::new("title_generation_failed", error))?
+            .ok_or_else(|| {
+                Failure::new("title_generation_failed", "Claude account is unavailable")
+            })?;
+        let path = std::env::var_os("PATH");
+        let program = process::executable(&self.program, path.as_deref())
+            .map_err(|error| Failure::new("title_generation_failed", error))?;
+        let directory =
+            tempfile::tempdir().map_err(|error| Failure::new("title_generation_failed", error))?;
+        let mut command = agent_process::command(&program)
+            .map_err(|error| Failure::new("title_generation_failed", error))?;
+        process::set_homes(
+            &mut command,
+            process::homes(&self.native_home, self.native_inherited, &home),
+        );
+        command
+            .current_dir(directory.path())
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+            .env_remove("CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
+            .args([
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                "claude-haiku-4-5",
+                "--no-session-persistence",
+                "--settings",
+                r#"{"disableAllHooks":true}"#,
+                "--tools",
+                "",
+                "--disable-slash-commands",
+                "--strict-mcp-config",
+                "--permission-mode",
+                "dontAsk",
+                "--json-schema",
+            ])
+            .arg(text_generation::schema().to_string());
+        let output = text_generation::run(command, prompt).await?;
+        let envelope: Value = serde_json::from_str(&output)
+            .map_err(|_| Failure::new("title_generation_failed", "Invalid Claude title output"))?;
+        text_generation::title(&envelope["structured_output"].to_string()).map(Some)
+    }
     fn data_recipient(&self) -> &'static str {
         "Anthropic"
     }

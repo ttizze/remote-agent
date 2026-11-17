@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 mod native_status;
 mod recovery;
+mod title_generation;
 
 const NOW: &str = "2026-11-14T00:00:00.000Z";
 

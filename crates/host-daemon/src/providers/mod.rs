@@ -8,6 +8,7 @@ mod registry;
 pub(crate) mod requests;
 mod scopes;
 mod settings;
+mod text_generation;
 pub use claude::Claude;
 pub(crate) use registry::Registry;
 pub(crate) use settings::Settings;
@@ -342,6 +343,11 @@ pub(crate) trait Identity: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Configuration: Send + Sync {
+    /// One-shot inference, outside native conversations. None means this
+    /// provider has no text-only runner; the Host may use another backend.
+    async fn generate_title(&self, _prompt: &str) -> Result<Option<String>, Failure> {
+        Ok(None)
+    }
     async fn codex_cli(&self, _: bool) -> Result<op::CodexCliStatus, Failure> {
         Err(Failure::new(
             "unsupported",

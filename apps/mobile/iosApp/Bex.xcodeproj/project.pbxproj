@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		9B3FFD9561B8E828375CE7E2 /* WorkspaceFileRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = 408386F944EDA1013901EB82 /* WorkspaceFileRendering.swift */; };
 		77623E97F556B8A188764521 /* SetupScriptSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15F39D62BA30B219DA0F3078 /* SetupScriptSettings.swift */; };
 		A266D440CA3F8D62688B1CE7 /* SetupProgressCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0124BF56F05791E4DAC9C225 /* SetupProgressCard.swift */; };
 		A1CBE54A5FAD2AF27E1C78F9 /* ConversationWorkspacePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFCCED37E111DD8C6D47DED3 /* ConversationWorkspacePicker.swift */; };
@@ -101,6 +102,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		408386F944EDA1013901EB82 /* WorkspaceFileRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFileRendering.swift; sourceTree = "<group>"; };
 		15F39D62BA30B219DA0F3078 /* SetupScriptSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupScriptSettings.swift; sourceTree = "<group>"; };
 		0124BF56F05791E4DAC9C225 /* SetupProgressCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupProgressCard.swift; sourceTree = "<group>"; };
 		EFCCED37E111DD8C6D47DED3 /* ConversationWorkspacePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationWorkspacePicker.swift; sourceTree = "<group>"; };
@@ -309,6 +311,7 @@
 				AA74DC0F6B272156A6A39ED4 /* ConversationMarkdownContent.swift */,
 				CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */,
 				1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */,
+				408386F944EDA1013901EB82 /* WorkspaceFileRendering.swift */,
 				8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */,
 				A10000000000000000000016 /* Info.plist */,
 				E50000000000000000000002 /* PrivacyInfo.xcprivacy */,
@@ -515,6 +518,7 @@
 				AAC15282ED580E15F2FE6024 /* ConversationMarkdownContent.swift in Sources */,
 				1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */,
 				CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */,
+				9B3FFD9561B8E828375CE7E2 /* WorkspaceFileRendering.swift in Sources */,
 				A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

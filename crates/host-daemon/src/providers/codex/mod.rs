@@ -78,7 +78,7 @@ fn unmaterialized_history(code: Option<&str>, message: &str, thread_id: &str) ->
 }
 
 pub struct Codex {
-    cli: cli::Updater,
+    cli: cli::Cli,
     accounts: Arc<tokio::sync::Mutex<Option<crate::providers::codex::accounts::Accounts>>>,
     list_access: tokio::sync::Semaphore,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
@@ -114,8 +114,7 @@ impl Codex {
             tracing::error!(target: "agent", operation = "host.codex", message = %error);
         }
         let available = process.is_ok();
-        let mut adapter = Self::new(process);
-        adapter.cli = cli::Updater::new(config.clone());
+        let adapter = Self::new(process);
         if available && let Err(error) = adapter.enable_accounts(account_directory, config).await {
             tracing::error!(target: "agent", operation = "host.codex.accounts", message = %error);
         }
@@ -123,11 +122,17 @@ impl Codex {
     }
 
     pub fn new(process: Result<Arc<CodexAppServer>, String>) -> Self {
+        let cli = cli::Cli::new(
+            process
+                .as_ref()
+                .map(|server| server.config().clone())
+                .unwrap_or_default(),
+        );
         let scopes = Arc::new(super::scopes::Scopes::default());
         let (processed, progress) = tokio::sync::watch::channel(0);
         let stopped = tokio_util::sync::CancellationToken::new();
         Self {
-            cli: cli::Updater::new(Config::default()),
+            cli,
             accounts: Arc::default(),
             list_access: tokio::sync::Semaphore::new(4),
             restoration_error: tokio::sync::watch::channel(None).0,
@@ -746,6 +751,16 @@ impl Identity for Codex {
 
 #[async_trait::async_trait]
 impl crate::providers::Configuration for Codex {
+    async fn generate_title(&self, prompt: &str) -> Result<Option<String>, Failure> {
+        let config: Value = self
+            .request("config/read", &serde_json::json!({"includeLayers":false}))
+            .await?;
+        let servers = config["config"]["mcp_servers"]
+            .as_object()
+            .map(|servers| servers.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.cli.generate_title(prompt, &servers).await.map(Some)
+    }
     async fn codex_cli(&self, update: bool) -> Result<op::CodexCliStatus, Failure> {
         Ok(self.cli.request(update).await)
     }

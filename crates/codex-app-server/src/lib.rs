@@ -63,6 +63,7 @@ pub struct CodexAppServer {
     child: tokio::sync::Mutex<Child>,
     peer: RpcPeer,
     initialize_response: InitializeResponse,
+    config: AppServerConfig,
 }
 
 impl CodexAppServer {
@@ -116,11 +117,17 @@ impl CodexAppServer {
             child: tokio::sync::Mutex::new(child),
             peer,
             initialize_response,
+            config,
         })
     }
 
     pub fn initialize_response(&self) -> &InitializeResponse {
         &self.initialize_response
+    }
+
+    /// One-shot CLI work must use this server's executable and credential home.
+    pub fn config(&self) -> &AppServerConfig {
+        &self.config
     }
 
     /// Ordered Codex messages, response markers, and connection termination.
@@ -237,6 +244,7 @@ mod tests {
                 .spawn()
                 .unwrap();
             let server = CodexAppServer {
+                config: AppServerConfig::default(),
                 child: tokio::sync::Mutex::new(child),
                 peer,
                 initialize_response: InitializeResponse {

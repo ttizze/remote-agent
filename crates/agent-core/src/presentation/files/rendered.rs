@@ -1,8 +1,8 @@
 //! A file shown rendered instead of as its source, as T3 Code's file panel
 //! (`FilePreviewPanel`): Markdown, a Mermaid diagram, or a delimited table.
 use super::super::markdown::{
-    MarkdownBlock, MarkdownFileSurface, file_basename, markdown_file_target,
-    workspace_markdown_blocks,
+    MarkdownBlock, MarkdownFileSurface, file_basename, markdown_blocks, markdown_file_target,
+    markdown_task_checked, workspace_markdown_blocks,
 };
 use regex::Regex;
 use std::sync::LazyLock;
@@ -142,51 +142,16 @@ const TABLE_MAX_COLUMN: f32 = 320.0;
 pub const TABLE_ROW_HEADER_WIDTH: f32 = 56.0;
 
 impl FileTable {
-    /// The table of the `.csv` or `.tsv` file at `path`, read as T3 Code's
-    /// `parseDelimitedPreview` reads it: a quote opens a quoted cell only at
-    /// the cell's start, and a doubled quote inside one is a quote.
+    /// The table of the `.csv` or `.tsv` file at `path`, every row of it, read
+    /// as T3 Code's `parseDelimitedPreview` reads it: a quote opens a quoted
+    /// cell only at the cell's start, and a doubled quote inside one is a quote.
     pub fn read(text: &str, path: &str) -> Self {
-        let delimiter = if extension_in(path, &["tsv"]) {
-            '\t'
-        } else {
-            ','
+        let limits = TableLimits {
+            rows: usize::MAX,
+            columns: TABLE_MAX_COLUMNS,
+            cell: usize::MAX,
         };
-        let mut rows = Vec::new();
-        let mut row = Vec::new();
-        let mut cell = String::new();
-        let mut quoted = false;
-        let mut pending = false;
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let mut chars = text.chars().peekable();
-        while let Some(char) = chars.next() {
-            pending = true;
-            if char == '"' {
-                if quoted && chars.next_if_eq(&'"').is_some() {
-                    cell.push('"');
-                    continue;
-                }
-                if quoted || cell.is_empty() {
-                    quoted = !quoted;
-                    continue;
-                }
-            }
-            if quoted || !(char == delimiter || char == '\n' || char == '\r') {
-                cell.push(char);
-                continue;
-            }
-            end_cell(&mut row, &mut cell);
-            if char != delimiter {
-                rows.push(std::mem::take(&mut row));
-                if char == '\r' {
-                    chars.next_if_eq(&'\n');
-                }
-                pending = false;
-            }
-        }
-        if pending {
-            end_cell(&mut row, &mut cell);
-            rows.push(row);
-        }
+        let (rows, _) = delimited_rows(text, path, limits);
         let columns = rows.iter().map(Vec::len).max().unwrap_or_default();
         Self { rows, columns }
     }
@@ -235,11 +200,136 @@ impl FileTable {
     }
 }
 
-fn end_cell(row: &mut Vec<String>, cell: &mut String) {
-    let cell = std::mem::take(cell);
-    if row.len() < TABLE_MAX_COLUMNS {
-        row.push(cell);
+/// How much of a delimited file a table shows.
+#[derive(Clone, Copy)]
+struct TableLimits {
+    rows: usize,
+    columns: usize,
+    /// In characters.
+    cell: usize,
+}
+
+/// The rows of the delimited file at `path` within `limits`, and whether
+/// they left any of it out (or its last quoted cell never closed).
+fn delimited_rows(text: &str, path: &str, limits: TableLimits) -> (Vec<Vec<String>>, bool) {
+    let delimiter = if extension_in(path, &["tsv"]) {
+        '\t'
+    } else {
+        ','
+    };
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut cell = String::new();
+    let mut length = 0;
+    let mut truncated = false;
+    let mut quoted = false;
+    let mut pending = false;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut chars = text.chars().peekable();
+    while let Some(char) = chars.next() {
+        pending = true;
+        if char == '"' && (quoted || length == 0) && !(quoted && chars.next_if_eq(&'"').is_some()) {
+            quoted = !quoted;
+            continue;
+        }
+        if quoted || !(char == delimiter || char == '\n' || char == '\r') {
+            if length < limits.cell {
+                cell.push(char);
+            } else {
+                truncated = true;
+            }
+            length += 1;
+            continue;
+        }
+        if row.len() < limits.columns {
+            row.push(std::mem::take(&mut cell));
+        } else {
+            cell.clear();
+            truncated = true;
+        }
+        length = 0;
+        if char != delimiter {
+            rows.push(std::mem::take(&mut row));
+            if char == '\r' {
+                chars.next_if_eq(&'\n');
+            }
+            pending = false;
+            if rows.len() == limits.rows {
+                return (rows, truncated || chars.peek().is_some());
+            }
+        }
     }
+    if pending {
+        if row.len() < limits.columns {
+            row.push(cell);
+        } else {
+            truncated = true;
+        }
+        rows.push(row);
+    }
+    (rows, truncated || quoted)
+}
+
+/// What the iPhone's file sheet can show in place of a file's source, as T3
+/// Code's mobile file screen: no diagrams there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum MobileFilePreview {
+    Markdown,
+    Table,
+}
+
+/// The preview the sheet of `path` offers.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_file_preview(path: String) -> Option<MobileFilePreview> {
+    match file_rendering(&path)? {
+        FileRendering::Markdown => Some(MobileFilePreview::Markdown),
+        FileRendering::Table => Some(MobileFilePreview::Table),
+        FileRendering::Mermaid => None,
+    }
+}
+
+/// Whether the sheet opens on the preview: T3 Code's `defaultViewMode`, a
+/// table unless a link named a `line` of its source; Markdown opens as its source.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_file_preview_opens(preview: MobileFilePreview, line: Option<u32>) -> bool {
+    preview == MobileFilePreview::Table && line.is_none()
+}
+
+/// T3 Code's mobile table: the first 100 rows and 30 columns, cells of up to
+/// 2000 characters; `truncated` when that left some of the file out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct MobileFileTable {
+    pub rows: Vec<Vec<String>>,
+    pub truncated: bool,
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_file_table(text: String, path: String) -> MobileFileTable {
+    let limits = TableLimits {
+        rows: 100,
+        columns: 30,
+        cell: 2000,
+    };
+    let (rows, truncated) = delimited_rows(&text, &path, limits);
+    MobileFileTable { rows, truncated }
+}
+
+/// The Markdown file at the Host path `path` as the iPhone renders a message:
+/// without its frontmatter, relative images those beside the file.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_file_markdown_blocks(source: String, path: String) -> Vec<MarkdownBlock> {
+    beside_file(markdown_blocks(without_frontmatter(&source).into()), &path)
+}
+
+/// `source`, the Markdown file its rendering shows, with the rendering's
+/// `index`th task item set to `checked`, as T3 Code's rendered file edits it.
+/// `None` when nothing changes.
+pub fn file_markdown_task_checked(source: &str, index: u32, checked: bool) -> Option<String> {
+    let shown = without_frontmatter(source);
+    let hidden = &source[..source.len() - shown.len()];
+    markdown_task_checked(shown, index, checked).map(|shown| format!("{hidden}{shown}"))
 }
 
 /// The rendering of the Markdown file at the Host path `path`: its leading YAML
@@ -251,7 +341,14 @@ pub fn file_markdown_blocks(
     cwd: String,
     home: Option<String>,
 ) -> Vec<MarkdownBlock> {
-    let blocks = workspace_markdown_blocks(without_frontmatter(source).into(), cwd, home);
+    beside_file(
+        workspace_markdown_blocks(without_frontmatter(source).into(), cwd, home),
+        path,
+    )
+}
+
+/// `blocks` of the file at `path`, its relative images those beside it.
+fn beside_file(blocks: Vec<MarkdownBlock>, path: &str) -> Vec<MarkdownBlock> {
     let folder = &path[..path.len() - file_basename(path).len()];
     relative_images(blocks, folder)
 }
@@ -294,7 +391,7 @@ fn relative_images(blocks: Vec<MarkdownBlock>, folder: &str) -> Vec<MarkdownBloc
 
 /// `markdown` after its leading frontmatter: a first line of `---`, through the
 /// next line of `---` or `...`. T3 Code blanks the block to keep source offsets;
-/// nothing here edits the source through its rendering.
+/// an edit through the rendering puts the block back before what it changed.
 fn without_frontmatter(markdown: &str) -> &str {
     let delimiter =
         |line: &str, marks: &[&str]| marks.contains(&line.trim_end_matches([' ', '\t']));
@@ -469,6 +566,138 @@ mod tests {
         assert_eq!(
             [25, 26, 27, 701, 702].map(|column| headless.column_title(column)),
             ["Z", "AA", "AB", "ZZ", "AAA"]
+        );
+    }
+
+    #[test]
+    fn the_iphone_offers_t3_mobiles_previews_and_opens_a_table_on_it() {
+        use MobileFilePreview::{Markdown, Table};
+        assert_eq!(mobile_file_preview("a.MD".into()), Some(Markdown));
+        assert_eq!(mobile_file_preview("a.tsv".into()), Some(Table));
+        assert_eq!(mobile_file_preview("a.mmd".into()), None);
+        assert_eq!(mobile_file_preview("a.rs".into()), None);
+        assert!(mobile_file_preview_opens(Table, None));
+        assert!(!mobile_file_preview_opens(Table, Some(3)));
+        assert!(!mobile_file_preview_opens(Markdown, None));
+    }
+
+    #[test]
+    fn the_iphones_table_is_t3_mobiles_first_rows_columns_and_characters() {
+        let table = |text: &str| mobile_file_table(text.into(), "a.csv".into());
+        let whole = table("a,b\n1,2\n");
+        assert_eq!(whole.rows, vec![vec!["a", "b"], vec!["1", "2"]]);
+        assert!(!whole.truncated);
+        let long = table(&"x\n".repeat(101));
+        assert_eq!(long.rows.len(), 100);
+        assert!(long.truncated);
+        // Exactly the limit, with nothing after it, is the whole file.
+        assert!(!table(&"x\n".repeat(100)).truncated);
+        let wide = table(&format!("{}\n", vec!["x"; 31].join(",")));
+        assert_eq!(wide.rows[0].len(), 30);
+        assert!(wide.truncated);
+        assert!(!table(&vec!["x"; 30].join(",")).truncated);
+        let big = table(&"日".repeat(2001));
+        assert_eq!(big.rows[0][0].chars().count(), 2000);
+        assert!(big.truncated);
+        assert!(!table(&"日".repeat(2000)).truncated);
+        // A quoted cell that never closes was cut somewhere.
+        assert!(table("a,\"b").truncated);
+    }
+
+    #[test]
+    fn the_iphones_markdown_hides_frontmatter_and_finds_images_beside_the_file() {
+        let blocks = mobile_file_markdown_blocks(
+            "---\ntitle: a\n---\n![a](a.png)".into(),
+            "/repo/docs/guide.md".into(),
+        );
+        let [MarkdownBlock::Paragraph { runs, .. }] = blocks.as_slice() else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(loaded(runs[0].image.as_ref().unwrap()), "/repo/docs/a.png");
+    }
+
+    /// The boxes a rendering of `source` shows, in reading order.
+    fn boxes(source: &str) -> Vec<bool> {
+        fn visit(blocks: Vec<MarkdownBlock>) -> Vec<bool> {
+            blocks
+                .into_iter()
+                .flat_map(|block| match block {
+                    MarkdownBlock::Paragraph { style, .. } => match style.marker.as_deref() {
+                        Some("☑") => vec![true],
+                        Some("☐") => vec![false],
+                        _ => Vec::new(),
+                    },
+                    MarkdownBlock::Disclosure { blocks, .. }
+                    | MarkdownBlock::Callout { blocks, .. } => visit(blocks),
+                    _ => Vec::new(),
+                })
+                .collect()
+        }
+        visit(file_markdown_blocks(
+            source,
+            "/repo/a.md",
+            "/repo".into(),
+            None,
+        ))
+    }
+
+    #[test]
+    fn a_pressed_box_edits_only_that_tasks_marker_in_the_source() {
+        let source = "---\ntitle: [ ]\n---\n- [ ] one\n- [x] two\n  1. [ ] nested [ ]\n\n> * [X] quoted\n\n- plain\n";
+        assert_eq!(boxes(source), [false, true, false, true]);
+        for (index, checked, edited) in [
+            (0, true, source.replacen("- [ ] one", "- [x] one", 1)),
+            (1, false, source.replacen("- [x] two", "- [ ] two", 1)),
+            (
+                2,
+                true,
+                source.replacen("1. [ ] nested", "1. [x] nested", 1),
+            ),
+            (3, false, source.replacen("* [X] quoted", "* [ ] quoted", 1)),
+        ] {
+            let result = file_markdown_task_checked(source, index, checked).unwrap();
+            assert_eq!(result, edited, "task {index}");
+            // The rendering of the edit shows that box, and only it, changed.
+            let mut expected = boxes(source);
+            expected[index as usize] = checked;
+            assert_eq!(boxes(&result), expected, "task {index}");
+        }
+        // Already so, or no such task: nothing to save.
+        assert_eq!(file_markdown_task_checked(source, 0, false), None);
+        assert_eq!(file_markdown_task_checked(source, 4, true), None);
+        assert_eq!(file_markdown_task_checked("no tasks", 0, true), None);
+    }
+
+    #[test]
+    fn a_box_the_source_does_not_hold_as_shown_is_not_edited() {
+        // Without its disclosure tags the text between them reads as a list.
+        let source = "<details>\n- [ ] inside\n</details>\n\n- [ ] after\n";
+        assert_eq!(boxes(source).len(), 2);
+        assert_eq!(file_markdown_task_checked(source, 1, true), None);
+        // With blank lines around it the list is one in the source too.
+        let source = "<details>\n\n- [ ] inside\n\n</details>\n\n- [ ] after\n";
+        assert_eq!(
+            file_markdown_task_checked(source, 1, true).unwrap(),
+            source.replacen("- [ ] after", "- [x] after", 1)
+        );
+        // A caption is inline content, so its source list has no rendered box.
+        let source = "<details>\n<summary>\n\n- [ ] caption\n\n</summary>\n\n- [ ] body\n\n</details>\n\n- [ ] after\n";
+        assert_eq!(boxes(source), [false, false]);
+        assert_eq!(file_markdown_task_checked(source, 0, true), None);
+        assert_eq!(file_markdown_task_checked(source, 1, true), None);
+    }
+
+    #[test]
+    fn checking_a_task_preserves_unicode_frontmatter_and_crlf() {
+        let source =
+            "\u{feff}---\r\ntitle: 日本語 [ ]\r\n---\r\n🦀 本文\r\n\r\n- [ ] 最初\r\n- [X] 次\r\n";
+        assert_eq!(
+            file_markdown_task_checked(source, 1, false),
+            Some(source.replace("- [X] 次", "- [ ] 次"))
+        );
+        assert_eq!(
+            file_markdown_task_checked(source, 0, true),
+            Some(source.replace("- [ ] 最初", "- [x] 最初"))
         );
     }
 

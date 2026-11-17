@@ -62,6 +62,10 @@ struct WorkspaceScreen: View {
             perform: request,
             fileDraft: fileDraft,
             downloadFile: model.download,
+            previewAccess: WorkspaceFilePreviewAccess(
+                media: { model.mediaAccess(presentation: $0, open: $1) },
+                addToChat: model.addSelectionToChat
+            ),
             aiEdit: { model.perform(.setDraftText(
                 threadId: draft,
                 text: fileEditPrompt(path: $0)
@@ -96,6 +100,7 @@ private struct WorkspaceDirectoryScreen: View {
     let perform: SnapshotRequest
     let fileDraft: (String) -> Binding<String>
     let downloadFile: @MainActor (String) async throws -> URL
+    let previewAccess: WorkspaceFilePreviewAccess
     let aiEdit: (String) -> Void
     let close: () -> Void
     @State private var owner = UUID().uuidString
@@ -185,11 +190,16 @@ private struct WorkspaceDirectoryScreen: View {
         }
         .sheet(item: $selected) { entry in
             WorkspaceFileSheet(files: files, paneId: paneId, text: fileDraft(entry.path), perform: perform,
-                               entry: entry, line: selectedLine, download: downloadFile) { path in
-                aiEdit(path)
-                selected = nil
-                close()
-            }
+                               entry: entry, line: selectedLine, download: downloadFile,
+                               previewAccess: previewAccess, openFile: { path, line in
+                                   selectedLine = line
+                                   selected = FileEntry(name: URL(fileURLWithPath: path).lastPathComponent,
+                                                        path: path, directory: false, size: 0)
+                               }, aiEdit: { path in
+                                   aiEdit(path)
+                                   selected = nil
+                                   close()
+                               })
         }
     }
 
