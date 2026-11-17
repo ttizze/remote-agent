@@ -87,15 +87,24 @@ impl Runtime {
             | AgentChange::TaskParent { session, .. } => Some(session.clone()),
             _ => None,
         };
-        if let Some(native) = &native {
-            let missing = !runtime.resources.lock().unwrap().contains_key(native);
-            if missing && let Some(target) = runtime.storage.native_owner(native)? {
-                runtime.register_native(&target, native);
+        let source = if let Some(native) = &native {
+            let held = runtime.resources.lock().unwrap().get(native).cloned();
+            match held {
+                Some(source) => Some(source),
+                None => runtime
+                    .storage
+                    .native_owner(native)?
+                    .map(|target| runtime.register_native(&target, native)),
             }
-        }
-        let _retire = scopeguard::guard(native.clone(), |native| {
-            if let Some(native) = native {
-                runtime.retire_source(&native);
+        } else {
+            None
+        };
+        // Keep the same resource alive across the buffered fast path and its
+        // fallback. A flush worker can retire an empty buffer between them.
+        let source = scopeguard::guard(source, |source| {
+            drop(source);
+            if let Some(native) = &native {
+                runtime.retire_source(native);
             }
         });
         let child_turn = match &event {
@@ -113,7 +122,7 @@ impl Runtime {
             }),
             _ => None,
         };
-        if Self::append_buffered_change(service, &event, execution).await? {
+        if Self::append_buffered_change(service, source.as_ref(), &event, execution).await? {
             return Ok(());
         }
         if let Some(execution) = execution
@@ -150,8 +159,8 @@ impl Runtime {
         }
         match event {
             AgentChange::Session { session, change } => {
-                let source = runtime.resources.lock().unwrap().get(&session).cloned();
-                if let (Some(source), SessionChange::Status { status }) = (&source, &change) {
+                let source = source.as_ref();
+                if let (Some(source), SessionChange::Status { status }) = (source, &change) {
                     let provider = session.native_provider().map_err(str::to_owned)?;
                     let now = commands::at();
                     let command = Uuid::new_v4().to_string();
@@ -181,7 +190,7 @@ impl Runtime {
                 }
                 if let Some(source) = source {
                     let _updates = source.updates.lock().await;
-                    Self::external_change(service, &source, &session, change).await?;
+                    Self::external_change(service, source, &session, change).await?;
                     if let Some((turn, new_turn)) = child_turn {
                         runtime.storage.observe_native_child_turn(
                             &session,
@@ -197,8 +206,7 @@ impl Runtime {
                 origin,
                 request,
             } => {
-                let source = runtime.resources.lock().unwrap().get(&session).cloned();
-                if let Some(source) = source {
+                if let Some(source) = source.as_ref() {
                     Self::execution_request(
                         service,
                         &source.target,
@@ -262,12 +270,7 @@ impl Runtime {
                 session,
                 name: Some(name),
             } => {
-                let target = runtime
-                    .resources
-                    .lock()
-                    .unwrap()
-                    .get(&session)
-                    .map(|source| source.target.clone());
+                let target = source.as_ref().map(|source| &source.target);
                 if let Some(target) = target {
                     let now = commands::at();
                     runtime.storage.observe_thread(
@@ -294,9 +297,8 @@ impl Runtime {
                 turn,
                 head,
             } => {
-                let source = runtime.resources.lock().unwrap().get(&session).cloned();
-                if let Some(source) = source {
-                    Self::observe_native_cursor(service, &source, &session, &turn, &head, None)
+                if let Some(source) = source.as_ref() {
+                    Self::observe_native_cursor(service, source, &session, &turn, &head, None)
                         .await?;
                 }
             }

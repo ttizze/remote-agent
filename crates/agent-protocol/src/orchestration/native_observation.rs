@@ -44,8 +44,7 @@ pub fn observe_external_turn(
     });
     // A callback with no owned attempt cannot adopt an application's write or
     // convert its unknown delivery receipt into a fresh external execution.
-    if state.active_run().is_some()
-        || state.has_uncertain_input()
+    if !state.accepts_external_observation()
         || existing.is_some_and(|turn| {
             turn.run_attempt_id.is_some() || turn.status != ProviderTurnStatus::Running
         })
@@ -184,9 +183,7 @@ pub fn observe_external_item(
             state.turn_items.get(&item.id).unwrap_or(&item),
         );
     if !background
-        && (turn.status != ProviderTurnStatus::Running
-            || state.active_run().is_some()
-            || state.has_uncertain_input())
+        && (turn.status != ProviderTurnStatus::Running || !state.accepts_external_observation())
     {
         return Ok(Decision::default());
     }

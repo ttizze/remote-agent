@@ -18,10 +18,29 @@ enum WorkspaceMatch<'a> {
     Ambiguous,
 }
 
+fn physical_workspace(path: &Path) -> Option<PathBuf> {
+    if !path.components().any(|part| part == Component::ParentDir) {
+        return dunce::canonicalize(path).ok();
+    }
+    // Windows canonicalization removes missing/.. before visiting missing.
+    // Resolve each child (including symlinks) before traversing its parent.
+    let mut physical = PathBuf::new();
+    for component in path.components() {
+        if component == Component::ParentDir && !physical.is_dir() {
+            return None;
+        }
+        physical.push(component);
+        if matches!(component, Component::Normal(_) | Component::ParentDir) {
+            physical = dunce::canonicalize(&physical).ok()?;
+        }
+    }
+    Some(physical)
+}
+
 /// Include missing children, configured aliases and their physical targets.
 /// Membership, discovery and SDK provenance recovery share this boundary.
 pub(crate) fn scratch_root<'a>(roots: &'a BTreeSet<PathBuf>, path: &Path) -> Option<&'a Path> {
-    let physical = dunce::canonicalize(path).ok();
+    let physical = physical_workspace(path);
     let path = if path.components().any(|part| part == Component::ParentDir) {
         physical.as_deref()?
     } else {
@@ -63,7 +82,7 @@ impl Snapshot {
                 // Registration stores a physical root, but providers can report
                 // its alias (for example /tmp instead of /private/tmp on macOS).
                 // Keep known and unavailable roots readable without filesystem I/O.
-                let physical = dunce::canonicalize(workspace).ok()?;
+                let physical = physical_workspace(workspace)?;
                 match self.match_workspace(&physical) {
                     WorkspaceMatch::Project(id) => Some(id),
                     WorkspaceMatch::Missing | WorkspaceMatch::Ambiguous => None,
@@ -236,6 +255,7 @@ mod tests {
         for name in ["a", "b", "outside", "b/nested"] {
             std::fs::create_dir_all(root.join(name)).unwrap();
         }
+        std::fs::write(root.join("a/file"), "not a directory").unwrap();
         let mut snapshot = snapshot();
         snapshot.projects = serde_json::from_value(json!([
             {"id":"a","name":"A","roots":[{"path":root.join("a")}]},
@@ -247,12 +267,21 @@ mod tests {
             ("a/../outside", None),
             ("a/../a", Some("a")),
             ("a/missing/../../b", None),
+            ("a/file/../../b", None),
         ] {
             assert_eq!(
                 snapshot.project_for_workspace(root.join(relative).to_str().unwrap()),
                 expected,
                 "membership must follow the workspace reached by {relative}"
             );
+        }
+        let roots = BTreeSet::from([root.join("b")]);
+        assert_eq!(
+            scratch_root(&roots, &root.join("a/../b")),
+            Some(root.join("b").as_path())
+        );
+        for relative in ["a/missing/../../b", "a/file/../../b"] {
+            assert_eq!(scratch_root(&roots, &root.join(relative)), None);
         }
         #[cfg(unix)]
         {
@@ -261,6 +290,10 @@ mod tests {
                 snapshot.project_for_workspace(root.join("a/alias/..").to_str().unwrap()),
                 Some("b"),
                 "parent traversal follows the symlink target, not lexical component removal"
+            );
+            assert_eq!(
+                scratch_root(&roots, &root.join("a/alias/..")),
+                Some(root.join("b").as_path())
             );
         }
     }

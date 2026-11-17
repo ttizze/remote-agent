@@ -119,6 +119,12 @@ grep -qx 'OK (14 tests)' "$log.store.log"
 # Each paired test gets a fresh single-use invitation and isolated credentials.
 
 prepare_pairing
+adb -P "$server_port" -s "$serial" shell am instrument -w -r \
+    -e class dev.remoteagent.mobile.ModelPickerConnectionTest \
+    dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.models.log"
+grep -qx 'OK (1 test)' "$log.models.log"
+
+prepare_pairing
 adb -P "$server_port" -s "$serial" shell am instrument -w -r -e cwd "$fixture/host/project" \
     -e class dev.remoteagent.mobile.VisualizationTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.visualize.log"

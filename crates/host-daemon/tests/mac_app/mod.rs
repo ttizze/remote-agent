@@ -3,7 +3,7 @@
 /// Opens the bex.app `scripts/build-macos.sh desktop dev` packages, scoped to
 /// `state` and without starting a Host of its own. Its window registers the
 /// renderer in `state` once it shows.
-pub fn spawn(state: &std::path::Path) -> tokio::process::Child {
+pub(super) fn spawn(state: &std::path::Path) -> tokio::process::Child {
     let app = agent_process::runtime_directory()
         .unwrap()
         .join("bex.app/Contents/MacOS/bex");

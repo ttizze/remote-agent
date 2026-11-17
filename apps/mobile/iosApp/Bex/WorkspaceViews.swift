@@ -14,7 +14,6 @@ struct ConversationDirectorySheet: View {
     let close: () -> Void
 
     var body: some View {
-        let inputScope = model.snapshot.panelScope(host: model.host, draft: model.inputDraftKey)
         NavigationStack {
             WorkspaceScreen(
                 model: model,
@@ -53,6 +52,7 @@ struct WorkspaceScreen: View {
     let close: () -> Void
 
     var body: some View {
+        let inputScope = model.snapshot.panelScope(host: model.host, draft: model.inputDraftKey)
         WorkspaceDirectoryScreen(
             files: model.files,
             paneId: model.publication.paneId(),

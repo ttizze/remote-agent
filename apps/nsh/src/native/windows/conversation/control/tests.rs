@@ -5,7 +5,7 @@ use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 /// search and selection positions even when they have no displayed glyph.
 #[test]
 fn system_rich_edit_keeps_document_positions_for_chips_unicode_and_tables() {
-    // Match the native UI thread: inline pictures also need OLE initialized.
+    // Match the native UI thread: WIC image decoding needs COM initialized.
     unsafe { OleInitialize(None) }.unwrap();
     let window = unsafe {
         CreateWindowExW(
@@ -24,7 +24,6 @@ fn system_rich_edit_keeps_document_positions_for_chips_unicode_and_tables() {
         )
     }
     .unwrap();
-    pictures::install(window);
     let chip: Value = serde_json::from_str(include_str!(
         "../../../../../apple/Tests/BexNshNativeTests/Fixtures/file-chip.json"
     ))
@@ -32,32 +31,35 @@ fn system_rich_edit_keeps_document_positions_for_chips_unicode_and_tables() {
     let text = json!({"runs":[{"text":"👋 日本語\nnext"}]});
     let table = json!([
         [[{"Text":[{"runs":[{"text":"header"}]}]}]],
-        [[{"Text":[{"runs":[{"text":"説明","link":"https://example.test","webMenu":[]}]}]}]]
+        [[
+            {"Text":[{"runs":[{"text":"説明","link":"https://example.test","webMenu":[]}]}]},
+            {"Image":{"source":"chart.png"}},
+            {"Text":[{"runs":[{"text":"after image","link":"https://example.test/after","webMenu":[]}]}]}
+        ]]
     ]);
-    for document in [
-        rich_document::paragraphs(&[chip, text]),
-        rich_document::table(
-            table.as_array().unwrap(),
-            400,
-            &Value::Null,
-            &Value::Null,
-            &Value::Null,
+    let media = json!({"chart.png":chip["runs"][0]["file"]["icon"]});
+    let mut damaged = rich_document::paragraphs(&[chip.clone(), chip.clone()]);
+    damaged.images[0].bytes.truncate(24);
+    for (document, expected) in [
+        (
+            rich_document::paragraphs(&[chip.clone(), text, chip.clone()]),
+            None,
         ),
+        (
+            rich_document::table(
+                table.as_array().unwrap(),
+                400,
+                &media,
+                &Value::Null,
+                &Value::Null,
+            ),
+            None,
+        ),
+        // One broken image leaves its reserved space. Later images and every
+        // link still load, and their UTF-16 positions remain unchanged.
+        (damaged, Some("  統合前レビュー\r\u{fffc} 統合前レビュー")),
     ] {
-        let mut input = std::io::Cursor::new(document.rtf.as_slice());
-        let mut stream = EDITSTREAM {
-            dwCookie: (&mut input as *mut std::io::Cursor<&[u8]>) as usize,
-            pfnCallback: Some(read_stream),
-            ..Default::default()
-        };
-        message(
-            window,
-            EM_STREAMIN,
-            SF_RTF as usize,
-            (&mut stream as *mut EDITSTREAM) as isize,
-        );
-        assert_eq!(stream.dwError, 0);
-        mark_links(window, &document.links);
+        load_document(window, &document).unwrap();
         let mut buffer = vec![0u16; 4096];
         let mut request = GETTEXTEX {
             cb: (buffer.len() * 2) as u32,
@@ -73,7 +75,10 @@ fn system_rich_edit_keeps_document_positions_for_chips_unicode_and_tables() {
         )
         .0 as usize;
         let native = String::from_utf16(&buffer[..length]).unwrap();
-        assert_eq!(native.replace('\u{b}', "\n"), document.text);
+        assert_eq!(
+            native.replace('\u{b}', "\n"),
+            expected.unwrap_or(&document.text)
+        );
         for link in &document.links {
             let native_label = String::from_utf16(&buffer[link.start..link.end]).unwrap();
             assert!(native_label.contains(&document.selected(link.start, link.end)));

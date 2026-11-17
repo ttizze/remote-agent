@@ -2502,63 +2502,134 @@ fn promoting_a_queue_entry_moves_its_original_message_and_cancels_only_its_reser
 
 #[test]
 fn successful_native_completion_waits_for_checkpoint_capture_before_starting_queued_work() {
-    let (state, run, attempt) = running();
-    let state = state.apply(&prepare_checkpoint_scope(&state, &run, "/project", NOW).unwrap());
-    let state = accepted(&state, 4, Admission::Queue);
-    let next = state.next_queued_run().unwrap().id.clone();
-    let root_id = state.runs[&run].root_node_id.clone().unwrap();
-    let waiting = state.apply(
-        &complete(
-            &state,
-            &attempt,
-            "session",
-            Completion::Completed,
-            context("5", &state),
-        )
-        .unwrap(),
-    );
-    assert_eq!(waiting.runs[&run].status, RunStatus::Waiting);
-    assert_eq!(waiting.nodes[&root_id].status, NodeStatus::Waiting);
-    let native_turn = &waiting.provider_turns[waiting.run_attempts[&attempt]
-        .provider_turn_id
-        .as_ref()
-        .unwrap()];
-    assert_eq!(native_turn.status, ProviderTurnStatus::Completed);
-    assert_eq!(native_turn.completed_at.as_deref(), Some(NOW));
-    assert_eq!(
-        waiting.run_attempts[&attempt].status,
-        RunAttemptStatus::Completed
-    );
-    assert_eq!(waiting.runs[&next].status, RunStatus::Queued);
-    let scope = waiting.nodes[&root_id].checkpoint_scope_id.clone().unwrap();
-    assert!(waiting.effects.values().any(|effect|matches!(&effect.request,EffectRequest::CheckpointCapture {scope_id,run_id} if scope_id==&scope && run_id==&run)));
-    let checkpoint = Checkpoint {
-        id: "checkpoint".into(),
-        thread_id: waiting.thread.id.clone(),
-        scope_id: scope,
-        run_id: Some(run.clone()),
-        node_id: root_id.clone(),
-        parent_checkpoint_id: None,
-        ordinal_within_scope: waiting.runs[&run].ordinal,
-        app_run_ordinal: Some(waiting.runs[&run].ordinal),
-        reference: "refs/t3/orchestration-v2/checkpoints/example/ordinal/1".into(),
-        status: CheckpointStatus::Missing,
-        files: Vec::new(),
-        files_total: None,
-        captured_at: NOW.into(),
-    };
-    let completed = waiting.apply(
-        &checkpoint_captured(&waiting, &run, checkpoint.clone(), context("6", &waiting)).unwrap(),
-    );
-    assert_eq!(completed.runs[&run].status, RunStatus::Completed);
-    assert_eq!(completed.nodes[&root_id].status, NodeStatus::Completed);
-    assert_eq!(completed.active_run().unwrap().id, next);
-    assert!(
-        checkpoint_captured(&completed, &run, checkpoint, context("7", &completed))
-            .unwrap()
-            .changes
-            .is_empty()
-    );
+    for background_before_checkpoint in [false, true] {
+        let (state, run, attempt) = running();
+        let state = state.apply(&prepare_checkpoint_scope(&state, &run, "/project", NOW).unwrap());
+        let state = accepted(&state, 4, Admission::Queue);
+        let next = state.next_queued_run().unwrap().id.clone();
+        let root_id = state.runs[&run].root_node_id.clone().unwrap();
+        let mut waiting = state.apply(
+            &complete(
+                &state,
+                &attempt,
+                "session",
+                Completion::Completed,
+                context("5", &state),
+            )
+            .unwrap(),
+        );
+        assert_eq!(waiting.runs[&run].status, RunStatus::Waiting);
+        assert_eq!(waiting.nodes[&root_id].status, NodeStatus::Waiting);
+        let native_turn = &waiting.provider_turns[waiting.run_attempts[&attempt]
+            .provider_turn_id
+            .as_ref()
+            .unwrap()];
+        assert_eq!(native_turn.status, ProviderTurnStatus::Completed);
+        assert_eq!(native_turn.completed_at.as_deref(), Some(NOW));
+        assert_eq!(
+            waiting.run_attempts[&attempt].status,
+            RunAttemptStatus::Completed
+        );
+        assert_eq!(waiting.runs[&next].status, RunStatus::Queued);
+        let report = if background_before_checkpoint {
+            let observed = observe_external_turn(
+                &waiting,
+                "native-thread",
+                "native",
+                native("background-report", None),
+                ProviderTurnStatus::Running,
+                NOW,
+            )
+            .unwrap();
+            assert!(
+                !observed.changes.is_empty(),
+                "a completed native attempt must not lose its immediate background report while its checkpoint is pending"
+            );
+            waiting = waiting.apply(&observed);
+            let turn = waiting
+                .provider_turns
+                .values()
+                .find(|turn| turn.run_attempt_id.is_none())
+                .unwrap()
+                .clone();
+            let item: TurnItem = serde_json::from_value(serde_json::json!({
+            "id":"background-message","threadId":waiting.thread.id,"runId":null,"nodeId":turn.node_id,"providerThreadId":"native-thread","providerTurnId":turn.id,
+            "nativeItemRef":null,"parentItemId":null,"ordinal":0,"status":"running","title":null,"startedAt":NOW,"completedAt":null,"updatedAt":NOW,
+            "type":"assistant_message","messageId":"report-message","text":"background output","attachments":[],"streaming":true
+        })).unwrap();
+            waiting =
+                waiting.apply(&observe_external_item(&waiting, &turn.id, "native", item).unwrap());
+            assert!(
+                waiting.turn_items.contains_key("background-message"),
+                "the report's items must survive the checkpoint boundary too"
+            );
+            Some(turn.id)
+        } else {
+            None
+        };
+        let scope = waiting.nodes[&root_id].checkpoint_scope_id.clone().unwrap();
+        assert!(waiting.effects.values().any(|effect|matches!(&effect.request,EffectRequest::CheckpointCapture {scope_id,run_id} if scope_id==&scope && run_id==&run)));
+        let checkpoint = Checkpoint {
+            id: "checkpoint".into(),
+            thread_id: waiting.thread.id.clone(),
+            scope_id: scope,
+            run_id: Some(run.clone()),
+            node_id: root_id.clone(),
+            parent_checkpoint_id: None,
+            ordinal_within_scope: waiting.runs[&run].ordinal,
+            app_run_ordinal: Some(waiting.runs[&run].ordinal),
+            reference: "refs/t3/orchestration-v2/checkpoints/example/ordinal/1".into(),
+            status: CheckpointStatus::Missing,
+            files: Vec::new(),
+            files_total: None,
+            captured_at: NOW.into(),
+        };
+        let completed = waiting.apply(
+            &checkpoint_captured(&waiting, &run, checkpoint.clone(), context("6", &waiting))
+                .unwrap(),
+        );
+        assert_eq!(completed.runs[&run].status, RunStatus::Completed);
+        assert_eq!(completed.nodes[&root_id].status, NodeStatus::Completed);
+        if let Some(report) = report {
+            assert!(completed.active_run().is_none());
+            assert_eq!(completed.runs[&next].status, RunStatus::Queued);
+            assert_eq!(
+                completed.provider_turns[&report].status,
+                ProviderTurnStatus::Running
+            );
+            let settled = completed.apply(
+                &observe_external_turn(
+                    &completed,
+                    "native-thread",
+                    "native",
+                    native("background-report", None),
+                    ProviderTurnStatus::Completed,
+                    NOW,
+                )
+                .unwrap(),
+            );
+            let released = settled.apply(
+                &observe_native_status(
+                    &settled,
+                    "codex",
+                    "codex",
+                    "native",
+                    ProviderThreadStatus::Idle,
+                    context("report-ended", &settled),
+                )
+                .unwrap(),
+            );
+            assert_eq!(released.active_run().unwrap().id, next);
+        } else {
+            assert_eq!(completed.active_run().unwrap().id, next);
+        }
+        assert!(
+            checkpoint_captured(&completed, &run, checkpoint, context("7", &completed))
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+    }
 }
 
 #[test]

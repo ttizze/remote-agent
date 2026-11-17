@@ -6,6 +6,7 @@ use std::fmt::Write;
 #[derive(Clone, Default, PartialEq)]
 pub(crate) struct Document {
     pub rtf: Vec<u8>,
+    pub images: Vec<InlineImage>,
     pub text: String,
     pub links: Vec<Link>,
     pub active: Option<(usize, usize)>,
@@ -13,6 +14,14 @@ pub(crate) struct Document {
     #[cfg(windows)]
     pub shimmer: Option<super::effects::Shimmer>,
     decorations: Vec<(usize, usize)>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct InlineImage {
+    pub start: usize,
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -27,6 +36,7 @@ pub(crate) struct Link {
 
 struct Writer {
     body: String,
+    images: Vec<InlineImage>,
     text: String,
     links: Vec<Link>,
     colors: Vec<u32>,
@@ -114,6 +124,7 @@ impl Writer {
     fn new() -> Self {
         Self {
             body: String::new(),
+            images: Vec::new(),
             text: String::new(),
             links: Vec::new(),
             units: 0,
@@ -140,6 +151,7 @@ impl Writer {
         rtf.push('}');
         Document {
             rtf: rtf.into_bytes(),
+            images: self.images,
             text: self.text,
             links: self.links,
             active: self.active,
@@ -329,18 +341,16 @@ impl Writer {
         let original_width = u32::from_be_bytes(dimensions[..4].try_into().unwrap());
         let original_height = u32::from_be_bytes(dimensions[4..].try_into().unwrap());
         let height = width.saturating_mul(original_height) / original_width.max(1);
-        let _ = write!(
-            self.body,
-            "{{\\pict\\pngblip\\picwgoal{}\\pichgoal{} ",
-            width * 20,
-            height * 20
-        );
-        for byte in bytes {
-            let _ = write!(self.body, "{byte:02x}");
-        }
-        self.body.push('}');
-        self.text.push('\u{fffc}');
-        self.units += 1;
+        // System Rich Edit accepts PNG through EM_INSERTIMAGE, independently
+        // of the image formats its RTF reader supports. Reserve one UTF-16
+        // position so replacing it with the image preserves all later ranges.
+        self.images.push(InlineImage {
+            start: self.units,
+            bytes,
+            width,
+            height,
+        });
+        self.separator(" ", '\u{fffc}');
         true
     }
 
@@ -516,8 +526,10 @@ mod tests {
         assert_eq!(doc.links[0].tooltip, "/repo/SKILL.md");
         assert_eq!(doc.links[0].action, "file");
         assert_eq!(doc.links[0].menu[1]["id"], "\"CopyFullPath\"");
+        let image = &doc.images[0];
+        assert_eq!((image.start, image.width, image.height), (0, 14, 14));
+        assert!(image.bytes.starts_with(b"\x89PNG"));
         let rtf = String::from_utf8(doc.rtf).unwrap();
-        assert!(rtf.contains("\\pict\\pngblip"));
         assert!(rtf.contains("\\red255\\green0\\blue0;") && rtf.contains("\\f3\\fs28"));
         assert!(rtf.contains("\\ul0"));
         let doc = paragraphs(&[

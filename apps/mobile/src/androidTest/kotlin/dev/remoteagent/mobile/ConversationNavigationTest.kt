@@ -12,8 +12,6 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import dev.remoteagent.core.ConversationRowContent
-import dev.remoteagent.core.ProviderKind
-import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.Snapshot
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -35,7 +33,6 @@ class ConversationNavigationTest {
                     )
                 )
             }
-            val session = SessionRef(ProviderKind.CODEX, "activity")
             val identity = JSONObject("""{"provider":"codex","id":"activity"}""")
             val thread =
                 JSONObject()
@@ -70,6 +67,10 @@ class ConversationNavigationTest {
                 header.assertIsDisplayed().performClick()
                 compose.waitForIdle()
                 header.assertIsDisplayed()
+                // Core's T3 timeline has a separate disclosure for the tool group.
+                compose.onNodeWithText("40 件のコマンドを実行しました").assertIsDisplayed().performClick()
+                compose.waitForIdle()
+                header.assertIsDisplayed()
                 compose.onNodeWithText("command-0", substring = true).assertIsDisplayed()
             }
         }
@@ -90,7 +91,6 @@ class ConversationNavigationTest {
                         )
                 turns.put(JSONObject().put("id", "turn-$index").put("status", "completed").put("items", items))
             }
-            val session = SessionRef(ProviderKind.CODEX, "thread")
             val identity = JSONObject("""{"provider":"codex","id":"thread"}""")
             val persisted =
                 JSONObject(Snapshot.empty().serialize().decodeToString())

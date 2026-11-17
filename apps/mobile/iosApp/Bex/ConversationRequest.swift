@@ -47,8 +47,8 @@ struct RequestPanel: View {
     @ViewBuilder
     private var answerControls: some View {
         switch request.requestBody {
-        case let .approval(_, _, _, choices): choiceButtons(choices) { .approval(choiceId: $0) }
-        case let .permission(_, _, choices): choiceButtons(choices) { .permission(choiceId: $0) }
+        case .approval: choiceButtons { .approval(choiceId: $0) }
+        case .permission: choiceButtons { .permission(choiceId: $0) }
         // The question panel answers questions.
         case .question: EmptyView()
         case let .elicitation(_, _, input):
@@ -83,25 +83,32 @@ struct RequestPanel: View {
         TextEditor(text: $response).font(.body.monospaced()).frame(minHeight: 100, maxHeight: 200)
     }
 
-    private func choiceButtons(_ choices: [Choice], answer: @escaping (String) -> Answer) -> some View {
-        // Choices sharing a description, such as the scopes of one permission, explain it once.
-        let notes = choices.map(\.description).filter { !$0.isEmpty }
-            .reduce(into: [String]()) { notes, note in
-                if !notes.contains(note) {
-                    notes.append(note)
+    @ViewBuilder
+    private func choiceButtons(answer: @escaping (String) -> Answer) -> some View {
+        if let approval = request.approval {
+            VStack(alignment: .leading, spacing: 8) {
+                FlowLayout {
+                    if let decline = approval.actions.decline {
+                        Button(decline.label) { respond(answer(decline.choiceId)) }
+                            .requestButtonStyle(.secondary)
+                            .accessibilityIdentifier("request.choice.\(decline.choiceId)")
+                    }
+                    if let approve = approval.actions.approve {
+                        Button(approve.label) { respond(answer(approve.choiceId)) }
+                            .requestButtonStyle(.primary)
+                            .accessibilityIdentifier("request.accept")
+                    }
+                    if !approval.actions.more.isEmpty {
+                        Menu("その他の承認方法") {
+                            ForEach(approval.actions.more, id: \.choiceId) { action in
+                                Button(action.label) { respond(answer(action.choiceId)) }
+                                    .accessibilityIdentifier("request.choice.\(action.choiceId)")
+                            }
+                        }.requestButtonStyle(.secondary)
+                    }
                 }
+                ForEach(approval.notes, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
             }
-        return VStack(alignment: .leading, spacing: 8) {
-            FlowLayout {
-                ForEach(choices, id: \.id) { choice in
-                    Button(choice.label) { respond(answer(choice.id)) }
-                        .requestButtonStyle(choiceTone(effect: choice.effect))
-                        .accessibilityIdentifier(
-                            choice.id == choices.first?.id ? "request.accept" : "request.choice.\(choice.id)"
-                        )
-                }
-            }
-            ForEach(notes, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
         }
     }
 

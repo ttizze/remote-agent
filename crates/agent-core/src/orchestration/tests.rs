@@ -343,6 +343,75 @@ fn inherited_success_waits_for_the_root_checkpoint_and_ignores_later_background_
 }
 
 #[test]
+fn a_late_checkpoint_does_not_split_the_following_native_turn() {
+    use agent_protocol::{conversation::records::ForkPoint, items, session};
+    for visibility in [Visibility::Local, Visibility::Inherited] {
+        let mut snapshot = snapshot(1);
+        snapshot.has_more_history = false;
+        snapshot.history_cursor = None;
+        snapshot.projection.runs.push(run("completed"));
+        let mut answer = item("answer", 1);
+        answer.started_at = Some("1970-01-01T00:00:01.000Z".into());
+        answer.completed_at = Some("1970-01-01T00:00:02.000Z".into());
+        let mut command = item("report-command", 2);
+        command.run_id = None;
+        command.provider_turn_id = Some("report".into());
+        command.body = serde_json::from_value(
+            json!({"type":"command_execution","input":"report","output":"done"}),
+        )
+        .unwrap();
+        let mut checkpoint = item("checkpoint", 3);
+        checkpoint.completed_at = Some("1970-01-01T00:00:03.000Z".into());
+        checkpoint.body = TurnItemBody::Checkpoint {
+            checkpoint_id: "root-checkpoint".into(),
+            scope_id: "root-scope".into(),
+            files: vec![],
+            files_total: None,
+        };
+        let mut report = item("report-answer", 4);
+        report.run_id = None;
+        report.provider_turn_id = Some("report".into());
+        snapshot.projection.visible_turn_items = [answer, command, checkpoint, report]
+            .into_iter()
+            .enumerate()
+            .map(|(position, item)| row(item, visibility, position as u64))
+            .collect();
+        let owner = session::SessionRef::new(None, "thread".into()).unwrap();
+        let view = project(
+            &snapshot,
+            &owner,
+            session::ProviderKind::Codex,
+            Default::default(),
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let turns = view.thread.turns.unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].id.as_str(), "run");
+        assert_eq!(turns[0].completed_at_ms, Some(3000));
+        assert_eq!(turns[1].id.as_str(), "report");
+        let report = turns[1].items.as_ref().unwrap();
+        assert_eq!(report.len(), 2);
+        assert!(
+            matches!(report[0].body(), items::ItemBody::CommandExecution { command, .. } if command == "report")
+        );
+        assert!(
+            matches!(report[1].body(), items::ItemBody::AssistantText { text, .. } if text == "report-answer")
+        );
+        assert_eq!(
+            fork_point(&snapshot.projection, &"report".into()),
+            Some((
+                owner,
+                ForkPoint::ProviderTurn {
+                    provider_turn_id: "report".into()
+                }
+            ))
+        );
+    }
+}
+
+#[test]
 fn a_queued_input_is_displayed_once_in_the_queue_until_it_starts() {
     use agent_protocol::{items, session};
     let identity = session::SessionRef::new(None, uuid::Uuid::new_v4().to_string()).unwrap();

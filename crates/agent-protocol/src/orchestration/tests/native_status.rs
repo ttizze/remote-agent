@@ -414,6 +414,23 @@ fn external_turns_have_real_runless_roots_and_cannot_reopen_or_settle_another_ru
 
 #[test]
 fn external_observations_cannot_adopt_an_application_write_or_an_uncertain_delivery_receipt() {
+    let (mut active, run, _) = running();
+    for status in [RunStatus::Running, RunStatus::Waiting] {
+        active.runs.get_mut(&run).unwrap().status = status;
+        assert_eq!(
+            observe_external_turn(
+                &active,
+                "native-thread",
+                "native",
+                native("unexpected-report", None),
+                ProviderTurnStatus::Running,
+                NOW,
+            )
+            .unwrap(),
+            Decision::default(),
+            "an app response waiting for permission still owns its native write"
+        );
+    }
     let initial = external(ProviderThreadStatus::Idle);
     assert_eq!(
         observe_external_turn(

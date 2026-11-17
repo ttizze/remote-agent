@@ -193,6 +193,19 @@ impl State {
             .is_some_and(|thread| thread.status == ProviderThreadStatus::Active)
     }
 
+    /// A completed native attempt can report background work while the app
+    /// still captures its checkpoint. It cannot adopt an active or uncertain
+    /// application write, even though both may have a Waiting run.
+    pub fn accepts_external_observation(&self) -> bool {
+        !self.has_uncertain_input()
+            && self.active_run().is_none_or(|run| {
+                run.status == RunStatus::Waiting
+                    && self
+                        .active_attempt(run.active_attempt_id.as_deref())
+                        .is_some_and(|attempt| attempt.status == RunAttemptStatus::Completed)
+            })
+    }
+
     pub fn has_pending_rollback(&self) -> bool {
         self.effects.values().any(|effect| {
             matches!(effect.request, EffectRequest::ProviderThreadRollback { .. })

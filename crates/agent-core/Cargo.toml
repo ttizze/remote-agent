@@ -13,7 +13,7 @@ workspace = true
 bindings = ["dep:uniffi", "dep:zeroize"]
 diagrams = ["dep:mermaid-rs-renderer", "dep:usvg"]
 # The desktop update flow: release downloads and replacing the installed app.
-app-updates = ["dep:agent-local-host", "dep:anyhow", "dep:reqwest", "dep:ring", "dep:rustls", "tokio/fs"]
+app-updates = ["dep:anyhow", "dep:reqwest", "dep:ring", "dep:rustls", "dep:tempfile", "tokio/fs"]
 
 [dependencies]
 icu_collator = "=2.4.0"
@@ -44,12 +44,12 @@ mermaid-rs-renderer = { version = "=0.3.1", default-features = false, optional =
 # draw it may have none.
 usvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts"], optional = true }
 base64.workspace = true
-agent-local-host = { path = "../agent-local-host", optional = true }
+agent-local-host = { path = "../agent-local-host" }
 anyhow = { workspace = true, optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "system-proxy"], optional = true }
 ring = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
-tempfile = "3"
+tempfile = { version = "3", optional = true }
 
 # Recorded speech at a microphone's own rate; Apple platforms record at the
 # transcription's.
@@ -57,6 +57,7 @@ tempfile = "3"
 rubato = { version = "5", default-features = false }
 
 [dev-dependencies]
+tempfile = "3"
 agent-protocol = { path = "../agent-protocol", features = ["test-support"] }
 ring.workspace = true
 insta = { version = "1.49", default-features = false, features = ["json"] }

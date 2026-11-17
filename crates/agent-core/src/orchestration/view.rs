@@ -1,5 +1,5 @@
 //! Disposable native display DTOs built directly from the canonical projection.
-//! Grouping never invents persisted runs or changes the inherited row order.
+//! Grouping preserves each real owner's first appearance and its item order.
 use super::*;
 use agent_protocol::{execution as display, items, models, operations as op, requests, session};
 
@@ -334,6 +334,7 @@ fn driver_kind(driver: &str) -> Result<session::ProviderKind, String> {
 
 fn timeline_groups(items: &[ProjectedTurnItem]) -> Vec<Vec<&ProjectedTurnItem>> {
     let mut groups: Vec<Vec<&ProjectedTurnItem>> = Vec::new();
+    let mut owned = BTreeMap::new();
     let mut previous = None;
     for row in items {
         let key = (
@@ -343,16 +344,23 @@ fn timeline_groups(items: &[ProjectedTurnItem]) -> Vec<Vec<&ProjectedTurnItem>> 
                 .as_deref()
                 .or(row.item.provider_turn_id.as_deref()),
         );
-        let imported_input = row.item.run_id.is_none()
-            && row.item.provider_turn_id.is_none()
-            && matches!(row.item.body, model::TurnItemBody::UserMessage { .. });
-        if previous != Some(key) || imported_input {
-            groups.push(Vec::new());
-        }
-        groups
-            .last_mut()
-            .expect("row allocated its group")
-            .push(row);
+        // A checkpoint can arrive after the following native turn has begun.
+        // Real ownership survives that interleaving; unowned imported history
+        // still gets its boundaries from consecutive inputs.
+        let index = if let Some(owner) = key.1 {
+            *owned.entry((key.0, owner)).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            })
+        } else {
+            if previous != Some(key)
+                || matches!(row.item.body, model::TurnItemBody::UserMessage { .. })
+            {
+                groups.push(Vec::new());
+            }
+            groups.len() - 1
+        };
+        groups[index].push(row);
         previous = Some(key);
     }
     groups

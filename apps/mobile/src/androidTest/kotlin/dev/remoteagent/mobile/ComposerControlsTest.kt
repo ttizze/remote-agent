@@ -1,9 +1,11 @@
 package dev.remoteagent.mobile
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import dev.remoteagent.core.Attachment
@@ -26,12 +28,11 @@ class ComposerControlsTest {
     @get:Rule val compose = createComposeRule()
 
     @Test
-    fun existingConversationOffersProviderSwitchingAndDispatchesSettingsChoices() {
+    fun existingConversationModelDialogOffersProvidersAndDispatchesSettingsChoices() {
         val identity = JSONObject("""{"provider":"codex","id":"fixture"}""")
         val key = JSONObject().put("Session", JSONObject().put("session", identity))
         val state =
             JSONObject(Snapshot.empty().serialize().decodeToString())
-                .put("connected", true)
                 .put("navigation", JSONObject().put("thread_id", identity).put("draft_key", key).put("cwd", "/fixture"))
                 .put(
                     "models",
@@ -60,23 +61,31 @@ class ComposerControlsTest {
             val intents = mutableListOf<Intent>()
             val presentation = Presentation.fromSnapshot(snapshot, "")
             val perform: (Intent, (Result<Outcome>) -> Unit) -> Unit = { intent, _ -> intents.add(intent) }
+            var open by mutableStateOf(true)
             compose.setContent {
                 MaterialTheme {
-                    ModelPickerButton(presentation.composer(), perform) { selected, dismiss ->
-                        ModelPickerDialog(presentation.settings(), selected, perform, dismiss)
+                    if (open) {
+                        ModelPickerDialog(
+                            presentation.settings(),
+                            presentation.composer().controls().selectedModel,
+                            perform,
+                        ) {
+                            open = false
+                        }
                     }
                 }
             }
-            compose.onNodeWithTag("model.settings").performClick()
             compose.onNodeWithText("この設定を新規チャットの既定にする").assertDoesNotExist()
             compose.onNodeWithText("完了").performClick()
-            compose.runOnIdle { assertEquals(listOf(Intent.RefreshModels), intents) }
-            compose.onNodeWithTag("model.settings").performClick()
+            compose.runOnIdle {
+                assertTrue(!open)
+                assertTrue(intents.isEmpty())
+                open = true
+            }
             compose.onNodeWithText("Other Provider").performClick()
             compose.onNodeWithText("GPT-6.1").performClick()
             compose.onNodeWithText("高").performClick()
             compose.runOnIdle {
-                assertTrue(intents.any { it is Intent.RefreshModels })
                 assertTrue(intents.any { it is Intent.SelectModel && it.model.provider == ProviderKind.CLAUDE })
                 assertTrue(intents.any { it is Intent.SelectModel && it.model.id == "gpt-6.1-sol" })
                 assertEquals(

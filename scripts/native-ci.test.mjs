@@ -191,7 +191,7 @@ test('manual runs and unavailable comparison data conservatively verify everythi
 test('Android acceptance counts include every test declared by its selected classes', () => {
   const script = readFileSync(new URL('./android-e2e.sh', import.meta.url), 'utf8');
   const groups = [...script.matchAll(/-e class ([\w.,]+)[\s\S]*?\| tee "\$log\.(\w+)\.log"[\s\S]*?grep -qx 'OK \((\d+) tests?\)'/g)];
-  assert.equal(groups.length, 4);
+  assert.equal(groups.length, 5);
   for (const [, classes, label, expected] of groups) {
     const count = classes.split(',').reduce((count, name) => {
       const source = readFileSync(new URL(`../apps/mobile/src/androidTest/kotlin/${name.replaceAll('.', '/')}.kt`, import.meta.url), 'utf8');
