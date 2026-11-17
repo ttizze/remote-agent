@@ -347,12 +347,15 @@ extension LaunchUITests {
     }
 
     func simulatorTaskRow(_ app: XCUIApplication, native: String) throws -> XCUIElement {
-        try revealSimulatorTaskRow(app, identifier: simulatorTaskIdentifier("session-identity/\(native)"))
+        try app.descendants(matching: .any)[simulatorTaskIdentifier("session-identity/\(native)")]
     }
 
-    func revealSimulatorTaskRow(_ app: XCUIApplication, identifier: String) -> XCUIElement {
-        let row = app.descendants(matching: .any)[identifier]
+    func revealSimulatorTaskRow(_ app: XCUIApplication, row: XCUIElement) {
         let more = app.buttons["tasks.project.simulator-project.more"]
+        // A restored first page can precede the refreshed pagination control.
+        // Await either usable route before deciding whether another page exists.
+        let ready = expectation(for: NSPredicate { _, _ in row.exists || more.exists }, evaluatedWith: app)
+        wait(for: [ready], timeout: 10)
         // Earlier tests keep their conversations on this Host. Reach an older
         // fixture through the same explicit project pagination as a user.
         while !row.exists, more.exists {
@@ -367,6 +370,5 @@ extension LaunchUITests {
                 break
             }
         }
-        return row
     }
 }

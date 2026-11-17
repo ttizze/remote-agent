@@ -102,6 +102,7 @@ extension LaunchUITests {
         app.buttons["tasks.menu"].tap(); app.buttons["tasks.refresh"].tap()
         expandSimulatorProject(app)
         let row = try simulatorTaskRow(app, native: "fixture-upload-thread")
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 15)); row.tap()
         let prompt = app.textFields["task.message"]
         XCTAssertTrue(prompt.waitUntilExists(timeout: 10))

@@ -10,6 +10,7 @@ extension LaunchUITests {
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
         let row = try simulatorTaskRow(app, native: "fixture-external-thread")
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 15))
         try simulatorFixture("hold-history-reads")
         row.tap()
@@ -30,7 +31,8 @@ extension LaunchUITests {
         let identifier = try simulatorTaskIdentifier("background-task")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = revealSimulatorTaskRow(app, identifier: identifier)
+        let row = app.descendants(matching: .any)[identifier]
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 15))
         try simulatorFixture("background-reply/\(identifier.dropFirst("tasks.row.".count))")
         try simulatorFixture("fail-next-history-read")
@@ -107,6 +109,7 @@ extension LaunchUITests {
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
         let row = try simulatorTaskRow(app, native: "fixture-external-thread")
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 15)); row.tap()
         XCTAssertTrue(
             fixtureItems(app, containing: "answer-fixture-external-thread").firstMatch.waitUntilExists(timeout: 15),

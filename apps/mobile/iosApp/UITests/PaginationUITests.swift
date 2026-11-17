@@ -12,6 +12,7 @@ extension LaunchUITests {
         app.terminate(); app.launch()
         expandSimulatorProject(app)
         let row = try simulatorTaskRow(app, native: conversationId)
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitUntilExists(timeout: 30))
@@ -67,6 +68,7 @@ extension LaunchUITests {
         app.terminate(); app.launch()
         expandSimulatorProject(app)
         let row = try simulatorTaskRow(app, native: conversationId)
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitUntilExists(timeout: 30))

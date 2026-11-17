@@ -442,6 +442,7 @@ public struct ConversationWork<Content: View>: View {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 12)).frame(width: 16, height: 16).opacity(0.7)
                 }.font(.system(size: 14)).foregroundStyle(ConversationColors.muted)
+                    .contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel(Text(verbatim: accessibilityLabel ?? title))
             if expanded {
                 content.padding(.leading, 28)

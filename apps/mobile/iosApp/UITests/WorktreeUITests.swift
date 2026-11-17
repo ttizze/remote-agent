@@ -7,7 +7,8 @@ extension LaunchUITests {
         refreshSimulatorTaskList(app)
         let project = app.descendants(matching: .any)["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitUntilExists(timeout: 10))
-        _ = try simulatorTaskRow(app, native: "merge-active")
+        let row = try simulatorTaskRow(app, native: "merge-active")
+        revealSimulatorTaskRow(app, row: row)
         let running = try app.descendants(matching: .any)[simulatorTaskIdentifier(
             "session-identity/merge-active",
             prefix: "tasks.running."
@@ -33,7 +34,7 @@ extension LaunchUITests {
         app.terminate()
         app.launch()
         expandSimulatorProject(app)
-        _ = try simulatorTaskRow(app, native: "merge-active")
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(running.waitUntilExists(timeout: 10))
         XCTAssertFalse(changes.exists)
         try simulatorFixture("merge-worktree/new-work")
@@ -203,6 +204,7 @@ extension LaunchUITests {
         refreshSimulatorTaskList(app)
         expandSimulatorProject(app)
         let row = try simulatorTaskRow(app, native: "fixture-review-thread")
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 15)); row.tap()
         let changes = app.buttons["task.diff"]
         XCTAssertTrue(changes.waitUntilExists(timeout: 15))

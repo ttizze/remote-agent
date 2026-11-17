@@ -9,6 +9,7 @@ extension LaunchUITests {
         app.terminate(); app.launch()
         expandSimulatorProject(app)
         let row = try simulatorTaskRow(app, native: conversationId)
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
         let latest = fixtureItems(app, containing: "long-latest-message").firstMatch
         XCTAssertTrue(latest.waitUntilExists(timeout: 20))
@@ -37,6 +38,7 @@ extension LaunchUITests {
         expandSimulatorProject(app)
 
         let row = try simulatorTaskRow(app, native: conversationId)
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitUntilExists(timeout: 30))

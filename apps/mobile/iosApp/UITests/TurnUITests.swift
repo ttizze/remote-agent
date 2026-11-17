@@ -9,6 +9,7 @@ extension LaunchUITests {
         app.terminate(); app.launch()
         expandSimulatorProject(app)
         let row = try simulatorTaskRow(app, native: conversationId)
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 30)); row.tap()
         XCTAssertTrue(fixtureItems(app, containing: "long-latest-message").firstMatch.waitUntilExists(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]

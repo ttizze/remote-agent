@@ -252,6 +252,7 @@ extension LaunchUITests {
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
         let row = try simulatorTaskRow(app, native: "fixture-external-thread")
+        revealSimulatorTaskRow(app, row: row)
         XCTAssertTrue(row.waitUntilExists(timeout: 15)); row.tap()
         XCTAssertTrue(fixtureItems(app, containing: "answer-fixture-external-thread").firstMatch
             .waitUntilExists(timeout: 15))
