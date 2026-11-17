@@ -89,6 +89,8 @@ pub struct SaveFile {
     pub path: String,
 }
 impl Operation for SaveFile {
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
+
     fn navigation_bound(&self) -> bool {
         false
     }
@@ -134,30 +136,32 @@ impl Operation for SaveFile {
     fn apply(
         self,
         snapshot: &mut Snapshot,
-        pane_id: &str,
-        (submitted, file): Self::Output,
-    ) -> Vec<Effect> {
-        Self::rebase_draft(snapshot, &submitted, &file);
-        let effects = super::file_tree::refresh_file_trees(snapshot, &file.path);
-        if snapshot
-            .panes
-            .get(pane_id)
-            .and_then(|pane| pane.workspace.file.as_ref())
-            .is_some_and(|current| current.path == file.path)
-            && let Some(pane) = snapshot.panes.get_mut(pane_id)
-        {
-            Arc::make_mut(&mut Arc::make_mut(pane).workspace).file = Some(Arc::new(file));
-        }
-        effects
-    }
-    fn stale(
-        self,
-        snapshot: &mut Snapshot,
         _pane_id: &str,
         (submitted, file): Self::Output,
     ) -> Vec<Effect> {
         Self::rebase_draft(snapshot, &submitted, &file);
-        Vec::new()
+        let effects = super::file_tree::refresh_file_trees(snapshot, &file.path);
+        let file = Arc::new(file);
+        let matches_file = |location: &WorkspaceLocation| {
+            location
+                .file
+                .as_ref()
+                .is_some_and(|current| current.path == file.path)
+        };
+        for pane in Arc::make_mut(&mut snapshot.panes.0).values_mut() {
+            if matches_file(&pane.workspace) {
+                Arc::make_mut(&mut Arc::make_mut(pane).workspace).file = Some(file.clone());
+            }
+            if pane.workspaces.values().any(matches_file) {
+                for location in Arc::make_mut(&mut Arc::make_mut(pane).workspaces)
+                    .values_mut()
+                    .filter(|location| matches_file(location))
+                {
+                    location.file = Some(file.clone());
+                }
+            }
+        }
+        effects
     }
 }
 impl SaveFile {
@@ -498,6 +502,9 @@ impl Operation for LoadVisualization {
         }
     }
 }
+
+#[cfg(test)]
+mod save_tests;
 
 #[cfg(test)]
 mod read_result_tests {
