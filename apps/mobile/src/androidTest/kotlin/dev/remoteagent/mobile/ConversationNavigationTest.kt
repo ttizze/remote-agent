@@ -70,6 +70,10 @@ class ConversationNavigationTest {
                 header.assertIsDisplayed().performClick()
                 compose.waitForIdle()
                 header.assertIsDisplayed()
+                // Core's T3 timeline has a separate disclosure for the tool group.
+                compose.onNodeWithText("40 件のコマンドを実行しました").assertIsDisplayed().performClick()
+                compose.waitForIdle()
+                header.assertIsDisplayed()
                 compose.onNodeWithText("command-0", substring = true).assertIsDisplayed()
             }
         }
