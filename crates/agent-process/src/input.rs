@@ -29,9 +29,11 @@ async fn wait_for_owner(owner_closed: &mut impl FnMut() -> io::Result<bool>) -> 
 
 #[cfg(unix)]
 pub(super) fn owner_closed(pipe: &impl std::os::fd::AsRawFd) -> io::Result<bool> {
+    // Darwin needs read readiness requested to report a pipe hangup, even
+    // though unread input must remain untouched by this lifetime check.
     let mut descriptor = libc::pollfd {
         fd: pipe.as_raw_fd(),
-        events: 0,
+        events: libc::POLLIN,
         revents: 0,
     };
     if unsafe { libc::poll(&mut descriptor, 1, 0) } == -1 {
