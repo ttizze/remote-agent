@@ -98,12 +98,13 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
         if viewport {
             // The bounded item page starts inside collapsed work, leaving a
             // short viewport with older pages available behind the manual control.
+            // Keep this reading-position case to a few manual pages; the long
+            // scenario separately retains thousands of items for capacity coverage.
             for turn in &turns[..14] {
                 let mut turn = turn.borrow_mut();
-                turn["items"]
-                    .as_array_mut()
-                    .unwrap()
-                    .retain(|item| item["type"] == "commandExecution");
+                let items = turn["items"].as_array_mut().unwrap();
+                items.retain(|item| item["type"] == "commandExecution");
+                items.truncate(50);
             }
         }
         let mut last = turns.last().unwrap().borrow_mut();
@@ -319,6 +320,14 @@ mod tests {
                     let items = turn["items"].as_array().unwrap();
                     !items.is_empty() && items.iter().all(|item| item["type"] == "commandExecution")
                 }));
+                let older_items: usize = history.turns[..14]
+                    .iter()
+                    .map(|turn| turn.borrow()["items"].as_array().unwrap().len())
+                    .sum();
+                assert!(
+                    older_items > 500,
+                    "the manual-control fixture needs older pages"
+                );
                 assert_eq!(last["items"].as_array().unwrap().len(), 2);
                 assert_eq!(last["items"][0]["type"], "userMessage");
             }

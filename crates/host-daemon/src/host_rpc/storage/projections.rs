@@ -219,7 +219,9 @@ pub(super) fn save<T: Projection>(
         ownership
     );
     let changed = transaction
-        .execute(&sql, rusqlite::params_from_iter(values))
+        .prepare_cached(&sql)
+        .map_err(failure)?
+        .execute(rusqlite::params_from_iter(values))
         .map_err(failure)?;
     if changed != 1 {
         return Err("projection belongs to another conversation".into());

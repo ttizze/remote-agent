@@ -24,9 +24,9 @@ pub(super) fn append(
         event.change,
         model::Change::ThreadCreated(_) | model::Change::Thread(_)
     ) {
-        transaction.execute("UPDATE orchestration_v2_projection_threads
-            SET updated_at=?1,payload_json=json_set(payload_json,'$.updatedAt',?1) WHERE thread_id=?2",
-            params![event.occurred_at,event.thread_id]).map_err(failure)?;
+        transaction.prepare_cached("UPDATE orchestration_v2_projection_threads
+            SET updated_at=?1,payload_json=json_set(payload_json,'$.updatedAt',?1) WHERE thread_id=?2")
+            .map_err(failure)?.execute(params![event.occurred_at,event.thread_id]).map_err(failure)?;
     }
     let mut encoded = serde_json::to_value(&event).map_err(failure)?;
     let fields = encoded.as_object_mut().ok_or("event is not an object")?;
@@ -38,19 +38,19 @@ pub(super) fn append(
     for key in ["id", "threadId", "occurredAt"] {
         fields.remove(key);
     }
-    transaction.execute("INSERT INTO orchestration_events(event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,command_id,causation_event_id,correlation_id,actor_kind,payload_json,metadata_json,application_event_version)
-        VALUES (?1,'thread',?2,coalesce((SELECT max(stream_version)+1 FROM orchestration_events WHERE aggregate_kind='thread' AND stream_id=?2),0),?3,?4,?5,NULL,?5,?6,?7,?8,2)",
-        params![event.id,event.thread_id,event_type,event.occurred_at,command_id,
+    transaction.prepare_cached("INSERT INTO orchestration_events(event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,command_id,causation_event_id,correlation_id,actor_kind,payload_json,metadata_json,application_event_version)
+        VALUES (?1,'thread',?2,coalesce((SELECT max(stream_version)+1 FROM orchestration_events WHERE aggregate_kind='thread' AND stream_id=?2),0),?3,?4,?5,NULL,?5,?6,?7,?8,2)")
+        .map_err(failure)?.execute(params![event.id,event.thread_id,event_type,event.occurred_at,command_id,
             if event.raw_event_id.is_some() {"provider"} else {"server"},
             serde_json::to_string(&payload).map_err(failure)?,serde_json::to_string(fields).map_err(failure)?]).map_err(failure)?;
     let sequence: u64 = transaction
         .last_insert_rowid()
         .try_into()
         .map_err(failure)?;
-    transaction.execute("INSERT INTO orchestration_v2_projection_metadata(projection_name,schema_version,last_sequence,updated_at)
+    transaction.prepare_cached("INSERT INTO orchestration_v2_projection_metadata(projection_name,schema_version,last_sequence,updated_at)
         VALUES ('thread-projections',2,?1,?2) ON CONFLICT(projection_name) DO UPDATE SET
-        last_sequence=excluded.last_sequence,updated_at=excluded.updated_at",
-        params![integer(sequence)?,event.occurred_at]).map_err(failure)?;
+        last_sequence=excluded.last_sequence,updated_at=excluded.updated_at")
+        .map_err(failure)?.execute(params![integer(sequence)?,event.occurred_at]).map_err(failure)?;
     Ok(StoredEvent {
         sequence,
         command_id: command_id.map(str::to_owned),
@@ -117,9 +117,9 @@ pub(super) fn item_position(
     run_ordinal: Option<u64>,
     placement: ItemPlacement,
 ) -> Result<u64, String> {
-    let existing:Option<i64>=transaction.query_row(
-        "SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id=?1 AND turn_item_id=?2",
-        params![thread_id,item_id],|row|row.get(0)).optional().map_err(failure)?;
+    let existing:Option<i64>=transaction.prepare_cached(
+        "SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id=?1 AND turn_item_id=?2")
+        .map_err(failure)?.query_row(params![thread_id,item_id],|row|row.get(0)).optional().map_err(failure)?;
     if let Some(ordinal) = existing {
         return ordinal.try_into().map_err(failure);
     }
@@ -133,15 +133,16 @@ pub(super) fn item_position(
     // itself) follows everything the thread already shows.
     if run_id.is_none() {
         let last: i64 = transaction
-            .query_row(
-                "SELECT coalesce(max(ordinal),0) FROM orchestration_v2_turn_item_positions WHERE thread_id=?1",
+            .prepare_cached(
+                "SELECT coalesce(max(ordinal),0) FROM orchestration_v2_turn_item_positions WHERE thread_id=?1")
+            .map_err(failure)?.query_row(
                 [thread_id],
                 |row| row.get(0),
             )
             .map_err(failure)?;
         let ordinal = last.checked_add(1).ok_or("item position exhausted")?;
-        transaction.execute("INSERT INTO orchestration_v2_turn_item_positions(thread_id,turn_item_id,ordinal) VALUES (?1,?2,?3)",
-                params![thread_id,item_id,ordinal]).map_err(failure)?;
+        transaction.prepare_cached("INSERT INTO orchestration_v2_turn_item_positions(thread_id,turn_item_id,ordinal) VALUES (?1,?2,?3)")
+                .map_err(failure)?.execute(params![thread_id,item_id,ordinal]).map_err(failure)?;
         return ordinal.try_into().map_err(failure);
     }
     let lower = integer(run_ordinal.unwrap_or(0))?
@@ -151,9 +152,10 @@ pub(super) fn item_position(
         .checked_add(999_999)
         .ok_or("item position exhausted")?;
     let (first, last): (i64, i64) = transaction
-        .query_row(
+        .prepare_cached(
             "SELECT coalesce(min(ordinal),?3),coalesce(max(ordinal),?2) FROM orchestration_v2_turn_item_positions
-                WHERE thread_id=?1 AND ordinal BETWEEN ?2 AND ?3",
+                WHERE thread_id=?1 AND ordinal BETWEEN ?2 AND ?3")
+        .map_err(failure)?.query_row(
             params![thread_id, lower, upper],
             |row| Ok((row.get(0)?,row.get(1)?)),
         )
@@ -165,8 +167,8 @@ pub(super) fn item_position(
             .filter(|ordinal| *ordinal <= upper)
             .ok_or("item run position exhausted")?
     };
-    transaction.execute("INSERT INTO orchestration_v2_turn_item_positions(thread_id,turn_item_id,ordinal) VALUES (?1,?2,?3)",
-                params![thread_id,item_id,ordinal]).map_err(failure)?;
+    transaction.prepare_cached("INSERT INTO orchestration_v2_turn_item_positions(thread_id,turn_item_id,ordinal) VALUES (?1,?2,?3)")
+                .map_err(failure)?.execute(params![thread_id,item_id,ordinal]).map_err(failure)?;
     ordinal.try_into().map_err(failure)
 }
 

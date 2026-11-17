@@ -141,9 +141,9 @@ fi
 
 prepare_pairing
 adb -P "$server_port" -s "$serial" shell am instrument -w -r -e cwd "$fixture/host/project" \
-    -e class dev.remoteagent.mobile.NativeTerminalTest \
+    -e class dev.remoteagent.mobile.NativeTerminalTest,dev.remoteagent.mobile.NativeTerminalRestoreTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.terminal.log"
-if ! grep -qx 'OK (1 test)' "$log.terminal.log"; then
+if ! grep -qx 'OK (3 tests)' "$log.terminal.log"; then
     adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/terminal-failure.png "$log.terminal-failure.png" || true
     adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/terminal-failure.xml "$log.terminal-failure.xml" || true
     exit 1
