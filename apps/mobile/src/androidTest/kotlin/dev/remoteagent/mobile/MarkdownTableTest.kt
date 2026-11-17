@@ -43,7 +43,11 @@ class MarkdownTableTest {
         val visible = mutableStateOf(true)
         compose.setContent {
             MaterialTheme {
-                Surface { Column(Modifier.width(360.dp)) { if (visible.value) ConversationBody(body.value) } }
+                Surface {
+                    Column(Modifier.width(360.dp)) {
+                        if (visible.value) ConversationBlocks(dev.remoteagent.core.markdownBlocks(body.value), "", null)
+                    }
+                }
             }
         }
         compose.onNodeWithTag("markdown.cell.0.0.0").assertTextEquals("構成")
@@ -62,7 +66,13 @@ class MarkdownTableTest {
                 it.readText()
             }
         compose.setContent {
-            MaterialTheme { Surface { Column(Modifier.width(360.dp)) { ConversationBody(fixture) } } }
+            MaterialTheme {
+                Surface {
+                    Column(Modifier.width(360.dp)) {
+                        ConversationBlocks(dev.remoteagent.core.markdownBlocks(fixture), "", null)
+                    }
+                }
+            }
         }
         for (text in listOf("見出し", "3. 最初", "4. 次", "☑ 完了", "☐ 未完了", "引用")) {
             compose.onNodeWithText(text).assertIsDisplayed()

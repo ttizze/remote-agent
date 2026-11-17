@@ -79,7 +79,9 @@ class MarkdownLinkTest {
             val base = LocalContext.current
             CompositionLocalProvider(LocalContext provides LinkContext(base) { launched.add(it) }) {
                 AppTheme {
-                    ConversationBody("[notes.md](/repo/notes.md)", "/repo") { intent, complete ->
+                    ConversationBlocks(dev.remoteagent.core.markdownBlocks("[notes.md](/repo/notes.md)"), "/repo") {
+                        intent,
+                        complete ->
                         intents.add(intent)
                         complete(
                             if (intent is Intent.ResolveFileReference)
@@ -110,7 +112,13 @@ class MarkdownLinkTest {
         compose.setContent {
             val base = LocalContext.current
             CompositionLocalProvider(LocalContext provides LinkContext(base, launch)) {
-                AppTheme { Surface { Column(Modifier.width(240.dp)) { ConversationBody(markdown) } } }
+                AppTheme {
+                    Surface {
+                        Column(Modifier.width(240.dp)) {
+                            ConversationBlocks(dev.remoteagent.core.markdownBlocks(markdown), "", null)
+                        }
+                    }
+                }
             }
         }
     }
