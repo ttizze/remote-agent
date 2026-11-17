@@ -733,6 +733,77 @@ fn cancelling_an_uncertain_steer_does_not_cancel_or_resend_its_running_turn() {
 }
 
 #[test]
+fn an_uncertain_steer_promoted_from_the_queue_can_be_resolved_without_stopping_its_turn() {
+    for deferred in [false, true] {
+        let mut state = accepted(
+            &accepted(&initial(), 1, Admission::Queue),
+            4,
+            Admission::Queue,
+        );
+        let run = state.active_run().unwrap().clone();
+        let queued = state.next_queued_run().unwrap().clone();
+        if deferred {
+            state = state
+                .apply(&promote_queued(&state, &queued.id, context("promote", &state)).unwrap());
+        }
+        state = state.apply(
+            &started(
+                &state,
+                run.active_attempt_id.as_deref().unwrap(),
+                "session",
+                native("turn", None),
+                context("started", &state),
+            )
+            .unwrap(),
+        );
+        if !deferred {
+            state = state
+                .apply(&promote_queued(&state, &queued.id, context("promote", &state)).unwrap());
+        }
+        let effect = state
+            .effects
+            .values_mut()
+            .find(|effect| matches!(effect.request, EffectRequest::ProviderTurnSteer { .. }))
+            .unwrap();
+        effect.status = EffectStatus::Running;
+        effect.lease_owner = Some("worker".into());
+        let effect_id = effect.id.clone();
+        let unknown =
+            state.apply(&uncertain_delivery(&state, &effect_id, "steer ack lost", NOW).unwrap());
+        assert!(
+            cancel_uncertain(&unknown, &run.user_message_id, context("wrong", &unknown)).is_err(),
+            "the joined turn's original input is not this uncertain steer"
+        );
+        let resolved = unknown.apply(
+            &cancel_uncertain(
+                &unknown,
+                &queued.user_message_id,
+                context("resolve", &unknown),
+            )
+            .expect("a promoted steer has the same recovery as a directly admitted steer"),
+        );
+        assert_eq!(resolved.runs[&run.id].status, RunStatus::Running);
+        assert_eq!(resolved.runs[&queued.id].status, RunStatus::Cancelled);
+        assert_eq!(resolved.run_attempts, unknown.run_attempts);
+        assert_eq!(resolved.effects, unknown.effects);
+        assert!(
+            cancel_uncertain(
+                &resolved,
+                &queued.user_message_id,
+                context("again", &resolved)
+            )
+            .is_err()
+        );
+        for id in [
+            user_item_id("thread", &queued.user_message_id),
+            format!("turn-item:delivery-uncertain:{effect_id}"),
+        ] {
+            assert_eq!(resolved.turn_items[&id].status, TurnItemStatus::Cancelled);
+        }
+    }
+}
+
+#[test]
 fn late_native_acceptance_resolves_the_public_uncertainty_error_with_the_outbox() {
     const LATER: &str = "2026-11-14T00:00:01.000Z";
     let mut state = accepted(&initial(), 1, Admission::Queue);

@@ -407,19 +407,30 @@ fn a_queued_input_is_displayed_once_in_the_queue_until_it_starts() {
     );
 }
 
-#[test]
-fn an_uncertain_steer_is_answerable_as_its_own_input_without_replacing_the_running_turn() {
+#[rstest::rstest]
+#[case("steer")]
+#[case("promoted_queued_to_steer")]
+fn an_uncertain_steer_is_answerable_as_its_own_input_without_replacing_the_running_turn(
+    #[case] intent: &str,
+) {
     use agent_protocol::session;
     let identity = session::SessionRef::new(None, "thread".into()).unwrap();
     let mut projection = projection();
     projection.runs.push(run("running"));
+    if intent == "promoted_queued_to_steer" {
+        let mut reserved = run("cancelled");
+        reserved.id = "reserved".into();
+        reserved.ordinal = 2;
+        reserved.user_message_id = "steer-input".into();
+        projection.runs.push(reserved);
+    }
     let mut user = item("steer-item", 1_000_002);
     user.body = TurnItemBody::UserMessage {
         message_id: "steer-input".into(),
         created_by: Actor::User,
         creation_source: CreationSource::Mobile,
         scheduled_task_id: None,
-        input_intent: "steer".into(),
+        input_intent: intent.into(),
         text: "extra".into(),
         attachments: vec![],
         context: None,
@@ -487,7 +498,18 @@ fn an_uncertain_steer_is_answerable_as_its_own_input_without_replacing_the_runni
     snapshot.projection = apply(&snapshot.projection, Change::TurnItem(cancelled));
     let view = display(&snapshot);
     assert!(view.thread.preparations.is_empty());
-    assert!(!view.thread.submissions.contains_key("steer-input"));
+    if intent == "promoted_queued_to_steer" {
+        // Its original admission remains saved; the message now belongs to
+        // the joined turn, with no unresolved delivery or reserved execution.
+        assert_eq!(
+            view.thread.submissions["steer-input"],
+            session::SubmissionDelivery::Accepted {
+                turn_id: Some("run".into()),
+            }
+        );
+    } else {
+        assert!(!view.thread.submissions.contains_key("steer-input"));
+    }
     assert!(view.thread.turns.as_ref().unwrap()[0].error.is_none());
 }
 

@@ -1036,14 +1036,29 @@ pub fn cancel_uncertain(
     context: Context<'_>,
 ) -> Result<Decision, String> {
     let user_item_id = user_item_id(&state.thread.id, message_id);
-    if state.turn_items.get(&user_item_id).is_some_and(|item| matches!(&item.body,TurnItemBody::UserMessage {input_intent,..} if input_intent=="steer")) {
+    if let Some(user) = state
+        .turn_items
+        .get(&user_item_id)
+        .filter(|item| item.body.is_steer())
+    {
         let item=state.turn_items.values().find(|item| item.parent_item_id.as_deref()==Some(&user_item_id)
             && item.status==TurnItemStatus::Failed && matches!(&item.body,TurnItemBody::Error {failure,..} if failure.class=="delivery_uncertain"))
             .ok_or("input delivery is no longer uncertain")?;
-        return Ok(Decision {changes:vec![
-            Change::TurnItem(TurnItem {status:TurnItemStatus::Cancelled,updated_at:context.now.into(),..item.clone()}),
-            Change::TurnItem(TurnItem {status:TurnItemStatus::Cancelled,updated_at:context.now.into(),..state.turn_items[&user_item_id].clone()})
-        ],effects:vec![]});
+        return Ok(Decision {
+            changes: vec![
+                Change::TurnItem(TurnItem {
+                    status: TurnItemStatus::Cancelled,
+                    updated_at: context.now.into(),
+                    ..item.clone()
+                }),
+                Change::TurnItem(TurnItem {
+                    status: TurnItemStatus::Cancelled,
+                    updated_at: context.now.into(),
+                    ..user.clone()
+                }),
+            ],
+            effects: vec![],
+        });
     }
     let uncertain_effect = state
         .effects

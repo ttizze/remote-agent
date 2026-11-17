@@ -144,15 +144,10 @@ pub fn project(
         submissions.insert(run.user_message_id.clone().into(), delivery);
     }
     for item in &projection.turn_items {
-        let model::TurnItemBody::UserMessage {
-            message_id,
-            input_intent,
-            ..
-        } = &item.body
-        else {
+        let model::TurnItemBody::UserMessage { message_id, .. } = &item.body else {
             continue;
         };
-        if input_intent != "steer" || !delivery_uncertain(projection, &item.id) {
+        if !item.body.is_steer() || !delivery_uncertain(projection, &item.id) {
             continue;
         }
         let run = projection

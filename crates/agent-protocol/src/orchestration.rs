@@ -922,6 +922,13 @@ pub enum TurnItemBody {
 }
 
 impl TurnItemBody {
+    /// Queue promotion preserves its provenance, but delivery and recovery
+    /// still belong to a steer rather than the run reserved at admission.
+    pub fn is_steer(&self) -> bool {
+        matches!(self, Self::UserMessage { input_intent, .. }
+            if matches!(input_intent.as_str(), "steer" | "promoted_queued_to_steer"))
+    }
+
     pub fn has_omitted_detail(&self) -> bool {
         match self {
             Self::CommandExecution { output_omitted, .. } => *output_omitted == Some(true),
