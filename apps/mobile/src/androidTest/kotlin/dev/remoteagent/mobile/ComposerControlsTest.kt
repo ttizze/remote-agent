@@ -31,6 +31,7 @@ class ComposerControlsTest {
         val key = JSONObject().put("Session", JSONObject().put("session", identity))
         val state =
             JSONObject(Snapshot.empty().serialize().decodeToString())
+                .put("connected", true)
                 .put("navigation", JSONObject().put("thread_id", identity).put("draft_key", key).put("cwd", "/fixture"))
                 .put(
                     "models",

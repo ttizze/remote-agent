@@ -37,6 +37,8 @@ import dev.remoteagent.core.Choice
 import dev.remoteagent.core.ConversationContext
 import dev.remoteagent.core.ElicitationAnswer
 import dev.remoteagent.core.ElicitationInput
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Question
 import dev.remoteagent.core.Request
 import dev.remoteagent.core.RequestBody

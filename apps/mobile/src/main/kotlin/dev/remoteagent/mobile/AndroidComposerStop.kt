@@ -25,6 +25,7 @@ import dev.remoteagent.core.Outcome
 internal fun ComposerStopButton(
     interrupt: Interrupt,
     phase: dev.remoteagent.core.OperationPhase?,
+    enabled: Boolean,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
 ) {
     val language = LocalUiLanguage.current
@@ -32,7 +33,7 @@ internal fun ComposerStopButton(
     Column {
         FilledIconButton(
             onClick = { perform(Intent.Interrupt(interrupt)) {} },
-            enabled = !stopping,
+            enabled = enabled,
             colors =
                 IconButtonDefaults.filledIconButtonColors(containerColor = Color.White, contentColor = Color.Black),
             modifier =

@@ -38,8 +38,9 @@ internal fun ThreadDetailFixture(
 ) {
     var current by remember(projection) { mutableStateOf(projection) }
     var expansion by remember(projection) { mutableStateOf(emptyMap<String, String>()) }
+    val context = dev.remoteagent.core.Presentation.fromSnapshot(snapshot, "").conversationContext()
     ThreadDetailScreen(
-        dev.remoteagent.core.Presentation.fromSnapshot(snapshot, "").conversationContext(),
+        context,
         current,
         ConversationActions(
             perform,
@@ -69,6 +70,7 @@ internal fun ThreadDetailFixture(
         ),
         modifier,
         scrollToTopRequest,
-        composer,
+        dockedRequests = context.navigation().threadId?.let(snapshot::dockedRequests).orEmpty(),
+        composer = composer,
     )
 }

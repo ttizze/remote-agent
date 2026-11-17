@@ -164,7 +164,7 @@ internal class AndroidAppModel(private val context: Context, private val prefere
         get() = conversationContext.navigation().draftKey
 
     val selectionKey
-        get() = connectionSelection.hostId to draftKey
+        get() = snapshot.panelScope(connectionSelection.hostId.orEmpty(), composer.controls().navigation.draftKey)
 
     init {
         scope.launch {
@@ -518,12 +518,11 @@ internal class AndroidAppModel(private val context: Context, private val prefere
         }
     }
 
-    fun attach(selection: Pair<String?, dev.remoteagent.core.DraftKey>, uri: Uri, complete: () -> Unit) {
+    fun attach(selection: dev.remoteagent.core.PanelScope, uri: Uri, complete: () -> Unit) {
         if (selection != selectionKey) {
             complete()
             return
         }
-        val key = draftKey
         if (!snapshot.connected()) connect()
         attachmentTransfers++
         var local: File? = null
@@ -535,7 +534,7 @@ internal class AndroidAppModel(private val context: Context, private val prefere
         scope.launch {
             var uploading = false
             try {
-                connections[selection.first]?.join()
+                connections[selection.host]?.join()
                 if (selection != selectionKey) return@launch
                 if (!snapshot.connected()) throw IOException("PCに接続できません。接続を確認してもう一度添付してください。")
                 notice = null
@@ -543,7 +542,7 @@ internal class AndroidAppModel(private val context: Context, private val prefere
                     withContext(Dispatchers.IO) { importAttachment(context, uri).also { local = File(it.path) } }
                 if (selection != selectionKey) return@launch
                 uploading = true
-                perform(Intent.UploadAttachment(UploadAttachment(key, attachment, null))) { finish() }
+                perform(Intent.UploadAttachment(UploadAttachment(selection.draft, attachment, null))) { finish() }
             } catch (error: SecurityException) {
                 if (selection == selectionKey) notice = error.displayMessage()
             } catch (error: IOException) {
@@ -698,7 +697,7 @@ private fun androidx.compose.foundation.layout.ColumnScope.AppScreenContent(
 
 @Composable
 private fun androidx.compose.foundation.layout.ColumnScope.ConversationPane(model: AndroidAppModel) {
-    androidx.compose.runtime.key(model.selectionKey) {
+    androidx.compose.runtime.key(model.connectionSelection.hostId, model.draftKey) {
         var scrollToTopRequest by remember { mutableStateOf(0) }
         ConversationHeader(
             model.conversationContext.title(),

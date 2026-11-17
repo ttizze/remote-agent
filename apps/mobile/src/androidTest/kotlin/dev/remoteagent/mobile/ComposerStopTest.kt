@@ -33,6 +33,7 @@ class ComposerStopTest {
         val key = JSONObject().put("Session", JSONObject().put("session", identity))
         val state =
             JSONObject(Snapshot.empty().serialize().decodeToString())
+                .put("connected", true)
                 .put("navigation", JSONObject().put("thread_id", identity).put("draft_key", key).put("cwd", "/fixture"))
                 .put(
                     "drafts",
@@ -73,6 +74,7 @@ class ComposerStopTest {
                 ComposerStopButton(
                     Interrupt(SessionRef(ProviderKind.CODEX, "thread"), "active"),
                     phase,
+                    phase !is OperationPhase.Running,
                     { intent, _ ->
                         intents.add(intent)
                         phase = OperationPhase.Running

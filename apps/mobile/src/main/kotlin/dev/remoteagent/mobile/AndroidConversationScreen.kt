@@ -245,6 +245,7 @@ internal fun ThreadComposer(
     val sending = controls.sending
     var uploading by remember(navigation.draftKey) { mutableStateOf(false) }
     val inputUnavailable = controls.unavailable
+    // Android keeps one composer stop for active and answered background work.
     val activeTurn = controls.runningTurn
     Surface(
         Modifier.padding(horizontal = 12.dp, vertical = 8.dp).testTag("conversation.composer"),
@@ -264,6 +265,7 @@ internal fun ThreadComposer(
                     ComposerStopButton(
                         Interrupt(navigation.threadId!!, activeTurn),
                         controls.interruptPhase,
+                        composer.canInterrupt(activeTurn),
                         perform,
                     )
                 } else
@@ -290,8 +292,8 @@ internal fun ThreadComposer(
 
 @Composable
 internal fun AttachmentButton(
-    selectionKey: Pair<String?, dev.remoteagent.core.DraftKey>,
-    attach: (Pair<String?, dev.remoteagent.core.DraftKey>, Uri, () -> Unit) -> Unit,
+    selectionKey: dev.remoteagent.core.PanelScope,
+    attach: (dev.remoteagent.core.PanelScope, Uri, () -> Unit) -> Unit,
     enabled: Boolean,
     transferState: (Boolean) -> Unit = {},
 ) {
