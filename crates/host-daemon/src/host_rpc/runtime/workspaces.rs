@@ -272,23 +272,22 @@ impl Runtime {
         target: &SessionRef,
     ) -> Result<(), String> {
         let runtime = &service.inner.conversation;
-        if !runtime
+        let Some(generation) = runtime
             .storage
             .thread_header(target)?
             .and_then(|thread| thread.workspace_launch)
-            .is_some_and(|workspace| {
+            .filter(|workspace| {
                 workspace
                     .setup
                     .as_ref()
                     .is_some_and(|setup| setup.phase == SetupPhase::Cancelled)
             })
-        {
+            .map(|workspace| workspace.generation)
+        else {
             return Ok(());
-        }
+        };
         let preparation = runtime.preparation(target);
-        if let Some((_, cancel)) = &*preparation.active.lock().unwrap() {
-            cancel.cancel();
-        }
+        preparation.cancel_generation(generation);
         let service = service.clone();
         let target = target.clone();
         tokio::spawn(async move {
@@ -297,21 +296,7 @@ impl Runtime {
             });
             let preparation = preparation;
             let _io = preparation.io.lock().await;
-            let result = async {
-                if let Some(workspace) = service
-                    .inner
-                    .conversation
-                    .storage
-                    .thread_header(&target)?
-                    .and_then(|thread| thread.workspace_launch)
-                {
-                    Self::discard_cancelled_workspace(&service, &target, workspace.generation)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok::<_, String>(())
-            }
-            .await;
+            let result = Self::discard_cancelled_workspace(&service, &target, generation).await;
             if let Err(error) = result {
                 tracing::error!(target:"agent",operation="workspace.cancel",%error);
             }

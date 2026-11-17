@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use tokio::{io::AsyncWriteExt, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
+mod input;
+use input::InputQueue;
+
 pub(super) struct Worker {
     pub(super) router: SessionRouter,
     pub(super) attached: Arc<Mutex<Option<SessionId>>>,
@@ -30,7 +33,7 @@ impl Worker {
         }
     }
     pub(super) async fn run(mut self, launch: Launch, size: TerminalSize) -> Result<(), String> {
-        let mut pending: Option<(u64, Receipt)> = None;
+        let mut input = InputQueue::default();
         let mut screen = TerminalScreen::new(size);
         let mut cleanup = Ok(());
         let result = async {
@@ -44,10 +47,15 @@ impl Worker {
             let mut stdin = child.stdin().take().ok_or("terminal input pipe unavailable")?;
             let mut output = JsonlReader::new(child.stdout().take().ok_or("terminal output pipe unavailable")?);
             let initialize = PtyCommand::Start { command:launch.arguments, cwd:launch.directory.to_string_lossy().into_owned(), rows:size.rows, cols:size.cols };
-            let mut next_id = 0u64;
             let interaction: Result<(), String> = async {
                 write(&mut stdin, &initialize).await?;
                 loop {
+                    if let Some(reply) = input.next_reply()? {
+                        tokio::select! {
+                            _ = self.stop.cancelled() => return Ok(()),
+                            result = write(&mut stdin, &reply) => result?,
+                        }
+                    }
                     tokio::select! {
                         biased;
                         _ = self.stop.cancelled() => return Ok(()),
@@ -62,16 +70,11 @@ impl Worker {
                                 PtyEvent::Started => { let checkpoint = screen.checkpoint(); self.publish(Notification::TerminalRestored { handle: self.handle.clone(), data: checkpoint.data, cols: checkpoint.size.cols, rows: checkpoint.size.rows }); self.started.store(true, std::sync::atomic::Ordering::Release); if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); } }
                                 PtyEvent::Output { data } => {
                                     // The Host is the sole terminal-query responder, even during disconnects.
-                                    for reply in screen.feed(&data) {
-                                        write(&mut stdin, &PtyCommand::Write { id: 0, data: reply }).await?;
-                                    }
+                                    input.extend_replies(screen.feed(&data));
                                     self.publish(Notification::Output { handle: self.handle.clone(), data });
                                 },
                                 PtyEvent::Ack { id, error } => {
-                                    if id == 0 { if let Some(error)=error {return Err(error);} continue; }
-                                    let (expected, complete) = pending.take().ok_or("unexpected terminal acknowledgement")?;
-                                    if expected != id { let _ = complete.send(Err("terminal acknowledgement ID changed".into())); return Err("terminal acknowledgement ID changed".into()); }
-                                    let _ = complete.send(error.map_or(Ok(()), Err));
+                                    input.acknowledge(id, error)?;
                                 }
                                 PtyEvent::Exited { code } => {
                                     let code = i32::try_from(code).unwrap_or(1);
@@ -80,7 +83,7 @@ impl Worker {
                                 PtyEvent::Failed { message } => return Err(message),
                             }
                         }
-                        command = self.input.recv(), if self.ready.is_none() && pending.is_none() => {
+                        command = self.input.recv(), if self.ready.is_none() && input.is_idle() => {
                             let Some(command) = command else { return Ok(()) };
                             if let Action::Attach(owner, size) = command.action {
                                 if let Err(error) = self.router.ensure_session(owner) { let _=command.complete.send(Err(error)); continue; }
@@ -98,13 +101,12 @@ impl Worker {
                                 let _=command.complete.send(result);
                                 continue;
                             }
-                            next_id = next_id.checked_add(1).ok_or("terminal operation ID exhausted")?;
+                            let id = input.begin(Some(command.complete))?;
                             let action = match command.action {
-                                Action::Write(data) => PtyCommand::Write {id:next_id,data},
-                                Action::Resize(size) => {screen.resize(size); PtyCommand::Resize {id:next_id,rows:size.rows,cols:size.cols}},
+                                Action::Write(data) => PtyCommand::Write {id,data},
+                                Action::Resize(size) => {screen.resize(size); PtyCommand::Resize {id,rows:size.rows,cols:size.cols}},
                                 Action::Attach(_, _) => unreachable!(),
                             };
-                            pending = Some((next_id, command.complete));
                             tokio::select! {
                                 _ = self.stop.cancelled() => return Ok(()),
                                 result = write(&mut stdin, &action) => result?,
@@ -136,9 +138,7 @@ impl Worker {
                 .err()
                 .unwrap_or_else(|| "terminal startup cancelled".into())));
         }
-        if let Some((_, complete)) = pending {
-            let _ = complete.send(Err("terminal has exited".into()));
-        }
+        input.finish();
         if let Err(message) = result {
             if let Some(replay) = &self.replay {
                 *replay.lock().unwrap() = super::Replay {

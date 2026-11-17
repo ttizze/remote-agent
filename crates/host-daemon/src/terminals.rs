@@ -488,6 +488,96 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn multiple_query_replies_survive_backpressured_input_in_order() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let directory = tempfile::tempdir().unwrap();
+            let router = SessionRouter::new();
+            let mut connection = router.open_authenticated_session(Some("query-test".into()));
+            let terminals = Terminals::default();
+            let launch = Launch {
+                directory: directory.path().into(),
+                arguments: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "stty raw -echo; : > ready; dd bs=1 count=1 of=prefix 2>/dev/null; printf '\\033[2;3H\\033[6n\\033[4;5H\\033[6n\\033[5n'; remaining=1000; while [ ! -f release ]; do remaining=$((remaining-1)); [ \"$remaining\" -gt 0 ] || exit 91; sleep 0.01; done; dd bs=1 count=65535 of=user-input 2>/dev/null; dd bs=1 count=16 of=query-replies 2>/dev/null; dd bs=1 count=4 of=following-input 2>/dev/null".into(),
+                ],
+                environment: Vec::new(),
+            };
+            terminals
+                .start(
+                    router,
+                    connection.id(),
+                    "queries".into(),
+                    launch,
+                    TerminalSize { rows: 24, cols: 80 },
+                )
+                .await
+                .unwrap();
+            while !directory.path().join("ready").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let call = Call::WriteTerminal(agent_protocol::operations::TerminalWrite {
+                process_handle: "queries".into(),
+                data: vec![b'x'; 64 * 1024],
+            });
+            let mut writing = Box::pin(terminals.request(connection.id(), &call));
+            assert!(futures_util::poll!(&mut writing).is_pending());
+            let queries = b"\x1b[2;3H\x1b[6n\x1b[4;5H\x1b[6n\x1b[5n";
+            let mut output = Vec::new();
+            while !output.windows(queries.len()).any(|bytes| bytes == queries) {
+                let line = connection.recv().await.unwrap();
+                match agent_protocol::protocol::decode::<Notification>(&line).unwrap() {
+                    Notification::Output { data, .. } => output.extend(data),
+                    Notification::TerminalFailed { reason, .. } => panic!("{reason}"),
+                    Notification::Exited { code, .. } => panic!("fixture exited early: {code}"),
+                    _ => {}
+                }
+            }
+            assert!(futures_util::poll!(&mut writing).is_pending());
+            std::fs::write(directory.path().join("release"), b"ready").unwrap();
+            writing.await.unwrap();
+            terminals
+                .request(
+                    connection.id(),
+                    &Call::WriteTerminal(agent_protocol::operations::TerminalWrite {
+                        process_handle: "queries".into(),
+                        data: b"next".to_vec(),
+                    }),
+                )
+                .await
+                .unwrap();
+            loop {
+                let line = connection.recv().await.unwrap();
+                match agent_protocol::protocol::decode::<Notification>(&line).unwrap() {
+                    Notification::Exited { code, .. } => {
+                        assert_eq!(code, 0);
+                        break;
+                    }
+                    Notification::TerminalFailed { reason, .. } => panic!("{reason}"),
+                    _ => {}
+                }
+            }
+            assert_eq!(std::fs::read(directory.path().join("prefix")).unwrap(), b"x");
+            assert_eq!(
+                std::fs::read(directory.path().join("user-input")).unwrap(),
+                vec![b'x'; 65535]
+            );
+            assert_eq!(
+                std::fs::read(directory.path().join("query-replies")).unwrap(),
+                b"\x1b[2;3R\x1b[4;5R\x1b[0n"
+            );
+            assert_eq!(
+                std::fs::read(directory.path().join("following-input")).unwrap(),
+                b"next"
+            );
+            terminals.shutdown().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn command_runs_once_and_reattachment_keeps_its_identity() {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             let directory = tempfile::tempdir().unwrap();

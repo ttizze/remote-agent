@@ -269,13 +269,14 @@ impl Worktrees {
                 Err(error) => return Err(error.into()),
             }
             let root = Path::new(project);
+            let base = default_base(root)?;
             let branch = format!("bex/session-{}", uuid::Uuid::new_v4());
             let relative_cwd = cwd.strip_prefix(destination)?;
             create_checkout(
                 root,
                 destination,
                 &branch,
-                "refs/heads/main",
+                &base,
                 if state.settings.copy_on_create {
                     &state.settings.copy_paths
                 } else {
@@ -283,6 +284,8 @@ impl Worktrees {
                 },
                 relative_cwd,
             )?;
+            initialize_submodules(destination, &state.settings, &Observer::default())
+                .map_err(|error| discard_checkout(root, destination, &branch, error))?;
             Ok(Some(destination.to_path_buf()))
         })
         .await?
@@ -325,9 +328,8 @@ impl Worktrees {
         let cwd = PathBuf::from(cwd);
         tokio::task::spawn_blocking(move || {
             let cwd = dunce::canonicalize(&cwd)?;
-            let root = dunce::canonicalize(
-                crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
-            )?;
+            let root = crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?;
+            let root = dunce::canonicalize(root.strip_suffix('\n').unwrap_or(&root))?;
             let relative_cwd = cwd.strip_prefix(&root)?;
             let base = preparation::start_ref(&root, &base, fetch, &observer)?;
             let original = match state
@@ -407,27 +409,8 @@ impl Worktrees {
                     agent_protocol::workspace::SetupStageStatus::Done,
                 ))
                 .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
-            if state.settings.init_submodules && destination.join(".gitmodules").is_file() {
-                use agent_protocol::workspace::{SetupStageId, SetupStageStatus};
-                observer
-                    .send(Progress::Stage(
-                        SetupStageId::Submodules,
-                        SetupStageStatus::Running,
-                    ))
-                    .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
-                preparation::git(
-                    &destination,
-                    &["submodule", "update", "--init", "--recursive", "--progress"],
-                    &observer,
-                )
+            initialize_submodules(&destination, &state.settings, &observer)
                 .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
-                observer
-                    .send(Progress::Stage(
-                        SetupStageId::Submodules,
-                        SetupStageStatus::Done,
-                    ))
-                    .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
-            }
             state.workspace_roots.insert(
                 destination
                     .to_str()
@@ -641,6 +624,30 @@ fn create_checkout_observed(
         Ok(target)
     })();
     prepared.map_err(|error| discard_checkout(source, destination, branch, error))
+}
+
+fn initialize_submodules(
+    destination: &Path,
+    settings: &WorktreeSettings,
+    observer: &Observer,
+) -> Result<()> {
+    use agent_protocol::workspace::{SetupStageId, SetupStageStatus};
+    if !settings.init_submodules || !destination.join(".gitmodules").is_file() {
+        return Ok(());
+    }
+    observer.send(Progress::Stage(
+        SetupStageId::Submodules,
+        SetupStageStatus::Running,
+    ))?;
+    preparation::git(
+        destination,
+        &["submodule", "update", "--init", "--recursive", "--progress"],
+        observer,
+    )?;
+    observer.send(Progress::Stage(
+        SetupStageId::Submodules,
+        SetupStageStatus::Done,
+    ))
 }
 
 fn discard_checkout(
@@ -1093,6 +1100,280 @@ mod tests {
                 "uncommitted"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn deleted_worktrees_use_the_projects_existing_default_base() {
+        for remote in [None, Some("origin"), Some("mirror")] {
+            let directory = repository();
+            let root = dunce::canonicalize(directory.path()).unwrap();
+            crate::git::text(&root, &["branch", "-m", "develop"]).unwrap();
+            fs::write(root.join("default-only.txt"), "default branch\n").unwrap();
+            crate::git::text(&root, &["add", "default-only.txt"]).unwrap();
+            commit(&root, "default branch change");
+            let base = if let Some(remote) = remote {
+                crate::git::text(&root, &["remote", "add", remote, "./unreachable"]).unwrap();
+                let tracking = format!("refs/remotes/{remote}/develop");
+                crate::git::text(&root, &["update-ref", &tracking, "HEAD"]).unwrap();
+                crate::git::text(
+                    &root,
+                    &[
+                        "symbolic-ref",
+                        &format!("refs/remotes/{remote}/HEAD"),
+                        &tracking,
+                    ],
+                )
+                .unwrap();
+                crate::git::text(&root, &["switch", "-c", "main", "HEAD~1"]).unwrap();
+                tracking
+            } else {
+                "refs/heads/develop".into()
+            };
+            let state = tempfile::tempdir().unwrap();
+            let projects = state.path().join("projects.json");
+            let store = Worktrees::new(&projects);
+            let checkout = store
+                .prepare_selected(
+                    root.to_str().unwrap(),
+                    String::new(),
+                    false,
+                    Observer::default(),
+                )
+                .await
+                .unwrap();
+            assert!(checkout.join("default-only.txt").is_file());
+            store
+                .remove(checkout.to_str().unwrap().into(), Removal::Manual)
+                .await
+                .unwrap();
+            let restarted = Worktrees::new(&projects);
+            assert_eq!(
+                restarted
+                    .ensure_available(checkout.to_str().unwrap())
+                    .await
+                    .unwrap(),
+                Some(checkout.clone()),
+                "default base {base}"
+            );
+            assert_eq!(
+                crate::git::text(&checkout, &["rev-parse", "HEAD"]).unwrap(),
+                crate::git::text(&root, &["rev-parse", &base]).unwrap()
+            );
+            assert_eq!(
+                fs::read_to_string(checkout.join("default-only.txt")).unwrap(),
+                "default branch\n"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkout_preserves_trailing_whitespace_in_repository_paths() {
+        for name in ["project ", "project\t"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join(name);
+            fs::create_dir(&root).unwrap();
+            let fixture = repository();
+            crate::git::text(
+                directory.path(),
+                &[
+                    "clone",
+                    "--quiet",
+                    fixture.path().to_str().unwrap(),
+                    root.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+            let root = dunce::canonicalize(root).unwrap();
+            let store = Worktrees::new(&directory.path().join("projects.json"));
+            for neighbor in [false, true] {
+                if neighbor {
+                    let neighbor = directory.path().join("project");
+                    fs::create_dir(&neighbor).unwrap();
+                    crate::git::text(&neighbor, &["init", "--initial-branch=other"]).unwrap();
+                    fs::write(neighbor.join("neighbor-only.txt"), "wrong repository\n").unwrap();
+                    crate::git::text(&neighbor, &["add", "."]).unwrap();
+                    commit(&neighbor, "neighbor");
+                }
+                let checkout = store
+                    .prepare_selected(
+                        root.to_str().unwrap(),
+                        "main".into(),
+                        false,
+                        Observer::default(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(checkout.file_name(), root.file_name());
+                assert_eq!(
+                    fs::read_to_string(checkout.join("tracked.txt")).unwrap(),
+                    "committed\n"
+                );
+                assert!(!checkout.join("neighbor-only.txt").exists());
+            }
+        }
+    }
+
+    fn file_submodule_test(test: &str) -> bool {
+        const CHILD: &str = "AGENT_TEST_WORKTREE_SUBMODULES";
+        if std::env::var(CHILD).is_ok_and(|child| child == test) {
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, test)
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    fn submodule_repository() -> (tempfile::TempDir, tempfile::TempDir) {
+        let directory = repository();
+        let dependency = repository();
+        crate::git::text(
+            directory.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                dependency.path().to_str().unwrap(),
+                "dependency",
+            ],
+        )
+        .unwrap();
+        commit(directory.path(), "add dependency");
+        (directory, dependency)
+    }
+
+    #[tokio::test]
+    async fn deleted_worktrees_restore_submodules_according_to_settings() {
+        if !file_submodule_test(
+            "worktrees::tests::deleted_worktrees_restore_submodules_according_to_settings",
+        ) {
+            return;
+        }
+        for init_submodules in [false, true] {
+            let (directory, _dependency) = submodule_repository();
+            let root = dunce::canonicalize(directory.path()).unwrap();
+            let state = tempfile::tempdir().unwrap();
+            let projects = state.path().join("projects.json");
+            let store = Worktrees::new(&projects);
+            store
+                .settings(Some(WorktreeSettings {
+                    init_submodules,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+            let checkout = store
+                .prepare_selected(
+                    root.to_str().unwrap(),
+                    String::new(),
+                    false,
+                    Observer::default(),
+                )
+                .await
+                .unwrap();
+            let dependency_file = checkout.join("dependency/tracked.txt");
+            assert_eq!(dependency_file.is_file(), init_submodules);
+            fs::remove_dir_all(&checkout).unwrap();
+            let restarted = Worktrees::new(&projects);
+            assert_eq!(
+                restarted
+                    .ensure_available(checkout.to_str().unwrap())
+                    .await
+                    .unwrap(),
+                Some(checkout.clone())
+            );
+            assert!(checkout.join(".gitmodules").is_file());
+            assert_eq!(dependency_file.is_file(), init_submodules);
+            if init_submodules {
+                assert_eq!(fs::read_to_string(dependency_file).unwrap(), "committed\n");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_submodule_recovery_rolls_back_and_can_be_retried() {
+        if !file_submodule_test(
+            "worktrees::tests::failed_submodule_recovery_rolls_back_and_can_be_retried",
+        ) {
+            return;
+        }
+        let (directory, dependency) = submodule_repository();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let store = Worktrees::new(&state.path().join("projects.json"));
+        let checkout = store
+            .prepare_selected(
+                root.to_str().unwrap(),
+                String::new(),
+                false,
+                Observer::default(),
+            )
+            .await
+            .unwrap();
+        fs::remove_dir_all(&checkout).unwrap();
+        store
+            .settings(Some(WorktreeSettings {
+                init_submodules: true,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let branch_args = [
+            "for-each-ref",
+            "--format=%(refname):%(objectname)",
+            "refs/heads",
+        ];
+        let branches = crate::git::text(&root, &branch_args).unwrap();
+        crate::git::text(
+            &root,
+            &[
+                "config",
+                "submodule.dependency.url",
+                state.path().join("missing").to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        assert!(
+            store
+                .ensure_available(checkout.to_str().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(!checkout.exists());
+        assert_eq!(crate::git::text(&root, &branch_args).unwrap(), branches);
+        crate::git::text(
+            &root,
+            &[
+                "config",
+                "submodule.dependency.url",
+                dependency.path().to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .ensure_available(checkout.to_str().unwrap())
+                .await
+                .unwrap(),
+            Some(checkout.clone())
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.join("dependency/tracked.txt")).unwrap(),
+            "committed\n"
+        );
+        assert_eq!(store.list().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

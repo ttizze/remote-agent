@@ -3,7 +3,7 @@
 use serde_json::Value;
 use std::fmt::Write;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub(crate) struct Document {
     pub rtf: Vec<u8>,
     pub text: String,
@@ -15,7 +15,7 @@ pub(crate) struct Document {
     decorations: Vec<(usize, usize)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct Link {
     pub start: usize,
     pub end: usize,
@@ -608,6 +608,45 @@ mod tests {
         assert_eq!(doc.links[0].destination, "https://example.test/a?q=1");
         assert_eq!(doc.links[0].menu[0]["id"], "copyLink");
         assert_eq!(doc.links[0].action, "webLink");
+    }
+    #[test]
+    fn document_changes_when_only_a_same_label_link_destination_changes() {
+        let before = paragraphs(&[
+            json!({"runs":[{"text":"👋 "},{"text":"説明","link":"https://example.test/a"}]}),
+        ]);
+        let after = paragraphs(&[
+            json!({"runs":[{"text":"👋 "},{"text":"説明","link":"https://example.test/b"}]}),
+        ]);
+        assert_eq!(before.rtf, after.rtf);
+        assert_eq!(before.text, after.text);
+        assert_eq!(before.links[0].start, after.links[0].start);
+        assert_eq!(before.links[0].end, after.links[0].end);
+        assert_eq!(after.selected(3, 5), "説明");
+        assert_eq!(after.links[0].destination, "https://example.test/b");
+        assert_eq!(after.links[0].tooltip, "https://example.test/b");
+        assert!(before != after, "new destinations must update the document");
+        assert!(
+            after == after.clone(),
+            "unchanged documents must be reusable"
+        );
+    }
+    #[test]
+    fn document_changes_when_only_link_menu_tooltip_or_action_changes() {
+        let original =
+            paragraphs(&[json!({"runs":[{"text":"説明","link":"https://example.test"}]})]);
+        let mut menu = original.clone();
+        menu.links[0].menu = json!([{"id":"copyLink","title":"Copy link"}]);
+        let mut tooltip = original.clone();
+        tooltip.links[0].tooltip = "Updated tooltip".into();
+        let mut action = original.clone();
+        action.links[0].action = "file";
+        for changed in [menu, tooltip, action] {
+            assert_eq!(original.rtf, changed.rtf);
+            assert!(
+                original != changed,
+                "interaction metadata must stay current"
+            );
+        }
     }
     #[test]
     fn active_search_ranges_use_utf16_across_unicode_and_formatted_runs() {

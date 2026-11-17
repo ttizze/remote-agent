@@ -10,6 +10,32 @@ pub(super) struct Preparation {
     pub preparing_input: Mutex<HashMap<String, String>>,
 }
 
+impl Preparation {
+    pub(super) fn begin_input_write(
+        &self,
+        effect_id: &str,
+        ready: impl FnOnce() -> Result<bool, Failure>,
+    ) -> Result<bool, Failure> {
+        let mut preparing_input = self.preparing_input.lock().unwrap();
+        if !ready()? {
+            return Ok(false);
+        }
+        preparing_input.remove(effect_id);
+        Ok(true)
+    }
+
+    pub(super) fn cancel_generation(&self, generation: Uuid) {
+        if let Some((current, cancel)) = &*self.active.lock().unwrap()
+            && *current == generation
+        {
+            cancel.cancel();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
 impl Runtime {
     pub(super) fn preparation(&self, target: &SessionRef) -> Arc<Preparation> {
         self.preparations

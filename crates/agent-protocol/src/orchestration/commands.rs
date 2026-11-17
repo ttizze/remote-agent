@@ -219,6 +219,23 @@ pub fn admit(
     Ok(decision)
 }
 
+fn validate_input(
+    text: &str,
+    attachments: &[Value],
+    context: Option<&Value>,
+) -> Result<(), String> {
+    if text.trim().is_empty()
+        && attachments.is_empty()
+        && !context
+            .and_then(|context| context.get("records"))
+            .and_then(Value::as_array)
+            .is_some_and(|records| !records.is_empty())
+    {
+        return Err("input is empty".into());
+    }
+    Ok(())
+}
+
 fn admit_run(
     state: &State,
     input: Input,
@@ -237,17 +254,7 @@ fn admit_run(
     if state.has_uncertain_input() {
         return Err("resolve the uncertain input before sending".into());
     }
-    if input.text.trim().is_empty()
-        && input.attachments.is_empty()
-        && !input
-            .context
-            .as_ref()
-            .and_then(|context| context.get("records"))
-            .and_then(Value::as_array)
-            .is_some_and(|records| !records.is_empty())
-    {
-        return Err("input is empty".into());
-    }
+    validate_input(&input.text, &input.attachments, input.context.as_ref())?;
     if admission == Admission::Steer
         && state.active_run().is_some()
         && input.text.trim().eq_ignore_ascii_case("/compact")
@@ -505,9 +512,7 @@ pub fn edit_queued(
         .get(run_id)
         .filter(|run| run.status == RunStatus::Queued)
         .ok_or("run is no longer queued")?;
-    if text.trim().is_empty() {
-        return Err("queued messages need nonempty text".into());
-    }
+    validate_input(&text, &attachments, message_context.as_ref())?;
     let item = state
         .user_message_item(&run.user_message_id)
         .ok_or("queued message is missing")?;

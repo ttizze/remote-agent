@@ -146,6 +146,15 @@ final class AppViewModel {
     }
 
     func removeProfile(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            let operation = await sessions.lockHostStorage(host: id)
+            defer { operation.release() }
+            await removeHost(id)
+        }
+    }
+
+    private func removeHost(_ id: String) async {
         guard profiles.contains(where: { $0.id == id }) else { return }
         do { try HostProfile.save(profiles.filter { $0.id != id }) } catch {
             notice = error.localizedDescription
@@ -175,13 +184,11 @@ final class AppViewModel {
             activateProfile(host)
         }
         updateTaskList()
-        Task { [weak self] in
-            do {
-                do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }
-                try DeviceIdentity.remove(id)
-                try? FileManager.default.removeItem(at: MobileSessionStorage(host: id).conversations())
-            } catch { self?.notice = error.localizedDescription }
-        }
+        do {
+            try await old?.shutdown()
+            try DeviceIdentity.remove(id)
+            try? FileManager.default.removeItem(at: MobileSessionStorage(host: id).conversations())
+        } catch { notice = error.localizedDescription }
     }
 
     private func resetPresentation() {
@@ -221,6 +228,9 @@ final class AppViewModel {
             pairingError = nil
             pairingConnection = Task { [weak self] in
                 guard let self else { return }
+                let operation = await sessions.lockHostStorage(host: id)
+                defer { operation.release() }
+                guard !Task.isCancelled else { return }
                 do {
                     let storage = MobileSessionStorage(host: id)
                     let owner = try await sessions.pair(storage: storage, platform: storage, invitation: invitation)

@@ -127,8 +127,19 @@ fn read(
                         item
                     }),
             );
-            let cutoff=connection.query_row("SELECT max(ordinal) FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND run_id=?2",params![source_id,run.id],|row|row.get::<_,Option<i64>>(0)).map_err(ReadError::from)?
-                .ok_or("fork source run has no items")?.try_into().map_err(failure)?;
+            let boundary = state
+                .context_transfers
+                .values()
+                .find(|transfer| {
+                    transfer.kind == model::TransferType::Fork
+                        && transfer.target_thread_id == state.thread.id
+                        && transfer.source_thread_id == *source_id
+                        && transfer.source_point.run_id.as_ref() == Some(run_id)
+                })
+                .and_then(|transfer| transfer.source_point.turn_item_id.as_ref())
+                .ok_or("fork source run has no item boundary")?;
+            let cutoff=connection.query_row("SELECT ordinal FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND run_id=?2 AND turn_item_id=?3",params![source_id,run.id,boundary],|row|row.get::<_,i64>(0)).map_err(ReadError::from)?
+                .try_into().map_err(failure)?;
             items.extend(local_items(
                 connection,
                 source_id,

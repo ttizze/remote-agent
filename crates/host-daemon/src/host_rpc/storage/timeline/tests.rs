@@ -28,6 +28,27 @@ fn save_thread(db: &mut Connection, id: &str) {
     tx.commit().unwrap();
 }
 
+fn save_fork(tx: &Transaction<'_>, run: &model::Run, id: &str, boundary: &str) -> model::Thread {
+    let source = projections::metadata(tx, &run.thread_id).unwrap();
+    let mut point = source.context_source_point(run);
+    point.turn_item_id = Some(boundary.into());
+    let (child, transfer) = model::fork_thread(
+        &source.thread,
+        run,
+        point,
+        model::ForkTarget {
+            id,
+            transfer_id: id,
+            title: "Fork".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    projections::save(tx, None, &child).unwrap();
+    projections::save(tx, Some(&run.thread_id), &transfer).unwrap();
+    child
+}
+
 #[test]
 fn old_unknown_input_stays_actionable_outside_the_bounded_visible_page() {
     let mut db = database();
@@ -165,12 +186,7 @@ fn forks_inherit_only_the_prefix_without_copying_items_or_renumbering_local_runs
         )
         .unwrap();
     }
-    let mut child = thread("child");
-    child.forked_from = Some(model::ThreadForkSource::Run {
-        thread_id: "parent".into(),
-        run_id: "run:1".into(),
-    });
-    projections::save(&tx, None, &child).unwrap();
+    save_fork(&tx, &run("run:1", 1), "child", "parent:1");
     let mut child_run = run("child-run", 1);
     child_run.thread_id = "child".into();
     projections::save(&tx, Some("child"), &child_run).unwrap();
@@ -207,16 +223,12 @@ fn a_later_parent_rewind_preserves_already_forked_history_and_side_chats_show_on
     save_thread(&mut db, "parent");
     let tx = db.transaction().unwrap();
     let mut source_run = run("run", 1);
+    projections::save(&tx, Some("parent"), &source_run).unwrap();
+    save_item(&tx, &item("source", "parent", Some("run"), 1)).unwrap();
+    let child = save_fork(&tx, &source_run, "child", "source");
     source_run.status = model::RunStatus::RolledBack;
     source_run.completed_at = Some("2026-11-14T00:00:01.000Z".into());
     projections::save(&tx, Some("parent"), &source_run).unwrap();
-    save_item(&tx, &item("source", "parent", Some("run"), 1)).unwrap();
-    let mut child = thread("child");
-    child.forked_from = Some(model::ThreadForkSource::Run {
-        thread_id: "parent".into(),
-        run_id: "run".into(),
-    });
-    projections::save(&tx, None, &child).unwrap();
     let mut side = child.clone();
     side.id = "side".into();
     side.lineage.side_chat = Some(true);

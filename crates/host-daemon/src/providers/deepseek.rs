@@ -66,7 +66,7 @@ struct Inner {
     usage: std::sync::Mutex<Arc<crate::account_usage::UsageEntry>>,
 }
 struct Rpc {
-    input: Arc<Mutex<JsonlWriter<ChildStdin>>>,
+    input: Arc<Mutex<Option<JsonlWriter<ChildStdin>>>>,
     pending: Mutex<Pending>,
     next: AtomicU64,
     loaded: Mutex<HashSet<String>>,
@@ -316,7 +316,7 @@ impl DeepSeek {
                 .ok_or_else(|| failure("Harness stdout unavailable"))?,
         );
         let rpc = Arc::new(Rpc {
-            input: Arc::new(Mutex::new(JsonlWriter::new(input))),
+            input: Arc::new(Mutex::new(Some(JsonlWriter::new(input)))),
             pending: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             loaded: Mutex::new(HashSet::new()),
@@ -341,7 +341,7 @@ impl DeepSeek {
                 }
             }
             reader.stop.cancel();
-            let _ = reader.input.lock().await.shutdown().await;
+            drop(reader.input.lock().await.take());
             if tokio::time::timeout(Duration::from_secs(10), child.wait())
                 .await
                 .is_err()
@@ -408,17 +408,11 @@ impl DeepSeek {
             ));
         }
         if let Some(rpc) = self.0.rpc.lock().await.take() {
-            let loaded: Vec<_> = rpc.loaded.lock().await.iter().cloned().collect();
-            for id in loaded {
-                rpc.call(
-                    "session/close",
-                    json!({"sessionId":id}),
-                    Some(Duration::from_secs(30)),
-                )
-                .await?;
-            }
-            rpc.stop.cancel();
+            let stop = rpc.stop.clone().drop_guard();
+            let result = rpc.close_loaded().await;
+            drop(stop);
             let _ = tokio::time::timeout(Duration::from_secs(15), rpc.stopped.cancelled()).await;
+            result?;
         }
         Ok(())
     }
@@ -594,13 +588,45 @@ impl DeepSeek {
 }
 
 impl Rpc {
+    async fn close_loaded(&self) -> Result<(), Failure> {
+        let loaded: Vec<_> = self.loaded.lock().await.iter().cloned().collect();
+        for id in loaded {
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                self.call("session/close", json!({"sessionId":id}), None),
+            )
+            .await
+            .map_err(|_| {
+                Failure::unknown(
+                    "deepseek_timeout",
+                    "Harness did not acknowledge the request",
+                )
+            })??;
+        }
+        Ok(())
+    }
     async fn write(&self, value: Value) -> Result<(), Failure> {
-        self.input
-            .lock()
-            .await
-            .write_line(&value.to_string())
-            .await
-            .map_err(failure)
+        Self::write_input(&self.input, &self.stop, value).await
+    }
+    async fn write_input(
+        input: &Mutex<Option<JsonlWriter<ChildStdin>>>,
+        stop: &CancellationToken,
+        value: Value,
+    ) -> Result<(), Failure> {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => Err(failure("Harness disconnected")),
+            result = async {
+                input
+                    .lock()
+                    .await
+                    .as_mut()
+                    .ok_or_else(|| failure("Harness disconnected"))?
+                    .write_line(&value.to_string())
+                    .await
+                    .map_err(failure)
+            } => result,
+        }
     }
     async fn call(
         &self,
@@ -671,12 +697,9 @@ impl AnswerSource for Rpc {
             if stop.is_cancelled() {
                 return Err(failure("Harness disconnected"));
             }
-            input
-                .lock()
+            Self::write_input(&input, &stop, response)
                 .await
-                .write_line(&response.to_string())
-                .await
-                .map_err(|e| Failure::unknown("answer_delivery_unknown", e))
+                .map_err(|error| Failure::unknown("answer_delivery_unknown", error))
         }))
     }
 }
@@ -1644,6 +1667,132 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors["deepseek"]["code"], "provider_timeout");
         assert!(!errors.contains_key("claude"));
+    }
+
+    async fn reset_harness_fixture(behavior: &str) -> (tempfile::TempDir, DeepSeek, Arc<Rpc>) {
+        let directory = tempfile::tempdir().unwrap();
+        let harness = directory.path().join("harness.js");
+        std::fs::write(
+            &harness,
+            r#"
+const readline = require('node:readline');
+const {writeFileSync} = require('node:fs');
+const deadline = setTimeout(() => process.exit(99), 15000);
+readline.createInterface({input: process.stdin}).on('line', line => {
+    const request = JSON.parse(line);
+    if (request.method === 'session/close') {
+        writeFileSync(__dirname + '/close-requested', 'ready');
+        if ('fixture-mode' === 'timeout') return;
+        process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: request.id, error: {code: -32603, message: 'fixture close error'}}) + '\n');
+        return;
+    }
+    process.stdout.write(JSON.stringify({jsonrpc: '2.0', id: request.id, result: {protocolVersion: 1}}) + '\n');
+}).on('close', () => {
+    writeFileSync(__dirname + '/harness-stopped', 'stopped');
+    clearTimeout(deadline);
+    process.exit(0);
+});
+"#
+            .replace("fixture-mode", behavior),
+        )
+        .unwrap();
+        let adapter = DeepSeek::load(
+            harness,
+            directory.path().into(),
+            Some(directory.path().join("home")),
+            None,
+        )
+        .await
+        .unwrap();
+        let rpc = adapter.rpc().await.unwrap();
+        (directory, adapter, rpc)
+    }
+
+    #[tokio::test]
+    async fn reset_stops_the_old_harness_after_close_error_or_timeout() {
+        for behavior in ["error", "timeout"] {
+            let (directory, adapter, rpc) = reset_harness_fixture(behavior).await;
+            let cleanup = rpc.stop.clone().drop_guard();
+            rpc.loaded.lock().await.insert("loaded-session".into());
+            let resetting = adapter.clone();
+            let reset = tokio::spawn(async move { resetting.reset_rpc().await });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !directory.path().join("close-requested").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if behavior == "timeout" {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(31)).await;
+                tokio::time::resume();
+            }
+            let error = tokio::time::timeout(Duration::from_secs(5), reset)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            if behavior == "timeout" {
+                assert_eq!(error.code, "deepseek_timeout");
+            } else {
+                assert!(error.to_string().contains("fixture close error"));
+            }
+            assert!(rpc.stop.is_cancelled());
+            assert!(rpc.stopped.is_cancelled());
+            assert!(directory.path().join("harness-stopped").exists());
+            assert!(adapter.0.rpc.lock().await.is_none());
+            let replacement = adapter.rpc().await.unwrap();
+            assert_ne!(rpc.instance, replacement.instance);
+            adapter.reset_rpc().await.unwrap();
+            assert!(replacement.stopped.is_cancelled());
+            drop(cleanup);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_reset_before_close_still_stops_the_detached_harness() {
+        let (directory, adapter, rpc) = reset_harness_fixture("error").await;
+        let cleanup = rpc.stop.clone().drop_guard();
+        let loaded = rpc.loaded.lock().await;
+        let mut reset = Box::pin(adapter.reset_rpc());
+        assert!(futures_util::poll!(&mut reset).is_pending());
+        drop(reset);
+        drop(loaded);
+        assert!(rpc.stop.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), rpc.stopped.cancelled())
+            .await
+            .unwrap();
+        assert!(directory.path().join("harness-stopped").exists());
+        assert!(adapter.0.rpc.lock().await.is_none());
+        drop(cleanup);
+    }
+
+    #[tokio::test]
+    async fn stopping_the_harness_cancels_a_waiting_input_write() {
+        let (directory, adapter, rpc) = reset_harness_fixture("error").await;
+        let cleanup = rpc.stop.clone().drop_guard();
+        let input = rpc.input.lock().await;
+        let mut write = Box::pin(rpc.write(json!({"jsonrpc":"2.0","method":"fixture"})));
+        assert!(futures_util::poll!(&mut write).is_pending());
+
+        rpc.stop.cancel();
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), write)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        drop(input);
+        tokio::time::timeout(Duration::from_secs(5), rpc.stopped.cancelled())
+            .await
+            .unwrap();
+        assert!(directory.path().join("harness-stopped").exists());
+        assert!(rpc.input.lock().await.is_none());
+        assert!(rpc.write(json!({})).await.is_err());
+        drop(adapter);
+        drop(cleanup);
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ public final class TerminalSession extends TerminalOutput {
         emulator.resize(columns, rows, width, height);
         transport.resize(columns, rows);
     }
-    public void restoreSize(int columns, int rows) { emulator.resize(columns, rows, 8, 16); }
+    public void restoreSize(int columns, int rows) { emulator.reset(); emulator.resize(columns, rows, 8, 16); }
     public void feed(byte[] bytes) { feeding = true; try { emulator.append(bytes, bytes.length); } finally { feeding = false; } client.onTextChanged(this); }
     public void writeCodePoint(boolean alt, int codePoint) {
         write((alt ? "\u001b" : "") + new String(Character.toChars(codePoint)));

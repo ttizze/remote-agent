@@ -291,23 +291,12 @@ internal class AndroidAppModel(private val context: Context, private val prefere
                     val invitation =
                         parseInvitation(contents, System.currentTimeMillis().milliseconds.inWholeSeconds.toULong())
                     val id = ticketIdentity(invitation.endpoint)
-                    val storage = repository.sessionStorage(id)
-                    val store = sessions.pair(storage, storage, invitation)
-                    if (!isActive) {
-                        store.shutdown()
-                        return@launch
+                    val operation = sessions.lockHostStorage(id)
+                    try {
+                        pairHost(id, invitation)
+                    } finally {
+                        operation.release()
                     }
-                    val paired =
-                        profiles.filterNot { it.id == id } + HostProfile(id, invitation.hostName, invitation.endpoint)
-                    repository.saveProfiles(paired)
-                    observations.remove(id)?.cancel()
-                    connections.remove(id)?.cancel()
-                    sessions.adopt(id, store)
-                    if (connectionSelection.hostId == id) session = null
-                    if (!isActive) return@launch
-                    profiles = paired
-                    pairingConnection = null
-                    selectConnection(id)
                 } catch (error: AgentException) {
                     notice = error.displayMessage()
                 } finally {
@@ -315,6 +304,27 @@ internal class AndroidAppModel(private val context: Context, private val prefere
                 }
             }
         pairingConnection?.start()
+    }
+
+    private suspend fun CoroutineScope.pairHost(id: String, invitation: dev.remoteagent.core.Invitation) {
+        if (!isActive) return
+        val storage = repository.sessionStorage(id)
+        val store = sessions.pair(storage, storage, invitation)
+        if (!isActive) {
+            store.shutdown()
+            return
+        }
+        val paired =
+            profiles.filterNot { it.id == id } + HostProfile(id, invitation.hostName, invitation.endpoint)
+        repository.saveProfiles(paired)
+        observations.remove(id)?.cancel()
+        connections.remove(id)?.cancel()
+        sessions.adopt(id, store)
+        if (connectionSelection.hostId == id) session = null
+        if (!isActive) return
+        profiles = paired
+        pairingConnection = null
+        selectConnection(id)
     }
 
     fun connect() {
@@ -352,6 +362,17 @@ internal class AndroidAppModel(private val context: Context, private val prefere
     }
 
     fun removeProfile(host: String) {
+        scope.launch {
+            val operation = sessions.lockHostStorage(host)
+            try {
+                removeHost(host)
+            } finally {
+                operation.release()
+            }
+        }
+    }
+
+    private suspend fun removeHost(host: String) {
         if (profiles.none { it.id == host }) return
         profiles = profiles.filterNot { it.id == host }
         repository.saveProfiles(profiles)
@@ -375,19 +396,18 @@ internal class AndroidAppModel(private val context: Context, private val prefere
         connectionSelection.hostId?.let(::activateProfile)
         updateTaskList()
         screen = Screen.Hosts
-        scope.launch {
-            try {
-                previous?.shutdown()
-            } catch (error: AgentException) {
-                notice = error.displayMessage()
-            }
-            try {
-                repository.removeHost(host)
-            } catch (error: java.security.GeneralSecurityException) {
-                notice = error.displayMessage()
-            } catch (error: IOException) {
-                notice = error.displayMessage()
-            }
+        try {
+            previous?.shutdown()
+        } catch (error: AgentException) {
+            notice = error.displayMessage()
+            return
+        }
+        try {
+            repository.removeHost(host)
+        } catch (error: java.security.GeneralSecurityException) {
+            notice = error.displayMessage()
+        } catch (error: IOException) {
+            notice = error.displayMessage()
         }
     }
 

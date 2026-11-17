@@ -9,7 +9,7 @@ pub mod shell;
 mod view;
 pub(crate) use view::fork_point;
 pub use view::project;
-pub(crate) use view::{attachment_parts, attachments, context_input, context_parts};
+pub(crate) use view::{attachment_parts, attachments, context_input};
 
 /// T3 queries running item details under one `live` revision and settled
 /// details under updatedAt. Query results never change the thread projection.
@@ -399,8 +399,10 @@ pub fn merge_older_history(
             continue;
         }
         let mut row = current.get(&key).copied().unwrap_or(incoming).clone();
+        let local =
+            row.visibility == Visibility::Local || row.source_thread_id == projection.thread.id;
         if !current.contains_key(&key)
-            && (row.visibility == Visibility::Local || row.source_thread_id == projection.thread.id)
+            && local
             && let Some(item) = items.get(&row.source_item_id)
         {
             if !matches!(
@@ -408,14 +410,16 @@ pub fn merge_older_history(
                 model::TurnItemBody::RunInterruptRequest { .. }
                     | model::TurnItemBody::ApprovalRequest { .. }
                     | model::TurnItemBody::UserInputRequest { .. }
-            ) || !visibility.visible(item)
-            {
+            ) {
                 continue;
             }
             row.item = item.clone();
         }
+        if local && !visibility.visible(&row.item) {
+            continue;
+        }
         keys.insert(key);
-        if (row.visibility == Visibility::Local || row.source_thread_id == projection.thread.id)
+        if local
             && let std::collections::btree_map::Entry::Vacant(entry) =
                 items.entry(row.source_item_id.clone())
         {

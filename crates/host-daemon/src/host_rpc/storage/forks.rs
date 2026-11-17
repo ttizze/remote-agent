@@ -1,6 +1,9 @@
 use super::*;
 use agent_protocol::orchestration as model;
 
+#[cfg(test)]
+mod tests;
+
 impl Storage {
     pub(in crate::host_rpc) fn fork_origin(
         &self,
@@ -178,13 +181,13 @@ fn plan(
     use agent_protocol::conversation::records::ForkPoint;
     if let ForkPoint::Run { run_id } = through {
         let run = state.runs.get(run_id).ok_or("fork run does not exist")?;
-        return model::fork_thread(
-            &state.thread,
-            run,
-            state.context_source_point(run),
-            fork,
-            now,
-        );
+        let mut point = state.context_source_point(run);
+        point.turn_item_id = Some(connection.query_row(
+            "SELECT turn_item_id FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND run_id=?2 ORDER BY ordinal DESC,turn_item_id DESC LIMIT 1",
+            params![state.thread.id, run.id],
+            |row| row.get(0),
+        ).map_err(failure)?);
+        return model::fork_thread(&state.thread, run, point, fork, now);
     }
     let turn = if let ForkPoint::ProviderTurn { provider_turn_id } = through {
         Some(

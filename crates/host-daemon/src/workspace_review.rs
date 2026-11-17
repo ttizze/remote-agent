@@ -192,6 +192,33 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn review_and_marks_preserve_trailing_whitespace_in_repository_paths() {
+        for name in ["project ", "project\t"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join(name);
+            std::fs::create_dir(&root).unwrap();
+            git(&root, &["init", "--initial-branch=main"]);
+            std::fs::write(root.join("tracked.txt"), "base\n").unwrap();
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-m", "base"]);
+            std::fs::write(root.join("tracked.txt"), "base\nmine\n").unwrap();
+            assert_changes(&root, &["tracked.txt"], (1, 0)).await;
+            let neighbor = directory.path().join("project");
+            std::fs::create_dir(&neighbor).unwrap();
+            git(&neighbor, &["init", "--initial-branch=other"]);
+            git(&neighbor, &["commit", "--allow-empty", "-m", "neighbor"]);
+            std::fs::write(neighbor.join("neighbor-only.txt"), "wrong repository\n").unwrap();
+            let review = assert_changes(&root, &["tracked.txt"], (1, 0)).await;
+            assert_eq!(review.branch, "main");
+            assert!(review.diff.contains("+mine"));
+            assert!(!review.diff.contains("neighbor-only.txt"));
+            std::fs::write(root.join("tracked.txt"), "base\n").unwrap();
+            assert_changes(&root, &[], (0, 0)).await;
+        }
+    }
+
+    #[tokio::test]
     async fn changes_and_marks_follow_the_worktrees_source_through_edits_commits_and_integration() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();

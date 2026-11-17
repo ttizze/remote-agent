@@ -595,6 +595,7 @@ pub use agent_protocol::operations::RewindSession;
 struct Recalled {
     text: String,
     attachments: Vec<Attachment>,
+    invocations: Vec<agent_protocol::composer::Invocation>,
     contexts: Vec<agent_protocol::context::MessageContext>,
     fresh_context: bool,
 }
@@ -605,8 +606,8 @@ fn sent_input(
     details: &BTreeMap<(String, String), Arc<agent_protocol::orchestration::TurnItem>>,
     turn: &agent_protocol::ids::TurnId,
 ) -> Result<Option<Recalled>, String> {
-    use agent_protocol::{items::MessagePart, orchestration::TurnItemBody};
-    let Some((omitted, text, images, context)) = projection
+    use agent_protocol::orchestration::TurnItemBody;
+    let Some(item) = projection
         .turn_items
         .iter()
         .map(AsRef::as_ref)
@@ -625,42 +626,29 @@ fn sent_input(
                 .filter(|detail| crate::orchestration::same_detail_revision(item, detail))
                 .map_or(item, AsRef::as_ref)
         })
-        .find_map(|item| match &item.body {
-            TurnItemBody::UserMessage {
-                text,
-                attachments,
-                context,
-                ..
-            } => Some((item.detail_omitted, text, attachments, context)),
-            _ => None,
-        })
+        .find(|item| matches!(item.body, TurnItemBody::UserMessage { .. }))
     else {
         return Ok(None);
     };
-    if omitted {
+    if item.detail_omitted {
         return Err("Wait for the original message to finish loading before rewinding.".into());
     }
-    let mut attachments = crate::orchestration::attachments(images)?;
-    let mut contexts = Vec::new();
-    for part in crate::orchestration::context_parts(context.as_ref()) {
-        match part {
-            MessagePart::Attachment { name, path } => attachments.push(Attachment {
-                name,
-                path,
-                is_image: false,
-            }),
-            MessagePart::Context { context } => contexts.push(*context),
-            _ => {}
-        }
-    }
+    let run = projection.runs.iter().find(|run| run.id == turn.as_str());
+    let instance = run.map_or(&projection.thread.provider_instance_id, |run| {
+        &run.provider_instance_id
+    });
+    let provider = crate::session::ProviderKind::from_instance_id(instance)?;
+    let draft = crate::composer::input::from_body(
+        &item.body,
+        provider,
+        run.is_some_and(|run| run.fresh_context),
+    )?;
     Ok(Some(Recalled {
-        text: text.clone(),
-        attachments,
-        contexts,
-        fresh_context: projection
-            .runs
-            .iter()
-            .any(|run| run.id == turn.as_str() && run.fresh_context),
+        text: draft.text,
+        attachments: draft.attachments,
+        invocations: draft.invocations,
+        contexts: draft.contexts,
+        fresh_context: draft.fresh_context,
     }))
 }
 
@@ -751,6 +739,11 @@ impl Operation for RewindSession {
             let draft = Arc::make_mut(drafts.entry(captured.draft_key).or_default());
             draft.text = recalled_prompt(&draft.text, &recalled.text);
             draft.attachments.extend(recalled.attachments);
+            for invocation in recalled.invocations {
+                if !draft.invocations.contains(&invocation) {
+                    draft.invocations.push(invocation);
+                }
+            }
             for context in recalled.contexts {
                 if !draft
                     .contexts

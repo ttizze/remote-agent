@@ -222,6 +222,91 @@ fn accepted(state: &State, seed: u128, admission: Admission) -> State {
     )
 }
 
+#[test]
+fn queued_edits_use_the_same_nonempty_input_contract_as_admission() {
+    let state = accepted(
+        &accepted(&initial(), 1, Admission::Queue),
+        2,
+        Admission::Queue,
+    );
+    let queued_message = input(2).message_id;
+    let run = state
+        .runs
+        .values()
+        .find(|run| run.user_message_id == queued_message)
+        .unwrap();
+    assert_eq!(run.status, RunStatus::Queued);
+    for (text, attachments, message_context, valid) in [
+        ("updated", vec![], None, true),
+        (
+            "",
+            vec![serde_json::json!({"name":"fixture.png","path":"/fixture.png","isImage":true})],
+            None,
+            true,
+        ),
+        (
+            " \n",
+            vec![],
+            Some(serde_json::json!({"version":1,"records":[{
+                "version":1,"contextId":"skill-review","kind":"skill","label":"review","name":"review"
+            }]})),
+            true,
+        ),
+        ("", vec![], None, false),
+        (
+            " \n",
+            vec![],
+            Some(serde_json::json!({"version":1,"records":[]})),
+            false,
+        ),
+        (
+            "",
+            vec![],
+            Some(serde_json::json!({"version":1,"records":null})),
+            false,
+        ),
+    ] {
+        let mut submitted = input(3);
+        submitted.text = text.into();
+        submitted.attachments = attachments.clone();
+        submitted.context = message_context.clone();
+        let admission = admit(&state, submitted, Admission::Queue, context("new", &state));
+        let edit = edit_queued(
+            &state,
+            &run.id,
+            text.into(),
+            attachments.clone(),
+            message_context.clone(),
+            NOW,
+        );
+        if !valid {
+            assert_eq!(admission.unwrap_err(), "input is empty");
+            assert_eq!(edit.unwrap_err(), "input is empty");
+            continue;
+        }
+        assert!(
+            admission.is_ok(),
+            "new input must accept this content: {admission:?}"
+        );
+        let edit = edit.unwrap();
+        assert!(edit.effects.is_empty());
+        let updated = state.apply(&edit);
+        assert_eq!(updated.runs, state.runs);
+        let TurnItemBody::UserMessage {
+            text: updated_text,
+            attachments: updated_attachments,
+            context: updated_context,
+            ..
+        } = &updated.user_message_item(&queued_message).unwrap().body
+        else {
+            panic!("queued edit must preserve the user message body");
+        };
+        assert_eq!(updated_text, text);
+        assert_eq!(updated_attachments, &attachments);
+        assert_eq!(updated_context, &message_context);
+    }
+}
+
 fn running() -> (State, String, String) {
     let state = accepted(&initial(), 1, Admission::Queue);
     let run = state.runs.values().next().unwrap().id.clone();

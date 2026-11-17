@@ -794,27 +794,28 @@ impl Runtime {
                 },
             );
         }
-        let before_write = commands::at();
-        runtime
-            .storage
-            .observe_effect(effect, worker, &before_write, |state| {
-                model::cancel_start(
-                    state,
-                    &attempt.id,
-                    context(state, &effect.id, &before_write),
-                )
-            })
-            .map_err(storage_failure)?;
-        if runtime
-            .storage
-            .effect_state(effect, worker)
-            .map_err(storage_failure)?
-            .is_none()
-        {
-            return Ok(None);
-        }
         // Clearing the owner's non-delivery proof is the user-write boundary.
         // Stop holds the same mutex while certifying cancellation.
+        if !preparation.begin_input_write(&effect.id, || {
+            let before_write = commands::at();
+            runtime
+                .storage
+                .observe_effect(effect, worker, &before_write, |state| {
+                    model::cancel_start(
+                        state,
+                        &attempt.id,
+                        context(state, &effect.id, &before_write),
+                    )
+                })
+                .map_err(storage_failure)?;
+            Ok(runtime
+                .storage
+                .effect_state(effect, worker)
+                .map_err(storage_failure)?
+                .is_some())
+        })? {
+            return Ok(None);
+        }
         drop(allocation_stage);
         drop(allocation_io);
         let submitted = agent

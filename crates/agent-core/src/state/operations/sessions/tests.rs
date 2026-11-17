@@ -833,6 +833,120 @@ fn a_paged_rewind_restores_only_the_selected_conversations_original_input() {
     );
 }
 
+#[rstest::rstest]
+fn rewind_restores_canonical_invocations_without_discarding_existing_draft_parts(
+    #[values(ProviderKind::Codex, ProviderKind::Claude, ProviderKind::DeepSeek)]
+    provider: ProviderKind,
+    #[values(false, true)] paged: bool,
+) {
+    use agent_protocol::{
+        composer::{Invocation, InvocationKind},
+        context::{ContextContent, MessageContext},
+        orchestration::TurnItemBody,
+    };
+    let session = SessionRef::new(None, "rewind-invocations".into()).unwrap();
+    let mut state = Snapshot::default();
+    let response = serde_json::from_value(serde_json::json!({"thread":{
+        "id":session,"turns":[{"id":"old-run","status":"completed","items":[{
+            "id":"input","status":"completed","body":{"inline":{"body":{
+                "userMessage":{"text":"$review check @git","content":[]}
+            }}}
+        }]}]
+    }}))
+    .unwrap();
+    let mut canonical = crate::test_conversations::opened(response, &mut state).projection;
+    let projection = &mut canonical.projection;
+    projection.thread.provider_instance_id = "claude".into();
+    let run = projection
+        .runs
+        .iter_mut()
+        .find(|run| run.id == "old-run")
+        .unwrap();
+    run.provider_instance_id = provider.key().into();
+    run.fresh_context = true;
+    let context = MessageContext {
+        id: "source-context".into(),
+        label: "Source".into(),
+        content: ContextContent::File {
+            path: "/project/source.rs".into(),
+        },
+    };
+    let records = serde_json::json!({"version":1,"records":[
+        {"version":1,"contextId":"skill-review","kind":"skill","label":"review","name":"review"},
+        {"version":1,"contextId":"plugin-git","kind":"mention","label":"git","path":"plugin://git"},
+        {"version":1,"contextId":"source-file","kind":"mention","label":"source.rs","path":"/project/source.rs"},
+        context.record()
+    ]});
+    for item in projection.turn_items.iter_mut().chain(
+        projection
+            .visible_turn_items
+            .iter_mut()
+            .map(|row| &mut row.item),
+    ) {
+        if let TurnItemBody::UserMessage { context, .. } = &mut Arc::make_mut(item).body {
+            *context = Some(records.clone());
+        }
+    }
+    if paged {
+        projection.turn_items.clear();
+    }
+    Arc::make_mut(&mut state.sessions.projections).insert(session.clone(), Arc::new(canonical));
+    let existing = Invocation {
+        provider,
+        kind: InvocationKind::Skill,
+        name: "existing".into(),
+        path: "/skills/existing".into(),
+    };
+    Arc::make_mut(&mut state.input.drafts).insert(
+        session.clone().into(),
+        Arc::new(crate::state::Draft {
+            text: "$existing work".into(),
+            invocations: vec![existing.clone()],
+            contexts: vec![context.clone()],
+            ..Default::default()
+        }),
+    );
+    let operation = RewindSession::new(
+        session.clone(),
+        "old-run".into(),
+        state.connection.storage_scope.clone(),
+    );
+    let capture = operation.capture(&state, "").unwrap();
+    operation
+        .complete(&mut state, "", (capture, 1), false)
+        .unwrap();
+    let draft = &state.input.drafts[&session.into()];
+    assert_eq!(draft.text, "$existing work\n\n$review check @git");
+    assert_eq!(
+        draft.invocations,
+        [
+            existing,
+            Invocation {
+                provider,
+                kind: InvocationKind::Skill,
+                name: "review".into(),
+                path: String::new(),
+            },
+            Invocation {
+                provider,
+                kind: InvocationKind::Plugin,
+                name: "git".into(),
+                path: "plugin://git".into(),
+            },
+        ]
+    );
+    assert_eq!(
+        draft.attachments,
+        [Attachment {
+            name: "source.rs".into(),
+            path: "/project/source.rs".into(),
+            is_image: false,
+        }]
+    );
+    assert_eq!(draft.contexts, [context]);
+    assert!(draft.fresh_context);
+}
+
 #[test]
 fn a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences() {
     // T3 rewindToMessage adds files with allowDuplicates, including copies
@@ -859,6 +973,7 @@ fn a_confirmed_rewind_restores_duplicate_attachments_as_distinct_occurrences() {
         original: Some(Recalled {
             text: String::new(),
             attachments: vec![file.clone(), file.clone()],
+            invocations: Vec::new(),
             contexts: Vec::new(),
             fresh_context: false,
         }),

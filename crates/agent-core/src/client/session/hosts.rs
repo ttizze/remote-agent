@@ -3,6 +3,9 @@ use super::*;
 use crate::client::persistence::DevicePreferences;
 use std::collections::BTreeMap;
 
+mod storage;
+pub use storage::HostStorageGuard;
+
 struct Hosts {
     sessions: BTreeMap<String, Arc<ClientSession>>,
     active: bool,
@@ -11,6 +14,7 @@ struct Hosts {
 #[derive(uniffi::Object)]
 pub struct ClientSessions {
     hosts: Mutex<Hosts>,
+    storage: storage::HostStorageLocks,
     device: Arc<DevicePreferences>,
     recent_chats: bool,
     client_build: ClientBuild,
@@ -31,11 +35,18 @@ impl ClientSessions {
                 sessions: BTreeMap::new(),
                 active: true,
             }),
+            storage: Default::default(),
             device,
             recent_chats,
             client_build,
             device_name,
         })
+    }
+
+    /// Hold through pairing and adoption, or removal, shutdown and platform storage cleanup.
+    /// Acquire before accessing Host storage or changing its saved profile or session.
+    pub async fn lock_host_storage(&self, host: String) -> Arc<HostStorageGuard> {
+        self.storage.lock(&host).await
     }
 
     /// Opening another Host neither retires nor waits for an existing session.
@@ -84,6 +95,7 @@ impl ClientSessions {
     }
 
     /// Remains provisional until the platform saves the profile and adopts it.
+    /// The caller holds its Host storage guard until that commit or provisional shutdown.
     pub async fn pair(
         &self,
         storage: Arc<dyn ClientStorage>,
@@ -121,6 +133,7 @@ impl ClientSessions {
 
     /// Detach synchronously so pending native work cannot reopen a removed Host.
     /// Await the returned session's shutdown before deleting platform files.
+    /// Hold its Host storage guard until shutdown and platform cleanup both finish.
     pub fn remove(&self, host: String) -> Option<Arc<ClientSession>> {
         let session = self.hosts.lock().unwrap().sessions.remove(&host)?;
         session.retire();

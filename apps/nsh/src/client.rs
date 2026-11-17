@@ -511,6 +511,7 @@ impl Client {
             .as_secs();
         agent_core::client::native::validate_invitation(invitation.clone(), now)?;
         let id = agent_core::client::native::ticket_identity(invitation.endpoint.clone())?;
+        let _storage = self.sessions.lock_host_storage(id.clone()).await;
         let host = Host {
             id: id.clone(),
             name: invitation.host_name.clone(),
@@ -571,6 +572,7 @@ impl Client {
     }
 
     async fn remove_host(&self, id: String) -> Result<(), AgentError> {
+        let _storage = self.sessions.lock_host_storage(id.clone()).await;
         let mut hosts = self.hosts.lock().await;
         let Some(profile) = hosts
             .iter()
@@ -821,6 +823,44 @@ mod tests {
             };
             assert_eq!(hosts.len(), 1);
             assert!(hosts[0] == remote);
+            client.shutdown().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn removal_waits_for_pairing_storage_before_detaching_or_deleting_a_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = saved_host(directory.path());
+        let (runtime, client, incoming) = Client::new(directory.path().into(), None).unwrap();
+        runtime.block_on(async {
+            assert!(matches!(incoming.recv().await.unwrap(), Update::Hosts(_)));
+            assert_eq!(client.hosts.lock().await.len(), 1);
+            let session = client.sessions.session(host.id.clone()).unwrap();
+            session.clone().ready().await.unwrap();
+            let storage = Storage {
+                root: directory.path().into(),
+                host: host.clone(),
+                handed: Default::default(),
+            };
+            let pairing = client.sessions.lock_host_storage(host.id.clone()).await;
+            let mut removing = Box::pin(client.remove_host(host.id.clone()));
+            let pending = std::future::poll_fn(|context| {
+                std::task::Poll::Ready(removing.as_mut().poll(context).is_pending())
+            })
+            .await;
+            assert!(pending);
+            assert_eq!(client.hosts.lock().await.len(), 1);
+            assert!(Arc::ptr_eq(
+                &session,
+                &client.sessions.session(host.id.clone()).unwrap(),
+            ));
+            assert!(!storage.load().unwrap().is_empty());
+
+            pairing.release();
+            removing.await.unwrap();
+            assert!(client.hosts.lock().await.is_empty());
+            assert!(client.sessions.session(host.id).is_none());
+            assert!(storage.load().unwrap().is_empty());
             client.shutdown().await.unwrap();
         });
     }

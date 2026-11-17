@@ -1,7 +1,7 @@
 //! Each mobile Host session owns restoration, queued intents and ordered saves.
 //! Platforms supply private storage; no UI task decides when state is durable.
 mod hosts;
-pub use hosts::ClientSessions;
+pub use hosts::{ClientSessions, HostStorageGuard};
 
 use super::native::{AgentStore, Connection, Receipt};
 use super::persistence::ClientStorage;

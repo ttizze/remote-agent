@@ -61,7 +61,7 @@ impl Comparison {
             return Ok(None);
         }
         let root = crate::git::text(cwd, &["rev-parse", "--show-toplevel"])?;
-        let root = dunce::canonicalize(root.trim_end())?;
+        let root = dunce::canonicalize(root.strip_suffix('\n').unwrap_or(&root))?;
         let branch = super::controls::branch(&root)
             .ok()
             .map(|branch| branch.trim().to_owned());

@@ -1,3 +1,5 @@
+#[path = "../input.rs"]
+mod input;
 #[path = "../pty.rs"]
 mod pty;
 // No history or provider protocol parsing: only owned process lifetimes.
@@ -81,9 +83,11 @@ async fn run() -> std::io::Result<i32> {
         result = child.wait() => Some(result),
         _ = async {
             if let Some(input) = &mut input {
-                tokio::io::copy(&mut source, input).await
+                input::relay(&mut source, input, || input::owner_closed(&std::io::stdin())).await
             } else {
-                tokio::io::copy(&mut source, &mut tokio::io::sink()).await
+                tokio::io::copy(&mut source, &mut tokio::io::sink())
+                    .await
+                    .map(|_| ())
             }
         } => None,
     };

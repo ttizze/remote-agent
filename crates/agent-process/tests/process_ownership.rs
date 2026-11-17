@@ -121,6 +121,121 @@ async fn lifetime_pipe_relays_input_and_preserves_native_exit_status() {
     );
 }
 
+async fn backpressured_provider(
+    file: &Path,
+) -> (tokio::process::Child, tokio::process::ChildStdin) {
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_agent-provider-supervisor"))
+        .args([
+            "/bin/sh",
+            "-c",
+            "sleep 20 & echo \"$$ $!\" > \"$AGENT_TEST_BACKPRESSURE_PIDS\"; wait",
+        ])
+        .env("AGENT_TEST_BACKPRESSURE_PIDS", file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if std::fs::read_to_string(file).is_ok_and(|text| text.split_whitespace().count() == 2)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            input.write_all(&vec![b'x'; 8 * 1024 * 1024]),
+        )
+        .await
+        .is_err(),
+        "fixture must fill both stdin pipes without the provider reading"
+    );
+    (child, input)
+}
+
+async fn assert_backpressured_processes_stopped(file: &Path) {
+    let pids = std::fs::read_to_string(file).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for pid in pids.split_whitespace() {
+            loop {
+                let output = tokio::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", pid])
+                    .output()
+                    .await
+                    .unwrap();
+                let state = String::from_utf8_lossy(&output.stdout);
+                if state.trim().is_empty() || state.trim().starts_with('Z') {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    })
+    .await
+    .expect("provider and tool must not survive their owner's closed pipe");
+}
+
+#[tokio::test]
+async fn closing_backpressured_stdin_reaps_provider_and_tool() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("pids");
+    let (mut child, input) = backpressured_provider(&file).await;
+    drop(input);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .expect("stdin backpressure must not hide the owner's cancellation")
+            .unwrap()
+            .success()
+    );
+    assert_backpressured_processes_stopped(&file).await;
+}
+
+#[test]
+fn abrupt_host_exit_with_backpressured_stdin_reaps_provider_and_tool() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    if let Some(file) = std::env::var_os("AGENT_TEST_BACKPRESSURED_HOST") {
+        runtime.block_on(async {
+            let file = Path::new(&file);
+            let (mut child, input) = backpressured_provider(file).await;
+            std::fs::write(file.with_extension("blocked"), b"ready").unwrap();
+            child.wait().await.unwrap();
+            drop(input);
+        });
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("pids");
+    let mut host = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "abrupt_host_exit_with_backpressured_stdin_reaps_provider_and_tool",
+            "--nocapture",
+        ])
+        .env("AGENT_TEST_BACKPRESSURED_HOST", &file)
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !file.with_extension("blocked").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        host.kill().unwrap();
+        host.wait().unwrap();
+        assert_backpressured_processes_stopped(&file).await;
+    });
+}
+
 // GUI/update launch threads can block signals before exec. Both native exit
 // and EOF cleanup must still finish, including on macOS's SIGCHLD reaper.
 #[tokio::test]

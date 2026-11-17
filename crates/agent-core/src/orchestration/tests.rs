@@ -728,9 +728,26 @@ fn delayed_history_preserves_live_bodies_and_does_not_revive_rolled_back_items()
         initial.visible_turn_items[0].item
     );
     let rolled_back = apply(&initial, Change::Run(run("rolled_back")));
-    let merged = merge_older_history(&rolled_back, &older[1..]);
+    let merged = merge_older_history(&rolled_back, &older);
     assert!(merged.visible_turn_items.is_empty());
     assert_eq!(merged.turn_items.len(), 1);
+}
+
+#[test]
+fn delayed_history_keeps_inherited_items_when_only_the_local_run_was_rolled_back() {
+    let initial = apply(&projection(), Change::Run(run("rolled_back")));
+    let mut inherited = item("inherited", 1);
+    inherited.thread_id = "parent".into();
+    let older = [
+        row(item("unloaded", 1), Visibility::Local, 0),
+        row(inherited.clone(), Visibility::Inherited, 1),
+    ];
+    let merged = merge_older_history(&initial, &older);
+    assert_eq!(
+        merged.visible_turn_items,
+        [row(inherited, Visibility::Inherited, 0)]
+    );
+    assert!(merged.turn_items.is_empty());
 }
 
 #[test]

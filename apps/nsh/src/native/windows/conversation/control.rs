@@ -692,7 +692,7 @@ impl Item {
         if self.edit.context.wrap.replace(wrap) != wrap {
             self.edit.context.width.set(0);
         }
-        if self.edit.context.document.borrow().rtf != document.rtf {
+        if &*self.edit.context.document.borrow() != document {
             self.edit.set_document(document);
         }
     }
