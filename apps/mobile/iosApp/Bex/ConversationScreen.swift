@@ -92,8 +92,6 @@ struct ThreadScreen: View {
 
     private var chatContent: some View {
         let history = model.history
-        // Hosted cells render later, outside this body's State observation.
-        let expanded = expandedItemIds
         return VStack(spacing: 0) {
             ErrorNotices(notices: model.conversationContext.notices(), perform: { model.perform($0) })
                 .padding(.horizontal)
@@ -133,6 +131,8 @@ struct ThreadScreen: View {
     @ViewBuilder private var conversationBody: some View {
         let history = model.history
         if let thread = conversation {
+            // Hosted cells render later, outside this body's State observation.
+            let expanded = expandedItemIds
             let rows = thread.rows
             let hasHistory = thread.id != nil && history != nil
             let ids: [ConversationList.RowID] = (hasHistory ? [.history] : []) + rows.map { .message($0.id) }
