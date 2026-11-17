@@ -1983,7 +1983,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(initial.thread_list().unwrap().threads.len(), 5);
         let projects = initial.lists.threads.as_ref().unwrap().projects.iter().map(|project|project.id.clone()).collect::<Vec<_>>();
         for project_id in projects {
-            initial = reduce(&initial, "", Event::Intent(Intent::SetProjectExpanded { project_id, expanded: true })).0;
+            initial = reduce(&initial, "", Event::from(Intent::SetProjectExpanded { project_id, expanded: true })).0;
         }
         let first = initial.lists.threads.as_ref().unwrap();
         let displayed = initial.thread_list().unwrap();
@@ -2001,11 +2001,11 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(first.projects.iter().map(|project| project.id.as_str()).collect::<Vec<_>>(), ["project-5", "project-3", "project-7", "project-6", "project-4"]);
         assert!(first.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
         let project_page = |project: &str, limit| {
-            let (all, _) = reduce(&initial, "", Event::Intent(Intent::ExpandProjects));
-            let (opened, _) = reduce(&all, "", Event::Intent(Intent::SetProjectExpanded { project_id:project.into(), expanded:true }));
+            let (all, _) = reduce(&initial, "", Event::from(Intent::ExpandProjects));
+            let (opened, _) = reduce(&all, "", Event::from(Intent::SetProjectExpanded { project_id:project.into(), expanded:true }));
             let mut page = opened;
             while page.lists.project_threads[project].limit < limit {
-                page = reduce(&page, "", Event::Intent(Intent::ExpandThreadList { project_id: Some(project.into()) })).0;
+                page = reduce(&page, "", Event::from(Intent::ExpandThreadList { project_id: Some(project.into()) })).0;
             }
             page.lists.project_threads[project].clone()
         };
