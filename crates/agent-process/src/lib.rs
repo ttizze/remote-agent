@@ -29,6 +29,18 @@ pub fn command(program: &Path) -> io::Result<Command> {
     Ok(command)
 }
 
+/// Retains the owner's lifetime pipe while the program itself receives EOF.
+/// Non-interactive commands must not wait for input on that lifetime pipe.
+/// Keep the returned child's stdin handle alive until completion or cancellation.
+pub fn non_interactive_command(program: &Path) -> io::Result<Command> {
+    let mut command = supervisor_command()?;
+    command
+        .arg("--agent-stdin-null")
+        .arg(program)
+        .stdin(std::process::Stdio::piped());
+    Ok(command)
+}
+
 fn supervisor_command() -> io::Result<Command> {
     let mut command = Command::new(supervisor_path()?);
     // Closing its input lets the supervisor terminate and reap the provider group.

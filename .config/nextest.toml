@@ -51,3 +51,10 @@ threads-required = "num-test-threads"
 [[profile.default.overrides]]
 filter = 'test(=host_rpc::service::workspace_setup::tests::remote_start_fetches_before_checkout_and_retains_the_completed_card)'
 threads-required = "num-test-threads"
+
+# These contracts keep their own process/turn concurrency and real deadlines:
+# 100 ms Git execution, two-second account isolation, five-second provider round trips.
+# Competing fixture startups must not consume that latency budget on CI's 16 slots.
+[[profile.default.overrides]]
+filter = 'test(=git::tests::bounded_git_covers_a_running_root_and_descendant_output_after_root_exit) | test(=helper_initialization_does_not_block_completed_turns) | test(host_rpc::runtime::tests::returning_to_a_provider_reuses_its_context_and_injects_only_unseen_history)'
+threads-required = "num-test-threads"

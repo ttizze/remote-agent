@@ -140,7 +140,22 @@ pub enum Update {
     Refresh(Vec<PullRequest>),
 }
 
-fn snapshot(value: &PullRequest, now: &str) -> ThreadPullRequestSnapshot {
+fn snapshot(
+    value: &PullRequest,
+    previous: Option<&ThreadPullRequestSnapshot>,
+    now: &str,
+) -> ThreadPullRequestSnapshot {
+    // A later response can contain older upstream data. Compare instants,
+    // including offsets, rather than the time this Host received the reply.
+    // An undated response cannot replace a snapshot with a known timestamp.
+    if let Some(previous) = previous
+        && let Some(updated) = previous.updated_at.as_deref()
+        && let Ok(saved) = chrono::DateTime::parse_from_rfc3339(updated)
+        && chrono::DateTime::parse_from_rfc3339(&value.updated_at)
+            .map_or(true, |incoming| saved > incoming)
+    {
+        return previous.clone();
+    }
     ThreadPullRequestSnapshot {
         state: value.state,
         title: value.title.clone(),
@@ -164,7 +179,7 @@ pub fn apply(
         Update::Link(value) => {
             validate_url(&value.url)?;
             if let Some(link) = links.iter_mut().find(|link| link.url == value.url) {
-                link.snapshot = Some(snapshot(&value, now));
+                link.snapshot = Some(snapshot(&value, link.snapshot.as_ref(), now));
             } else {
                 if links.len() >= LINK_LIMIT {
                     return Err("too many linked pull requests");
@@ -177,7 +192,7 @@ pub fn apply(
                     url: value.url.clone(),
                     source: "manual".into(),
                     linked_at: now.into(),
-                    snapshot: Some(snapshot(&value, now)),
+                    snapshot: Some(snapshot(&value, None, now)),
                     stack: None,
                 });
             }
@@ -189,7 +204,7 @@ pub fn apply(
                     .iter()
                     .find(|value| value.url == link.url && value.error.is_none())
                 {
-                    link.snapshot = Some(snapshot(value, now));
+                    link.snapshot = Some(snapshot(value, link.snapshot.as_ref(), now));
                 }
             }
         }
@@ -245,6 +260,49 @@ mod tests {
         assert!(apply(&full, Update::Link(pr(99)), now).is_err());
         assert!(apply(&full, Update::Link(pr(1)), now).is_ok());
     }
+    #[test]
+    fn late_pull_request_responses_cannot_overwrite_newer_upstream_snapshots() {
+        for old_time in [
+            "2026-11-16T00:00:00Z",
+            "2026-11-16T09:00:00+09:00",
+            "",
+            "invalid timestamp",
+        ] {
+            let mut old = pr(1);
+            old.updated_at = old_time.into();
+            let mut newer = old.clone();
+            newer.updated_at = "2026-11-16T00:00:01Z".into();
+            newer.state = State::Merged;
+            newer.title = "Merged result".into();
+            let current = apply(&[], Update::Link(newer), "2026-11-16T01:00:00Z").unwrap();
+            for delayed in [Update::Refresh(vec![old.clone()]), Update::Link(old)] {
+                assert_eq!(
+                    apply(&current, delayed, "2026-11-16T01:00:05Z").unwrap(),
+                    current,
+                    "later delivery does not make an older GitHub snapshot current"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pull_request_snapshots_accept_newer_equal_and_previously_undated_updates() {
+        let mut old = pr(1);
+        old.updated_at.clear();
+        let mut links = apply(&[], Update::Link(old), "2026-11-16T00:00:00Z").unwrap();
+        for (updated_at, title) in [
+            ("2026-11-16T00:00:01Z", "dated"),
+            ("2026-11-16T09:00:01+09:00", "same instant"),
+            ("2026-11-16T00:00:02Z", "newer"),
+        ] {
+            let mut value = pr(1);
+            value.updated_at = updated_at.into();
+            value.title = title.into();
+            links = apply(&links, Update::Refresh(vec![value.clone()]), updated_at).unwrap();
+            assert_eq!(links[0].pull_request(), value);
+        }
+    }
+
     #[test]
     fn urls_are_explicit_pr_resources_without_credentials_or_command_options() {
         assert!(validate_url("https://github.com/acme/repo/pull/12").is_ok());

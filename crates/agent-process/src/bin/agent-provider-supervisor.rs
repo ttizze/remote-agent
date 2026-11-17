@@ -42,13 +42,24 @@ async fn run() -> std::io::Result<i32> {
     #[cfg(unix)]
     provider_file_limit()?;
     let mut args = std::env::args_os().skip(1);
-    let program = args
+    let first = args
         .next()
         .ok_or_else(|| std::io::Error::other("provider program is required"))?;
+    let stdin_null = first == "--agent-stdin-null";
+    let program = if stdin_null {
+        args.next()
+            .ok_or_else(|| std::io::Error::other("provider program is required"))?
+    } else {
+        first
+    };
     let mut command = Command::new(program);
     command
         .args(args)
-        .stdin(Stdio::piped())
+        .stdin(if stdin_null {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     let mut command = CommandWrap::from(command);
@@ -61,14 +72,20 @@ async fn run() -> std::io::Result<i32> {
         "provider process ownership is unsupported on this OS",
     ));
     let mut child = command.wrap(KillOnDrop).spawn()?;
-    let mut input = child
-        .stdin()
-        .take()
-        .ok_or_else(|| std::io::Error::other("provider stdin unavailable"))?;
+    let mut input = child.stdin().take();
+    if !stdin_null && input.is_none() {
+        return Err(std::io::Error::other("provider stdin unavailable"));
+    }
     let mut source = tokio::io::stdin();
     let finished = tokio::select! {
         result = child.wait() => Some(result),
-        _ = tokio::io::copy(&mut source, &mut input) => None,
+        _ = async {
+            if let Some(input) = &mut input {
+                tokio::io::copy(&mut source, input).await
+            } else {
+                tokio::io::copy(&mut source, &mut tokio::io::sink()).await
+            }
+        } => None,
     };
     drop(input);
     let result = match finished {

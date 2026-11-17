@@ -69,6 +69,27 @@ async fn provider_file_budget_survives_gui_limits_and_respects_the_hard_cap() {
 }
 
 #[tokio::test]
+async fn non_interactive_programs_get_eof_without_ending_the_owners_lifetime() {
+    let mut command = agent_process::non_interactive_command(Path::new("/bin/sh")).unwrap();
+    let mut child = command
+        .args([
+            "-c",
+            "if read value; then exit 7; fi; echo eof; sleep 1; echo done",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lifetime = child.stdin.take();
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(lifetime);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"eof\ndone\n");
+}
+
+#[tokio::test]
 async fn lifetime_pipe_relays_input_and_preserves_native_exit_status() {
     let mut command = agent_process::command(Path::new("/bin/sh")).unwrap();
     let mut child = command
