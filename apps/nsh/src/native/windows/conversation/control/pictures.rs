@@ -14,6 +14,7 @@ pub(super) fn insert(window: HWND, image: &rich_document::InlineImage) -> Result
         xWidth: (u64::from(image.width) * 2540 / 72).min(i32::MAX as u64) as i32,
         yHeight: (u64::from(image.height) * 2540 / 72).min(i32::MAX as u64) as i32,
         Type: TA_BASELINE.0 as i32,
+        pwszAlternateText: w!(""),
         pIStream: ManuallyDrop::new(Some(stream)),
         ..Default::default()
     };

@@ -59,7 +59,15 @@ fn system_rich_edit_keeps_document_positions_for_chips_unicode_and_tables() {
         // link still load, and their UTF-16 positions remain unchanged.
         (damaged, Some("  統合前レビュー\r\u{fffc} 統合前レビュー")),
     ] {
-        load_document(window, &document).unwrap();
+        let loaded = load_document(window, &document);
+        if expected.is_some() {
+            assert!(
+                loaded.is_err(),
+                "the invalid PNG must report its decoding failure"
+            );
+        } else {
+            loaded.expect("valid PNG images must be inserted by the system RichEdit API");
+        }
         assert_ne!(
             unsafe { GetWindowLongPtrW(window, GWL_STYLE) } & ES_READONLY as isize,
             0,

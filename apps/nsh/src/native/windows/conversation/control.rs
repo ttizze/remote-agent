@@ -64,13 +64,14 @@ fn load_document(window: HWND, document: &Document) -> windows::core::Result<()>
         (&mut stream as *mut EDITSTREAM) as isize,
     );
     windows::core::HRESULT::from_win32(stream.dwError).ok()?;
+    let mut images = Ok(());
     for image in &document.images {
-        if let Err(error) = pictures::insert(window, image) {
-            tracing::warn!(%error, "could not insert native conversation image");
-        }
+        // Evaluate every insertion even after an error; links still need to
+        // be marked before the caller receives the first image failure.
+        images = images.and(pictures::insert(window, image));
     }
     mark_links(window, &document.links);
-    Ok(())
+    images
 }
 
 fn mark_links(window: HWND, links: &[rich_document::Link]) {
