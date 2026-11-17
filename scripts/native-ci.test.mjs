@@ -50,7 +50,7 @@ test('the early runner is built and archived inside Nix with its executable perm
     writeFileSync(path, `#!/usr/bin/env bash\nset -eu\n${body}\n`);
     chmodSync(path, 0o755);
   }
-  const result = spawnSync('bash', ['-euo', 'pipefail', '-c', script], {
+  const result = spawnSync('bash', ['--noprofile', '--norc', '-euo', 'pipefail', '-c', script], {
     cwd: root, encoding: 'utf8',
     env: {...process.env, PATH: `${bin}:${process.env.PATH}`, NATIVE_RUNNER_STAGE: '', NATIVE_REAL_TAR: realTar.stdout.trim()},
   });

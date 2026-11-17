@@ -114,7 +114,7 @@ impl Storage {
         })
     }
     // Bex explicitly supports projectless conversations. Assign them when a
-    // project is registered, using the same pure membership rule as creation.
+    // project is registered, using the same membership rule as creation.
     // Existing assignments remain owned by their conversation commands.
     pub(crate) fn assign_projectless_threads(
         &self,

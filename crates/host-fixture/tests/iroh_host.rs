@@ -1990,7 +1990,10 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         // The shared catalog carries one small header per native row; bodies
         // remain behind the conversation subscription/hydration boundary.
         assert!(catalog.max_wire_bytes < threads.len() * 1024 + 16 * 1024);
-        assert!(catalog.snapshot.threads.iter().all(|thread| thread.latest_visible_message.is_none() && agent_protocol::protocol::encode(thread).unwrap().len() < 1024));
+        for thread in &catalog.snapshot.threads {
+            let bytes = agent_protocol::protocol::encode(thread).unwrap().len();
+            assert!(thread.latest_visible_message.is_none() && bytes < 1024, "catalog header {} is {bytes} bytes: {thread:?}", thread.thread.id);
+        }
         assert_eq!(first.projects.len(), 5);
         assert!(first.has_more && first.has_more_projects);
         assert_eq!(first.data.iter().map(|thread| thread.id.as_ref().unwrap().id.as_str()).collect::<Vec<_>>(), ["projectless", "chat-18", "chat-17", "chat-16", "chat-15"]);
@@ -2964,7 +2967,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 let configured_project = project.clone();
                 seed_projects(&root, serde_json::from_value(json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
-                let program = host_fixture::fixture::Config { trace: true, deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
+                let program = host_fixture::fixture::Config { trace: true, deferred_thread_metadata: true, generated_title: Some("Completed conversation".into()), stream_delay_ms: 10, ..Default::default() }
                     .install(Path::new(env!("CARGO_BIN_EXE_agent-codex-fixture")), &root).unwrap();
                 let fixture = HostFixture::start(&root, AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated", false, None, None).await.unwrap();
                 let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();

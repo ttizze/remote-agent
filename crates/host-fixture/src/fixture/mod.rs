@@ -17,6 +17,7 @@ use std::{
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub deferred_thread_metadata: bool,
+    pub generated_title: Option<String>,
     pub initialize_gate: Option<PathBuf>,
     pub trace: bool,
     pub expected_cwd: Option<PathBuf>,
@@ -27,6 +28,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             deferred_thread_metadata: false,
+            generated_title: None,
             initialize_gate: None,
             trace: false,
             expected_cwd: None,
@@ -64,6 +66,28 @@ impl Config {
 }
 
 pub async fn run(arguments: &[String]) -> Result<()> {
+    let program = std::env::current_exe()?;
+    let home = program
+        .parent()
+        .ok_or("fixture executable has no directory")?
+        .to_path_buf();
+    let config: Config = serde_json::from_slice(&fs::read(home.join("fixture-config.json"))?)?;
+    if arguments.iter().any(|argument| argument == "exec") {
+        let output = arguments
+            .windows(2)
+            .find(|pair| pair[0] == "--output-last-message")
+            .ok_or("title generation requires an output file")?;
+        let title = config
+            .generated_title
+            .ok_or("fixture title generation is not configured")?;
+        // A one-shot CLI result is independent of native metadata notices and
+        // does not create a provider conversation. Stdin is its lifetime pipe.
+        fs::write(
+            &output[1],
+            serde_json::to_vec(&serde_json::json!({"title": title}))?,
+        )?;
+        return Ok(());
+    }
     let mut arguments = arguments;
     let mut credential_home = None;
     while arguments.first().map(String::as_str) == Some("-c") {
@@ -78,12 +102,6 @@ pub async fn run(arguments: &[String]) -> Result<()> {
     if arguments != ["app-server"] && arguments != ["app-server", "--listen", "stdio://"] {
         return Err("usage: agent-codex-fixture app-server --listen stdio://".into());
     }
-    let program = std::env::current_exe()?;
-    let home = program
-        .parent()
-        .ok_or("fixture executable has no directory")?
-        .to_path_buf();
-    let config = serde_json::from_slice(&fs::read(home.join("fixture-config.json"))?)?;
     // Only the explicit auth-helper override uses the supplied credential home.
     // Ordinary fixtures never read an inherited personal CODEX_HOME.
     server::run(credential_home.unwrap_or(home), config).await

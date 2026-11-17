@@ -57,6 +57,7 @@ if ! flock -n 9; then
     wait -n -p finished "$locker" "$client"
     if [[ $finished == "$client" ]]; then
         kill "$locker" 2> /dev/null
+        wait "$locker"
         exit 1
     fi
 fi

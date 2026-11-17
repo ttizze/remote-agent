@@ -191,6 +191,69 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn registered_projects_match_workspace_aliases_and_their_children() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let project = root.join("project");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        let store = ProjectStore::fixture(project.join("projects.json"));
+        store.register(&project).await.unwrap();
+        let snapshot = store.load().await.unwrap();
+        let id = snapshot.projects[0].id.as_str();
+        for path in [&project, &alias, &alias.join("src")] {
+            assert_eq!(
+                snapshot.project_for_workspace(path.to_str().unwrap()),
+                Some(id)
+            );
+            assert_eq!(
+                snapshot.project_membership(path.to_str()),
+                agent_protocol::models::ProjectMembership::Assigned(id.into())
+            );
+        }
+        assert_eq!(snapshot.project_for_workspace("alias/src"), None);
+
+        let chats = store.create_chat_directory().await.unwrap();
+        let chat_alias = root.join("chat-alias");
+        std::os::unix::fs::symlink(chats, &chat_alias).unwrap();
+        let snapshot = store.load().await.unwrap();
+        assert_eq!(
+            snapshot.project_membership(chat_alias.to_str()),
+            agent_protocol::models::ProjectMembership::Unassigned {}
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ambiguous_workspace_alias_does_not_select_a_physical_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let project = root.join("project");
+        let alias = root.join("alias");
+        std::fs::create_dir(&project).unwrap();
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        let store = ProjectStore::fixture(root.join("projects.json"));
+        store.register(&project).await.unwrap();
+        let mut snapshot = store.load().await.unwrap();
+        for id in ["first", "second"] {
+            snapshot.projects.push(Project {
+                id: id.into(),
+                name: id.into(),
+                roots: vec![agent_protocol::models::ProjectRoot {
+                    path: alias.to_str().unwrap().into(),
+                }],
+                icon: None,
+            });
+        }
+        assert_eq!(
+            snapshot.project_for_workspace(alias.to_str().unwrap()),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn unavailable_root_keeps_saved_membership_and_other_projects_readable() {
         use agent_protocol::models::ProjectMembership;
         let directory = tempfile::tempdir().unwrap();

@@ -11,6 +11,13 @@ pub(crate) struct Snapshot {
     pub(super) worktree_roots: HashMap<String, String>,
     pub(super) chat_directories: BTreeSet<PathBuf>,
 }
+
+enum WorkspaceMatch<'a> {
+    Project(&'a str),
+    Missing,
+    Ambiguous,
+}
+
 impl Snapshot {
     pub(crate) fn is_chat_directory(&self, path: &Path) -> bool {
         self.chat_directories.contains(path)
@@ -30,12 +37,32 @@ impl Snapshot {
     }
     pub(crate) fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
         let workspace = Path::new(workspace);
-        let mapped = worktree_mapping(&self.worktree_roots, workspace)
-            .map(|(root, source)| Path::new(source).join(workspace.strip_prefix(root).unwrap()));
-        let workspace = mapped.as_deref().unwrap_or(workspace);
         if !workspace.is_absolute() {
             return None;
         }
+        match self.match_workspace(workspace) {
+            WorkspaceMatch::Project(id) => Some(id),
+            WorkspaceMatch::Ambiguous => None,
+            WorkspaceMatch::Missing => {
+                // Registration stores a physical root, but providers can report
+                // its alias (for example /tmp instead of /private/tmp on macOS).
+                // Keep known and unavailable roots readable without filesystem I/O.
+                let physical = dunce::canonicalize(workspace).ok()?;
+                if self.is_chat_directory(&physical) {
+                    return None;
+                }
+                match self.match_workspace(&physical) {
+                    WorkspaceMatch::Project(id) => Some(id),
+                    WorkspaceMatch::Missing | WorkspaceMatch::Ambiguous => None,
+                }
+            }
+        }
+    }
+
+    fn match_workspace(&self, workspace: &Path) -> WorkspaceMatch<'_> {
+        let mapped = worktree_mapping(&self.worktree_roots, workspace)
+            .map(|(root, source)| Path::new(source).join(workspace.strip_prefix(root).unwrap()));
+        let workspace = mapped.as_deref().unwrap_or(workspace);
         let mut matched: Option<(&str, usize)> = None;
         let mut ambiguous = false;
         for project in &self.projects {
@@ -64,9 +91,11 @@ impl Snapshot {
             }
         }
         if ambiguous {
-            None
+            WorkspaceMatch::Ambiguous
         } else {
-            matched.map(|(id, _)| id)
+            matched.map_or(WorkspaceMatch::Missing, |(id, _)| {
+                WorkspaceMatch::Project(id)
+            })
         }
     }
 }

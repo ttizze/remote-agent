@@ -7,33 +7,6 @@ pub(super) fn schema() -> serde_json::Value {
     serde_json::json!({"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false})
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn title_output_is_bounded_and_invalid_structured_results_are_rejected() {
-        assert_eq!(
-            title(r#"{"title":"日本語の名前"}"#).unwrap(),
-            "日本語の名前"
-        );
-        for output in ["not JSON", "{}", r#"{"title":42}"#] {
-            assert!(title(output).is_err());
-        }
-        let bytes = vec![b'x'; 256 * 1024 + 1];
-        assert!(read(bytes.as_slice()).await.is_err());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn title_errors_never_include_provider_output_or_prompt_text() {
-        let mut command = agent_process::command(std::path::Path::new("/bin/sh")).unwrap();
-        command.args(["-c", "echo private-provider-diagnostic >&2; exit 7"]);
-        let error = run(command, "private-prompt").await.unwrap_err();
-        assert_eq!(error.message, "Title generator failed");
-    }
-}
-
 pub(super) fn title(output: &str) -> Result<String, Failure> {
     let value: serde_json::Value = serde_json::from_str(output)
         .map_err(|_| Failure::new("title_generation_failed", "Invalid title output"))?;
@@ -87,4 +60,31 @@ pub(super) async fn run(
         .await
         .map_err(|_| Failure::new("title_generation_failed", "Title generation timed out"))?
         .map_err(|message| Failure::new("title_generation_failed", message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn title_output_is_bounded_and_invalid_structured_results_are_rejected() {
+        assert_eq!(
+            title(r#"{"title":"日本語の名前"}"#).unwrap(),
+            "日本語の名前"
+        );
+        for output in ["not JSON", "{}", r#"{"title":42}"#] {
+            assert!(title(output).is_err());
+        }
+        let bytes = vec![b'x'; 256 * 1024 + 1];
+        assert!(read(bytes.as_slice()).await.is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn title_errors_never_include_provider_output_or_prompt_text() {
+        let mut command = agent_process::command(std::path::Path::new("/bin/sh")).unwrap();
+        command.args(["-c", "echo private-provider-diagnostic >&2; exit 7"]);
+        let error = run(command, "private-prompt").await.unwrap_err();
+        assert_eq!(error.message, "Title generator failed");
+    }
 }

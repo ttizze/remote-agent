@@ -68,7 +68,7 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
         &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
     );
     let first = service(directory.path());
-    first.inner.projects.register(&repo).await.unwrap();
+    let registered_root = first.inner.projects.register(&repo).await.unwrap();
     change(&first, &repo, save(None, " Build ", " echo build "))
         .await
         .unwrap();
@@ -85,7 +85,7 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
     let stored: String = database
         .query_row(
             "SELECT scripts_json FROM projection_projects WHERE workspace_root=?1",
-            [repo.to_str().unwrap()],
+            [registered_root.as_str()],
             |row| row.get(0),
         )
         .unwrap();
@@ -97,10 +97,7 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
     database
         .execute(
             "UPDATE projection_projects SET scripts_json=?1 WHERE workspace_root=?2",
-            rusqlite::params![
-                serde_json::to_string(&stored).unwrap(),
-                repo.to_str().unwrap()
-            ],
+            rusqlite::params![serde_json::to_string(&stored).unwrap(), registered_root],
         )
         .unwrap();
     assert_eq!(
@@ -116,7 +113,7 @@ async fn project_scripts_share_worktrees_and_persist_renames_without_touching_fi
     let renamed: String = database
         .query_row(
             "SELECT scripts_json FROM projection_projects WHERE workspace_root=?1",
-            [repo.to_str().unwrap()],
+            [registered_root.as_str()],
             |row| row.get(0),
         )
         .unwrap();

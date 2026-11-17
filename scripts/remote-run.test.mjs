@@ -164,18 +164,24 @@ test('a failed checkout ends the session while the client is still connected', a
   assert.equal(await done, 1);
 });
 
-for (const [name, leave, edit] of [
-  ['closes its connection', client => client.stdin.end(), undefined],
-  ['stops sending heartbeats', () => {}, script => script.replace('read -r -t 120', 'read -r -t 1')],
+for (const [name, edit] of [
+  ['closes its connection', undefined],
+  ['stops sending heartbeats', script => script.replace('read -r -t 120', 'read -r -t 1')],
 ]) {
   test(`a run queued for the worktree lock stops when its client ${name}`, { timeout: 30_000 }, async t => {
+    // Keep the connection alive until it actually queues, even under parallel
+    // fixture startup. Then stop heartbeats while leaving the pipe open.
+    const heartbeats = edit ? spawn('bash', ['-c', 'while ! read -r -t 0.1; do echo; done; exec sleep 60'], { stdio: ['pipe', 'pipe', 'ignore'] }) : null;
+    if (heartbeats) t.after(() => heartbeats.kill('SIGKILL'));
     const { client, locker, done } = await builderRun(
       t,
       { flock: '[[ $1 == -n ]] && exit 1\necho $$ > "$FIXTURE_LOCKER"\nexec sleep 60\n' },
       edit,
+      heartbeats?.stdout ?? 'pipe',
     );
     await until(() => existsSync(locker) && readFileSync(locker, 'utf8').trim());
-    leave(client);
+    if (heartbeats) heartbeats.stdin.end('\n');
+    else client.stdin.end();
     assert.equal(await done, 1);
     const pid = Number(readFileSync(locker, 'utf8'));
     await until(() => {

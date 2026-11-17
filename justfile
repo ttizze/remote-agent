@@ -38,6 +38,11 @@ complexity:
 unit-tests *targets:
     #!/usr/bin/env bash
     set -uo pipefail
+    # Match CI's shell isolation: setup scripts must not run personal startup files.
+    agent_test_zsh=$(mktemp -d) || exit 1
+    trap 'rm -rf "$agent_test_zsh"' EXIT
+    : > "$agent_test_zsh/.zshrc" || exit 1
+    export ZDOTDIR="$agent_test_zsh"
     failed=0
     just typescript || failed=1
     node --test scripts/*.test.mjs || failed=1

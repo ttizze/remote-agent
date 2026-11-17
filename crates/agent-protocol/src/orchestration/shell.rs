@@ -153,8 +153,11 @@ pub struct ThreadShell {
     pub last_error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_limit_reset_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_runtime_request: Option<PendingRequestSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_visible_message: Option<MessageSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_user_message_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_user_authored_message_at: Option<String>,
