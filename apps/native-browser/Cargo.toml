@@ -29,7 +29,7 @@ dispatch2 = "=0.3.1"
 futures-util.workspace = true
 base64.workspace = true
 ring.workspace = true
-wry = { version = "=0.57.1", default-features = false }
+wry = { version = "=0.57.2", default-features = false }
 zeroize.workspace = true
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSResponder", "NSView", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphicsContext"] }
