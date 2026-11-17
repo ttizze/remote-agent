@@ -1,6 +1,97 @@
 use super::*;
 use crate::session::{ProviderKind, SessionRef};
 
+#[rstest::rstest]
+fn history_projection_failure_keeps_the_page_retryable(
+    #[values(None, Some("oldest"))] next_cursor: Option<&str>,
+) {
+    use agent_protocol::orchestration::{self as model, projection::ThreadHistoryPage};
+    let id = SessionRef::new(None, "history-retry".into()).unwrap();
+    let mut snapshot = Snapshot::default();
+    open_thread(
+        &mut snapshot,
+        "",
+        serde_json::from_value(serde_json::json!({
+            "id":id,"historyCursor":"older","historyHasMore":true,
+            "turns":[{"id":"turn","status":"completed","items":[{
+                "id":"latest","body":{"inline":{"body":{"assistantText":{"text":"Latest answer","phase":"final"}}}}
+            }]}]
+        }))
+        .unwrap(),
+        None,
+        None,
+        None,
+    );
+    let request = || ReadHistory {
+        session: id.clone(),
+    };
+    let input = request().capture(&snapshot, "").unwrap();
+    let before = snapshot.clone();
+    let mut row = snapshot.sessions.projections[&id]
+        .projection
+        .visible_turn_items[0]
+        .clone();
+    row.source_item_id = "older-question".into();
+    let item = Arc::make_mut(&mut row.item);
+    item.id = row.source_item_id.clone();
+    item.body = model::TurnItemBody::UserMessage {
+        message_id: "older-question".into(),
+        created_by: model::Actor::User,
+        creation_source: model::CreationSource::Mobile,
+        scheduled_task_id: None,
+        input_intent: "turn_start".into(),
+        text: "Earlier question".into(),
+        attachments: vec![serde_json::json!({"id":"attachment"})],
+        context: None,
+    };
+    let mut page = ThreadHistoryPage {
+        snapshot_sequence: 10,
+        items: vec![row],
+        next_cursor: next_cursor.map(str::to_owned),
+        has_more_history: next_cursor.is_some(),
+    };
+    let error = request()
+        .complete(&mut snapshot, "", (input.clone(), page.clone()), true)
+        .unwrap_err();
+    assert!(error.to_string().contains("attachment name is missing"));
+    assert_eq!(
+        snapshot, before,
+        "A failed page must not change the cursor or displayed history"
+    );
+    assert_eq!(request().capture(&snapshot, "").unwrap(), input);
+    let (_, effects) = super::super::super::reduce(
+        &snapshot,
+        "",
+        Event::Intent(Intent::ReadOlder {
+            thread_id: id.clone(),
+        }),
+    );
+    assert_eq!(
+        effects.len(),
+        1,
+        "Load earlier must still request the failed page"
+    );
+
+    let model::TurnItemBody::UserMessage { attachments, .. } =
+        &mut Arc::make_mut(&mut page.items[0].item).body
+    else {
+        unreachable!()
+    };
+    attachments[0]["name"] = serde_json::json!("notes.txt");
+    request()
+        .complete(&mut snapshot, "", (input, page), true)
+        .unwrap();
+    let thread = &snapshot.sessions.conversations[&id];
+    assert_eq!(thread.history_cursor.as_deref(), next_cursor);
+    assert_eq!(thread.history_has_more, Some(next_cursor.is_some()));
+    let items = thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(
+        matches!(items[0].body(), crate::models::ItemBody::UserMessage { text: Some(text), .. } if text == "Earlier question")
+    );
+    assert_eq!(items[1].id.as_str(), "latest");
+}
+
 fn open_thread(
     snapshot: &mut Snapshot,
     pane: &str,

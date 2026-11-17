@@ -62,10 +62,15 @@ impl Operation for ReadHistory {
             .get(&self.session)
             .and_then(|snapshot| crate::orchestration::receive_history(snapshot, &cursor, page));
         if let Some(next) = next {
-            Arc::make_mut(&mut snapshot.sessions.expanded_history).insert(self.session.clone());
-            Arc::make_mut(&mut snapshot.sessions.projections)
+            // Commit the cursor with its display projection. A failed conversion
+            // must leave the same page available for retry, including the last page.
+            let mut updated = snapshot.clone();
+            Arc::make_mut(&mut updated.sessions.expanded_history).insert(self.session.clone());
+            Arc::make_mut(&mut updated.sessions.projections)
                 .insert(self.session.clone(), Arc::new(next));
-            return super::super::conversations::refresh(snapshot, &self.session);
+            let effects = super::super::conversations::refresh(&mut updated, &self.session)?;
+            *snapshot = updated;
+            return Ok(effects);
         }
         Ok(Vec::new())
     }
