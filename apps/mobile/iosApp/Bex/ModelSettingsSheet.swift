@@ -1,19 +1,6 @@
 import AgentCore
 import SwiftUI
 
-struct ModelSettingsSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let model: ConversationModel
-
-    var body: some View {
-        NavigationStack {
-            ModelSettingsScreen(model: model, close: { dismiss() })
-        }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-    }
-}
-
 struct ModelSettingsScreen: View {
     let model: ConversationModel
     let close: () -> Void

@@ -231,7 +231,9 @@ extension LaunchUITests {
         // The default follow-up queues input. Explicitly steer it before
         // checking that acceptance is visible ahead of the provider's echo.
         let steer = app.buttons["今すぐ送信"]
-        XCTAssertTrue(steer.waitUntilExists(timeout: 10))
+        // Core exposes the control while admission is pending, but keeps it disabled.
+        let ready = expectation(for: NSPredicate(format: "exists == true AND isEnabled == true"), evaluatedWith: steer)
+        wait(for: [ready], timeout: 10)
         steer.tap()
         let sentMessages = app.textViews.matching(NSPredicate(
             format: "identifier == %@ AND value == %@", "message.user-text", "Show this additional input immediately"

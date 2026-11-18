@@ -31,7 +31,13 @@ struct ConversationComposer: View {
             }
             .background(ComposerMediaPicker(model: model, selection: $mediaPicker,
                                             preparingMedia: $preparingMedia))
-            .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
+            .sheet(isPresented: $showingModelSettings) {
+                NavigationStack {
+                    ModelSettingsScreen(model: model, close: { showingModelSettings = false })
+                }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+            }
             .sheet(item: $openedDirectory) { destination in
                 ConversationDirectorySheet(model: model, destination: destination) { openedDirectory = nil }
             }

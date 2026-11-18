@@ -53,6 +53,7 @@ pub(super) trait Projection: Serialize + DeserializeOwned {
     const KEY: &'static str;
     const OWNER: Option<&'static str>;
     const COLUMNS: &'static [(&'static str, &'static str)];
+    fn upsert_sql() -> &'static str;
 }
 
 macro_rules! projection {
@@ -62,6 +63,12 @@ macro_rules! projection {
             const KEY: &'static str = $key;
             const OWNER: Option<&'static str> = $owner;
             const COLUMNS: &'static [(&'static str, &'static str)] = &[$(($column, $field)),*];
+            fn upsert_sql() -> &'static str {
+                static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+                    upsert_sql($table, $key, $owner, &[$(($column, $field)),*])
+                });
+                &SQL
+            }
         }
     };
 }
@@ -168,10 +175,8 @@ pub(super) fn save<T: Projection>(
     record: &T,
 ) -> Result<(), String> {
     let value = serde_json::to_value(record).map_err(failure)?;
-    let mut columns = Vec::with_capacity(T::COLUMNS.len() + 1);
     let mut values = Vec::with_capacity(T::COLUMNS.len() + 1);
-    for (column, field) in T::COLUMNS {
-        columns.push(*column);
+    for (_, field) in T::COLUMNS {
         values.push(if *field == "$thread" {
             SqlValue::Text(
                 thread_id
@@ -183,43 +188,19 @@ pub(super) fn save<T: Projection>(
         });
     }
     if let (Some(scope), Some(owner)) = (thread_id, T::OWNER) {
-        let index = columns
+        let index = T::COLUMNS
             .iter()
-            .position(|column| *column == owner)
+            .position(|(column, _)| *column == owner)
             .ok_or("projection owner column is missing")?;
         if values[index] != SqlValue::Null && values[index] != SqlValue::Text(scope.into()) {
             return Err("event and projection belong to different conversations".into());
         }
     }
-    columns.push("payload_json");
     values.push(SqlValue::Text(
         serde_json::to_string(&value).map_err(failure)?,
     ));
-    let assignments = columns
-        .iter()
-        .map(|column| format!("{column}=excluded.{column}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let ownership = T::OWNER
-        .map(|owner| {
-            format!(
-                " WHERE ({}.{owner} IS excluded.{owner} OR {}.{owner} IS NULL)",
-                T::TABLE,
-                T::TABLE
-            )
-        })
-        .unwrap_or_default();
-    let sql = format!(
-        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}{}",
-        T::TABLE,
-        columns.join(","),
-        vec!["?"; columns.len()].join(","),
-        T::KEY,
-        assignments,
-        ownership
-    );
     let changed = transaction
-        .prepare_cached(&sql)
+        .prepare_cached(T::upsert_sql())
         .map_err(failure)?
         .execute(rusqlite::params_from_iter(values))
         .map_err(failure)?;
@@ -229,16 +210,41 @@ pub(super) fn save<T: Projection>(
     Ok(())
 }
 
+fn upsert_sql(table: &str, key: &str, owner: Option<&str>, fields: &[(&str, &str)]) -> String {
+    let columns: Vec<_> = fields
+        .iter()
+        .map(|(column, _)| *column)
+        .chain(std::iter::once("payload_json"))
+        .collect();
+    let assignments = columns
+        .iter()
+        .map(|column| format!("{column}=excluded.{column}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let ownership = owner
+        .map(|owner| {
+            format!(" WHERE ({table}.{owner} IS excluded.{owner} OR {table}.{owner} IS NULL)")
+        })
+        .unwrap_or_default();
+    format!(
+        "INSERT INTO {table} ({}) VALUES ({}) ON CONFLICT ({key}) DO UPDATE SET {assignments}{ownership}",
+        columns.join(","),
+        vec!["?"; columns.len()].join(","),
+    )
+}
+
 pub(super) fn read<T: Projection>(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<T>, ReadError> {
     let body = connection
-        .query_row(
-            &format!("SELECT payload_json FROM {} WHERE {}=?1", T::TABLE, T::KEY),
-            [id],
-            |row| row.get::<_, String>(0),
-        )
+        .prepare_cached(&format!(
+            "SELECT payload_json FROM {} WHERE {}=?1",
+            T::TABLE,
+            T::KEY
+        ))
+        .map_err(ReadError::from)?
+        .query_row([id], |row| row.get::<_, String>(0))
         .optional()
         .map_err(ReadError::from)?;
     body.map(|body| serde_json::from_str(&body).map_err(ReadError::from))
