@@ -98,6 +98,24 @@ fn normalize_item(
         run_ordinal,
         placement,
     )?;
+    // Clients key settled details by updatedAt. Distinguish writes within one
+    // clock tick before encoding the event, so replay and projection agree.
+    let previous: Option<String> = transaction
+        .prepare_cached("SELECT updated_at FROM orchestration_v2_projection_turn_items WHERE turn_item_id=?1 AND thread_id=?2")
+        .map_err(failure)?
+        .query_row(params![item.id, item.thread_id], |row| row.get(0))
+        .optional()
+        .map_err(failure)?;
+    if let Some(previous) = previous {
+        let previous = chrono::DateTime::parse_from_rfc3339(&previous).map_err(failure)?;
+        let updated = chrono::DateTime::parse_from_rfc3339(&item.updated_at).map_err(failure)?;
+        if updated <= previous {
+            item.updated_at = previous
+                .checked_add_signed(chrono::Duration::nanoseconds(1))
+                .ok_or("item detail revision timestamp exhausted")?
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+        }
+    }
     Ok(())
 }
 

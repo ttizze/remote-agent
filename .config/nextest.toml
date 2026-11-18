@@ -28,10 +28,11 @@ threads-required = "num-test-threads"
 filter = 'binary(adapter_conformance)'
 threads-required = "num-test-threads"
 
-# This contract holds a usage request across credential verification. Reserve
-# its real eight-second fetch budget instead of competing with SDK startups.
+# Credential contracts hold an eight-second usage request or traverse all five
+# SDK-start attempts before reporting failure. Keep competing startups outside
+# their existing deadlines while retaining each contract's own concurrency.
 [[profile.default.overrides]]
-filter = 'test(=claude_accounts_login_switch_resume_cancel_and_logout_without_codex)'
+filter = 'test(=claude_accounts_login_switch_resume_cancel_and_logout_without_codex) | test(=claude_authentication_and_inference_failures_are_visible_and_retry_preserves_the_conversation)'
 threads-required = "num-test-threads"
 
 # The disconnected-draft contract must observe the closed transport within two

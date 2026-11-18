@@ -47,6 +47,60 @@ fn event(id: &str, item: model::TurnItem) -> Event {
 }
 
 #[test]
+fn terminal_output_updates_in_one_clock_tick_have_distinct_detail_revisions() {
+    let mut db = database();
+    let tx = db.transaction().unwrap();
+    let mut command = item("command", "first");
+    command.body = model::TurnItemBody::CommandExecution {
+        input: "background work".into(),
+        output: None,
+        exit_code: None,
+        output_omitted: Some(false),
+        output_indicates_failure: None,
+    };
+    let mut revisions = Vec::new();
+    let mut events = Vec::new();
+    for (index, text) in ["approved", "background stdout\n", "final output"]
+        .iter()
+        .enumerate()
+    {
+        if let model::TurnItemBody::CommandExecution { output, .. } = &mut command.body {
+            *output = Some((*text).into());
+        }
+        let saved = append(
+            &tx,
+            &event(&format!("update-{index}"), command.clone()),
+            None,
+            Some(1),
+        )
+        .unwrap();
+        let model::Change::TurnItem(current) = &saved.event.change else {
+            panic!("item event")
+        };
+        assert!(
+            revisions
+                .iter()
+                .all(|previous| !agent_core::orchestration::same_detail_revision(
+                    previous, current
+                )),
+            "new terminal output must invalidate every previously hydrated body, including when the clock has not advanced"
+        );
+        revisions.push(current.clone());
+        events.push(saved);
+    }
+    assert_eq!(
+        projections::read::<model::TurnItem>(&tx, "command")
+            .unwrap()
+            .as_ref(),
+        revisions.last()
+    );
+    assert_eq!(
+        read(&tx, None, 0, events.last().unwrap().sequence, 10).unwrap(),
+        events
+    );
+}
+
+#[test]
 fn item_positions_are_stable_and_identical_in_projection_and_replayed_events() {
     let mut db = database();
     let tx = db.transaction().unwrap();
