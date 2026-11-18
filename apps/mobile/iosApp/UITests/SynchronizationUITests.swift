@@ -262,6 +262,8 @@ extension LaunchUITests {
         XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
         XCTAssertFalse(fixtureItems(app, containing: "fixture-command-").firstMatch.exists)
         command.tap()
+        // The completed activity fold and its command group open independently.
+        app.buttons["1 件のコマンドを実行しました"].tap()
         XCTAssertTrue(fixtureItems(app, containing: "fixture-command-").firstMatch.waitUntilExists(timeout: 5))
         XCTAssertEqual(message.value as? String, message.placeholderValue)
         XCTAssertFalse(app.staticTexts["notice"].exists)
