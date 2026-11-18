@@ -3509,21 +3509,19 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
             } else {
                 json!([{"id":"last-old","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"tail","phase":"unknown"}}}}}])
             };
-            writer.reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"historyLimit":limit,"historyHasMore":!complete,"turns":[{"id":"old","items":items,"status":"unknown"},{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]}}})).await.unwrap();
+            writer.reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"historyLimit":limit,"historyCursor":(!complete).then_some("older-work"),"historyHasMore":!complete,"turns":[{"id":"old","items":items,"status":"unknown"},{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]}}})).await.unwrap();
         }
         (reader, writer)
     });
-    for _ in 0..2 {
-        store
-            .dispatch(Intent::ReadOlder {
-                thread_id: SessionRef {
-                    provider: Some(ProviderKind::Codex),
-                    id: "thread".into(),
-                },
-            })
-            .await
-            .unwrap();
-    }
+    store
+        .dispatch(Intent::ReadOlder {
+            thread_id: SessionRef {
+                provider: Some(ProviderKind::Codex),
+                id: "thread".into(),
+            },
+        })
+        .await
+        .unwrap();
     let snapshot = store.snapshot();
     let thread = &snapshot.sessions.conversations[&SessionRef {
         provider: Some(ProviderKind::Codex),
@@ -6447,16 +6445,29 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
     })
     .await;
     assert!(store.snapshot().sessions.subscriptions.contains_key(&id));
-    let cached = store.snapshot().sessions.conversations.clone();
     let failed = store.dispatch(Intent::ReadOlder {
         thread_id: id.clone(),
     });
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/conversation/extend");
     assert_eq!(request["params"]["session"], json!(id));
-    let captured = request["params"]["cursor"].clone();
-    assert_eq!(captured, "oldest-A");
+    assert_eq!(request["params"]["cursor"], "oldest-A");
     let live_sequence = store.snapshot().sessions.projections[&id].snapshot_sequence;
+    // The first page contains only work from a different run. The same dispatch
+    // must request the next page and retain the first if that second read fails.
+    writer
+        .reply(
+            &request,
+            json!({"result":{"nextCursor":"before-work","turns":[{
+                "id":"older-turn","status":"completed","items":[item("work")]
+            }]}}),
+        )
+        .await
+        .unwrap();
+    let request = read(&mut reader).await;
+    let captured = request["params"]["cursor"].clone();
+    assert_eq!(captured, "before-work");
+    let cached = store.snapshot().sessions.conversations.clone();
     assert!(store.snapshot().operation_running(history.clone()));
     writer
         .reply(
@@ -6488,7 +6499,11 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
         .reply(
             &request,
             json!({"result":{"nextCursor":"oldest-B",
-        "turns":[{"id":"older-turn","status":"completed","items":[item("head")]}]}}),
+            "turns":[{"id":"older-turn","status":"completed","items":[
+                {"id":"head","status":"completed","body":{"inline":{"body":{"userMessage":{
+                    "text":"Earlier question","content":[{"text":{"text":"Earlier question"}}]
+                }}}}},item("work")
+            ]}]}}),
         )
         .await
         .unwrap();
@@ -6509,7 +6524,7 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
             .iter()
             .map(|item| item.id.as_str())
             .collect::<Vec<_>>(),
-        ["head"]
+        ["head", "work"]
     );
     assert_eq!(
         thread.turns.as_ref().unwrap()[1].items.as_ref().unwrap()[0]

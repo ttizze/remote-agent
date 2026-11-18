@@ -56,23 +56,45 @@ impl Operation for ReadHistory {
         if !current || snapshot.sessions.subscriptions.get(&self.session) != Some(&subscription) {
             return Ok(Vec::new());
         }
-        let next = snapshot
+        // T3 manual history crosses work-only pages, including work from other runs.
+        let read_more = page.has_more_history
+            && !page.items.iter().any(|row| {
+                use agent_protocol::orchestration::TurnItemBody;
+                match &row.item.body {
+                    TurnItemBody::Notification { .. } => true,
+                    body @ TurnItemBody::UserMessage { .. } => !body.is_steer(),
+                    _ => false,
+                }
+            });
+        let Some(next) = snapshot
             .sessions
             .projections
             .get(&self.session)
-            .and_then(|snapshot| crate::orchestration::receive_history(snapshot, &cursor, page));
-        if let Some(next) = next {
-            // Commit the cursor with its display projection. A failed conversion
-            // must leave the same page available for retry, including the last page.
-            let mut updated = snapshot.clone();
-            Arc::make_mut(&mut updated.sessions.expanded_history).insert(self.session.clone());
-            Arc::make_mut(&mut updated.sessions.projections)
-                .insert(self.session.clone(), Arc::new(next));
-            let effects = super::super::conversations::refresh(&mut updated, &self.session)?;
-            *snapshot = updated;
-            return Ok(effects);
+            .and_then(|before| crate::orchestration::receive_history(before, &cursor, page))
+        else {
+            return Ok(Vec::new());
+        };
+        if read_more
+            && next
+                .history_cursor
+                .as_deref()
+                .is_none_or(|next| next == cursor)
+        {
+            return Err(PeerError::InvalidMessage(
+                "history cursor did not advance".into(),
+            ));
         }
-        Ok(Vec::new())
+        // Commit each successfully displayed page before dispatching its continuation.
+        let mut updated = snapshot.clone();
+        Arc::make_mut(&mut updated.sessions.expanded_history).insert(self.session.clone());
+        Arc::make_mut(&mut updated.sessions.projections)
+            .insert(self.session.clone(), Arc::new(next));
+        let mut effects = super::super::conversations::refresh(&mut updated, &self.session)?;
+        *snapshot = updated;
+        if read_more {
+            effects.push(Effect::continuation(self));
+        }
+        Ok(effects)
     }
 }
 

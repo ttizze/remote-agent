@@ -1,3 +1,5 @@
+mod history_paging;
+
 use super::*;
 use crate::session::{ProviderKind, SessionRef};
 
