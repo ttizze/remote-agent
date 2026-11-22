@@ -26,7 +26,7 @@ tempfile = "3"
 url.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Lucide's own SVG files, independent of any UI framework.
-lucide-static-svg = "=1.70.0"
+lucide-static-svg = "=1.73.0"
 # Official stable v0.5.0 plus the retained Bex patches and TextView/AX fixes.
 # Copy is included in the release; no main/nightly dependency is used.
 nsh-core = { git = "https://github.com/ttizze/nsh", rev = "b83a5f548ae6b6c3cdc5eb49664d301e6f4d7bd7" }
